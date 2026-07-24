@@ -13,17 +13,20 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
 NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 Quickhull = "baca2653-9c88-49d2-a488-12dbf25fc4fb"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [extensions]
 FlowGeometriesDelaunayTriangulationExt = "DelaunayTriangulation"
 FlowGeometriesNearestNeighborsExt = "NearestNeighbors"
 FlowGeometriesQuickhullExt = "Quickhull"
+FlowGeometriesSparseArraysExt = "SparseArrays"
 FlowGeometriesStaticArraysExt = "StaticArrays"
 
 [compat]
 DelaunayTriangulation = "1"
 NearestNeighbors = "0.4"
 Quickhull = "0.2"
+SparseArrays = "1.11"
 StaticArrays = "1"
 julia = "1.11"

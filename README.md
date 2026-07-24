@@ -8,6 +8,22 @@ Coordinate metrics, spherical samplings, and grid types.
 Geometry (metric), sampling (point placement on the sphere), and grid architecture are
 separate. Dispatch on the abstracts; use the concrete defaults as instances.
 
+**Connectivity** is topology of a *grid* or of a *sampling that defines a mesh*:
+
+| Layout | How connectivity is obtained |
+|--------|------------------------------|
+| `StructuredGrid` / `CurvilinearGrid` | Index stencil (`:face` / `:vertex`) + per-axis `periodic` |
+| `UnstructuredGrid` | CSR stored on the grid |
+| Tensor-product samplings (GL, CC, DH, MW, lat–lon) | `structured_grid(sampling, nlat)` → structured stencil (lon periodic when full-circle) |
+| Cubed sphere | `build_connectivity(CubedSphereSampling(), n)` — 6 panels + gnomonic seams |
+| Yin–Yang | `build_connectivity(YinYangSampling(), nlon, nlat)` — panel-local (no cross-panel edges) |
+| HEALPix | `build_connectivity(HEALPixSampling(nside))` — RING topological neighbors |
+| Icosahedral | `build_connectivity(IcosahedralSampling(ν))` — geodesic triangulation edges |
+
+`unstructured_grid(sampling, …)` builds points + that CSR in one step. Sampling alone does not
+imply a grid; do not assume Clenshaw–Curtis “has” connectivity until it is wrapped as a
+`StructuredGrid`.
+
 Core point type from `coords` is a geometry-named `NamedTuple`: `(x=, y=)` or `(λ=, φ=)`.
 Escapes: `coords!(out, …)`, `coords(NTuple{2,T}, …)`, `coords(SVector{2,T}, …)` with StaticArrays.
 
@@ -38,7 +54,9 @@ Sampling constructors are allocating + in-place (`spherical_axes!`, `spherical_p
 
 Optional extensions (weakdeps): `StaticArrays`, `NearestNeighbors` (unstructured k-d-tree
 neighbors), `DelaunayTriangulation` (Cartesian Voronoi areas), `Quickhull` (spherical Voronoi
-areas).
+areas), `SparseArrays` (`sparse_adjacency_matrix` → CSC). Native connectivity is CSR via
+`build_connectivity` / `neighbors!`; dense `adjacency_matrix!` is core. Prefer bang forms on
+hot paths (`neighbors!`, `adjacency_matrix!`, `sparse_adjacency_coo!`, `healpix_neighbors!`).
 
 ```julia
 using FlowGeometries: FlowGeometries as FG

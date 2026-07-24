@@ -355,6 +355,155 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test sum(w) ≈ 2 atol = 1e-12
     end
 
+    Test.@testset "Connectivity CSR / structured neighbors" begin
+        geom = FG.CartesianGeometry(1.0, 1.0)
+        grid = FG.StructuredGrid(geom, 0.0:1.0:2.0, 0.0:1.0:2.0, trues(3, 3); periodic = (false, false))
+        nbr = FG.neighbors(grid, 2, 2)
+        Test.@test Set(nbr) == Set([
+            FG.linear_index(grid, 1, 2),
+            FG.linear_index(grid, 3, 2),
+            FG.linear_index(grid, 2, 1),
+            FG.linear_index(grid, 2, 3),
+        ])
+        Test.@test FG.nneighbors(grid, 2, 2) == 4
+        Test.@test FG.nneighbors(grid, 1, 1) == 2
+        out = Vector{Int}(undef, 4)
+        Test.@test FG.neighbors!(out, grid, 2, 2) == 4
+        Test.@test Set(out) == Set(nbr)
+
+        conn = FG.build_connectivity(grid)
+        Test.@test conn isa FG.CSRConnectivity
+        Test.@test FG.nnodes(conn) == 9
+        Test.@test Set(FG.Connectivity.neighbors(conn, FG.linear_index(grid, 2, 2))) == Set(nbr)
+        Test.@test FG.nedges(conn) == sum(FG.nneighbors(grid, Tuple(ci)...) for ci in CartesianIndices((3, 3)))
+
+        mask = trues(3, 3)
+        mask[2, 2] = false
+        g2 = FG.StructuredGrid(geom, 0.0:1.0:2.0, 0.0:1.0:2.0, mask)
+        Test.@test FG.nneighbors(g2, 2, 2) == 0
+        Test.@test FG.nneighbors(g2, 1, 2) == 2
+
+        ug = FG.UnstructuredGrid(geom, [0.0, 1.0, 0.5], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], trues(3),
+            [2, 3, 1, 3, 1, 2], [1, 3, 5, 7])
+        uc = FG.build_connectivity(ug)
+        Test.@test Set(FG.neighbors(ug, 1)) == Set([2, 3])
+        Test.@test Set(FG.Connectivity.neighbors(uc, 1)) == Set([2, 3])
+
+        A = FG.adjacency_matrix(grid)
+        Test.@test A isa Matrix{Bool}
+        Test.@test size(A) == (9, 9)
+        Test.@test A[FG.linear_index(grid, 2, 2), FG.linear_index(grid, 2, 3)]
+        Abuf = falses(9, 9)
+        FG.adjacency_matrix!(Abuf, grid)
+        Test.@test Abuf == A
+        FG.adjacency_matrix!(Abuf, conn)
+        Test.@test Abuf == A
+    end
+
+    Test.@testset "Curvilinear periodicity" begin
+        geom = FG.CartesianGeometry(1.0, 1.0)
+        x = [Float64(i) for i in 1:3, j in 1:2]
+        y = [Float64(j) for i in 1:3, j in 1:2]
+        g = FG.CurvilinearGrid(geom, x, y, trues(3, 2); periodic = (true, false))
+        Test.@test FG.isperiodic(g, 1)
+        Test.@test !FG.isperiodic(g, 2)
+        Test.@test FG.nneighbors(g, 1, 1) == 3  # wrap in x, open in y
+        nbr = FG.neighbors(g, 1, 1)
+        Test.@test FG.linear_index(g, 3, 1) in nbr  # periodic wrap
+        Test.@test FG.linear_index(g, 1, 2) in nbr
+    end
+
+    Test.@testset "Spherical sampling connectivity" begin
+        function _symmetric(conn)
+            A = FG.adjacency_matrix(conn)
+            return A == A'
+        end
+        function _min_degree(conn, dmin)
+            return all(i -> FG.nneighbors(conn, i) ≥ dmin, 1:FG.nnodes(conn))
+        end
+
+        # Tensor-product → structured lon-periodic
+        sg = FG.structured_grid(FG.ClenshawCurtisSampling(), 8)
+        Test.@test FG.isperiodic(sg, 1)
+        Test.@test !FG.isperiodic(sg, 2)
+        cc = FG.build_connectivity(FG.ClenshawCurtisSampling(), 8)
+        Test.@test FG.nnodes(cc) == length(sg.mask)
+        Test.@test _symmetric(cc)
+
+        # Cubed sphere: seams + symmetry
+        n = 4
+        csc = FG.build_connectivity(FG.CubedSphereSampling(), n)
+        Test.@test FG.nnodes(csc) == 6 * n * n
+        Test.@test _symmetric(csc)
+        Test.@test _min_degree(csc, 2)
+        # Interior panel cell (away from edges) has 4 face neighbors
+        # face 1, i=j=2 → lin = (2-1)*n + 2 = n+2 when j=2,i=2 → (f-1)*n²+(j-1)*n+i
+        lin_int = (1 - 1) * n * n + (2 - 1) * n + 2
+        Test.@test FG.nneighbors(csc, lin_int) == 4
+        # Edge (not corner): still 4 after seam fold
+        lin_edge = (1 - 1) * n * n + (1 - 1) * n + 2  # j=1, i=2 on face 1
+        Test.@test FG.nneighbors(csc, lin_edge) == 4
+
+        # Yin–Yang: two disconnected panels
+        nlon, nlat = 5, 4
+        yyc = FG.build_connectivity(FG.YinYangSampling(), nlon, nlat)
+        Test.@test FG.nnodes(yyc) == 2 * nlon * nlat
+        Test.@test _symmetric(yyc)
+        yin_nodes = 1:(nlon * nlat)
+        yang_nodes = (nlon * nlat + 1):(2 * nlon * nlat)
+        for i in yin_nodes
+            Test.@test all(j -> j in yin_nodes, FG.Connectivity.neighbors(yyc, i))
+        end
+        for i in yang_nodes
+            Test.@test all(j -> j in yang_nodes, FG.Connectivity.neighbors(yyc, i))
+        end
+
+        # HEALPix: documented RING neighbors for nside=4, pix=1 (0-based)
+        nbr0 = FG.healpix_neighbors(4, 1)
+        Test.@test Set(nbr0) == Set([16, 6, 5, 0, 3, 2, 8, 7])
+        hpc = FG.build_connectivity(FG.HEALPixSampling(2))
+        Test.@test FG.nnodes(hpc) == 12 * 2 * 2
+        Test.@test _symmetric(hpc)
+        # nside=1 → every pixel has 6 neighbors
+        hp1 = FG.build_connectivity(FG.HEALPixSampling(1))
+        Test.@test all(i -> FG.nneighbors(hp1, i) == 6, 1:12)
+        Test.@test _symmetric(hp1)
+
+        # Icosahedral ν=1: 12 vertices, each degree 5; 30 undirected edges → 60 directed
+        ic1 = FG.build_connectivity(FG.IcosahedralSampling(1))
+        Test.@test FG.nnodes(ic1) == 12
+        Test.@test all(i -> FG.nneighbors(ic1, i) == 5, 1:12)
+        Test.@test FG.nedges(ic1) == 60
+        Test.@test _symmetric(ic1)
+        mesh2 = FG.icosahedral_mesh(2)
+        Test.@test length(mesh2.λ) == FG.icosahedral_nvertices(2)
+        ic2 = FG.build_connectivity(FG.IcosahedralSampling(2))
+        Test.@test FG.nnodes(ic2) == length(mesh2.λ)
+        Test.@test _symmetric(ic2)
+        Test.@test _min_degree(ic2, 5)
+
+        ug = FG.unstructured_grid(FG.CubedSphereSampling(), 3)
+        Test.@test ug isa FG.UnstructuredGrid
+        Test.@test length(FG.neighbors(ug, 1)) == FG.nneighbors(FG.build_connectivity(FG.CubedSphereSampling(), 3), 1)
+    end
+
+    Test.@testset "SparseArrays sparse_adjacency_matrix (optional)" begin
+        using SparseArrays: SparseArrays as Sp
+        geom = FG.CartesianGeometry(1.0, 1.0)
+        grid = FG.StructuredGrid(geom, 0.0:1.0:1.0, 0.0:1.0:1.0, trues(2, 2))
+        conn = FG.build_connectivity(grid)
+        ne = FG.nedges(conn)
+        I = Vector{Int}(undef, ne)
+        J = Vector{Int}(undef, ne)
+        Test.@test FG.sparse_adjacency_coo!(I, J, conn) == ne
+        S = FG.sparse_adjacency_matrix(conn)
+        Test.@test S isa Sp.SparseMatrixCSC
+        Test.@test size(S) == (4, 4)
+        Test.@test Sp.nnz(S) == ne
+        Test.@test S[1, 2] && S[2, 1]
+        Test.@test Matrix(S) == FG.adjacency_matrix(conn)
+    end
+
     Test.@testset "StaticArrays extension" begin
         using StaticArrays: StaticArrays as SA
         geom = FG.SphericalGeometry(1.0)

@@ -754,10 +754,16 @@ function _xyz_to_lonlat!(λ::AbstractVector{T}, φ::AbstractVector{T}, verts) wh
     return (; λ, φ)
 end
 
-function icosahedral_vertices!(λ::AbstractVector{T}, φ::AbstractVector{T}, frequency::Integer = 1) where {T<:AbstractFloat}
+"""
+    icosahedral_mesh(frequency; T=Float64) -> (; λ, φ, edges)
+
+Geodesic vertices at frequency `ν` plus undirected triangular-mesh edges
+`(i,j)` with `i < j` (1-based). Vertex ordering is deterministic (sorted by
+quantized XYZ key).
+"""
+function icosahedral_mesh(frequency::Integer = 1; T::Type{<:AbstractFloat} = Float64)
     ν = Int(frequency)
     nexp = icosahedral_nvertices(ν)
-    length(λ) == nexp && length(φ) == nexp || throw(DimensionMismatch("buffers must have length 10ν²+2"))
     φg = (one(T) + sqrt(T(5))) / T(2)
     raw = NTuple{3,T}[
         (zero(T), one(T), φg), (zero(T), -one(T), φg),
@@ -767,38 +773,93 @@ function icosahedral_vertices!(λ::AbstractVector{T}, φ::AbstractVector{T}, fre
         (φg, zero(T), one(T)), (φg, zero(T), -one(T)),
         (-φg, zero(T), one(T)), (-φg, zero(T), -one(T)),
     ]
-    verts = map(raw) do (x, y, z)
+    base = map(raw) do (x, y, z)
         r = sqrt(x * x + y * y + z * z)
         (x / r, y / r, z / r)
     end
-    if ν == 1
-        return _xyz_to_lonlat!(λ, φ, verts)
-    end
-    faces = _icosahedron_faces(verts)
-    seen = Dict{NTuple{3,Int},NTuple{3,T}}()
     key(p) = (round(Int, p[1] * 1_000_000), round(Int, p[2] * 1_000_000), round(Int, p[3] * 1_000_000))
-    function add!(p)
+    if ν == 1
+        # Stable order by key, then recover base-icosahedron edges via distance.
+        order = sortperm(1:12; by = i -> key(base[i]))
+        verts = [base[i] for i in order]
+        inv = Dict(key(verts[i]) => i for i in 1:12)
+        faces = _icosahedron_faces(base)
+        edgeset = Set{NTuple{2,Int}}()
+        for (a, b, c) in faces
+            for (u, v) in ((a, b), (b, c), (c, a))
+                iu, iv = inv[key(base[u])], inv[key(base[v])]
+                push!(edgeset, iu < iv ? (iu, iv) : (iv, iu))
+            end
+        end
+        λ = Vector{T}(undef, 12)
+        φ = Vector{T}(undef, 12)
+        _xyz_to_lonlat!(λ, φ, verts)
+        return (; λ, φ, edges = collect(edgeset))
+    end
+    faces = _icosahedron_faces(base)
+    # Map quantized key → vertex; also accumulate edges during subdivision.
+    seen = Dict{NTuple{3,Int},NTuple{3,T}}()
+    function add_vert!(p)
         r = sqrt(p[1]^2 + p[2]^2 + p[3]^2)
         q = (p[1] / r, p[2] / r, p[3] / r)
-        seen[key(q)] = q
+        k = key(q)
+        seen[k] = q
+        return k
+    end
+    edgeset = Set{NTuple{2,NTuple{3,Int}}}()
+    @inline function add_edge!(ka, kb)
+        ka == kb && return nothing
+        push!(edgeset, ka < kb ? (ka, kb) : (kb, ka))
         return nothing
     end
     for (ia, ib, ic) in faces
-        A, B, C = verts[ia], verts[ib], verts[ic]
+        A, B, C = base[ia], base[ib], base[ic]
+        # Barycentric lattice on the face: nodes (i,j) with i+j ≤ ν.
+        nodekey = Dict{NTuple{2,Int},NTuple{3,Int}}()
         for i in 0:ν, j in 0:(ν - i)
             u = T(i) / T(ν); v = T(j) / T(ν); w = one(T) - u - v
-            add!((w * A[1] + u * B[1] + v * C[1],
-                  w * A[2] + u * B[2] + v * C[2],
-                  w * A[3] + u * B[3] + v * C[3]))
+            nodekey[(i, j)] = add_vert!((
+                w * A[1] + u * B[1] + v * C[1],
+                w * A[2] + u * B[2] + v * C[2],
+                w * A[3] + u * B[3] + v * C[3],
+            ))
+        end
+        for i in 0:ν, j in 0:(ν - i)
+            k0 = nodekey[(i, j)]
+            if i + j < ν
+                # edge toward B (increase i)
+                add_edge!(k0, nodekey[(i + 1, j)])
+                # edge toward C (increase j)
+                add_edge!(k0, nodekey[(i, j + 1)])
+            end
+            if i ≥ 1 && (i - 1) + (j + 1) ≤ ν
+                # hypotenuse of the up-pointing micro-triangle
+                add_edge!(nodekey[(i, j)], nodekey[(i - 1, j + 1)])
+            end
         end
     end
     length(seen) == nexp || throw(ArgumentError("icosahedral subdivision produced $(length(seen)) ≠ $nexp vertices"))
-    return _xyz_to_lonlat!(λ, φ, collect(values(seen)))
+    keys_sorted = sort!(collect(keys(seen)))
+    id_of = Dict{NTuple{3,Int},Int}(keys_sorted[i] => i for i in eachindex(keys_sorted))
+    verts = [seen[k] for k in keys_sorted]
+    edges = NTuple{2,Int}[(id_of[a], id_of[b]) for (a, b) in edgeset]
+    λ = Vector{T}(undef, nexp)
+    φ = Vector{T}(undef, nexp)
+    _xyz_to_lonlat!(λ, φ, verts)
+    return (; λ, φ, edges)
+end
+
+function icosahedral_vertices!(λ::AbstractVector{T}, φ::AbstractVector{T}, frequency::Integer = 1) where {T<:AbstractFloat}
+    mesh = icosahedral_mesh(frequency; T = T)
+    length(λ) == length(mesh.λ) && length(φ) == length(mesh.φ) || throw(DimensionMismatch("buffers must have length 10ν²+2"))
+    copyto!(λ, mesh.λ)
+    copyto!(φ, mesh.φ)
+    return (; λ, φ)
 end
 
 function icosahedral_vertices(frequency::Integer = 1; T::Type{<:AbstractFloat} = Float64)
-    n = icosahedral_nvertices(frequency)
-    return icosahedral_vertices!(Vector{T}(undef, n), Vector{T}(undef, n), frequency)
+    mesh = icosahedral_mesh(frequency; T = T)
+    return (; λ = mesh.λ, φ = mesh.φ)
 end
 
 function _icosahedron_faces(verts::Vector{NTuple{3,T}}) where {T}

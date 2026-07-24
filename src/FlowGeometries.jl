@@ -26,7 +26,7 @@ FG.coords(grid, 2, 3)            # (x=, y=) or (λ=, φ=)
 FG.Geometry.distance(geo, p1, p2)
 ```
 
-Submodules: `FG.Geometry`, `FG.SphericalSampling`, `FG.Grids`.
+Submodules: `FG.Geometry`, `FG.SphericalSampling`, `FG.Grids`, `FG.Connectivity`.
 """
 module FlowGeometries
 
@@ -40,6 +40,9 @@ using .SphericalSampling: SphericalSampling
 
 include("Grids.jl")
 using .Grids: Grids
+
+include("Connectivity.jl")
+using .Connectivity: Connectivity
 
 # Bind the public API on this module for `FG.coords`-style calls.
 # Nothing is `export`ed — callers use `using FlowGeometries: FlowGeometries as FG`.
@@ -73,11 +76,21 @@ using .SphericalSampling:
     colatitude, geographic_latitude,
     healpix_npix, healpix_nring, healpix_pixel_area,
     cubed_sphere_points, cubed_sphere_points!,
-    yin_yang_axes, yin_yang_axes!, icosahedral_vertices, icosahedral_vertices!
+    yin_yang_axes, yin_yang_axes!, icosahedral_vertices, icosahedral_vertices!,
+    icosahedral_mesh
 
 using .Grids:
     AbstractGrid, AbstractStructuredGrid, AbstractCurvilinearGrid, AbstractUnstructuredGrid,
     StructuredGrid, CurvilinearGrid, UnstructuredGrid,
     coords, coords!, area, isactive, grid_geometry, size_tuple, isperiodic, neighbors
+
+using .Connectivity:
+    CSRConnectivity, csr_connectivity, empty_csr,
+    build_connectivity, adjacency_matrix, adjacency_matrix!,
+    sparse_adjacency_matrix, sparse_adjacency_coo!,
+    nneighbors, neighbors!, nnodes, nedges,
+    linear_index, cartesian_index,
+    structured_grid, unstructured_grid,
+    healpix_neighbors!, healpix_neighbors
 
 end # module FlowGeometries

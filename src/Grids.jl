@@ -522,9 +522,11 @@ struct CurvilinearGrid{
     y_corner::ML  # Y/φ cell-vertex coordinate array ((Nx+1) × (Ny+1))
     areas::MA       # pre-computed exact quadrilateral cell areas (Nx × Ny)
     mask::B         # active mask (true=active/included, false=excluded)
+    periodic::NTuple{2,Bool}  # per-axis footprint wrapping (x/λ, y/φ)
 end
 
 size_tuple(grid::CurvilinearGrid) = size(grid.mask)
+@inline isperiodic(grid::CurvilinearGrid, dim::Integer) = grid.periodic[dim]
 
 @inline function _raw_coords(grid::CurvilinearGrid, i::Integer, j::Integer)
     return (grid.x[i, j], grid.y[i, j])
@@ -636,7 +638,7 @@ function _corner_areas(
 end
 
 """
-    CurvilinearGrid(geometry, x, y, mask; x_corner=nothing, y_corner=nothing)
+    CurvilinearGrid(geometry, x, y, mask; x_corner=nothing, y_corner=nothing, periodic=nothing)
 
 Build a curvilinear grid from `Nx × Ny` cell-center coordinate arrays `x`/`y`, computing
 exact quadrilateral cell areas from the `(Nx+1) × (Ny+1)` cell-vertex arrays. Supply
@@ -645,7 +647,11 @@ otherwise they are reconstructed
 from the centers (see [`_centers_to_corners`](@ref)), which requires at least a 2×2 grid.
 
 Spherical cell areas use the exact spherical-quadrilateral (L'Huilier excess) area; Cartesian cells
-use the exact planar shoelace area. The grid is treated as non-periodic.
+use the exact planar shoelace area.
+
+`periodic` is a `Bool` (applied to axis 1) or `NTuple{2,Bool}`. When omitted, axis-1 periodicity
+is auto-detected the same way as [`StructuredGrid`](@ref) (full-circle spherical longitude), and
+axis 2 is non-periodic.
 """
 function CurvilinearGrid(
     geometry::G,
@@ -654,6 +660,7 @@ function CurvilinearGrid(
     mask::AbstractMatrix{Bool};
     x_corner::Union{Nothing,AbstractMatrix} = nothing,
     y_corner::Union{Nothing,AbstractMatrix} = nothing,
+    periodic = nothing,
 ) where {T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     size(x) == size(y) || throw(ArgumentError("x and y must have the same size"))
     size(x) == size(mask) || throw(ArgumentError("x/y and mask must have the same size"))
@@ -669,13 +676,19 @@ function CurvilinearGrid(
     size(yc) == size(xc) || throw(ArgumentError("x_corner and y_corner must have the same size"))
 
     areas = _corner_areas(geometry, xc, yc, Nx, Ny)
+    # Auto-periodicity uses the first row of centers as a longitude-like axis sample.
+    per = if periodic === nothing
+        (_auto_periodic_x(geometry, @view(x_T[:, 1])), false)
+    else
+        _periodic_tuple(periodic)
+    end
     return CurvilinearGrid{T, G, typeof(x_T), typeof(areas), typeof(mask)}(
-        geometry, x_T, y_T, xc, yc, areas, mask,
+        geometry, x_T, y_T, xc, yc, areas, mask, per,
     )
 end
 
 """
-    CurvilinearGrid(geometry, x, y, areas, mask; x_corner=nothing, y_corner=nothing)
+    CurvilinearGrid(geometry, x, y, areas, mask; x_corner=nothing, y_corner=nothing, periodic=nothing)
 
 Build a curvilinear grid from cell-center coordinates with caller-supplied cell `areas` (common when
 a dataset ships its own cell areas). Corner arrays are still stored (reconstructed from the centers
@@ -689,6 +702,7 @@ function CurvilinearGrid(
     mask::AbstractMatrix{Bool};
     x_corner::Union{Nothing,AbstractMatrix} = nothing,
     y_corner::Union{Nothing,AbstractMatrix} = nothing,
+    periodic = nothing,
 ) where {T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     size(x) == size(y) || throw(ArgumentError("x and y must have the same size"))
     size(x) == size(mask) || throw(ArgumentError("x/y and mask must have the same size"))
@@ -699,9 +713,14 @@ function CurvilinearGrid(
     areas_T = _to_mat(T, areas)
     xc = x_corner === nothing ? _centers_to_corners(x_T) : _to_mat(T, x_corner)
     yc = y_corner === nothing ? _centers_to_corners(y_T) : _to_mat(T, y_corner)
+    per = if periodic === nothing
+        (_auto_periodic_x(geometry, @view(x_T[:, 1])), false)
+    else
+        _periodic_tuple(periodic)
+    end
 
     return CurvilinearGrid{T, G, typeof(x_T), typeof(areas_T), typeof(mask)}(
-        geometry, x_T, y_T, xc, yc, areas_T, mask,
+        geometry, x_T, y_T, xc, yc, areas_T, mask, per,
     )
 end
 
