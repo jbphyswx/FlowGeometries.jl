@@ -1,0 +1,29 @@
+name = "FlowGeometries"
+uuid = "0ccd6995-f618-4175-b01e-f437d0cb4974"
+version = "0.1.0"
+authors = ["Jordan Benjamin <jordantbenjamin@gmail.com>"]
+
+[workspace]
+projects = ["test"]
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+
+[weakdeps]
+DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
+NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
+Quickhull = "baca2653-9c88-49d2-a488-12dbf25fc4fb"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[extensions]
+FlowGeometriesDelaunayTriangulationExt = "DelaunayTriangulation"
+FlowGeometriesNearestNeighborsExt = "NearestNeighbors"
+FlowGeometriesQuickhullExt = "Quickhull"
+FlowGeometriesStaticArraysExt = "StaticArrays"
+
+[compat]
+DelaunayTriangulation = "1"
+NearestNeighbors = "0.4"
+Quickhull = "0.2"
+StaticArrays = "1"
+julia = "1.11"

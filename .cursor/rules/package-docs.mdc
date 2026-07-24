@@ -1,0 +1,21 @@
+---
+description: Package docs name the API and behavior only — no org/user/ecosystem fluff
+alwaysApply: true
+---
+
+# Package documentation tone
+
+Docstrings, README, and module comments describe **what the package is and how it works**.
+
+## Do
+
+- State purpose, types, functions, contracts, and usage.
+- Name sibling packages only when the API relationship matters (e.g. "orthogonal to execution tags in ComputationalBackends").
+
+## Do not
+
+- Mention GitHub usernames, org names, or phrases like "jbphyswx ecosystem", "our package family", "the X suite".
+- Paste chat/plan language into package records ("remediation", "mega-primary", "hub package").
+- Market the repository or author in technical docs (copyright in LICENSE is fine).
+
+If a sentence still makes sense after deleting every proper noun that is not a package/library name, keep it; otherwise rewrite.
