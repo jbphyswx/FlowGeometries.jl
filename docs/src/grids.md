@@ -2,6 +2,21 @@
 CurrentModule = FlowGeometries.Grids
 ```
 
+```@setup grids
+using FlowGeometries: FlowGeometries as FG
+geo    = FG.Geometry.SphericalGeometry()
+ax     = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.ClenshawCurtisSampling(), 32)
+λaxis, φaxis = ax.λ, ax.φ
+mask   = trues(length(λaxis), length(φaxis))
+grid   = FG.Grids.StructuredGrid(geo, λaxis, φaxis, mask)
+λ2d    = [λaxis[i] for i in eachindex(λaxis), j in eachindex(φaxis)]
+φ2d    = [φaxis[j] for i in eachindex(λaxis), j in eachindex(φaxis)]
+λc, φc = FG.Grids._centers_to_corners(λ2d), FG.Grids._centers_to_corners(φ2d)
+cg     = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask)
+I      = (3, 5)
+i, j   = 3, 5
+```
+
 # [Grids](@id grids-page)
 
 A grid answers: **how is the data stored?** It pairs a geometry with coordinates, a per-cell measure
@@ -15,31 +30,35 @@ and an activity mask.
 
 ## Building one
 
-```julia
+```@example grids
 using FlowGeometries: FlowGeometries as FG
 
 # From a sampling — the usual route
-grid = FG.structured_grid(FG.ClenshawCurtisSampling(), 64)
-g    = FG.unstructured_grid(FG.HEALPixSampling(16))
+grid = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 64)
+g    = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(16))
 
-# Or directly
-sg = FG.StructuredGrid(FG.SphericalGeometry(), λaxis, φaxis, mask)
-cg = FG.CurvilinearGrid(FG.SphericalGeometry(), λ2d, φ2d, mask)
+# Or directly, in any number of dimensions; the mask is optional
+sg  = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), λaxis, φaxis, mask)
+cg  = FG.Grids.CurvilinearGrid(FG.Geometry.SphericalGeometry(), λ2d, φ2d, mask)
+g4  = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
+                              0:1.0:3, 0:1.0:3, 0:1.0:3, 0:1.0:3)  # 4-D, all active
+size(g4)
 ```
 
 ## The common interface
 
 Everything below works on all three architectures:
 
-```julia
-FG.coords(grid, I...)          # (λ = …, φ = …) or (x = …, y = …)
-FG.coords!(out, grid, I...)    # into your buffer
-FG.coords(NTuple{2,Float64}, grid, I...)   # a specific storage type
-FG.measure(grid, I...)         # cell area / volume / control-volume size
-FG.isactive(grid, I...)        # participates in the domain?
-FG.neighbors(grid, I...)       # lazy iterator over neighbour indices
-size(grid), length(grid), FG.size_tuple(grid)
-FG.isperiodic(grid, d), FG.period(grid, d)
+```@example grids
+out = zeros(2)
+FG.Grids.coords(grid, i, j)                        # (λ = …, φ = …) or (x = …, y = …)
+FG.Grids.coords!(out, grid, i, j)                  # into your buffer
+FG.Grids.coords(NTuple{2,Float64}, grid, i, j)     # a specific storage type
+FG.Grids.measure(grid, i, j)                       # cell area / volume / control-volume size
+FG.Grids.isactive(grid, i, j)                      # participates in the domain?
+collect(FG.Grids.neighbors(grid, i, j))            # lazy iterator over neighbour indices
+size(grid), length(grid), FG.Grids.size_tuple(grid)
+FG.Grids.isperiodic(grid, 1), FG.Grids.period(grid, 1)
 ```
 
 Coordinates are also reachable by their geometry-correct names — `grid.λ`, `grid.φ` on a sphere;
@@ -51,12 +70,12 @@ On a rectilinear grid every measure this package supports is a product of one fa
 Cartesian `Δx·Δy·Δz`, spherical `R²cosφ·Δλ·Δφ = (Δλ)·(R²cosφ·Δφ)`. So a `StructuredGrid` stores the
 factors, not the `∏ Nᵈ` products.
 
-```julia
-m = FG.measure(grid)           # a SeparableMeasure — a real AbstractArray
+```@example grids
+m = FG.Grids.measure(grid)           # a SeparableMeasure — a real AbstractArray
 m[3, 5]                        # indexes exactly like the dense outer product
 sum(m)                         # ∏ᵈ ∑ᵢ wᵈᵢ — O(∑ Nᵈ), not O(∏ Nᵈ)
-FG.measure_factors(grid)       # the per-axis factors, or `nothing`
-FG.measure_array(grid)         # materialize densely, if you really need it
+FG.Grids.measure_factors(grid)       # the per-axis factors, or `nothing`
+FG.Grids.measure_array(grid)         # materialize densely, if you really need it
 ```
 
 Indexing, broadcasting and `collect` behave exactly as for the dense array — only the storage
@@ -68,9 +87,9 @@ DRAM-bound. See [Performance](@ref performance-page).
 
 ## Masks
 
-```julia
-FG.mask(grid)                  # the mask array
-FG.isactive(grid, i, j)        # false = excluded (land, say)
+```@example grids
+FG.Grids.mask(grid)                  # the mask array
+FG.Grids.isactive(grid, i, j)        # false = excluded (land, say)
 ```
 
 When every cell participates the mask is `AllActive`, which stores its size and nothing else —
@@ -83,9 +102,9 @@ When every cell participates the mask is `AllActive`, which stores its size and 
 areas from them — the spherical excess of the two triangles through the four corner directions on a
 sphere, the shoelace area on a plane.
 
-```julia
-cg = FG.CurvilinearGrid(geo, λ2d, φ2d, mask; x_corner = λc, y_corner = φc)
-FG.corners(cg), FG.corner_coords(cg, i, j)
+```@example grids
+cg2 = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask; x_corner = λc, y_corner = φc)
+size(FG.Grids.corners(cg2, 1)), FG.Grids.corner_coords(cg2, i, j)
 ```
 
 Supply `x_corner`/`y_corner` when your source model ships its own cell-vertex grid; otherwise they

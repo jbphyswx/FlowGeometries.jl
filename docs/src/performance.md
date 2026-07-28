@@ -44,7 +44,7 @@ for ~2M nodes, not overhead.
 
 Gauss–Legendre holds machine precision past degree `2N−1`; Driscoll–Healy and Clenshaw–Curtis lose
 exactness just after `N−1`, which is the distinction
-[`admits_exact_bandlimited_quadrature`](@ref) encodes. The fitted exponents on the right are measured
+`admits_exact_bandlimited_quadrature` encodes. The fitted exponents on the right are measured
 per run, not asserted.
 
 
@@ -85,9 +85,8 @@ array is 61 MiB and DRAM-bound while the factors stay in cache:
 | `sum` | ~6000× |
 
 !!! warning "Measure at realistic sizes"
-    An earlier version of this comparison found factored and dense within 1.0× and concluded the
-    factoring was memory-only. That measurement was taken at a size where the dense array still fit
-    in cache. Benchmarks of memory-bound code at toy sizes measure the cache, not the code.
+    A memory-bound comparison taken at a size where the dense array still fits in cache measures the
+    cache, not the code. These are taken at 2000² and above for that reason.
 
 ## Threading
 
@@ -102,7 +101,7 @@ Opt-in through `ComputationalBackends` tags, serial by default, bit-identical re
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.build_connectivity(grid; backend = ThreadedBackend())
+FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
 ```
 
 Chunks are contiguous, so each thread touches one span of every array rather than striding across
@@ -122,7 +121,7 @@ Recorded so they are not re-litigated:
 - **`getproperty` coordinate-name lookup is free** — 0.065 vs 0.077 ms per 10⁶ reads; it const-folds.
 - **The dense-mask branch is free** in a predictable loop.
 - **Cross-point SIMD is unavailable** — `@simd` over 10⁶ haversines is 1.01×; LLVM cannot vectorize
-  `sin`/`cos`/`atan`. Eliminating trig is the only lever, which is why the geometry kernels use
-  `sincos` and hoist `atan` out of loops.
-- **Vector-axis construction is not superlinear** — the real finding was a 3.8× constant gap against
-  range axes.
+  `sin`/`cos`/`atan`. Eliminating trig is the only lever, so the geometry kernels use `sincos` and
+  hoist `atan` out of loops.
+- **Vector-axis construction is not superlinear** — the gap against a uniform axis is a constant
+  factor, not a growing one.

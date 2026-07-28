@@ -4,7 +4,8 @@ CurrentModule = FlowGeometries
 
 # API Reference
 
-Nothing is exported. Call through `FG.` or reach into a submodule directly.
+Nothing is exported and nothing is rebound at the package's top level: every name is reached through
+the submodule that defines it.
 
 ```julia
 using FlowGeometries: FlowGeometries as FG
@@ -13,6 +14,13 @@ using FlowGeometries: FlowGeometries as FG
 ```@contents
 Pages = ["api.md"]
 Depth = 2
+```
+
+## Axes
+
+```@autodocs
+Modules = [FlowGeometries.Axes]
+Order = [:type, :function]
 ```
 
 ## Geometry
@@ -26,6 +34,20 @@ Order = [:type, :function]
 
 ```@autodocs
 Modules = [FlowGeometries.SphericalSampling]
+Order = [:type, :function]
+```
+
+## Stencils
+
+```@autodocs
+Modules = [FlowGeometries.Stencils]
+Order = [:type, :function]
+```
+
+## Discretization
+
+```@autodocs
+Modules = [FlowGeometries.Discretization]
 Order = [:type, :function]
 ```
 

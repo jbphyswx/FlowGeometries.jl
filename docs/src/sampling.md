@@ -2,6 +2,15 @@
 CurrentModule = FlowGeometries.SphericalSampling
 ```
 
+```@setup sampling
+using FlowGeometries: FlowGeometries as FG
+s   = FG.SphericalSampling.GaussLegendreSampling()
+ν   = 4
+n   = 8
+nside = 8
+nlat, nlon = 16, 31
+```
+
 # [Spherical Sampling](@id sampling-page)
 
 A sampling answers: **where are the points?** It is independent of the metric and of how the data is
@@ -34,11 +43,11 @@ overlapping panels, which is why it has no polar singularity.
 
 Rather than testing types, ask:
 
-```julia
-FG.is_tensor_product(s)                       # fits an (nlon × nlat) structured grid?
-FG.is_iso_latitude(s)                          # points lie on rings of constant φ?
-FG.is_equal_area(s)                            # every cell the same area?
-FG.admits_exact_bandlimited_quadrature(s)      # weights integrate PRODUCTS exactly at `bandlimit`?
+```@example sampling
+FG.SphericalSampling.is_tensor_product(s)                       # fits an (nlon × nlat) structured grid?
+FG.SphericalSampling.is_iso_latitude(s)                          # points lie on rings of constant φ?
+FG.SphericalSampling.is_equal_area(s)                            # every cell the same area?
+FG.SphericalSampling.admits_exact_bandlimited_quadrature(s)      # weights integrate PRODUCTS exactly at `bandlimit`?
 ```
 
 That last one is deliberately strict. Spectral analysis forms products of two degree-`lmax` fields,
@@ -55,37 +64,38 @@ analysis to about `(N−1)/2`. Use Gauss–Legendre when the analysis has to be 
 
 ## Sizing
 
-```julia
-FG.bandlimit(s, nlat)              # lmax this grid resolves
-FG.nlat_for_bandlimit(s, lmax)     # the inverse
-FG.nlon_for_nlat(s, nlat)          # the matching longitude count
-FG.axes_lengths(s, nlat)           # (; nlon, nlat)
-FG.npoints(s, args...)             # total points
+```@example sampling
+FG.SphericalSampling.bandlimit(s, nlat)              # lmax this grid resolves
+FG.SphericalSampling.nlat_for_bandlimit(s, 15)       # the inverse
+FG.SphericalSampling.nlon_for_nlat(s, nlat)          # the matching longitude count
+FG.SphericalSampling.axes_lengths(s, nlat)           # (; nlon, nlat)
+FG.SphericalSampling.npoints(s, nlat)                # total points
 ```
 
 ## Axes, points and weights
 
 Tensor-product samplings give separable axes; the rest give point lists.
 
-```julia
-ax = FG.spherical_axes(FG.GaussLegendreSampling(), 64)      # (; λ, φ) — 127 and 64 long
-w  = FG.latitude_weights(FG.GaussLegendreSampling(), 64)    # 64 weights, Σw = 2
+```@example sampling
+ax = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.GaussLegendreSampling(), 64)      # (; λ, φ) — 127 and 64 long
+w  = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.GaussLegendreSampling(), 64)    # 64 weights, Σw = 2
 ```
 
 **If you need both, ask for both.** Gauss–Legendre nodes and weights come out of one root solve;
 requesting them separately solves twice:
 
-```julia
-q = FG.spherical_quadrature(FG.GaussLegendreSampling(), 64) # (; λ, φ, w) — one solve
+```@example sampling
+q = FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.GaussLegendreSampling(), 64) # (; λ, φ, w) — one solve
 ```
 
 Every one of these has an in-place form that writes into your buffers and allocates nothing beyond
 its return value: `spherical_axes!`, `latitude_weights!`, `spherical_quadrature!`,
 `spherical_points!`.
 
-```julia
+```@example sampling
 λ = Vector{Float64}(undef, 127); φ = Vector{Float64}(undef, 64); w = similar(φ)
-FG.spherical_quadrature!(λ, φ, w, FG.GaussLegendreSampling(), 64)
+FG.SphericalSampling.spherical_quadrature!(λ, φ, w, FG.SphericalSampling.GaussLegendreSampling(), 64)
+sum(w)
 ```
 
 Weights are normalized so `Σw = ∫₀^π sinθ dθ = 2` for every sampling that has them. McEwen–Wiaux
@@ -95,12 +105,12 @@ returning a plausible wrong answer.
 
 ## Sampling-specific constructors
 
-```julia
-FG.cubed_sphere_points(n)              # (; λ, φ, panel) — 6n² cell centres
-FG.icosahedral_mesh(ν)                 # (; λ, φ, edges, triangles, verts)
-FG.icosahedral_vertices(ν)             # just the points; skips building the topology
-FG.yin_yang_panels(nlon, nlat)         # (; yin, yang)
-FG.healpix_npix(nside), FG.healpix_nring(nside), FG.healpix_pixel_area(nside)
+```@example sampling
+FG.SphericalSampling.cubed_sphere_points(n).panel |> unique     # 6n² cell centres + panel ids
+length(FG.SphericalSampling.icosahedral_mesh(ν).triangles)      # 20ν² triangles
+length(FG.SphericalSampling.icosahedral_vertices(ν).λ)          # 10ν²+2 points, no topology built
+size(FG.SphericalSampling.yin_yang_panels(nlon, nlat).yang.λ)
+FG.SphericalSampling.healpix_npix(nside), FG.SphericalSampling.healpix_nring(nside)
 ```
 
 `yin_yang_panels` returns asymmetric shapes on purpose. The yin panel is a separable lat–lon patch in
@@ -108,8 +118,54 @@ its own frame, so it is a pair of **axes**; yang is that panel rotated onto the 
 separable in global lon/lat, so it is a pair of `nlon × nlat` **fields**. The shapes differ because
 the geometry does.
 
-`icosahedral_mesh(ν; topology = false)` skips the edge and triangle lists when you only want points —
-which is what `icosahedral_vertices` does, and is several times faster at large ν.
+`icosahedral_vertices!` writes the points straight into your buffers with no mesh built at all, so its
+allocation count does not grow with ν.
+
+## Ring grids and quasi-uniform lattices
+
+A reduced Gaussian grid keeps the Gaussian latitudes but gives each ring only as many longitudes as
+its circumference warrants, so it is not a tensor product:
+
+```@example sampling
+oct = FG.SphericalSampling.OctahedralGaussianSampling(80)     # ECMWF octahedral, N = 80
+FG.SphericalSampling.nrings(oct), FG.SphericalSampling.npoints(oct), 4 * 80 * (80 + 9)
+```
+
+```@example sampling
+first(FG.SphericalSampling.nlon_per_ring(oct), 4)             # 20 at the pole, +4 per ring
+```
+
+Its latitude weights are Gauss–Legendre's, so the quadrature is exact; the longitude factor varies by
+ring because the ring populations do:
+
+```@example sampling
+w = FG.SphericalSampling.latitude_weights(oct)
+counts = FG.SphericalSampling.nlon_per_ring(oct)
+sum(w), sum(w[j] * (2π / counts[j]) * counts[j] for j in eachindex(counts)) / 4π
+```
+
+The Fibonacci lattice spreads points one per equal-area band with a golden-angle longitude step, which
+gives a quasi-uniform set with no polar clustering and no panel seams:
+
+```@example sampling
+fib = FG.SphericalSampling.spherical_points(FG.SphericalSampling.FibonacciSampling(1000))
+extrema(diff(sin.(fib.φ)))            # exactly equal steps in z
+```
+
+## HEALPix pixel indexing
+
+```@example sampling
+SS = FG.SphericalSampling
+θ, ϕ = SS.pix2ang(8, 100)             # RING by default
+SS.ang2pix(8, θ, ϕ)
+```
+
+```@example sampling
+SS.ring2nest(8, 100), SS.nest2ring(8, SS.ring2nest(8, 100))
+```
+
+`Nested()` selects the quadtree ordering, which needs `nside` to be a power of two; `Ring()` works for
+any `nside`. `pix2vec`/`vec2pix` are the same maps through a unit vector.
 
 ## Cell centres, not panel edges
 

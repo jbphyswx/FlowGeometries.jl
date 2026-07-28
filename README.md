@@ -4,28 +4,120 @@ Coordinate metrics, spherical samplings, and grid types — with a **dependency-
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
 
-Eleven samplings, three grid architectures, two metrics — chosen independently of each other. Spatial
-search, tessellation, sparse output, static vectors, FFT-based quadrature, device transfer and
-threading all arrive through package extensions, so you pay for exactly what you load.
+Fourteen samplings, three grid architectures, three metrics — chosen independently of each other, in
+any number of dimensions. Spatial search, tessellation, sparse output, static vectors, FFT-based
+quadrature, device transfer and threading all arrive through package extensions, so you pay for
+exactly what you load.
 
-**API style:** `using FlowGeometries: FlowGeometries as FG`, then qualified calls (`FG.coords`,
-`FG.Geometry.distance`, …). Nothing is bare-exported into your namespace.
+**API style:** `using FlowGeometries: FlowGeometries as FG`, then qualified calls
+(`FG.Grids.coords`, `FG.Geometry.distance`, …). Nothing is exported and nothing is rebound at the top
+level — every name is reached through the submodule that defines it.
 
 ```julia
 using FlowGeometries: FlowGeometries as FG
 
-geo  = FG.SphericalGeometry()
-grid = FG.structured_grid(FG.GaussLegendreSampling(), 64)   # 127 × 64
+geo  = FG.Geometry.SphericalGeometry()
+grid = FG.Connectivity.structured_grid(FG.SphericalSampling.GaussLegendreSampling(), 64)   # 127 × 64
 
-FG.coords(grid, 3, 5)                                    # (λ = …, φ = …)
-FG.measure(grid, 3, 5)                                   # that cell's area
-sum(FG.measure(grid)) / (4π * geo.R^2)                   # ≈ 1
+FG.Grids.coords(grid, 3, 5)                                    # (λ = …, φ = …)
+FG.Grids.measure(grid, 3, 5)                                   # that cell's area
+sum(FG.Grids.measure(grid)) / (4π * geo.R^2)                   # ≈ 1
 ```
+
+The same three choices on a plane, with a stretched vertical direction:
+
+```julia
+geo = FG.Geometry.CartesianGeometry()
+
+# uniform in x and y, stretched in z — each direction keeps its own answer
+z    = cumsum([0.0; fill(10.0, 4); fill(40.0, 4)])
+grid = FG.Grids.StructuredGrid(geo, range(0, 1e5; length = 201), range(0, 1e5; length = 201), z;
+                               periodic = (true, true), period = (1e5, 1e5))
+
+FG.Grids.isuniform(grid, 1), FG.Grids.isuniform(grid, 3)   # (true, false)
+FG.Grids.spacing(grid, 1)                                   # 500.0, read from the type
+FG.Grids.measure(grid, 3, 4, 2)                             # that cell's volume
+FG.Discretization.locate(FG.Grids.coordinates(grid, 3), 75.0)  # which z cell holds 75 m
+```
+
+![Cartesian grids and mask topology](docs/src/assets/cartesian.png)
 
 ## Three orthogonal choices
 
 Geometry (the metric), sampling (where the points are), and grid architecture (how data is stored and
 connected) are separate. Dispatch on the abstracts; use the concrete defaults as instances.
+
+## Uniformity is a property of the type
+
+A direction is either provably uniform — its spacing readable without touching a coordinate — or
+genuinely stretched, and each direction of a grid keeps its own answer. That is what lets the exact
+fast paths be selected at compile time: an `O(1)` point location, a constant cell width, a closed-form
+neighbourhood bound.
+
+```julia
+FG.Grids.isuniform(grid, d)      # compile-time; const-folds
+FG.Grids.spacing(grid, d)        # the constant Δ, signed
+FG.Axes.detect_uniform(v)        # the O(n) question about the DATA
+```
+
+A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
+is a few hundred bytes rather than tens of kilobytes — and nothing is materialized onto a device that
+did not need to be.
+
+## Any number of dimensions
+
+One varargs constructor covers every `N`, and the mask is optional:
+
+```julia
+g4 = FG.Grids.StructuredGrid(geo, x, y, z, w)          # 4-D, all cells active
+FG.Grids.topology(g4)                                   # per-direction Periodic/Bounded, from the type
+```
+
+Topology lives in the type because the cell measure depends on it: a wrapped boundary cell has a width
+a bounded one does not, so a grid that could not tell the two apart would be describing a torus and an
+interval with the same words.
+
+## Stencils
+
+Any shape, any radius, any dimension — `Axial`, `VonNeumann`, `Moore` (alias `Vertex`), `Diagonal`,
+`Anisotropic`, `Custom`. Shape and radius live in the type, so the offset set is built at compile time
+and the loop over it unrolls.
+
+```julia
+S = FG.Stencils
+FG.Connectivity.build_connectivity(grid; stencil = S.Moore(2))
+FG.Connectivity.nneighbors(grid, i, j; stencil = S.Anisotropic((3, 1)))
+```
+
+A stencil is named by its type, never a symbol: a symbol could only be resolved at run time, so the
+neighbour iterator built from it would allocate once per cell.
+
+## Discretization primitives
+
+Point location, interpolation weights, staggering, metric factors, and finite-difference weights for
+**any** derivative order to **any** accuracy on **arbitrarily spaced** nodes — one recursion
+(Fornberg 1988) rather than a tableau per case.
+
+```julia
+D = FG.Discretization
+D.locate(axis, v)                     # O(1) uniform, O(log n) stretched
+D.faces(axis), D.nodes(axis, D.Face())
+D.interpolation_weights(axis, v)
+D.fd_weights([-1.0, 0.0, 1.0], 0.0, 2)   # [1, -2, 1]
+FG.Geometry.scale_factors(geo, point)    # (R cosφ, R) on a sphere
+```
+
+Weights and metric terms only. Applying them to a field needs a result location, a
+boundary-condition policy and a halo convention — modelling choices that belong to the caller, so the
+package supplies every geometric input and imposes none of them.
+
+## Mask topology
+
+```julia
+FG.Connectivity.interior(grid), FG.Connectivity.boundary_cells(grid)
+FG.Connectivity.connected_components(grid)
+FG.Connectivity.count_holes(grid)     # enclosed inactive regions; wrapping changes the answer
+```
 
 ## Cell areas are exact, in closed form
 
@@ -38,7 +130,7 @@ geodesic the largest cell is nearly twice the smallest, so that default would si
 area-weighted integral. The dark spots are the twelve pentagons.
 
 ```julia
-g = FG.unstructured_grid(FG.IcosahedralSampling(16))     # 2562 nodes, Σarea = 4πR² exactly
+g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))     # 2562 nodes, Σarea = 4πR² exactly
 ```
 
 Yin–Yang is the exception worth knowing about: its two panels **overlap by construction**, so the
@@ -54,7 +146,7 @@ discretisation error.
 Nodes and weights come from a single solve — ask for both if you need both:
 
 ```julia
-q = FG.spherical_quadrature(FG.GaussLegendreSampling(), 1024)   # (; λ, φ, w), Σw = 2
+q = FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.GaussLegendreSampling(), 1024)   # (; λ, φ, w), Σw = 2
 ```
 
 Gauss–Legendre holds machine precision out past degree `2N−1`; Driscoll–Healy and Clenshaw–Curtis
@@ -75,7 +167,7 @@ a curvilinear grid needs no separate implementation from a structured one.
 
 | Layout | How connectivity is obtained |
 |--------|------------------------------|
-| `StructuredGrid` / `CurvilinearGrid` | Index stencil (`:face` / `:vertex`) + per-axis `periodic` |
+| `StructuredGrid` / `CurvilinearGrid` | Index stencil (`Axial`/`VonNeumann`/`Moore`/`Diagonal`/`Anisotropic`/`Custom`, any radius, any `N`) + per-axis topology |
 | `UnstructuredGrid` | CSR stored on the grid |
 | Tensor-product samplings (GL, CC, DH, MW, lat–lon) | `build_connectivity(sampling, nlat)` — no grid is built |
 | Cubed sphere | `build_connectivity(CubedSphereSampling(), n)` — 6 panels + gnomonic seams |
@@ -104,8 +196,8 @@ real `AbstractArray`, so indexing and broadcasting are unchanged, but 2000² cos
 of 61 MiB and `sum` is `O(∑ Nᵈ)`. An all-active mask (`AllActive`) stores only its size.
 
 ```julia
-FG.measure_factors(grid)     # the factors, or `nothing`
-FG.measure_array(grid)       # materialize densely, if you truly need it
+FG.Grids.measure_factors(grid)     # the factors, or `nothing`
+FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 ```
 
 ## Defaults
@@ -114,6 +206,8 @@ FG.measure_array(grid)       # materialize densely, if you truly need it
 |----------|---------|
 | `AbstractCartesianGeometry` | `CartesianGeometry` |
 | `AbstractSphericalGeometry` | `SphericalGeometry` |
+| `AbstractEllipsoidalGeometry` | `SpheroidGeometry` (WGS 84) |
+| `AbstractReducedGaussianSampling` | `OctahedralGaussianSampling` |
 | `AbstractGaussLegendreSampling` | `GaussLegendreSampling` |
 | `AbstractDriscollHealySampling` | `DriscollHealySampling` / `DriscollHealyEqualSampling` |
 | `AbstractClenshawCurtisSampling` | `ClenshawCurtisSampling` |
@@ -124,6 +218,9 @@ FG.measure_array(grid)       # materialize densely, if you truly need it
 | `AbstractIcosahedralSampling` | `IcosahedralSampling` |
 | `AbstractYinYangSampling` | `YinYangSampling` |
 | `AbstractScatteredSphericalSampling` | `ScatteredSphericalSampling` |
+| `AbstractStencil` | `Axial` / `VonNeumann` / `Moore` / `Diagonal` / `Anisotropic` / `Custom` |
+| `AbstractTopology` | `Periodic` / `Bounded` |
+| `AbstractLocation` | `Center` / `Face` |
 | `AbstractStructuredGrid` | `StructuredGrid` |
 | `AbstractCurvilinearGrid` | `CurvilinearGrid` |
 | `AbstractUnstructuredGrid` | `UnstructuredGrid` |
@@ -143,7 +240,7 @@ FG.measure_array(grid)       # materialize densely, if you truly need it
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.build_connectivity(grid; backend = ThreadedBackend())   # 3.7–4.3× on 8 threads
+FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())   # 3.7–4.3× on 8 threads
 ```
 
 ## Documentation

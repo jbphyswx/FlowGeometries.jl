@@ -41,6 +41,22 @@ Geophysical / model latitude–longitude grids. No exact band-limited SHT claim.
 """
 abstract type AbstractLatLonSampling <: AbstractTensorProductSphericalSampling end
 
+"""
+    AbstractRingSampling <: AbstractSphericalSampling
+
+Iso-latitude rings whose longitude count VARIES by ring, so the layout is not a tensor product. A
+reduced Gaussian grid is the canonical case: latitudes are the Gaussian ones, but each ring carries
+only as many longitudes as its circumference warrants.
+"""
+abstract type AbstractRingSampling <: AbstractSphericalSampling end
+
+"""
+    AbstractReducedGaussianSampling <: AbstractRingSampling
+
+Ring samplings on Gaussian latitudes. Default: [`OctahedralGaussianSampling`](@ref).
+"""
+abstract type AbstractReducedGaussianSampling <: AbstractRingSampling end
+
 abstract type AbstractEqualAreaSphericalSampling <: AbstractSphericalSampling end
 abstract type AbstractHEALPixSampling <: AbstractEqualAreaSphericalSampling end
 abstract type AbstractCubedSphereSampling <: AbstractSphericalSampling end
@@ -159,6 +175,60 @@ Arbitrary ``(λ, φ)`` point set (NUFFT / NUFSHT paths).
 """
 struct ScatteredSphericalSampling <: AbstractScatteredSphericalSampling end
 
+"""
+    OctahedralGaussianSampling(N)
+
+Octahedral reduced Gaussian grid with `N` latitude rings between pole and equator (`2N` rings in all).
+
+Ring `i` counted from either pole carries `4i + 16` longitudes — 20 on the ring nearest the pole and
+four more on each successive ring — which totals `4N(N+9)` points. Latitudes are the `2N` Gaussian
+latitudes, so the latitude quadrature is the Gauss–Legendre one.
+"""
+struct OctahedralGaussianSampling <: AbstractReducedGaussianSampling
+    nlat_half::Int
+    function OctahedralGaussianSampling(nlat_half::Integer)
+        nlat_half ≥ 1 || throw(ArgumentError("octahedral N must be ≥ 1, got $nlat_half"))
+        return new(Int(nlat_half))
+    end
+end
+
+"""
+    ReducedGaussianSampling(nlon_per_ring)
+
+Reduced Gaussian grid with an explicit longitude count per ring, north to south.
+
+The classical reduced grids are published as tables rather than formulas — the count holds constant
+across blocks of latitudes and jumps between them — so the table is the input. Use
+[`OctahedralGaussianSampling`](@ref) for the octahedral rule, which is a formula.
+"""
+struct ReducedGaussianSampling{V<:AbstractVector{Int}} <: AbstractReducedGaussianSampling
+    nlon_per_ring::V
+    function ReducedGaussianSampling(nlon::AbstractVector{<:Integer})
+        isempty(nlon) && throw(ArgumentError("a reduced Gaussian grid needs at least one ring"))
+        all(>(0), nlon) || throw(ArgumentError("every ring needs at least one longitude"))
+        v = collect(Int, nlon)
+        return new{typeof(v)}(v)
+    end
+end
+
+"""
+    FibonacciSampling(n)
+
+`n` points on the spherical Fibonacci (golden-spiral) lattice: `z_k = (2k+1)/n - 1` with
+`λ_k = 2πk/φ mod 2π`, `φ` the golden ratio.
+
+`z` advances in equal steps, so the points are spread one per equal-area band, and the golden angle in
+longitude — the most irrational rotation there is — keeps them from lining up into visible spokes at
+any `n`. Quasi-uniform with no polar clustering and no panel seams.
+"""
+struct FibonacciSampling <: AbstractEqualAreaSphericalSampling
+    n::Int
+    function FibonacciSampling(n::Integer)
+        n ≥ 1 || throw(ArgumentError("FibonacciSampling needs n ≥ 1, got $n"))
+        return new(Int(n))
+    end
+end
+
 # ---------------------------------------------------------------------------
 # Traits
 # ---------------------------------------------------------------------------
@@ -170,6 +240,13 @@ is_tensor_product(::AbstractYinYangSampling) = false  # two structured panels, n
 is_iso_latitude(::AbstractSphericalSampling) = false
 is_iso_latitude(::AbstractTensorProductSphericalSampling) = true
 is_iso_latitude(::AbstractHEALPixSampling) = true
+is_iso_latitude(::AbstractRingSampling) = true
+
+# The longitude count varies by ring, so the layout is not an (nlon x nlat) array.
+is_tensor_product(::AbstractRingSampling) = false
+
+# The latitudes are the Gaussian ones, so the latitude rule is exact exactly as Gauss-Legendre's is.
+admits_exact_bandlimited_quadrature(::AbstractReducedGaussianSampling) = true
 
 is_equal_area(::AbstractSphericalSampling) = false
 is_equal_area(::AbstractEqualAreaSphericalSampling) = true
@@ -263,7 +340,9 @@ function axes_lengths(s::AbstractTensorProductSphericalSampling, nlat::Integer; 
     return (; nlon = nlon_eff, nlat)
 end
 
-function axes_lengths(::AbstractLatLonSampling, nlat::Integer; nlon::Integer)
+# Extra keywords are ignored so this can take the same keyword set as `spherical_axes!`, whose
+# `lat_range`/`lon_range` do not change a count.
+function axes_lengths(::AbstractLatLonSampling, nlat::Integer; nlon::Integer, _...)
     return (; nlon = Int(nlon), nlat = Int(nlat))
 end
 
@@ -280,6 +359,32 @@ npoints(s::HEALPixSampling) = healpix_npix(s)
 npoints(::CubedSphereSampling, n::Integer) = 6 * Int(n)^2
 npoints(::YinYangSampling, nlon::Integer, nlat::Integer) = 2 * Int(nlon) * Int(nlat)
 icosahedral_nvertices(frequency::Integer) = 10 * Int(frequency)^2 + 2
+
+"""
+    nlon_per_ring(sampling) -> Vector{Int}
+
+Longitudes on each iso-latitude ring, north to south.
+"""
+function nlon_per_ring(s::OctahedralGaussianSampling)
+    N = s.nlat_half
+    return [4 * min(j, 2N + 1 - j) + 16 for j in 1:(2N)]
+end
+nlon_per_ring(s::ReducedGaussianSampling) = copy(s.nlon_per_ring)
+
+"""
+    nrings(sampling) -> Int
+
+Number of iso-latitude rings.
+"""
+nrings(s::OctahedralGaussianSampling) = 2 * s.nlat_half
+nrings(s::ReducedGaussianSampling) = length(s.nlon_per_ring)
+
+npoints(s::OctahedralGaussianSampling) = 4 * s.nlat_half * (s.nlat_half + 9)
+npoints(s::ReducedGaussianSampling) = sum(s.nlon_per_ring)
+npoints(s::FibonacciSampling) = s.n
+
+bandlimit(::AbstractReducedGaussianSampling, nlat::Integer) = Int(nlat) - 1
+nlat_for_bandlimit(::AbstractReducedGaussianSampling, lmax::Integer) = Int(lmax) + 1
 npoints(s::IcosahedralSampling) = icosahedral_nvertices(s.frequency)
 
 # ---------------------------------------------------------------------------
@@ -874,15 +979,21 @@ function spherical_points!(
     Λ::AbstractVector{T}, Φ::AbstractVector{T}, s::AbstractTensorProductSphericalSampling, nlat::Integer; kwargs...,
 ) where {T<:AbstractFloat}
     sz = axes_lengths(s, nlat; kwargs...)
-    length(Λ) == sz.nlon * sz.nlat && length(Φ) == sz.nlon * sz.nlat || throw(DimensionMismatch("buffers must have length nlon*nlat"))
-    λ = Vector{T}(undef, sz.nlon)
-    φ = Vector{T}(undef, sz.nlat)
-    spherical_axes!(λ, φ, s, nlat; kwargs...)
-    k = 1
-    @inbounds for j in 1:sz.nlat, i in 1:sz.nlon
-        Λ[k] = λ[i]
-        Φ[k] = φ[j]
-        k += 1
+    n = sz.nlon * sz.nlat
+    length(Λ) == n && length(Φ) == n ||
+        throw(DimensionMismatch("buffers must have length nlon*nlat = $n"))
+    n == 0 && return (; λ = Λ, φ = Φ)
+    # The axes are built into the leading elements of the outputs and expanded in place, so no scratch
+    # is needed. Expanding backwards is what makes that safe: cell (i, j) lands at
+    # k = (j-1)·nlon + i ≥ max(i, j), so a write never lands on an axis element still to be read.
+    spherical_axes!(view(Λ, 1:sz.nlon), view(Φ, 1:sz.nlat), s, nlat; kwargs...)
+    @inbounds for j in sz.nlat:-1:1
+        φj = Φ[j]
+        base = (j - 1) * sz.nlon
+        for i in sz.nlon:-1:1
+            Λ[base + i] = Λ[i]
+            Φ[base + i] = φj
+        end
     end
     return (; λ = Λ, φ = Φ)
 end
@@ -968,6 +1079,369 @@ function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:Abstr
     end
     θ = acos(clamp(z, -one(T), one(T)))
     return θ, mod(ϕ, T(2π))
+end
+
+
+# ---------------------------------------------------------------------------
+# HEALPix pixel geometry: RING <-> face-local (ix, iy, face)
+# ---------------------------------------------------------------------------
+#
+# Follows Górski et al. (2005) and Reinecke (2003). The face-local form is the hinge both orderings and
+# the neighbour walk go through.
+
+const _HP_JRLL = (2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4)
+const _HP_JPLL = (1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7)
+@inline _hp_special_div(a::Int, b::Int) = (t = Int(a ≥ (b << 1)); a2 = a - t * (b << 1); (t << 1) + Int(a2 ≥ b))
+
+@inline function _hp_ncap(nside::Int)
+    # Pixels in the north polar cap ABOVE the ring at iring == nside, as the RING↔XYF conversion
+    # needs it. Distinct from the classic 2 nside (nside+1) cap count used for pixel centers.
+    return 2 * nside * (nside - 1)
+end
+
+@inline function _hp_get_ring_info_small(nside::Int, ring::Int)
+    npix = 12 * nside * nside
+    ncap = _hp_ncap(nside)
+    if ring < nside
+        return (startpix = 2 * ring * (ring - 1), ringpix = 4 * ring, shifted = true)
+    elseif ring < 3 * nside
+        ringpix = 4 * nside
+        return (startpix = ncap + (ring - nside) * ringpix, ringpix = ringpix, shifted = ((ring - nside) & 1) == 0)
+    else
+        nr = 4 * nside - ring
+        return (startpix = npix - 2 * nr * (nr + 1), ringpix = 4 * nr, shifted = true)
+    end
+end
+
+function _hp_ring2xyf(nside::Int, pix::Int)
+    # pix 0-based RING
+    ncap = _hp_ncap(nside)
+    npix = 12 * nside * nside
+    nl2 = 2 * nside
+    iring = 0
+    iphi = 0
+    kshift = 0
+    nr = 0
+    face_num = 0
+    if pix < ncap
+        iring = (1 + isqrt(1 + 2 * pix)) >> 1
+        iphi = (pix + 1) - 2 * iring * (iring - 1)
+        kshift = 0
+        nr = iring
+        face_num = _hp_special_div(iphi - 1, nr)
+    elseif pix < (npix - ncap)
+        ip = pix - ncap
+        tmp = ip ÷ (4 * nside)
+        iring = tmp + nside
+        iphi = ip - tmp * 4 * nside + 1
+        kshift = (iring + nside) & 1
+        nr = nside
+        ire = tmp + 1
+        irm = nl2 + 1 - tmp
+        ifm = (iphi - (ire >> 1) + nside - 1) ÷ nside
+        ifp = (iphi - (irm >> 1) + nside - 1) ÷ nside
+        face_num = (ifp == ifm) ? (ifp | 4) : ((ifp < ifm) ? ifp : (ifm + 8))
+    else
+        ip = npix - pix
+        iring = (1 + isqrt(2 * ip - 1)) >> 1
+        iphi = 4 * iring + 1 - (ip - 2 * iring * (iring - 1))
+        kshift = 0
+        nr = iring
+        iring = 2 * nl2 - iring
+        face_num = _hp_special_div(iphi - 1, nr) + 8
+    end
+    irt = iring - ((2 + (face_num >> 2)) * nside) + 1
+    ipt = 2 * iphi - _HP_JPLL[face_num + 1] * nr - kshift - 1
+    ipt ≥ nl2 && (ipt -= 8 * nside)
+    ix = (ipt - irt) >> 1
+    iy = (-ipt - irt) >> 1
+    return ix, iy, face_num
+end
+
+function _hp_xyf2ring(nside::Int, ix::Int, iy::Int, face_num::Int)
+    nl4 = 4 * nside
+    jr = (_HP_JRLL[face_num + 1] * nside) - ix - iy - 1
+    info = _hp_get_ring_info_small(nside, jr)
+    nr = info.ringpix >> 2
+    kshift = 1 - Int(info.shifted)
+    jp = (_HP_JPLL[face_num + 1] * nr + ix - iy + 1 + kshift) ÷ 2
+    jp < 1 && (jp += nl4)
+    return info.startpix + jp - 1
+end
+
+
+"""
+    RingScheme
+
+Which HEALPix pixel ordering is meant: [`Ring`](@ref) or [`Nested`](@ref).
+"""
+abstract type RingScheme end
+
+"""
+    Ring()
+
+Pixels numbered along iso-latitude rings, north to south and east within a ring. The ordering that
+makes a ring contiguous, so a longitude transform per ring is possible.
+"""
+struct Ring <: RingScheme end
+
+"""
+    Nested()
+
+Pixels numbered so that each is subdivided into four contiguous children — a quadtree per base face.
+The ordering that makes a neighbourhood contiguous. Requires `nside` to be a power of two.
+"""
+struct Nested <: RingScheme end
+
+# Bit interleaving: NESTED packs the two face-local coordinates into one index by placing `ix` on the
+# even bit positions and `iy` on the odd ones, which is what makes each pixel's four children adjacent.
+@inline function _spread_bits(v::Int)
+    r = 0
+    @inbounds for b in 0:20
+        ((v >> b) & 1) != 0 && (r |= 1 << (2b))
+    end
+    return r
+end
+
+@inline function _compress_bits(v::Int)
+    r = 0
+    @inbounds for b in 0:20
+        ((v >> (2b)) & 1) != 0 && (r |= 1 << b)
+    end
+    return r
+end
+
+@inline _is_power_of_two(n::Int) = n > 0 && (n & (n - 1)) == 0
+
+_require_nested_nside(nside::Int) = _is_power_of_two(nside) || throw(ArgumentError(
+    "the NESTED scheme needs nside to be a power of two, got $nside",
+))
+
+@inline function _hp_xyf2nest(nside::Int, ix::Int, iy::Int, face::Int)
+    return face * nside * nside + _spread_bits(ix) + 2 * _spread_bits(iy)
+end
+
+@inline function _hp_nest2xyf(nside::Int, pix::Int)
+    npface = nside * nside
+    face, p = divrem(pix, npface)
+    return _compress_bits(p), _compress_bits(p >> 1), face
+end
+
+"""
+    _hp_ang2xyf(nside, θ, ϕ) -> (ix, iy, face)
+
+Face-local coordinates of the pixel containing colatitude `θ`, longitude `ϕ`, by the HEALPix
+projection (Górski et al. 2005). Written with division and remainder rather than shift and mask, so it
+holds for any `nside` rather than only a power of two.
+"""
+function _hp_ang2xyf(nside::Int, θ::T, ϕ::T) where {T<:AbstractFloat}
+    z = cos(θ)
+    za = abs(z)
+    tt = mod(ϕ / (T(π) / 2), T(4))
+    if za ≤ T(2) / 3
+        # Equatorial belt: the pixel sits at the crossing of an ascending and a descending edge line.
+        temp1 = T(nside) * (T(0.5) + tt)
+        temp2 = T(nside) * z * T(0.75)
+        jp = Int(floor(temp1 - temp2))
+        jm = Int(floor(temp1 + temp2))
+        ifp = jp ÷ nside
+        ifm = jm ÷ nside
+        face = ifp == ifm ? (ifp | 4) : (ifp < ifm ? ifp : ifm + 8)
+        return (mod(jm, nside), nside - mod(jp, nside) - 1, face)
+    else
+        # Polar caps: within one of the four base faces of that hemisphere.
+        ntt = min(3, Int(floor(tt)))
+        tp = tt - T(ntt)
+        tmp = T(nside) * sqrt(T(3) * (one(T) - za))
+        jp = min(Int(floor(tp * tmp)), nside - 1)
+        jm = min(Int(floor((one(T) - tp) * tmp)), nside - 1)
+        return z ≥ 0 ? (nside - jm - 1, nside - jp - 1, ntt) : (jp, jm, ntt + 8)
+    end
+end
+
+"""
+    ang2pix(nside, θ, ϕ; scheme = Ring()) -> Int
+
+The 0-based index of the pixel containing colatitude `θ ∈ [0, π]` and longitude `ϕ`.
+
+`θ` is a COLATITUDE, matching the HEALPix convention throughout this section; use
+[`colatitude`](@ref) to convert a geographic latitude.
+"""
+function ang2pix(nside::Integer, θ::Real, ϕ::Real; scheme::RingScheme = Ring())
+    ns = Int(nside)
+    ns ≥ 1 || throw(ArgumentError("HEALPix nside must be ≥ 1, got $ns"))
+    T = float(promote_type(typeof(θ), typeof(ϕ)))
+    ix, iy, f = _hp_ang2xyf(ns, T(θ), T(ϕ))
+    return _xyf2pix(ns, ix, iy, f, scheme)
+end
+
+@inline _xyf2pix(ns::Int, ix::Int, iy::Int, f::Int, ::Ring) = _hp_xyf2ring(ns, ix, iy, f)
+@inline function _xyf2pix(ns::Int, ix::Int, iy::Int, f::Int, ::Nested)
+    _require_nested_nside(ns)
+    return _hp_xyf2nest(ns, ix, iy, f)
+end
+
+"""
+    pix2ang(nside, pix; scheme = Ring()) -> (θ, ϕ)
+
+Colatitude and longitude of pixel `pix`'s centre (0-based index).
+"""
+function pix2ang(nside::Integer, pix::Integer; scheme::RingScheme = Ring(), T::Type{<:AbstractFloat} = Float64)
+    ns = Int(nside)
+    p = Int(pix)
+    npix = healpix_npix(ns)
+    0 ≤ p < npix || throw(ArgumentError("HEALPix pixel $p out of range 0:$(npix - 1)"))
+    ring = _pix2ring_index(ns, p, scheme)
+    return _healpix_pix2ang_ring(ns, ring, T)
+end
+
+@inline _pix2ring_index(::Int, p::Int, ::Ring) = p
+@inline function _pix2ring_index(ns::Int, p::Int, ::Nested)
+    _require_nested_nside(ns)
+    ix, iy, f = _hp_nest2xyf(ns, p)
+    return _hp_xyf2ring(ns, ix, iy, f)
+end
+
+"""
+    ring2nest(nside, pix) -> Int
+    nest2ring(nside, pix) -> Int
+
+Convert a 0-based pixel index between the two orderings. Both need `nside` to be a power of two,
+which is what makes the NESTED quadtree exist.
+"""
+function ring2nest(nside::Integer, pix::Integer)
+    ns = Int(nside)
+    _require_nested_nside(ns)
+    ix, iy, f = _hp_ring2xyf(ns, Int(pix))
+    return _hp_xyf2nest(ns, ix, iy, f)
+end
+
+function nest2ring(nside::Integer, pix::Integer)
+    ns = Int(nside)
+    _require_nested_nside(ns)
+    ix, iy, f = _hp_nest2xyf(ns, Int(pix))
+    return _hp_xyf2ring(ns, ix, iy, f)
+end
+
+"""
+    pix2vec(nside, pix; scheme = Ring()) -> NTuple{3}
+
+Unit vector to pixel `pix`'s centre.
+"""
+function pix2vec(nside::Integer, pix::Integer; scheme::RingScheme = Ring(), T::Type{<:AbstractFloat} = Float64)
+    θ, ϕ = pix2ang(nside, pix; scheme = scheme, T = T)
+    sinθ, cosθ = sincos(θ)
+    sinϕ, cosϕ = sincos(ϕ)
+    return (sinθ * cosϕ, sinθ * sinϕ, cosθ)
+end
+
+"""
+    vec2pix(nside, v; scheme = Ring()) -> Int
+
+The 0-based index of the pixel containing direction `v`, which need not be normalized.
+"""
+function vec2pix(nside::Integer, v; scheme::RingScheme = Ring())
+    x, y, z = v[1], v[2], v[3]
+    T = float(promote_type(typeof(x), typeof(y), typeof(z)))
+    r = sqrt(T(x)^2 + T(y)^2 + T(z)^2)
+    iszero(r) && throw(ArgumentError("the zero vector has no direction"))
+    θ = acos(clamp(T(z) / r, -one(T), one(T)))
+    ϕ = mod(atan(T(y), T(x)), T(2π))
+    return ang2pix(nside, θ, ϕ; scheme = scheme)
+end
+
+# ---- Reduced Gaussian / octahedral ------------------------------------------
+
+"""
+    spherical_points!(λ, φ, sampling::AbstractReducedGaussianSampling) -> NamedTuple
+
+Ring-by-ring points of a reduced Gaussian grid, north to south, longitudes equispaced within each ring
+starting at zero. Buffer length is [`npoints`](@ref).
+"""
+function spherical_points!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, s::AbstractReducedGaussianSampling,
+) where {T<:AbstractFloat}
+    counts = nlon_per_ring(s)
+    nring = length(counts)
+    n = sum(counts)
+    length(λ) == n && length(φ) == n ||
+        throw(DimensionMismatch("buffers must have length npoints = $n"))
+    # The Gaussian latitudes come from the same solve every other spectral sampling uses.
+    μ = Vector{T}(undef, nring)
+    _gauss_legendre!(T, μ, nothing, nring)
+    k = 0
+    @inbounds for j in 1:nring
+        # `μ` ascends, so ring 1 (north) is the LAST entry.
+        φj = asin(μ[nring + 1 - j])
+        m = counts[j]
+        dλ = T(2π) / T(m)
+        for i in 1:m
+            k += 1
+            λ[k] = T(i - 1) * dλ
+            φ[k] = φj
+        end
+    end
+    return (; λ, φ)
+end
+
+function spherical_points(s::AbstractReducedGaussianSampling; T::Type{<:AbstractFloat} = Float64)
+    n = npoints(s)
+    return spherical_points!(Vector{T}(undef, n), Vector{T}(undef, n), s)
+end
+
+"""
+    ring_latitudes(sampling; T = Float64) -> Vector{T}
+
+The Gaussian latitudes of a reduced Gaussian grid's rings, north to south.
+"""
+function ring_latitudes(s::AbstractReducedGaussianSampling; T::Type{<:AbstractFloat} = Float64)
+    nring = nrings(s)
+    μ = Vector{T}(undef, nring)
+    _gauss_legendre!(T, μ, nothing, nring)
+    return [asin(μ[nring + 1 - j]) for j in 1:nring]
+end
+
+"""
+    latitude_weights(sampling::AbstractReducedGaussianSampling; T = Float64) -> Vector{T}
+
+Gauss–Legendre weights for the grid's rings, north to south, normalized as everywhere else in this
+module so that `Σw = 2`. A full-sphere integral is then `Σⱼ wⱼ (2π/nlonⱼ) Σᵢ f`, the longitude factor
+varying by ring because the ring populations do.
+"""
+function latitude_weights(
+    s::AbstractReducedGaussianSampling; T::Type{<:AbstractFloat} = Float64,
+)
+    nring = nrings(s)
+    w = Vector{T}(undef, nring)
+    _gauss_legendre!(T, nothing, w, nring)
+    return reverse!(w)
+end
+
+# ---- Fibonacci lattice ------------------------------------------------------
+
+"""
+    spherical_points!(λ, φ, sampling::FibonacciSampling) -> NamedTuple
+
+The `n` golden-spiral points, allocating nothing.
+"""
+function spherical_points!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, s::FibonacciSampling,
+) where {T<:AbstractFloat}
+    n = s.n
+    length(λ) == n && length(φ) == n ||
+        throw(DimensionMismatch("buffers must have length n = $n"))
+    golden = (one(T) + sqrt(T(5))) / T(2)
+    dλ = T(2π) / golden
+    @inbounds for k in 0:(n - 1)
+        z = T(2k + 1) / T(n) - one(T)
+        φ[k + 1] = asin(clamp(z, -one(T), one(T)))
+        λ[k + 1] = mod(T(k) * dλ, T(2π))
+    end
+    return (; λ, φ)
+end
+
+function spherical_points(s::FibonacciSampling; T::Type{<:AbstractFloat} = Float64)
+    return spherical_points!(Vector{T}(undef, s.n), Vector{T}(undef, s.n), s)
 end
 
 # ---- Cubed sphere -----------------------------------------------------------
@@ -1132,19 +1606,23 @@ end
 
 function spherical_points!(Λ::AbstractVector{T}, Φ::AbstractVector{T}, ::YinYangSampling, nlon::Integer, nlat::Integer) where {T<:AbstractFloat}
     nlon = Int(nlon); nlat = Int(nlat)
-    n = 2 * nlon * nlat
+    np = nlon * nlat
+    n = 2 * np
     length(Λ) == n && length(Φ) == n || throw(DimensionMismatch("buffers must have length 2*nlon*nlat"))
-    λyin = Vector{T}(undef, nlon)
-    φyin = Vector{T}(undef, nlat)
-    λyang = Matrix{T}(undef, nlon, nlat)
-    φyang = Matrix{T}(undef, nlon, nlat)
-    yin_yang_panels!(λyin, φyin, λyang, φyang, nlon, nlat)
-    k = 1
-    @inbounds for φ in φyin, λ in λyin
-        Λ[k] = λ; Φ[k] = φ; k += 1
-    end
-    @inbounds for i in eachindex(λyang)   # column-major, so this is the same (i, j) order as yin
-        Λ[k] = λyang[i]; Φ[k] = φyang[i]; k += 1
+    n == 0 && return (; λ = Λ, φ = Φ)
+    # Yang is written straight into the second half of the outputs — exactly an nlon×nlat block in the
+    # order the panel fields use — and yin's axes into the leading elements of the first half. Nothing
+    # overlaps, so one call fills all four; yin is then expanded across its block in place.
+    yang_λ = reshape(view(Λ, (np + 1):n), nlon, nlat)
+    yang_φ = reshape(view(Φ, (np + 1):n), nlon, nlat)
+    yin_yang_panels!(view(Λ, 1:nlon), view(Φ, 1:nlat), yang_λ, yang_φ, nlon, nlat)
+    @inbounds for j in nlat:-1:1
+        φj = Φ[j]
+        base = (j - 1) * nlon
+        for i in nlon:-1:1
+            Λ[base + i] = Λ[i]
+            Φ[base + i] = φj
+        end
     end
     return (; λ = Λ, φ = Φ)
 end
@@ -1183,25 +1661,11 @@ function icosahedral_mesh(
 )
     ν = Int(frequency)
     nexp = icosahedral_nvertices(ν)
-    φg = (one(T) + sqrt(T(5))) / T(2)
-    raw = NTuple{3,T}[
-        (zero(T), one(T), φg), (zero(T), -one(T), φg),
-        (zero(T), one(T), -φg), (zero(T), -one(T), -φg),
-        (one(T), φg, zero(T)), (-one(T), φg, zero(T)),
-        (one(T), -φg, zero(T)), (-one(T), -φg, zero(T)),
-        (φg, zero(T), one(T)), (φg, zero(T), -one(T)),
-        (-φg, zero(T), one(T)), (-φg, zero(T), -one(T)),
-    ]
-    base = map(raw) do (x, y, z)
-        r = sqrt(x * x + y * y + z * z)
-        (x / r, y / r, z / r)
-    end
+    # Fixed combinatorial facts, so load-time constants rather than four allocations per call.
+    base = _icosahedron_base(T)
     faces = _ICOSAHEDRON_FACES
-    macro_edges = _icosahedron_edges(faces)     # the 30 canonical (lo, hi) corner pairs
-    edge_index = zeros(Int, 12, 12)
-    for (e, (lo, hi)) in enumerate(macro_edges)
-        edge_index[lo, hi] = e
-    end
+    macro_edges = _ICOSAHEDRON_MACRO_EDGES      # the 30 canonical (lo, hi) corner pairs
+    edge_index = _ICOSAHEDRON_EDGE_INDEX
 
     # Vertices are numbered by TOPOLOGY, not by hashing their coordinates: the 12 corners, then the
     # ν-1 interior points of each of the 30 macro-edges, then the (ν-1)(ν-2)/2 interior points of
@@ -1328,11 +1792,65 @@ end
     return 12 + (e - 1) * (ν - 1) + s
 end
 
+"""
+    _put_lonlat!(λ, φ, v, p, T)
+
+Normalize `p` and write vertex `v`'s longitude/latitude. Top-level rather than a closure so nothing
+is captured.
+"""
+@inline function _put_lonlat!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, v::Int, p::NTuple{3,T}, ::Type{T},
+) where {T<:AbstractFloat}
+    r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
+    x = p[1] / r; y = p[2] / r; z = p[3] / r
+    θ = acos(clamp(z, -one(T), one(T)))
+    ϕ = atan(y, x)
+    ϕ < 0 && (ϕ += T(2π))
+    @inbounds λ[v] = ϕ
+    @inbounds φ[v] = geographic_latitude(θ)
+    return nothing
+end
+
+"""
+    icosahedral_vertices!(λ, φ, frequency = 1) -> NamedTuple{(:λ,:φ)}
+
+Write the `10ν²+2` geodesic vertices' longitude/latitude into the caller's buffers, allocating
+nothing. The numbering is [`icosahedral_mesh`](@ref)'s topological one — corners, then macro-edge
+interiors, then face interiors — so each vertex is emitted at its own index with no intermediate
+array and no lookup.
+"""
 function icosahedral_vertices!(λ::AbstractVector{T}, φ::AbstractVector{T}, frequency::Integer = 1) where {T<:AbstractFloat}
-    mesh = icosahedral_mesh(frequency; T = T, topology = false)
-    length(λ) == length(mesh.λ) && length(φ) == length(mesh.φ) || throw(DimensionMismatch("buffers must have length 10ν²+2"))
-    copyto!(λ, mesh.λ)
-    copyto!(φ, mesh.φ)
+    ν = Int(frequency)
+    ν ≥ 1 || throw(ArgumentError("icosahedral frequency must be ≥ 1, got $ν"))
+    nexp = icosahedral_nvertices(ν)
+    length(λ) == nexp && length(φ) == nexp ||
+        throw(DimensionMismatch("buffers must have length 10ν²+2 = $nexp"))
+    base = _icosahedron_base(T)
+    @inbounds for v in 1:12
+        _put_lonlat!(λ, φ, v, base[v], T)
+    end
+    @inbounds for (e, (lo, hi)) in enumerate(_ICOSAHEDRON_MACRO_EDGES)
+        P = base[lo]; Q = base[hi]
+        for t in 1:(ν - 1)
+            a = T(ν - t) / T(ν); b = T(t) / T(ν)
+            _put_lonlat!(λ, φ, 12 + (e - 1) * (ν - 1) + t,
+                         (a * P[1] + b * Q[1], a * P[2] + b * Q[2], a * P[3] + b * Q[3]), T)
+        end
+    end
+    nint = ((ν - 1) * (ν - 2)) ÷ 2
+    face_base = 12 + 30 * (ν - 1)
+    @inbounds for (f, (ia, ib, ic)) in enumerate(_ICOSAHEDRON_FACES)
+        A = base[ia]; B = base[ib]; C = base[ic]
+        k = 0
+        for i in 1:(ν - 1), j in 1:(ν - 1 - i)
+            k += 1
+            w = T(ν - i - j) / T(ν); u = T(i) / T(ν); v = T(j) / T(ν)
+            _put_lonlat!(λ, φ, face_base + (f - 1) * nint + k,
+                         (w * A[1] + u * B[1] + v * C[1],
+                          w * A[2] + u * B[2] + v * C[2],
+                          w * A[3] + u * B[3] + v * C[3]), T)
+        end
+    end
     return (; λ, φ)
 end
 
@@ -1343,8 +1861,8 @@ The `10ν²+2` geodesic vertices as longitude/latitude, without building the mes
 times faster than [`icosahedral_mesh`](@ref) at large `ν`, which also returns edges and triangles.
 """
 function icosahedral_vertices(frequency::Integer = 1; T::Type{<:AbstractFloat} = Float64)
-    mesh = icosahedral_mesh(frequency; T = T, topology = false)
-    return (; λ = mesh.λ, φ = mesh.φ)
+    n = icosahedral_nvertices(frequency)
+    return icosahedral_vertices!(Vector{T}(undef, n), Vector{T}(undef, n), frequency)
 end
 
 # The 20 faces, as index triples into the 12 base vertices in the order `icosahedral_mesh` lists them.
@@ -1355,6 +1873,36 @@ const _ICOSAHEDRON_FACES = (
     (4, 8, 12), (5, 9, 10), (6, 11, 12), (7, 9, 10), (8, 11, 12),
 )
 
+"""
+    _icosahedron_base(T) -> NTuple{12,NTuple{3,T}}
+
+The 12 unit vertices of the base icosahedron, in the order `_ICOSAHEDRON_FACES` indexes them.
+A tuple, so it costs no allocation. Every raw vertex is a permutation of `(0, ±1, ±φ)` and so shares
+the norm `√(1+φ²)`, formed once.
+"""
+@inline function _icosahedron_base(::Type{T}) where {T<:AbstractFloat}
+    φg = (one(T) + sqrt(T(5))) / T(2)
+    r = sqrt(one(T) + φg * φg)
+    z = zero(T)
+    o = one(T) / r
+    g = φg / r
+    return (
+        (z, o, g), (z, -o, g), (z, o, -g), (z, -o, -g),
+        (o, g, z), (-o, g, z), (o, -g, z), (-o, -g, z),
+        (g, z, o), (g, z, -o), (-g, z, o), (-g, z, -o),
+    )
+end
+
+# Derived once at load rather than rebuilt, with a sort and a dedup, on every call.
+const _ICOSAHEDRON_MACRO_EDGES = Tuple(_icosahedron_edges(_ICOSAHEDRON_FACES))
+
+const _ICOSAHEDRON_EDGE_INDEX = let m = zeros(Int, 12, 12)
+    for (e, (lo, hi)) in enumerate(_ICOSAHEDRON_MACRO_EDGES)
+        m[lo, hi] = e
+    end
+    m
+end
+
 function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, s::IcosahedralSampling) where {T<:AbstractFloat}
     return icosahedral_vertices!(λ, φ, s.frequency)
 end
@@ -1363,7 +1911,45 @@ function spherical_points(s::IcosahedralSampling; T::Type{<:AbstractFloat} = Flo
     return icosahedral_vertices(s.frequency; T = T)
 end
 
-spherical_points(::ScatteredSphericalSampling, λ::AbstractVector, φ::AbstractVector) = (; λ, φ)
-spherical_points!(λ::AbstractVector, φ::AbstractVector, ::ScatteredSphericalSampling) = (; λ, φ)
+"""
+    spherical_points(::AbstractScatteredSphericalSampling, λ, φ) -> NamedTuple{(:λ,:φ)}
+
+A scattered sampling's points are the caller's arrays, so this hands them back. It exists so a
+scattered set can be driven through the same entry point as a generated one.
+"""
+spherical_points(::AbstractScatteredSphericalSampling, λ::AbstractVector, φ::AbstractVector) =
+    (; λ, φ)
+
+"""
+    spherical_points!(λ_out, φ_out, ::AbstractScatteredSphericalSampling, λ, φ) -> NamedTuple
+
+Copy a scattered point set into caller-owned buffers.
+
+The source arrays are required: a scattered sampling carries no rule from which points could be
+generated, so a form taking only the destinations would have nothing to write.
+"""
+function spherical_points!(
+    λ_out::AbstractVector, φ_out::AbstractVector, ::AbstractScatteredSphericalSampling,
+    λ::AbstractVector, φ::AbstractVector,
+)
+    n = length(λ)
+    length(φ) == n || throw(DimensionMismatch("λ/φ length mismatch: $n vs $(length(φ))"))
+    length(λ_out) == n && length(φ_out) == n ||
+        throw(DimensionMismatch("buffers must have length npoints = $n"))
+    copyto!(λ_out, λ)
+    copyto!(φ_out, φ)
+    return (; λ = λ_out, φ = φ_out)
+end
+
+"""
+    npoints(::AbstractScatteredSphericalSampling, λ, φ) -> Int
+
+The number of points in a scattered set, i.e. `length(λ)`.
+"""
+function npoints(::AbstractScatteredSphericalSampling, λ::AbstractVector, φ::AbstractVector)
+    length(φ) == length(λ) ||
+        throw(DimensionMismatch("λ/φ length mismatch: $(length(λ)) vs $(length(φ))"))
+    return length(λ)
+end
 
 end # module

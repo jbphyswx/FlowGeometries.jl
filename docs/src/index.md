@@ -2,6 +2,12 @@
 CurrentModule = FlowGeometries
 ```
 
+```@setup index
+using FlowGeometries: FlowGeometries as FG
+geo  = FG.Geometry.SphericalGeometry()
+grid = FG.Connectivity.structured_grid(FG.SphericalSampling.GaussLegendreSampling(), 64)
+```
+
 # FlowGeometries.jl
 
 Coordinate metrics, spherical samplings, and grid types for flow-field analysis on the plane and the
@@ -38,55 +44,57 @@ Pkg.add(url = "https://github.com/jbphyswx/FlowGeometries.jl")
 
 The package exports nothing. Import it qualified:
 
-```julia
+```@example index
 using FlowGeometries: FlowGeometries as FG
 ```
 
 A spherical grid from a spectral sampling:
 
-```julia
-geo  = FG.SphericalGeometry()                                   # unit-agnostic; default Earth radius
-grid = FG.structured_grid(FG.GaussLegendreSampling(), 64)       # 127 × 64 lon/lat
+```@example index
+geo  = FG.Geometry.SphericalGeometry()                                   # unit-agnostic; default Earth radius
+grid = FG.Connectivity.structured_grid(FG.SphericalSampling.GaussLegendreSampling(), 64)       # 127 × 64 lon/lat
 
-FG.coords(grid, 3, 5)          # (λ = …, φ = …) — named for the geometry, not (x, y)
-FG.measure(grid, 3, 5)         # that cell's area
-sum(FG.measure(grid)) / (4π * geo.R^2)   # ≈ 1: the cells tile the sphere
+FG.Grids.coords(grid, 3, 5)          # (λ = …, φ = …) — named for the geometry, not (x, y)
+FG.Grids.measure(grid, 3, 5)         # that cell's area
+sum(FG.Grids.measure(grid)) / (4π * geo.R^2)   # ≈ 1: the cells tile the sphere
 ```
 
 Nodes and quadrature weights together, from a single solve:
 
-```julia
-q = FG.spherical_quadrature(FG.GaussLegendreSampling(), 1024)
+```@example index
+q = FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.GaussLegendreSampling(), 1024)
 q.λ, q.φ, q.w                  # longitudes, latitudes, latitude weights
 sum(q.w)                       # 2, i.e. ∫₋₁¹ dμ
 ```
 
 An unstructured grid on a quasi-uniform sampling, with exact dual-cell areas:
 
-```julia
-g = FG.unstructured_grid(FG.IcosahedralSampling(16))   # 2562 nodes
-sum(FG.measure(g)) / (4π * FG.SphericalGeometry().R^2) # 1.0 to machine precision
-FG.neighbors(g, 1)                                     # this node's neighbours
+```@example index
+g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))   # 2562 nodes
+sum(FG.Grids.measure(g)) / (4π * FG.Geometry.SphericalGeometry().R^2) # 1.0 to machine precision
+FG.Grids.neighbors(g, 1)                                     # this node's neighbours
 ```
 
 Neighbours on a structured grid, without materializing anything:
 
-```julia
+```@example index
 out = Vector{Int}(undef, 8)
-n = FG.neighbors!(out, grid, 3, 5; stencil = :vertex)  # writes n indices into `out`
+n = FG.Connectivity.neighbors!(out, grid, 3, 5; stencil = FG.Stencils.Moore(1))  # writes n indices
 ```
 
 ## Conventions
 
-- **Nothing is exported.** Call through `FG.` or reach into the submodules
-  (`FG.Geometry`, `FG.SphericalSampling`, `FG.Grids`, `FG.Connectivity`, `FG.Execution`).
+- **Nothing is exported, and nothing is rebound at the top level.** Every name is reached through the
+  submodule that defines it: `FG.Axes`, `FG.Geometry`, `FG.Stencils`, `FG.Discretization`,
+  `FG.SphericalSampling`, `FG.Grids`, `FG.Connectivity`, `FG.Execution`.
 - **Coordinates are named by the geometry.** A spherical grid has `grid.λ`, `grid.φ`; a Cartesian one
   has `grid.x`, `grid.y`. Asking for the wrong one is an error, never a silent alias for the other.
 - **Spherical coordinates are the polar frame** `(λ, φ, r)` — longitude, geographic latitude, radius —
   not east/north.
 - **Cells are cell-centred.** A sampling's points are cell centres, and the connectivity treats each
   point as one cell. The two never disagree.
-- **`f!` means it writes into your buffers** and allocates nothing beyond its return value.
+- **`f!` means it writes into your buffers** and allocates nothing beyond its return value — asserted
+  in the test suite for every such form, at more than one problem size.
 - **Nonstandard element types work.** `Float32` and `BigFloat` are supported throughout; algorithms
   that cannot reach a given precision defer to ones that can.
 

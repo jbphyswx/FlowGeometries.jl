@@ -24,8 +24,8 @@ Required to build an `UnstructuredGrid` from a bare point set:
 
 ```julia
 using NearestNeighbors
-g = FG.UnstructuredGrid(geo, λ, φ, mask; k = 6, areas = areas)          # k nearest
-g = FG.UnstructuredGrid(geo, x, y, mask; radius = 0.02, areas = areas,  # or by radius
+g = FG.Grids.UnstructuredGrid(geo, λ, φ, mask; k = 6, areas = areas)          # k nearest
+g = FG.Grids.UnstructuredGrid(geo, x, y, mask; radius = 0.02, areas = areas,  # or by radius
                         periodic = (true, true), period = (Lx, Ly))
 ```
 
@@ -40,7 +40,7 @@ and does not touch these.
 
 ```julia
 using Quickhull
-g = FG.unstructured_grid(FG.ScatteredSphericalSampling(), λ, φ)
+g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.ScatteredSphericalSampling(), λ, φ)
 ```
 
 The spherical dual cell of a node is the polygon through the circumcentres of its incident
@@ -50,8 +50,8 @@ triangles — the dual of the convex hull on the sphere.
 
 ```julia
 using SparseArrays
-A = FG.sparse_adjacency_matrix(grid)      # SparseMatrixCSC{Bool,Int}
-A = FG.sparse_adjacency_matrix(conn; Ti = Int32, Tv = Float64)
+A = FG.Connectivity.sparse_adjacency_matrix(grid)      # SparseMatrixCSC{Bool,Int}
+A = FG.Connectivity.sparse_adjacency_matrix(conn; Ti = Int32, Tv = Float64)
 ```
 
 ## StaticArrays
@@ -61,9 +61,9 @@ through tuples:
 
 ```julia
 using StaticArrays
-p = FG.coords(SVector, grid, 3, 5)
-FG.distance(geo, p1, p2)
-FG.project_to_tangent_plane(SVector{2,Float64}, geo, centre, neighbour)
+p = FG.Grids.coords(SVector, grid, 3, 5)
+FG.Geometry.distance(geo, p1, p2)
+FG.Geometry.project_to_tangent_plane(SVector{2,Float64}, geo, centre, neighbour)
 ```
 
 Measured over 10⁶ points against the generic path: `distance` is a wash (0.96–1.02×),
@@ -76,7 +76,7 @@ any FFT implementation turns it into one length-`nlat` transform:
 
 ```julia
 using FFTW      # or any AbstractFFTs backend
-FG.latitude_weights(FG.DriscollHealySampling(), 4096)   # ~106× faster than the fallback
+FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), 4096)   # ~106× faster than the fallback
 ```
 
 The trigger is `AbstractFFTs`, not FFTW, so any backend serves. Without one, an angle-addition
@@ -97,9 +97,9 @@ factored form exists to avoid — and `AllActive` carries only its size, so ther
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.cubed_sphere_points(512; backend = ThreadedBackend())
-FG.CurvilinearGrid(geo, λ, φ, mask; backend = ThreadedBackend())
-FG.build_connectivity(grid; backend = ThreadedBackend())
+FG.SphericalSampling.cubed_sphere_points(512; backend = ThreadedBackend())
+FG.Grids.CurvilinearGrid(geo, λ, φ, mask; backend = ThreadedBackend())
+FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
 ```
 
 Serial by default. Results are bit-identical to serial. See [Performance](@ref performance-page) for

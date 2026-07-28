@@ -10,7 +10,10 @@ DocMeta.setdocmeta!(
 
 const MODULES = [
     FlowGeometries,
+    FlowGeometries.Axes,
     FlowGeometries.Geometry,
+    FlowGeometries.Stencils,
+    FlowGeometries.Discretization,
     FlowGeometries.SphericalSampling,
     FlowGeometries.Grids,
     FlowGeometries.Connectivity,
@@ -30,14 +33,19 @@ makedocs(;
     pages = [
         "Home" => "index.md",
         "Geometry" => "geometry.md",
+        "Axes" => "axes.md",
         "Spherical Sampling" => "sampling.md",
         "Grids" => "grids.md",
-        "Connectivity" => "connectivity.md",
+        "Stencils & Connectivity" => "connectivity.md",
+        "Discretization" => "discretization.md",
         "Extensions" => "extensions.md",
         "Performance" => "performance.md",
         "API Reference" => "api.md",
     ],
-    warnonly = true,
+    # Every example in the docs is executed, and a docstring that names a signature the code does not
+    # have is an error. Without this, documented examples drift from the code silently.
+    doctest = true,
+    warnonly = [:missing_docs, :cross_references],
     checkdocs = :none,
 )
 

@@ -15,7 +15,6 @@ abstract type AbstractGeometry{T<:AbstractFloat} end
     AbstractCartesianGeometry{T} <: AbstractGeometry{T}
 
 Cartesian metrics.  Default: [`CartesianGeometry`](@ref).
-Subtypes should provide `dx`, `dy`, `dz` (or specialize the methods).
 """
 abstract type AbstractCartesianGeometry{T<:AbstractFloat} <: AbstractGeometry{T} end
 
@@ -28,18 +27,20 @@ Subtypes should provide `R` (or specialize the methods).
 abstract type AbstractSphericalGeometry{T<:AbstractFloat} <: AbstractGeometry{T} end
 
 """
-    CartesianGeometry{T} <: AbstractCartesianGeometry{T}
+    CartesianGeometry()
+    CartesianGeometry(T)
+    CartesianGeometry{T}()
 
-Default Cartesian geometry with spacings `dx`, `dy`, and optional `dz` (zero for 2D).
+Flat metric in `T`, of any dimension.
+
+It carries no grid spacing. A cell's extent belongs to the grid's axes, which already state it per
+cell and per direction; a nominal `dx`/`dy`/`dz` on the geometry would be a second, unchecked copy
+that could contradict them. The dimension likewise lives on the grid.
 """
-struct CartesianGeometry{T<:AbstractFloat} <: AbstractCartesianGeometry{T}
-    dx::T
-    dy::T
-    dz::T
-end
+struct CartesianGeometry{T<:AbstractFloat} <: AbstractCartesianGeometry{T} end
 
-CartesianGeometry(dx::T, dy::T) where {T<:AbstractFloat} = CartesianGeometry{T}(dx, dy, zero(T))
-CartesianGeometry{T}(dx, dy) where {T<:AbstractFloat} = CartesianGeometry{T}(convert(T, dx), convert(T, dy), zero(T))
+CartesianGeometry() = CartesianGeometry{Float64}()
+CartesianGeometry(::Type{T}) where {T<:AbstractFloat} = CartesianGeometry{T}()
 
 """
     SphericalGeometry{T} <: AbstractSphericalGeometry{T}
@@ -67,8 +68,8 @@ SphericalGeometry() = SphericalGeometry(6.371e6)
     point_names(geo, Val(N)) -> NTuple{N,Symbol}
 
 Field names for an `N`-coordinate point in this geometry.
-Cartesian: `(:x,)`, `(:x,:y)`, `(:x,:y,:z)`.
-Spherical: `(:λ,)`, `(:λ,:φ)`, `(:λ,:φ,:r)`.
+Cartesian: `(:x,)`, `(:x,:y)`, `(:x,:y,:z)`, then `(:x1, …, :xN)`.
+Spherical: `(:λ,)`, `(:λ,:φ)`, `(:λ,:φ,:r)`, then `(:λ,:φ,:r,:q4,…)`.
 """
 point_names(::AbstractCartesianGeometry, ::Val{1}) = (:x,)
 point_names(::AbstractCartesianGeometry, ::Val{2}) = (:x, :y)
@@ -76,6 +77,11 @@ point_names(::AbstractCartesianGeometry, ::Val{3}) = (:x, :y, :z)
 point_names(::AbstractSphericalGeometry, ::Val{1}) = (:λ,)
 point_names(::AbstractSphericalGeometry, ::Val{2}) = (:λ, :φ)
 point_names(::AbstractSphericalGeometry, ::Val{3}) = (:λ, :φ, :r)
+
+# Past the named directions the letters run out, so they are numbered from where each convention ends.
+point_names(::AbstractCartesianGeometry, ::Val{N}) where {N} = ntuple(d -> Symbol(:x, d), Val(N))
+point_names(::AbstractSphericalGeometry, ::Val{N}) where {N} =
+    (:λ, :φ, :r, ntuple(d -> Symbol(:q, d + 3), Val(N - 3))...)
 
 """
     build_point(S, names::NTuple{N,Symbol}, vals::NTuple{N}) -> S
@@ -230,27 +236,27 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    area_element(geo::AbstractCartesianGeometry{T})
-    area_element(geo::AbstractSphericalGeometry{T}, φ::T, dλ::T, dφ::T)
+    area_element(geo::AbstractCartesianGeometry, dx, dy)
+    area_element(geo::AbstractSphericalGeometry, φ, dλ, dφ)
 
-Compute local grid cell area.
+Local cell area from the cell's own extents: `dx·dy` on the plane, `R²·cosφ·dλ·dφ` on the sphere.
 """
-@inline area_element(geo::AbstractCartesianGeometry{T}) where {T} = geo.dx * geo.dy
+@inline area_element(::AbstractCartesianGeometry{T}, dx::Real, dy::Real) where {T} =
+    convert(T, dx) * convert(T, dy)
 
 @inline function area_element(geo::AbstractSphericalGeometry{T}, φ::T, dλ::T, dφ::T) where {T}
     return geo.R^2 * cos(φ) * dλ * dφ
 end
 
 """
-    volume_element(geo::AbstractCartesianGeometry{T})
-    volume_element(geo::AbstractSphericalGeometry{T}, r::T, φ::T, dλ::T, dφ::T, dr::T)
+    volume_element(geo::AbstractCartesianGeometry, dx, dy, dz)
+    volume_element(geo::AbstractSphericalGeometry, r, φ, dλ, dφ, dr)
 
-Compute local grid cell volume. The spherical form generalizes [`area_element`](@ref) with the
-LOCAL radius `r` at this level (not the fixed reference `geo.R`) — a genuine spherical-shell volume
-element `r²·cosφ·dλ·dφ·dr`, needed once a grid has real multi-level radial structure instead of a
-single reference sphere.
+Local cell volume from the cell's own extents. The spherical form uses the LOCAL radius `r` at this
+level, not the reference `geo.R`, so it is the genuine shell element `r²·cosφ·dλ·dφ·dr`.
 """
-@inline volume_element(geo::AbstractCartesianGeometry{T}) where {T} = geo.dx * geo.dy * geo.dz
+@inline volume_element(::AbstractCartesianGeometry{T}, dx::Real, dy::Real, dz::Real) where {T} =
+    convert(T, dx) * convert(T, dy) * convert(T, dz)
 
 @inline function volume_element(::AbstractSphericalGeometry{T}, r::T, φ::T, dλ::T, dφ::T, dr::T) where {T}
     return r^2 * cos(φ) * dλ * dφ * dr
@@ -425,6 +431,259 @@ end
         λ = dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
         φ = dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
     )
+end
+
+# ---------------------------------------------------------------------------
+# Metric scale factors
+# ---------------------------------------------------------------------------
+
+"""
+    scale_factors(geo, point) -> NTuple
+
+Physical length of a unit coordinate step in each direction at `point` — see
+[`FlowGeometries.Discretization.scale_factors`](@ref).
+
+Cartesian: `1` in every direction, the metric being the identity. Spherical: `(R·cosφ, R)` on the
+surface of radius `R`, and `(r·cosφ, r, 1)` where a radius direction is present, `r` being that
+point's own radius.
+"""
+@inline scale_factors(::AbstractCartesianGeometry{T}, p::Tuple{Vararg{Real,N}}) where {T,N} =
+    ntuple(_ -> one(T), N)
+
+@inline function scale_factors(geo::AbstractSphericalGeometry{T}, p::Tuple{Real,Real}) where {T}
+    φ = convert(T, p[2])
+    return (geo.R * cos(φ), geo.R)
+end
+
+@inline function scale_factors(::AbstractSphericalGeometry{T}, p::Tuple{Real,Real,Real}) where {T}
+    φ = convert(T, p[2])
+    r = convert(T, p[3])
+    return (r * cos(φ), r, one(T))
+end
+
+@inline scale_factors(geo::AbstractGeometry, p) = scale_factors(geo, as_ntuple(p))
+
+"""
+    jacobian(geo, point) -> T
+
+`∏` of [`scale_factors`](@ref): the volume element per unit coordinate volume at `point`.
+"""
+@inline jacobian(geo::AbstractGeometry, p) = prod(scale_factors(geo, p))
+
+
+# ---------------------------------------------------------------------------
+# Ellipsoidal geometry
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractEllipsoidalGeometry{T} <: AbstractGeometry{T}
+
+Oblate-spheroid metrics. Default: [`SpheroidGeometry`](@ref). Coordinate names match the spherical
+convention, `(λ, φ[, h])`, with `φ` the GEODETIC latitude.
+"""
+abstract type AbstractEllipsoidalGeometry{T<:AbstractFloat} <: AbstractGeometry{T} end
+
+point_names(::AbstractEllipsoidalGeometry, ::Val{1}) = (:λ,)
+point_names(::AbstractEllipsoidalGeometry, ::Val{2}) = (:λ, :φ)
+point_names(::AbstractEllipsoidalGeometry, ::Val{3}) = (:λ, :φ, :h)
+
+"""
+    SpheroidGeometry(a, f)
+    SpheroidGeometry()
+
+Oblate spheroid of equatorial radius `a` and flattening `f = (a-b)/a`. The no-argument form is WGS 84,
+`a = 6378137.0`, `f = 1/298.257223563`.
+
+Only `distance`, `area_element` and `scale_factors` differ from a sphere; the grid, sampling and
+connectivity stack is inherited unchanged.
+"""
+struct SpheroidGeometry{T<:AbstractFloat} <: AbstractEllipsoidalGeometry{T}
+    a::T
+    f::T
+
+    function SpheroidGeometry{T}(a, f) where {T<:AbstractFloat}
+        aT, fT = convert(T, a), convert(T, f)
+        aT > 0 || throw(ArgumentError("the equatorial radius must be positive, got $aT"))
+        zero(T) ≤ fT < one(T) || throw(ArgumentError("the flattening must lie in [0, 1), got $fT"))
+        return new{T}(aT, fT)
+    end
+end
+
+SpheroidGeometry(a::Real, f::Real) = SpheroidGeometry{float(promote_type(typeof(a), typeof(f)))}(a, f)
+SpheroidGeometry() = SpheroidGeometry(6378137.0, inv(298.257223563))
+
+"""Semi-minor axis `b = a(1-f)`."""
+@inline semiminor_axis(g::AbstractEllipsoidalGeometry) = g.a * (one(g.f) - g.f)
+
+"""First eccentricity squared, `e² = f(2-f)`."""
+@inline eccentricity²(g::AbstractEllipsoidalGeometry) = g.f * (2 - g.f)
+
+"""
+    prime_vertical_radius(geo, φ) -> T
+
+`N(φ) = a / √(1 - e²sin²φ)`: the radius of curvature perpendicular to the meridian. A unit step in
+longitude covers `N(φ)cosφ`.
+"""
+@inline function prime_vertical_radius(g::AbstractEllipsoidalGeometry{T}, φ::Real) where {T}
+    s = sin(convert(T, φ))
+    return g.a / sqrt(one(T) - eccentricity²(g) * s * s)
+end
+
+"""
+    meridional_radius(geo, φ) -> T
+
+`M(φ) = a(1-e²) / (1 - e²sin²φ)^{3/2}`: the radius of curvature along the meridian. A unit step in
+latitude covers `M(φ)`.
+"""
+@inline function meridional_radius(g::AbstractEllipsoidalGeometry{T}, φ::Real) where {T}
+    s = sin(convert(T, φ))
+    e² = eccentricity²(g)
+    w = one(T) - e² * s * s
+    return g.a * (one(T) - e²) / (w * sqrt(w))
+end
+
+@inline function scale_factors(g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real}) where {T}
+    φ = convert(T, p[2])
+    return (prime_vertical_radius(g, φ) * cos(φ), meridional_radius(g, φ))
+end
+
+@inline function scale_factors(g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real,Real}) where {T}
+    φ = convert(T, p[2])
+    h = convert(T, p[3])
+    return ((prime_vertical_radius(g, φ) + h) * cos(φ), meridional_radius(g, φ) + h, one(T))
+end
+
+"""
+    area_element(geo::AbstractEllipsoidalGeometry, φ, dλ, dφ)
+
+`M(φ)·N(φ)cosφ·dλ·dφ`, the exact ellipsoidal surface element — equal to
+`a²(1-e²)cosφ / (1-e²sin²φ)²·dλ·dφ`.
+"""
+@inline function area_element(
+    g::AbstractEllipsoidalGeometry{T}, φ::Real, dλ::Real, dφ::Real,
+) where {T}
+    φT = convert(T, φ)
+    return meridional_radius(g, φT) * prime_vertical_radius(g, φT) * cos(φT) *
+           convert(T, dλ) * convert(T, dφ)
+end
+
+"""
+    distance(geo::AbstractEllipsoidalGeometry, p1, p2)
+
+Geodesic distance by Vincenty's inverse method, iterated to `1e-12` in the auxiliary longitude, which
+holds the result to well under a millimetre at Earth scale.
+
+Vincenty's iteration converges slowly for very nearly antipodal point pairs. It is capped, and on
+reaching the cap the great-circle distance on a sphere of the mean radius is returned instead of a
+half-converged number.
+"""
+@inline distance(geo::AbstractEllipsoidalGeometry, pt1, pt2) =
+    _spheroid_distance(geo, as_ntuple(pt1), as_ntuple(pt2))
+
+function _spheroid_distance(
+    g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real,Real}, p2::Tuple{Real,Real},
+) where {T}
+    λ1, φ1 = _at(T, p1)
+    λ2, φ2 = _at(T, p2)
+    a = g.a
+    b = semiminor_axis(g)
+    f = g.f
+    L = λ2 - λ1
+    U1 = atan((one(T) - f) * tan(φ1))
+    U2 = atan((one(T) - f) * tan(φ2))
+    sinU1, cosU1 = sincos(U1)
+    sinU2, cosU2 = sincos(U2)
+    λ = L
+    # 1e-12 rad in the auxiliary longitude, Vincenty's own criterion: at Earth scale a looser bound
+    # such as sqrt(eps) leaves ~0.1 m of position error, which is far above the method's accuracy.
+    tol = max(T(1e-12), eps(T))
+    sinσ = cosσ = σ = sinα² = cos2σm = zero(T)
+    converged = false
+    for _ in 1:200
+        sinλ, cosλ = sincos(λ)
+        sinσ = sqrt((cosU2 * sinλ)^2 + (cosU1 * sinU2 - sinU1 * cosU2 * cosλ)^2)
+        iszero(sinσ) && return zero(T)                 # coincident points
+        cosσ = sinU1 * sinU2 + cosU1 * cosU2 * cosλ
+        σ = atan(sinσ, cosσ)
+        sinα = cosU1 * cosU2 * sinλ / sinσ
+        sinα² = sinα * sinα
+        cos²α = one(T) - sinα²
+        cos2σm = iszero(cos²α) ? zero(T) : cosσ - 2 * sinU1 * sinU2 / cos²α
+        C = f / 16 * cos²α * (4 + f * (4 - 3 * cos²α))
+        λprev = λ
+        λ = L + (one(T) - C) * f * sinα *
+            (σ + C * sinσ * (cos2σm + C * cosσ * (-one(T) + 2 * cos2σm^2)))
+        if abs(λ - λprev) < tol
+            converged = true
+            break
+        end
+    end
+    if !converged
+        # Near-antipodal: fall back to a sphere of the mean radius rather than report a partial solve.
+        R = (2 * a + b) / 3
+        dλ = λ2 - λ1
+        h = sin((φ2 - φ1) / T(2))^2 + cos(φ1) * cos(φ2) * sin(dλ / T(2))^2
+        return R * 2 * atan(sqrt(h), sqrt(max(zero(T), one(T) - h)))
+    end
+    u² = sinα² == one(T) ? zero(T) : (one(T) - sinα²) * (a * a - b * b) / (b * b)
+    A = one(T) + u² / 16384 * (4096 + u² * (-768 + u² * (320 - 175 * u²)))
+    B = u² / 1024 * (256 + u² * (-128 + u² * (74 - 47 * u²)))
+    Δσ = B * sinσ * (cos2σm + B / 4 * (cosσ * (-one(T) + 2 * cos2σm^2) -
+         B / 6 * cos2σm * (-3 + 4 * sinσ^2) * (-3 + 4 * cos2σm^2)))
+    return b * A * (σ - Δσ)
+end
+
+# ---------------------------------------------------------------------------
+# Pole rotation
+# ---------------------------------------------------------------------------
+
+"""
+    PoleRotation(λp, φp)
+
+The frame whose north pole sits at `(λp, φp)` of the original one — a rotated-pole grid's coordinate
+change. Apply it with [`rotate`](@ref) and undo it with [`unrotate`](@ref).
+"""
+struct PoleRotation{T<:AbstractFloat}
+    λp::T
+    φp::T
+end
+
+PoleRotation(λp::Real, φp::Real) =
+    PoleRotation{float(promote_type(typeof(λp), typeof(φp)))}(λp, φp)
+
+"""
+    rotate(rot, λ, φ) -> (λ′, φ′)
+
+`(λ, φ)` expressed in the rotated frame. The rotation's own pole maps to `φ′ = π/2`.
+"""
+function rotate(rot::PoleRotation{T}, λ::Real, φ::Real) where {T}
+    sinλ, cosλ = sincos(convert(T, λ) - rot.λp)
+    sinφ, cosφ = sincos(convert(T, φ))
+    # about z by -λp, then about y by φp - π/2
+    x = cosφ * cosλ
+    y = cosφ * sinλ
+    z = sinφ
+    sinθ, cosθ = sincos(rot.φp - T(π) / 2)
+    xr = cosθ * x + sinθ * z
+    zr = -sinθ * x + cosθ * z
+    return (mod(atan(y, xr), T(2π)), asin(clamp(zr, -one(T), one(T))))
+end
+
+"""
+    unrotate(rot, λ′, φ′) -> (λ, φ)
+
+Inverse of [`rotate`](@ref).
+"""
+function unrotate(rot::PoleRotation{T}, λ::Real, φ::Real) where {T}
+    sinλ, cosλ = sincos(convert(T, λ))
+    sinφ, cosφ = sincos(convert(T, φ))
+    x = cosφ * cosλ
+    y = cosφ * sinλ
+    z = sinφ
+    sinθ, cosθ = sincos(rot.φp - T(π) / 2)
+    xr = cosθ * x - sinθ * z
+    zr = sinθ * x + cosθ * z
+    return (mod(atan(y, xr) + rot.λp, T(2π)), asin(clamp(zr, -one(T), one(T))))
 end
 
 end # module

@@ -177,7 +177,7 @@ function build_connectivity(
     nlon::Union{Nothing,Integer} = nothing,
     mask = nothing,
     periodic::Union{Nothing,NTuple{2,Bool}} = nothing,
-    stencil::Symbol = :face,
+    stencil = Stencils.Axial(1),
     active_only::Bool = true,
 )
     sz = SphericalSampling.axes_lengths(s, nlat; nlon = nlon)
@@ -256,14 +256,14 @@ function _cubed_neighbor(f::Int, i::Int, j::Int, di::Int, dj::Int, n::Int)
 end
 
 """
-    build_connectivity(::CubedSphereSampling, n; stencil=:face) -> CSRConnectivity
+    build_connectivity(::CubedSphereSampling, n; stencil=Axial(1)) -> CSRConnectivity
 
 Six-panel gnomonic cubed sphere with cross-face seams. Indexing matches
 [`SphericalSampling.cubed_sphere_points!`](@ref).
 """
 function build_connectivity(
     ::SphericalSampling.CubedSphereSampling, n::Integer;
-    stencil::Symbol = :face, backend = nothing,
+    stencil = Stencils.Axial(1), backend = nothing,
 )
     n = Int(n)
     n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1"))
@@ -289,7 +289,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_connectivity(::YinYangSampling, nlon, nlat; stencil=:face) -> CSRConnectivity
+    build_connectivity(::YinYangSampling, nlon, nlat; stencil=Axial(1)) -> CSRConnectivity
 
 Panel-local face/vertex stencils on yin then yang. Global ordering matches
 [`SphericalSampling.spherical_points!`](@ref) for Yin–Yang: yin (`nlon×nlat`, lon
@@ -299,7 +299,7 @@ interpolation, not shared mesh edges).
 """
 function build_connectivity(
     ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
-    stencil::Symbol = :face, backend = nothing,
+    stencil = Stencils.Axial(1), backend = nothing,
 )
     nlon = Int(nlon); nlat = Int(nlat)
     nlon ≥ 1 && nlat ≥ 1 || throw(ArgumentError("Yin–Yang nlon/nlat must be ≥ 1"))
@@ -329,8 +329,6 @@ end
 # HEALPix RING neighbors (face-table algorithm)
 # ---------------------------------------------------------------------------
 
-const _HP_JRLL = (2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4)
-const _HP_JPLL = (1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7)
 const _HP_NB_X = (-1, -1, 0, 1, 1, 1, 0, -1)
 const _HP_NB_Y = (0, 1, 1, 1, 0, -1, -1, -1)
 
@@ -366,84 +364,6 @@ const _HP_NB_SWAP = (
     (3, 0, 0),
 )
 
-@inline _hp_special_div(a::Int, b::Int) = (t = Int(a ≥ (b << 1)); a2 = a - t * (b << 1); (t << 1) + Int(a2 ≥ b))
-
-@inline function _hp_ncap(nside::Int)
-    # Pixels in the north polar cap ABOVE the ring at iring == nside, as the RING↔XYF conversion
-    # needs it. Distinct from the classic 2 nside (nside+1) cap count used for pixel centers.
-    return 2 * nside * (nside - 1)
-end
-
-@inline function _hp_get_ring_info_small(nside::Int, ring::Int)
-    npix = 12 * nside * nside
-    ncap = _hp_ncap(nside)
-    if ring < nside
-        return (startpix = 2 * ring * (ring - 1), ringpix = 4 * ring, shifted = true)
-    elseif ring < 3 * nside
-        ringpix = 4 * nside
-        return (startpix = ncap + (ring - nside) * ringpix, ringpix = ringpix, shifted = ((ring - nside) & 1) == 0)
-    else
-        nr = 4 * nside - ring
-        return (startpix = npix - 2 * nr * (nr + 1), ringpix = 4 * nr, shifted = true)
-    end
-end
-
-function _hp_ring2xyf(nside::Int, pix::Int)
-    # pix 0-based RING
-    ncap = _hp_ncap(nside)
-    npix = 12 * nside * nside
-    nl2 = 2 * nside
-    iring = 0
-    iphi = 0
-    kshift = 0
-    nr = 0
-    face_num = 0
-    if pix < ncap
-        iring = (1 + isqrt(1 + 2 * pix)) >> 1
-        iphi = (pix + 1) - 2 * iring * (iring - 1)
-        kshift = 0
-        nr = iring
-        face_num = _hp_special_div(iphi - 1, nr)
-    elseif pix < (npix - ncap)
-        ip = pix - ncap
-        tmp = ip ÷ (4 * nside)
-        iring = tmp + nside
-        iphi = ip - tmp * 4 * nside + 1
-        kshift = (iring + nside) & 1
-        nr = nside
-        ire = tmp + 1
-        irm = nl2 + 1 - tmp
-        ifm = (iphi - (ire >> 1) + nside - 1) ÷ nside
-        ifp = (iphi - (irm >> 1) + nside - 1) ÷ nside
-        face_num = (ifp == ifm) ? (ifp | 4) : ((ifp < ifm) ? ifp : (ifm + 8))
-    else
-        ip = npix - pix
-        iring = (1 + isqrt(2 * ip - 1)) >> 1
-        iphi = 4 * iring + 1 - (ip - 2 * iring * (iring - 1))
-        kshift = 0
-        nr = iring
-        iring = 2 * nl2 - iring
-        face_num = _hp_special_div(iphi - 1, nr) + 8
-    end
-    irt = iring - ((2 + (face_num >> 2)) * nside) + 1
-    ipt = 2 * iphi - _HP_JPLL[face_num + 1] * nr - kshift - 1
-    ipt ≥ nl2 && (ipt -= 8 * nside)
-    ix = (ipt - irt) >> 1
-    iy = (-ipt - irt) >> 1
-    return ix, iy, face_num
-end
-
-function _hp_xyf2ring(nside::Int, ix::Int, iy::Int, face_num::Int)
-    nl4 = 4 * nside
-    jr = (_HP_JRLL[face_num + 1] * nside) - ix - iy - 1
-    info = _hp_get_ring_info_small(nside, jr)
-    nr = info.ringpix >> 2
-    kshift = 1 - Int(info.shifted)
-    jp = (_HP_JPLL[face_num + 1] * nr + ix - iy + 1 + kshift) ÷ 2
-    jp < 1 && (jp += nl4)
-    return info.startpix + jp - 1
-end
-
 """
     healpix_neighbors!(out, nside, ipix0) -> n_written
 
@@ -457,13 +377,13 @@ function healpix_neighbors!(out::AbstractVector{<:Integer}, nside::Integer, ipix
     npix = 12 * nside * nside
     (0 ≤ pix < npix) || throw(ArgumentError("HEALPix pixel $pix out of range 0:$(npix - 1)"))
     length(out) ≥ 8 || throw(ArgumentError("out must have length ≥ 8"))
-    ix, iy, face_num = _hp_ring2xyf(nside, pix)
+    ix, iy, face_num = SphericalSampling._hp_ring2xyf(nside, pix)
     nsm1 = nside - 1
     k = 0
     if (ix > 0) && (ix < nsm1) && (iy > 0) && (iy < nsm1)
         @inbounds for m in _HP_NB_ORDER
             k += 1
-            out[k] = _hp_xyf2ring(nside, ix + _HP_NB_X[m], iy + _HP_NB_Y[m], face_num)
+            out[k] = SphericalSampling._hp_xyf2ring(nside, ix + _HP_NB_X[m], iy + _HP_NB_Y[m], face_num)
         end
         return k
     end
@@ -490,7 +410,7 @@ function healpix_neighbors!(out::AbstractVector{<:Integer}, nside::Integer, ipix
                 x, y = y, x
             end
             k += 1
-            out[k] = _hp_xyf2ring(nside, x, y, f)
+            out[k] = SphericalSampling._hp_xyf2ring(nside, x, y, f)
         end
     end
     return k
@@ -578,13 +498,41 @@ function unstructured_grid(
     T::Type{<:AbstractFloat} = Float64,
     areas = nothing,
     mask = nothing,
-    stencil::Symbol = :face,
+    stencil = Stencils.Axial(1),
 )
     pts = SphericalSampling.spherical_points(s, nlon, nlat; T = T)
     conn = build_connectivity(s, nlon, nlat; stencil = stencil)
     # Cell areas need the panel shape, which N = 2·nlon·nlat does not determine.
     a = areas === nothing ? _yin_yang_areas(geometry, nlon, nlat) : areas
     return _unstructured_from_points_conn(s, geometry, pts.λ, pts.φ, conn; areas = a, mask = mask)
+end
+
+"""
+    unstructured_grid(::AbstractScatteredSphericalSampling, λ, φ; geometry, k, radius, areas, mask)
+
+Build an `UnstructuredGrid` on an arbitrary `(λ, φ)` point set. The points are the caller's, so there
+is no resolution parameter. Adjacency comes from a k-d-tree query (`k` nearest, or everything within
+a physical `radius`) and cell areas default to the spherical Voronoi dual; see
+[`Grids.UnstructuredGrid`](@ref) for the extension each needs.
+"""
+function unstructured_grid(
+    ::SphericalSampling.AbstractScatteredSphericalSampling,
+    λ::AbstractVector, φ::AbstractVector;
+    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
+    areas = nothing,
+    mask = nothing,
+    k::Integer = 6,
+    radius::Union{Nothing,Real} = nothing,
+    periodic = nothing,
+    period = nothing,
+)
+    n = length(λ)
+    length(φ) == n || throw(DimensionMismatch("λ/φ length mismatch: $n vs $(length(φ))"))
+    m = mask === nothing ? Grids.AllActive((n,)) : mask
+    return Grids.UnstructuredGrid(
+        geometry, λ, φ, m;
+        k = k, radius = radius, areas = areas, periodic = periodic, period = period,
+    )
 end
 
 function unstructured_grid(

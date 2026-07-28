@@ -1,6 +1,7 @@
 module Connectivity
 
 using ..Execution: Execution
+using ..Stencils: Stencils
 using ..Grids: Grids
 
 # Connectivity is a property of the *grid architecture* or of a *spherical sampling*
@@ -82,14 +83,21 @@ end
 # Index helpers
 # ---------------------------------------------------------------------------
 
-@inline function _linidx(sz::NTuple{1,Int}, i::Int)
-    return i
-end
-@inline function _linidx(sz::NTuple{2,Int}, i::Int, j::Int)
-    return i + (j - 1) * sz[1]
-end
-@inline function _linidx(sz::NTuple{3,Int}, i::Int, j::Int, k::Int)
-    return i + (j - 1) * sz[1] + (k - 1) * sz[1] * sz[2]
+# Column-major linear index, for any number of dimensions. Written as a fold over the tuple so it
+# unrolls: `i₁ + (i₂-1)·n₁ + (i₃-1)·n₁n₂ + …`.
+@inline _linidx(sz::NTuple{1,Int}, i::Int) = i
+@inline _linidx(sz::NTuple{2,Int}, i::Int, j::Int) = i + (j - 1) * sz[1]
+@inline _linidx(sz::NTuple{3,Int}, i::Int, j::Int, k::Int) =
+    i + (j - 1) * sz[1] + (k - 1) * sz[1] * sz[2]
+
+@inline function _linidx(sz::NTuple{N,Int}, I::Vararg{Int,N}) where {N}
+    lin = 1
+    stride = 1
+    @inbounds for d in 1:N
+        lin += (I[d] - 1) * stride
+        stride *= sz[d]
+    end
+    return lin
 end
 
 @inline linear_index(grid::Grids.AbstractStructuredGrid, I::Vararg{Integer}) =
@@ -102,41 +110,20 @@ end
     CartesianIndices(Grids.size_tuple(grid))[lin]
 
 # ---------------------------------------------------------------------------
-# Const stencils (Val — no Symbol / no heap in hot path)
+# Stencil resolution
 # ---------------------------------------------------------------------------
 
-const FACE_1D = ((-1,), (1,))
-const FACE_2D = ((-1, 0), (1, 0), (0, -1), (0, 1))
-const FACE_3D = (
-    (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1),
-)
-const VERTEX_1D = FACE_1D
-const VERTEX_2D = (
-    (-1, -1), (0, -1), (1, -1),
-    (-1, 0), (1, 0),
-    (-1, 1), (0, 1), (1, 1),
-)
-const VERTEX_3D = let
-    offs = NTuple{3,Int}[]
-    for dz in -1:1, dy in -1:1, dx in -1:1
-        (dx == 0 && dy == 0 && dz == 0) && continue
-        push!(offs, (dx, dy, dz))
-    end
-    Tuple(offs)
-end
+# Offsets come from `Stencils`, which generates them from the stencil's type, so any shape, radius and
+# dimension is available and the loop over them still unrolls.
+@inline _stencil_offsets(::Val{N}, s::Stencils.AbstractStencil) where {N} =
+    Stencils.offsets(s, Val(N))
 
-@inline _stencil_offsets(::Val{1}, ::Val{:face}) = FACE_1D
-@inline _stencil_offsets(::Val{2}, ::Val{:face}) = FACE_2D
-@inline _stencil_offsets(::Val{3}, ::Val{:face}) = FACE_3D
-@inline _stencil_offsets(::Val{1}, ::Val{:vertex}) = VERTEX_1D
-@inline _stencil_offsets(::Val{2}, ::Val{:vertex}) = VERTEX_2D
-@inline _stencil_offsets(::Val{3}, ::Val{:vertex}) = VERTEX_3D
-
-function _stencil_val(stencil::Symbol)
-    stencil === :face && return Val{:face}()
-    stencil === :vertex && return Val{:vertex}()
-    throw(ArgumentError("stencil must be :face or :vertex, got $stencil"))
-end
+# A stencil is named by its TYPE, never by a symbol: a symbol cannot be resolved until run time, so the
+# neighbour iterator built from it would not be concretely typed and every cell of a traversal would
+# allocate. This signature is where that is enforced — the `stencil` keyword is deliberately left
+# UNANNOTATED, because annotating it `::AbstractStencil` would declare it abstract and destroy the very
+# inference the type-level design exists to get.
+@inline _stencil_val(s::Stencils.AbstractStencil) = s
 
 @inline function _wrap_or_clip(i::Int, di::Int, n::Int, periodic::Bool)
     j = i + di
@@ -149,21 +136,21 @@ end
     end
 end
 
-@inline function _periodic_flags(grid::Grids.StructuredGrid{G,T,N}) where {G,T,N}
-    return ntuple(d -> Grids.isperiodic(grid, d), N)
-end
+# The grid carries its topology in its type, so this is a const-fold of singleton types rather than a
+# tuple rebuilt per call.
+@inline _periodic_flags(grid::Grids.AbstractGrid) = Grids.periodic_flags(grid)
 
 # ---------------------------------------------------------------------------
 # neighbors! / nneighbors / Grids.neighbors — dispatch on grid
 # ---------------------------------------------------------------------------
 
 """
-    neighbors!(out, grid, I...; stencil=:face, active_only=true) -> n_written
+    neighbors!(out, grid, I...; stencil=Axial(1), active_only=true) -> n_written
     nneighbors(grid, I...; …) -> Int
     Grids.neighbors(grid, I...; …) -> Vector{Int}
 
 Neighbors as linear indices into `grid.mask`. Prefer `neighbors!` on hot paths.
-`stencil` is `:face` or `:vertex` (converted to `Val` once per call).
+`stencil` is any [`Stencils.AbstractStencil`](@ref).
 """
 function neighbors! end
 function nneighbors end
@@ -187,7 +174,7 @@ end
 
 function neighbors!(
     out::AbstractVector{<:Integer}, grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 ) where {G,T,N}
     return neighbors!(out, grid, I, _stencil_val(stencil), active_only)
 end
@@ -230,49 +217,51 @@ end
     return nothing
 end
 
-function _nneighbors(t::IndexTopology{N}, Ii::NTuple{N,Int}, ::Val{S}, active_only::Bool) where {N,S}
+function _nneighbors(
+    t::IndexTopology{N}, Ii::NTuple{N,Int}, sten::Stencils.AbstractStencil, active_only::Bool,
+) where {N}
     _check_index(t, Ii)
     active_only && !_active(t, Ii...) && return 0
     sz = t.size
     per = t.periodic
-    k = 0
-    @inbounds for δ in _stencil_offsets(Val{N}(), Val{S}())
+    # Folded rather than looped over a returned offset tuple: the offsets are unrolled into the body, so
+    # a wide stencil materializes nothing, and the count is threaded through as a value rather than a
+    # captured local.
+    return Stencils.fold_offsets(0, sten, Val(N)) do k, δ
         J = ntuple(d -> _wrap_or_clip(Ii[d], δ[d], sz[d], per[d]), N)
-        any(==(0), J) && continue
-        active_only && !_active(t, J...) && continue
-        k += 1
+        any(==(0), J) && return k
+        active_only && !_active(t, J...) && return k
+        return k + 1
     end
-    return k
 end
 
 function neighbors!(
     out::AbstractVector{<:Integer}, t::IndexTopology{N}, Ii::NTuple{N,Int},
-    ::Val{S}, active_only::Bool,
-) where {N,S}
+    sten::Stencils.AbstractStencil, active_only::Bool,
+) where {N}
     _check_index(t, Ii)
     active_only && !_active(t, Ii...) && return 0
     sz = t.size
     per = t.periodic
-    k = 0
-    @inbounds for δ in _stencil_offsets(Val{N}(), Val{S}())
+    return Stencils.fold_offsets(0, sten, Val(N)) do k, δ
         J = ntuple(d -> _wrap_or_clip(Ii[d], δ[d], sz[d], per[d]), N)
-        any(==(0), J) && continue
-        active_only && !_active(t, J...) && continue
+        any(==(0), J) && return k
+        active_only && !_active(t, J...) && return k
         k += 1
         k ≤ length(out) || throw(ArgumentError("out too short for stencil (need ≥ $k)"))
-        out[k] = _linidx(sz, J...)
+        @inbounds out[k] = _linidx(sz, J...)
+        return k
     end
-    return k
 end
 
 @inline neighbors!(
     out::AbstractVector{<:Integer}, grid::Grids.StructuredGrid{G,T,N},
-    I::NTuple{N,Integer}, v::Val, active_only::Bool,
-) where {G,T,N} = neighbors!(out, IndexTopology(grid), map(Int, I), v, active_only)
+    I::NTuple{N,Integer}, sten::Stencils.AbstractStencil, active_only::Bool,
+) where {G,T,N} = neighbors!(out, IndexTopology(grid), map(Int, I), sten, active_only)
 
 function nneighbors(
     grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 ) where {G,T,N}
     return _nneighbors(IndexTopology(grid), map(Int, I), _stencil_val(stencil), active_only)
 end
@@ -287,25 +276,25 @@ Nothing is stored, so a traversal that visits every cell allocates nothing at al
 freshly built `Vector` per cell would cost two heap allocations per cell. Use [`neighbors!`](@ref) to
 write into a caller-supplied buffer, or `collect` this to materialize it.
 """
-struct StencilNeighbors{GR,N,S}
+struct StencilNeighbors{GR,N,S<:Stencils.AbstractStencil}
     grid::GR
     I::NTuple{N,Int}
+    stencil::S
     active_only::Bool
 end
 
 Base.IteratorSize(::Type{<:StencilNeighbors}) = Base.HasLength()
 Base.IteratorEltype(::Type{<:StencilNeighbors}) = Base.HasEltype()
 Base.eltype(::Type{<:StencilNeighbors}) = Int
-Base.length(s::StencilNeighbors{GR,N,S}) where {GR,N,S} =
-    _nneighbors(s.grid, s.I, Val{S}(), s.active_only)
+Base.length(s::StencilNeighbors) = _nneighbors(s.grid, s.I, s.stencil, s.active_only)
 
-@inline function Base.iterate(s::StencilNeighbors{GR,N,S}, k::Int = 0) where {GR,N,S}
+@inline function Base.iterate(s::StencilNeighbors{GR,N}, k::Int = 0) where {GR,N}
     grid = s.grid
     # A masked-out cell has no neighbors at all, matching `nneighbors`.
     (k == 0 && s.active_only && !Grids.isactive(grid, s.I...)) && return nothing
     sz = Grids.size_tuple(grid)
     per = _periodic_flags(grid)
-    offs = _stencil_offsets(Val{N}(), Val{S}())
+    offs = _stencil_offsets(Val{N}(), s.stencil)
     @inbounds while k < length(offs)
         k += 1
         δ = offs[k]
@@ -319,12 +308,13 @@ end
 
 # The iterator counts through the same topology kernel, for either grid type.
 @inline _nneighbors(
-    grid::Union{Grids.StructuredGrid,Grids.CurvilinearGrid}, I::NTuple{N,Int}, sv::Val, active_only::Bool,
-) where {N} = _nneighbors(IndexTopology(grid), I, sv, active_only)
+    grid::Union{Grids.StructuredGrid,Grids.CurvilinearGrid}, I::NTuple{N,Int},
+    sten::Stencils.AbstractStencil, active_only::Bool,
+) where {N} = _nneighbors(IndexTopology(grid), I, sten, active_only)
 
 function Grids.neighbors(
     grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 ) where {G,T,N}
     Ii = map(Int, I)
     sz = Grids.size_tuple(grid)
@@ -334,37 +324,33 @@ function Grids.neighbors(
     return _stencil_neighbors(grid, Ii, _stencil_val(stencil), active_only)
 end
 
-@inline _stencil_neighbors(grid::GR, I::NTuple{N,Int}, ::Val{S}, active_only::Bool) where {GR,N,S} =
-    StencilNeighbors{GR,N,S}(grid, I, active_only)
+@inline _stencil_neighbors(grid::GR, I::NTuple{N,Int}, sten::S, active_only::Bool) where {GR,N,S} =
+    StencilNeighbors{GR,N,S}(grid, I, sten, active_only)
 
 # ---- Curvilinear -------------------------------------------------------------
 
 function neighbors!(
     out::AbstractVector{<:Integer}, grid::Grids.CurvilinearGrid, i::Integer, j::Integer;
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 )
     return neighbors!(out, grid, Int(i), Int(j), _stencil_val(stencil), active_only)
 end
 
-@inline function _periodic_flags(grid::Grids.CurvilinearGrid)
-    return grid.periodic
-end
-
 @inline neighbors!(
     out::AbstractVector{<:Integer}, grid::Grids.CurvilinearGrid,
-    i::Int, j::Int, v::Val, active_only::Bool,
-) = neighbors!(out, IndexTopology(grid), (i, j), v, active_only)
+    i::Int, j::Int, sten::Stencils.AbstractStencil, active_only::Bool,
+) = neighbors!(out, IndexTopology(grid), (i, j), sten, active_only)
 
 function nneighbors(
     grid::Grids.CurvilinearGrid, i::Integer, j::Integer;
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 )
     return _nneighbors(IndexTopology(grid), (Int(i), Int(j)), _stencil_val(stencil), active_only)
 end
 
 function Grids.neighbors(
     grid::Grids.CurvilinearGrid, i::Integer, j::Integer;
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 )
     sz = Grids.size_tuple(grid)
     (1 ≤ i ≤ sz[1] && 1 ≤ j ≤ sz[2]) || throw(BoundsError(Grids.mask(grid), (i, j)))
@@ -376,7 +362,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_connectivity(grid; stencil=:face, active_only=true) -> CSRConnectivity
+    build_connectivity(grid; stencil=Axial(1), active_only=true) -> CSRConnectivity
 
 Materialize CSR adjacency. Unstructured wraps existing buffers without re-validation.
 """
@@ -387,7 +373,7 @@ build_connectivity(grid::Grids.UnstructuredGrid; _...) =
 
 function build_connectivity(
     grid::Grids.StructuredGrid;
-    stencil::Symbol = :face, active_only::Bool = true, backend = nothing,
+    stencil = Stencils.Axial(1), active_only::Bool = true, backend = nothing,
 )
     return _build_connectivity_topology(
         IndexTopology(grid), _stencil_val(stencil), active_only; backend = backend,
@@ -396,19 +382,19 @@ end
 
 function build_connectivity(
     t::IndexTopology;
-    stencil::Symbol = :face, active_only::Bool = true, backend = nothing,
+    stencil = Stencils.Axial(1), active_only::Bool = true, backend = nothing,
 )
     return _build_connectivity_topology(t, _stencil_val(stencil), active_only; backend = backend)
 end
 
 function _build_connectivity_topology(
-    t::IndexTopology{N,M}, ::Val{S}, active_only::Bool; backend = nothing,
-) where {N,M,S}
+    t::IndexTopology{N,M}, sten::Stencils.AbstractStencil, active_only::Bool; backend = nothing,
+) where {N,M}
     sz = t.size
     per = t.periodic
     n = prod(sz)
     ci = CartesianIndices(sz)
-    offs = _stencil_offsets(Val{N}(), Val{S}())
+    offs = _stencil_offsets(Val{N}(), sten)
     # Column-major linear order, so the k-th Cartesian index IS linear index k — no `_linidx` needed
     # for the owning cell, and chunking over `k` chunks over contiguous slots of every output.
     #
@@ -457,7 +443,7 @@ end
 # neighbors never consult coordinates, so the N = 2 case needs no separate implementation.
 function build_connectivity(
     grid::Grids.CurvilinearGrid;
-    stencil::Symbol = :face, active_only::Bool = true, backend = nothing,
+    stencil = Stencils.Axial(1), active_only::Bool = true, backend = nothing,
 )
     return _build_connectivity_topology(
         IndexTopology(grid), _stencil_val(stencil), active_only; backend = backend,
@@ -470,7 +456,7 @@ end
 
 """
     adjacency_matrix!(A, conn) -> A
-    adjacency_matrix!(A, grid; stencil=:face, active_only=true) -> A
+    adjacency_matrix!(A, grid; stencil=Axial(1), active_only=true) -> A
 
 Fill preallocated `N×N` `A`. Grid overload uses the stencil directly (no CSR alloc).
 """
@@ -490,7 +476,7 @@ end
 
 function adjacency_matrix!(
     A::AbstractMatrix{Bool}, grid::Grids.StructuredGrid{G,T,N};
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 ) where {G,T,N}
     n = length(grid.mask)
     size(A) == (n, n) || throw(DimensionMismatch(
@@ -516,7 +502,7 @@ end
 
 function adjacency_matrix!(
     A::AbstractMatrix{Bool}, grid::Grids.CurvilinearGrid;
-    stencil::Symbol = :face, active_only::Bool = true,
+    stencil = Stencils.Axial(1), active_only::Bool = true,
 )
     n = length(grid.mask)
     size(A) == (n, n) || throw(DimensionMismatch(
@@ -626,8 +612,8 @@ end
 """
     is_symmetric_adjacency(conn) -> Bool
 
-Whether `j ∈ N(i)` implies `i ∈ N(j)` throughout. `O(nedges·degree)`; used to guard the shortcut
-that reads a CSR as a CSC.
+Whether `j ∈ N(i)` implies `i ∈ N(j)` throughout. `O(nedges·degree)`; guards the shortcut that reads
+a CSR as a CSC.
 """
 function is_symmetric_adjacency(conn::CSRConnectivity)
     ptr, nbrs = conn.ptr, conn.nbrs
@@ -714,6 +700,127 @@ matrix built from them earlier. Buffers longer than needed are trimmed to fit (`
 `nedges`), since a matrix must own arrays of exactly the right length.
 """
 function sparse_adjacency_matrix! end
+
+# ---------------------------------------------------------------------------
+# Mask topology
+# ---------------------------------------------------------------------------
+
+"""
+    interior(grid; stencil = Stencils.Axial(1)) -> Array{Bool}
+
+Which active cells have their whole stencil active and in range. `false` at a domain edge that does
+not wrap, and beside any masked-out cell.
+"""
+function interior(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1))
+    return _interior(IndexTopology(grid), _stencil_val(stencil))
+end
+
+function _interior(t::IndexTopology{N}, sten::Stencils.AbstractStencil) where {N}
+    sz = t.size
+    per = t.periodic
+    offs = _stencil_offsets(Val{N}(), sten)
+    out = fill(false, sz)
+    @inbounds for ci in CartesianIndices(sz)
+        I = Tuple(ci)
+        _active(t, I...) || continue
+        ok = true
+        for δ in offs
+            J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), N)
+            if any(==(0), J) || !_active(t, J...)
+                ok = false
+                break
+            end
+        end
+        out[ci] = ok
+    end
+    return out
+end
+
+"""
+    boundary_cells(grid; stencil = Stencils.Axial(1)) -> Array{Bool}
+
+Which active cells are NOT [`interior`](@ref): the active cells that touch an edge or a masked-out
+neighbour.
+"""
+function boundary_cells(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1))
+    t = IndexTopology(grid)
+    int = _interior(t, _stencil_val(stencil))
+    out = similar(int)
+    @inbounds for ci in CartesianIndices(t.size)
+        out[ci] = _active(t, Tuple(ci)...) && !int[ci]
+    end
+    return out
+end
+
+"""
+    connected_components(grid; stencil = Stencils.Axial(1), active = true) -> (labels, ncomponents)
+
+Label the connected components of the active region (or of the inactive region with
+`active = false`), by flood fill honouring the grid's own wrapping. `labels` is `0` off the region and
+`1:ncomponents` on it.
+"""
+function connected_components(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1), active::Bool = true)
+    return _connected_components(IndexTopology(grid), _stencil_val(stencil), active)
+end
+
+function _connected_components(
+    t::IndexTopology{N}, sten::Stencils.AbstractStencil, want::Bool,
+) where {N}
+    sz = t.size
+    per = t.periodic
+    offs = _stencil_offsets(Val{N}(), sten)
+    labels = zeros(Int, sz)
+    ncomp = 0
+    stack = CartesianIndex{N}[]
+    @inbounds for seed in CartesianIndices(sz)
+        (_active(t, Tuple(seed)...) == want && labels[seed] == 0) || continue
+        ncomp += 1
+        empty!(stack)
+        push!(stack, seed)
+        labels[seed] = ncomp
+        while !isempty(stack)
+            I = Tuple(pop!(stack))
+            for δ in offs
+                J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), N)
+                any(==(0), J) && continue
+                cj = CartesianIndex(J)
+                (labels[cj] == 0 && _active(t, J...) == want) || continue
+                labels[cj] = ncomp
+                push!(stack, cj)
+            end
+        end
+    end
+    return labels, ncomp
+end
+
+"""
+    count_holes(grid; stencil = Stencils.Axial(1)) -> Int
+
+How many connected inactive regions are fully enclosed by active cells — the number of holes in the
+active region, and so an estimate of its first Betti number.
+
+A region that reaches a non-wrapping edge is outside rather than enclosed. Along a wrapping direction
+there is no edge to reach, so enclosure there is decided by the fill alone.
+"""
+function count_holes(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1))
+    t = IndexTopology(grid)
+    labels, ncomp = _connected_components(t, _stencil_val(stencil), false)
+    ncomp == 0 && return 0
+    sz = t.size
+    per = t.periodic
+    N = length(sz)
+    touches = falses(ncomp)
+    @inbounds for ci in CartesianIndices(sz)
+        l = labels[ci]
+        l == 0 && continue
+        I = Tuple(ci)
+        for d in 1:N
+            per[d] && continue
+            (I[d] == 1 || I[d] == sz[d]) && (touches[l] = true)
+        end
+    end
+    return count(!, touches)
+end
 
 include("ConnectivitySpherical.jl")
 
