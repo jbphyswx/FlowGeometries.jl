@@ -1,13 +1,14 @@
 module SphericalSampling
 
-using LinearAlgebra: LinearAlgebra as LA
+using ..Execution: Execution
 
 # Public API via `FlowGeometries.SphericalSampling.*` or parent rebinds. No exports.
 
 """
     AbstractSphericalSampling
 
-How points are placed on the sphere. Orthogonal to [`Geometry.AbstractSphericalGeometry`](@ref)
+How points are placed on the sphere. Orthogonal to
+[`FlowGeometries.Geometry.AbstractSphericalGeometry`](@ref)
 (the metric / radius) and to grid architecture (`StructuredGrid` vs unstructured).
 """
 abstract type AbstractSphericalSampling end
@@ -56,14 +57,14 @@ abstract type AbstractScatteredSphericalSampling <: AbstractSphericalSampling en
 
 Gauss–Legendre (Gauss–Neumann) latitudes: ``μ = \\cosθ`` at the ``N_θ`` roots of
 ``P_{N_θ}``, with ``N_λ = 2N_θ − 1`` equispaced longitudes.
-Exact for band-limit ``l_{\\max} = N_θ − 1`` (SHTOOLS GLQ; SHTns).
+Exact for band-limit ``l_{\\max} = N_θ − 1``.
 """
 struct GaussLegendreSampling <: AbstractGaussLegendreSampling end
 
 """
     DriscollHealySampling <: AbstractDriscollHealySampling
 
-Driscoll–Healy equiangular grid in the SHTOOLS **DH2** layout:
+Driscoll–Healy equiangular grid, rectangular (**DH2**) layout:
 ``N_θ × 2N_θ`` with ``N_θ = 2(l_{\\max}+1)``, ``Δθ = π/N_θ``, ``Δλ = π/N_θ``.
 Includes the north pole band, excludes the south (weight at the north pole is zero).
 
@@ -82,8 +83,8 @@ struct DriscollHealyEqualSampling <: AbstractDriscollHealySampling end
 """
     ClenshawCurtisSampling <: AbstractClenshawCurtisSampling
 
-Open equiangular Clenshaw–Curtis / FastTransforms grid (FastSphericalHarmonics `sph_points`):
-``θ_i = π(i−1/2)/N_θ`` (no poles), ``N_λ = 2N_θ − 1``, ``l_{\\max} = N_θ − 1``.
+Open equiangular Clenshaw–Curtis grid: ``θ_i = π(i−1/2)/N_θ`` (no poles),
+``N_λ = 2N_θ − 1``, ``l_{\\max} = N_θ − 1``.
 
 This is *not* the same as Driscoll–Healy: different ``N_θ(l_{\\max})``, open vs polar-cap
 nodes, and a different quadrature.
@@ -173,8 +174,30 @@ is_iso_latitude(::AbstractHEALPixSampling) = true
 is_equal_area(::AbstractSphericalSampling) = false
 is_equal_area(::AbstractEqualAreaSphericalSampling) = true
 
+"""
+    admits_exact_bandlimited_quadrature(sampling) -> Bool
+
+Whether this sampling's [`latitude_weights`](@ref) integrate the PRODUCTS that spectral analysis
+actually forms — two degree-`lmax` functions, hence degree `2·lmax` — exactly at the sampling's own
+[`bandlimit`](@ref).
+
+That is a stronger statement than "the quadrature integrates a single `P_l` up to `lmax`", and the
+distinction decides the answer here. Measured exactness of the weights in this package:
+
+| sampling | exact for a single `P_l` up to | `bandlimit` | needs `2·lmax` | exact? |
+|---|---|---|---|---|
+| Gauss–Legendre | `2N−1` | `N−1` | `2N−2` | yes |
+| Driscoll–Healy | `N−1` | `N/2−1` | `N−2` | yes |
+| Clenshaw–Curtis | `N−1` | `N−1` | `2N−2` | **no** |
+
+Clenshaw–Curtis's band limit describes what its grid can REPRESENT; its quadrature supports
+quadrature-based analysis only to `lmax ≈ (N−1)/2`. Use `GaussLegendreSampling` when analysis must
+be exact at the stated band limit.
+"""
 admits_exact_bandlimited_quadrature(::AbstractSphericalSampling) = false
 admits_exact_bandlimited_quadrature(::AbstractSpectralQuadratureSampling) = true
+admits_exact_bandlimited_quadrature(::AbstractClenshawCurtisSampling) = false
+admits_exact_bandlimited_quadrature(::AbstractMcEwenWiauxSampling) = false
 
 # ---------------------------------------------------------------------------
 # Angle convention helpers
@@ -266,35 +289,210 @@ npoints(s::IcosahedralSampling) = icosahedral_nvertices(s.frequency)
 """
     _gauss_legendre_μ!(μ, w) -> NamedTuple{(:μ,:w)}
 
-Golub–Welsch: write `n = length(μ)`-point Gauss–Legendre nodes/weights on
-``μ ∈ (-1, 1)`` into the provided buffers (`length(μ) == length(w)`).
+Write `n = length(μ)`-point Gauss–Legendre nodes/weights on ``μ ∈ (-1, 1)`` into the provided
+buffers, ascending in `μ` (`length(μ) == length(w)`).
 
-The bang only guarantees that the *result* lands in `μ`/`w`. The Jacobi eigen-
-decomposition still needs ``O(n²)`` scratch for eigenvectors (LAPACK); that is
-inherent to this algorithm, not a missing in-place path.
+Newton's method on ``Pₙ``, evaluated by the Bonnet recurrence, from a Tricomi starting estimate
+accurate to ``O(n⁻³)`` — so 2–4 iterations reach machine precision. Roots come in ``±`` pairs, so
+only the upper half is solved.
+
+Needs ``O(1)`` scratch. Time is still ``O(n²)`` — each of the ``n/2`` roots costs an ``O(n)``
+recurrence; an ``O(n)`` total needs Bogaert-style asymptotic expansions instead of Newton.
 """
 function _gauss_legendre_μ!(μ::AbstractVector{T}, w::AbstractVector{T}) where {T<:AbstractFloat}
-    n = length(μ)
-    length(w) == n || throw(DimensionMismatch("μ and w must have the same length"))
-    n ≥ 1 || throw(ArgumentError("need n ≥ 1"))
-    if n == 1
-        μ[1] = zero(T)
-        w[1] = T(2)
-        return (; μ, w)
-    end
-    # Subdiagonal βᵢ = i / √(4i²−1). Diagonal is zero (reuse `μ` as SymTridiagonal.dv).
-    β = Vector{T}(undef, n - 1)
-    @inbounds for i in 1:(n - 1)
-        β[i] = T(i) / sqrt(T(4 * i * i - 1))
-    end
-    fill!(μ, zero(T))
-    # LAPACK stegr returns eigenvalues ascending — no post-sort / permute needed.
-    F = LA.eigen!(LA.SymTridiagonal(μ, β))
-    @inbounds for i in 1:n
-        μ[i] = F.values[i]
-        w[i] = T(2) * abs2(F.vectors[1, i])
-    end
+    length(w) == length(μ) || throw(DimensionMismatch("μ and w must have the same length"))
+    _gauss_legendre!(T, μ, w, length(μ))
     return (; μ, w)
+end
+
+@inline _put!(::Nothing, ::Int, _) = nothing
+@inline _put!(v::AbstractVector, i::Int, x) = (@inbounds v[i] = x; nothing)
+
+# ---------------------------------------------------------------------------
+# Gauss–Legendre by asymptotic expansion (Bogaert, SIAM J. Sci. Comput. 36(3), 2014;
+# Hale & Townsend, SIAM J. Sci. Comput. 35(2), 2013)
+# ---------------------------------------------------------------------------
+#
+# Each node sits near `j_k/(n+½)` for `j_k` the k-th zero of `J₀`, with corrections in powers of
+# `(n+½)⁻²`. Nothing is iterated and no root depends on its neighbours, so this is `O(1)` per node
+# with no error accumulation along the sequence — which is what separates it from a march.
+
+# The first 20 zeros of J₀ to full Float64 precision; beyond that McMahon's expansion (DLMF 10.21.19)
+# is already accurate, with fewer terms needed as k grows.
+const _J0_ZEROS = (
+    2.4048255576957728, 5.5200781102863106, 8.6537279129110122, 11.791534439014281,
+    14.930917708487785, 18.071063967910922, 21.211636629879258, 24.352471530749302,
+    27.493479132040254, 30.634606468431975, 33.775820213573568, 36.917098353664044,
+    40.058425764628239, 43.199791713176730, 46.341188371661814, 49.482609897397817,
+    52.624051841114996, 55.765510755019979, 58.906983926080942, 62.048469190227170,
+)
+# J₁(j_k)², likewise tabulated then continued asymptotically (DLMF 10.17.3).
+const _J1SQ_AT_J0_ZEROS = (
+    0.2695141239419169, 0.1157801385822037, 0.07368635113640822, 0.05403757319811628,
+    0.04266142901724309, 0.03524210349099610, 0.03002107010305467, 0.02614739149530809,
+    0.02315912182469139, 0.02078382912226786,
+)
+
+@inline function _j0_zero(k::Int)
+    k ≤ 20 && return @inbounds _J0_ZEROS[k]
+    ak = π * (k - 0.25)
+    q = (0.125 / ak)^2
+    k ≤ 47 && return ak + 0.125 / ak * evalpoly(q, (1.0, -124 / 3, 120928 / 15, -401743168 / 105))
+    k ≤ 344 && return ak + 0.125 / ak * evalpoly(q, (1.0, -124 / 3, 120928 / 15))
+    k ≤ 13191 && return ak + 0.125 / ak * muladd(q, -124 / 3, 1.0)
+    return ak + 0.125 / ak
+end
+
+@inline function _j1sq_at_j0_zero(k::Int)
+    k ≤ 10 && return @inbounds _J1SQ_AT_J0_ZEROS[k]
+    ak = π * (k - 0.25)
+    q = (1 / ak)^2
+    s = 1 / (π * ak)
+    c1 = -171497088497 / 15206400; c2 = 461797 / 1152; c3 = -172913 / 8064
+    c4 = 151 / 80; c5 = -7 / 24
+    k ≤ 15 && return s * muladd(evalpoly(q, (c5, c4, c3, c2, c1)), q^2, 2.0)
+    k ≤ 21 && return s * muladd(evalpoly(q, (c5, c4, c3, c2)), q^2, 2.0)
+    k ≤ 55 && return s * muladd(evalpoly(q, (c5, c4, c3)), q^2, 2.0)
+    k ≤ 279 && return s * muladd(muladd(q, c4, c5), q^2, 2.0)
+    k ≤ 2279 && return s * muladd(q^2, c5, 2.0)
+    return s * 2.0
+end
+
+function _gauss_legendre_asy!(
+    ::Type{T}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector},
+    n::Int, m::Int,
+) where {T<:AbstractFloat}
+    vn = 1 / (n + 0.5)
+    vn² = vn * vn
+    vn⁴ = vn² * vn²
+    vn⁶ = vn⁴ * vn²
+    @inbounds for i in 1:m
+        ai = _j0_zero(i) * vn
+        u = cot(ai)
+        u² = u * u
+        ai² = ai * ai; ai³ = ai² * ai; ai⁵ = ai² * ai³
+        # Node: leading term aᵢ, then successive powers of vn². Fewer terms are needed as n grows,
+        # because vn shrinks; past n = 3950 the second-order term already reaches Float64 precision.
+        node = ai + (u - 1 / ai) / 8 * vn²
+        if n ≤ 3950
+            v1 = (6 * (1 + u²) / ai + 25 / ai³ - u * muladd(31, u², 33)) / 384
+            node = muladd(v1, vn⁴, node)
+            if n ≤ 255
+                v2 = u * evalpoly(u², (2595 / 15360, 6350 / 15360, 3779 / 15360))
+                v3 = (1 + u²) *
+                     (-muladd(31 / 1024, u², 11 / 1024) / ai + u / 512 / ai² - 25 / 3072 / ai³)
+                node = muladd(v2 - 1073 / 5120 / ai⁵ + v3, vn⁶, node)
+            end
+        end
+        xt = T(cos(node))
+        ua = u * ai
+        W1 = muladd(ua - 1, 1 / ai², 1.0) / 8
+        W = 1 / vn² + W1
+        if n ≤ 1500
+            W2 = evalpoly(1 / ai², (
+                evalpoly(u², (-27.0, -84.0, -56.0)),
+                muladd(-3.0, muladd(u², -2.0, 1.0), 6 * ua),
+                muladd(ua, -31.0, 81.0),
+            )) / 384
+            if n ≤ 170
+                W3 = evalpoly(1 / ai, (
+                    evalpoly(u², (153 / 1024, 295 / 256, 187 / 96, 151 / 160)),
+                    evalpoly(u², (-65 / 1024, -119 / 768, -35 / 384)) * u,
+                    evalpoly(u², (5 / 512, 15 / 512, 7 / 384)),
+                    muladd(u², 1 / 512, -13 / 1536) * u,
+                    muladd(u², -7 / 384, 53 / 3072),
+                    3749 / 15360 * u, -1125 / 1024,
+                ))
+                W = evalpoly(vn², (1 / vn² + W1, W2, W3))
+            else
+                W = muladd(vn², W2, 1 / vn² + W1)
+            end
+        end
+        wi = T(2 / (_j1sq_at_j0_zero(i) * (ai / sin(ai)) * W))
+        # Index 1 is the root nearest +1, so it lands at the top of the ascending output.
+        _put!(μ, n + 1 - i, xt); _put!(w, n + 1 - i, wi)
+        _put!(μ, i, -xt);        _put!(w, i, wi)
+    end
+    isodd(n) && _put!(μ, m, zero(T))
+    return nothing
+end
+
+"""
+    _gauss_legendre!(T, μ, w, n)
+
+Core solve. Either output may be `nothing`, so a caller that wants only the nodes or only the
+weights needs no scratch vector for the other half.
+"""
+function _gauss_legendre!(
+    ::Type{T}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector}, n::Int,
+) where {T<:AbstractFloat}
+    n ≥ 1 || throw(ArgumentError("need n ≥ 1"))
+    μ === nothing || length(μ) == n || throw(DimensionMismatch("μ must have length n"))
+    w === nothing || length(w) == n || throw(DimensionMismatch("w must have length n"))
+    if n == 1
+        _put!(μ, 1, zero(T))
+        _put!(w, 1, T(2))
+        return nothing
+    end
+    m = (n + 1) ÷ 2                       # roots are symmetric about 0; solve the upper half only
+    # Work at no less than Float64 and round once: the series below sums ~30 terms, which at Float32
+    # would leave the root short of that type's own precision.
+    TW = promote_type(T, Float64)
+    # The asymptotic expansions are Float64 coefficient sets truncated at a fixed order, so they are
+    # used only where they are actually the better answer: at Float64 width and above n = 60. Wider
+    # types and small n fall through to Newton, which is exact arithmetic converging to eps(TW).
+    # Measured relative weight error at Float64 against a high-precision reference:
+    #   n       8      33      64      1024     4096
+    #   Newton  8e-16  3e-14   5e-14   3e-12    2e-10
+    #   asy     5e-9   2e-13   1e-15   3e-15    1e-14
+    if TW === Float64 && n > 60
+        _gauss_legendre_asy!(T, μ, w, n, m)
+    else
+        _gauss_legendre_newton!(T, TW, μ, w, n, m)
+    end
+    return nothing
+end
+
+"""
+    _gauss_legendre_newton!(T, TW, μ, w, n, m)
+
+Nodes and weights by Newton on `Pₙ`, evaluated by the Bonnet recurrence from a Tricomi start.
+
+`O(n)` per root, so `O(n²)` overall — but it is exact arithmetic converging to `eps(TW)`, which the
+asymptotic expansion's fixed Float64 coefficient set cannot do. That makes it the right method for
+wide element types at any `n`, and for small `n`, where the expansion is inaccurate and the quadratic
+cost is microseconds.
+"""
+function _gauss_legendre_newton!(
+    ::Type{T}, ::Type{TW}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector},
+    n::Int, m::Int,
+) where {T<:AbstractFloat, TW<:AbstractFloat}
+    tol = 4 * eps(TW)
+    Tn = TW(n)
+    @inbounds for i in 1:m
+        θ = TW(π) * (4 * TW(i) - 1) / (4 * Tn + 2)
+        x = (1 - (Tn - 1) / (8 * Tn^3)) * cos(θ)
+        dp = zero(TW)
+        for _ in 1:100
+            # Bonnet: p1 ends as Pₙ(x), p2 as Pₙ₋₁(x); P′ₙ follows from both.
+            p1 = one(TW); p2 = zero(TW)
+            for k in 1:n
+                p3 = p2; p2 = p1
+                p1 = ((2 * TW(k) - 1) * x * p2 - (TW(k) - 1) * p3) / TW(k)
+            end
+            dp = Tn * (x * p1 - p2) / (x * x - 1)
+            δ = p1 / dp
+            x -= δ
+            abs(δ) ≤ tol * (abs(x) + 1) && break
+        end
+        wi = T(TW(2) / ((1 - x * x) * dp * dp))
+        xt = T(x)
+        _put!(μ, i, -xt);        _put!(w, i, wi)
+        _put!(μ, n + 1 - i, xt); _put!(w, n + 1 - i, wi)
+    end
+    # For odd n the central root is exactly zero; the ± assignment above leaves it as -0.0.
+    isodd(n) && _put!(μ, m, zero(T))
+    return nothing
 end
 
 function _gauss_legendre_μ(n::Integer; T::Type{<:AbstractFloat} = Float64)
@@ -324,11 +522,11 @@ function spherical_axes!(
     sz = axes_lengths(GaussLegendreSampling(), nlat; nlon)
     length(λ) == sz.nlon && length(φ) == sz.nlat || throw(DimensionMismatch("λ/φ lengths must match axes_lengths"))
     nlon_eff = sz.nlon
-    μ = similar(φ)
-    wscratch = similar(φ)
-    _gauss_legendre_μ!(μ, wscratch)
+    # φ receives μ and is converted in place; the weights are not requested, so there is no scratch
+    # at all. Callers that want both should use `spherical_quadrature!`, which solves once.
+    _gauss_legendre!(T, φ, nothing, nlat)
     @inbounds for i in 1:nlat
-        φ[i] = asin(μ[i])
+        φ[i] = asin(φ[i])
     end
     dλ = T(2π) / T(nlon_eff)
     @inbounds for i in 1:nlon_eff
@@ -382,7 +580,7 @@ function spherical_axes!(
     nlon::Union{Nothing,Integer} = nothing,
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
-    iseven(nlat) || throw(ArgumentError("DH nlat must be even (SHTOOLS N = 2(L+1))"))
+    iseven(nlat) || throw(ArgumentError("DH nlat must be even (N_θ = 2(l_max+1))"))
     sz = axes_lengths(DriscollHealySampling(), nlat; nlon)
     length(λ) == sz.nlon && length(φ) == sz.nlat || throw(DimensionMismatch("λ/φ lengths must match axes_lengths"))
     nlon_eff = sz.nlon
@@ -463,6 +661,68 @@ function spherical_axes(
 end
 
 # ---------------------------------------------------------------------------
+# spherical_quadrature! / spherical_quadrature
+# ---------------------------------------------------------------------------
+
+"""
+    spherical_quadrature!(λ, φ, w, sampling, nlat; nlon=…) -> NamedTuple{(:λ,:φ,:w)}
+
+Fill preallocated axes *and* latitude weights together. Buffer lengths are as for
+[`spherical_axes!`](@ref), with `length(w) == sz.nlat`.
+
+This is the entry point to use whenever both are needed. Gauss–Legendre nodes and weights fall out
+of a single root solve, but [`spherical_axes!`](@ref) keeps only the nodes and
+[`latitude_weights!`](@ref) only the weights — so calling them in sequence pays the ``O(n²)`` solve
+twice. Every other sampling has independent closed forms for the two, and gets the generic method.
+"""
+function spherical_quadrature! end
+
+function spherical_quadrature!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, w::AbstractVector{T},
+    ::AbstractGaussLegendreSampling, nlat::Integer; nlon::Union{Nothing,Integer} = nothing,
+) where {T<:AbstractFloat}
+    nlat = Int(nlat)
+    sz = axes_lengths(GaussLegendreSampling(), nlat; nlon)
+    length(λ) == sz.nlon && length(φ) == sz.nlat && length(w) == sz.nlat ||
+        throw(DimensionMismatch("λ/φ/w lengths must match axes_lengths"))
+    # One solve, no scratch: φ receives μ and is converted to latitude in place.
+    _gauss_legendre!(T, φ, w, nlat)
+    @inbounds for i in 1:nlat
+        φ[i] = asin(φ[i])
+    end
+    dλ = T(2π) / T(sz.nlon)
+    @inbounds for i in 1:sz.nlon
+        λ[i] = T(i - 1) * dλ
+    end
+    return (; λ, φ, w)
+end
+
+function spherical_quadrature!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, w::AbstractVector{T},
+    s::AbstractTensorProductSphericalSampling, nlat::Integer; nlon::Union{Nothing,Integer} = nothing,
+) where {T<:AbstractFloat}
+    spherical_axes!(λ, φ, s, nlat; nlon)
+    latitude_weights!(w, s, nlat)
+    return (; λ, φ, w)
+end
+
+"""
+    spherical_quadrature(sampling, nlat; nlon=…, T=Float64) -> NamedTuple{(:λ,:φ,:w)}
+
+Allocating wrapper around [`spherical_quadrature!`](@ref).
+"""
+function spherical_quadrature(
+    s::AbstractTensorProductSphericalSampling, nlat::Integer;
+    nlon::Union{Nothing,Integer} = nothing, T::Type{<:AbstractFloat} = Float64,
+)
+    sz = axes_lengths(s, nlat; nlon)
+    λ = Vector{T}(undef, sz.nlon)
+    φ = Vector{T}(undef, sz.nlat)
+    w = Vector{T}(undef, sz.nlat)
+    return spherical_quadrature!(λ, φ, w, s, nlat; nlon)
+end
+
+# ---------------------------------------------------------------------------
 # latitude_weights! / latitude_weights
 # ---------------------------------------------------------------------------
 
@@ -476,8 +736,70 @@ function latitude_weights! end
 function latitude_weights!(w::AbstractVector{T}, ::AbstractGaussLegendreSampling, nlat::Integer) where {T<:AbstractFloat}
     nlat = Int(nlat)
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    μ = similar(w)
-    _gauss_legendre_μ!(μ, w)
+    _gauss_legendre!(T, nothing, w, nlat)
+    return w
+end
+
+"""
+    OpenNodes(), ClosedNodes()
+
+The two equiangular colatitude families: open `θᵢ = π(i−½)/N` (Clenshaw–Curtis) and closed
+`θᵢ = π(i−1)/N` (Driscoll–Healy). Named rather than passed as a `θ(i)` closure so the sum below can
+dispatch on which one it is.
+"""
+struct OpenNodes end
+struct ClosedNodes end
+
+@inline _node_theta(::OpenNodes, i::Int, nlat::Int, ::Type{T}) where {T} =
+    T(π) * (T(i) - T(0.5)) / T(nlat)
+@inline _node_theta(::ClosedNodes, i::Int, nlat::Int, ::Type{T}) where {T} =
+    T(π) * T(i - 1) / T(nlat)
+
+"""
+    _equiangular_sums!(s, family, nlat, nterm) -> s
+
+`s[i] = Σ_{k=0}^{nterm-1} sin((2k+1)·θᵢ)/(2k+1)` for the given node family.
+
+Evaluated by the angle-addition recurrence
+`sin((2k+1)θ) = 2cos(2θ)·sin((2k−1)θ) − sin((2k−3)θ)`, seeded with `s₋₁ = −sin θ`, `s₀ = sin θ`, so
+each term costs two multiplies rather than a `sin`. This is `O(nlat·nterm)`; loading an FFT
+implementation replaces it with one length-`nlat` transform (see the `AbstractFFTs` extension).
+"""
+function _equiangular_sums!(s::AbstractVector{T}, family, nlat::Int, nterm::Int) where {T<:AbstractFloat}
+    @inbounds for i in 1:nlat
+        θi = _node_theta(family, i, nlat, T)
+        sθ = sin(θi)
+        u = 2 * cos(2 * θi)
+        skm1 = -sθ
+        sk = sθ
+        acc = zero(T)
+        for k in 0:(nterm - 1)
+            acc += sk / T(2k + 1)
+            skm1, sk = sk, u * sk - skm1
+        end
+        s[i] = acc
+    end
+    return s
+end
+
+"""
+    _equiangular_weights!(w, family, nlat) -> w
+
+Latitude quadrature weights for an equiangular node set, from the sine-series expansion of the
+`sinθ` Jacobian:
+
+    wᵢ = (4/N)·sinθᵢ·Σ_{k=0}^{⌊N/2⌋} sin((2k+1)θᵢ)/(2k+1)
+
+`family` is [`OpenNodes`](@ref) or `ClosedNodes`, so one construction serves both. Weights sum to
+`∫₀^π sinθ dθ = 2` — see [`latitude_weights`](@ref) for why every sampling here uses that
+normalization.
+"""
+function _equiangular_weights!(w::AbstractVector{T}, family, nlat::Int) where {T<:AbstractFloat}
+    nterm = (nlat + 1) ÷ 2
+    _equiangular_sums!(w, family, nlat, nterm)      # w doubles as the sum buffer
+    @inbounds for i in 1:nlat
+        w[i] *= (T(4) / T(nlat)) * sin(_node_theta(family, i, nlat, T))
+    end
     return w
 end
 
@@ -485,25 +807,53 @@ function latitude_weights!(w::AbstractVector{T}, ::AbstractDriscollHealySampling
     nlat = Int(nlat)
     iseven(nlat) || throw(ArgumentError("DH nlat must be even"))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    L = nlat ÷ 2
-    @inbounds for t in 0:(nlat - 1)
-        θ = T(π) * T(t) / T(nlat)
-        s = zero(T)
-        for k in 0:(L - 1)
-            s += sin(T(2k + 1) * θ) / T(2k + 1)
-        end
-        w[t + 1] = (T(2π) / T(L)^2) * sin(θ) * s
-    end
-    return w
+    return _equiangular_weights!(w, ClosedNodes(), nlat)
 end
 
-latitude_weights!(::AbstractVector, ::AbstractClenshawCurtisSampling, ::Integer) =
-    throw(ArgumentError("Clenshaw–Curtis sphere weights come from the FastTransforms plan, not a closed q(θ)"))
-latitude_weights!(::AbstractVector, ::AbstractMcEwenWiauxSampling, ::Integer) =
-    throw(ArgumentError("MW weights come from the SSHT / MW quadrature construction"))
-latitude_weights!(::AbstractVector, ::AbstractLatLonSampling, ::Integer) =
-    throw(ArgumentError("LatLonSampling has no spectral quadrature weights"))
+"""
+    latitude_weights!(w, ::AbstractClenshawCurtisSampling, nlat)
 
+Weights for the open nodes `θᵢ = π(i−½)/N`, from the same sine-series rule as the closed
+equiangular families.
+
+These integrate a single `P_l` exactly for `l ≤ N−1`, which is weaker than
+[`bandlimit`](@ref)`(ClenshawCurtisSampling(), N) = N−1` suggests: spectral analysis integrates
+PRODUCTS of two degree-`lmax` functions, so a quadrature exact to `l ≤ N−1` supports
+quadrature-based analysis only up to `lmax ≈ (N−1)/2`. The reported band limit describes what the
+grid can represent, not what this quadrature can integrate. Use `GaussLegendreSampling` (exact to
+`2N−1`) when analysis must be exact at the stated band limit.
+"""
+function latitude_weights!(w::AbstractVector{T}, ::AbstractClenshawCurtisSampling, nlat::Integer) where {T<:AbstractFloat}
+    nlat = Int(nlat)
+    length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
+    return _equiangular_weights!(w, OpenNodes(), nlat)
+end
+
+latitude_weights!(::AbstractVector, ::AbstractMcEwenWiauxSampling, ::Integer) = throw(ArgumentError(
+    "McEwen–Wiaux latitude weights are not implemented: the MW quadrature is not the sine-series " *
+    "rule the other equiangular samplings use (it is built on an extension of the sphere to a torus), " *
+    "and applying that rule to MW nodes is not exact even for l = 0. Use `GaussLegendreSampling`, " *
+    "`DriscollHealySampling`, or `ClenshawCurtisSampling` if you need quadrature weights.",
+))
+latitude_weights!(::AbstractVector, ::AbstractLatLonSampling, ::Integer) =
+    throw(ArgumentError("LatLonSampling is an arbitrary lat–lon layout with no spectral quadrature weights"))
+
+"""
+    latitude_weights(s, nlat; T=Float64) -> Vector{T}
+    latitude_weights!(w, s, nlat) -> w
+
+Latitude quadrature weights `wⱼ` for sampling `s`, normalized so that
+
+    Σⱼ wⱼ = ∫₀^π sinθ dθ = 2
+
+for EVERY sampling that provides them. The weights therefore carry the `sinθ` Jacobian and nothing
+else; the longitude factor is the caller's, so a full-sphere integral is always
+
+    ∫ f dΩ ≈ (2π/nlon) · Σⱼ wⱼ Σᵢ f(λᵢ, φⱼ)
+
+regardless of which sampling produced the weights. Not every sampling has them — `LatLonSampling`
+has no spectral quadrature at all, and `McEwenWiauxSampling`'s is a different construction.
+"""
 function latitude_weights(s::AbstractSphericalSampling, nlat::Integer; T::Type{<:AbstractFloat} = Float64)
     w = Vector{T}(undef, Int(nlat))
     return latitude_weights!(w, s, nlat)
@@ -537,6 +887,15 @@ function spherical_points!(
     return (; λ = Λ, φ = Φ)
 end
 
+"""
+    spherical_points(sampling, args...; T=Float64) -> NamedTuple{(:λ,:φ)}
+
+Every point of the sampling, flattened, as longitude/latitude vectors. Allocating wrapper around
+[`spherical_points!`](@ref); use [`npoints`](@ref) to size buffers for the in-place form.
+
+For a tensor-product sampling this is the outer product of its axes, so prefer
+[`spherical_axes`](@ref) when the separable form will do.
+"""
 function spherical_points(s::AbstractTensorProductSphericalSampling, nlat::Integer; T::Type{<:AbstractFloat} = Float64, kwargs...)
     n = npoints(s, nlat; kwargs...)
     Λ = Vector{T}(undef, n)
@@ -573,8 +932,11 @@ end
 function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractFloat}
     fn = T(nside)
     nl2 = 2 * nside
+    nl4 = 4 * nside
     npix = 12 * nside * nside
-    ncap = 2 * nside * (nside + 1)
+    # Pixels in the north polar cap, i.e. rings 1 … nside-1, which hold 4, 8, … 4(nside-1) pixels:
+    # 2·nside·(nside-1). Getting this wrong routes equatorial pixels through the cap branch.
+    ncap = 2 * nside * (nside - 1)
     fact1 = T(1.5) * fn
     fact2 = T(3) * fn * fn
     if ipix < ncap
@@ -585,10 +947,14 @@ function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:Abstr
         z = one(T) - T(iring * iring) / fact2
         ϕ = (T(iphi) - T(0.5)) * T(π) / (T(2) * T(iring))
     elseif ipix < (npix - ncap)
+        # Every equatorial ring holds 4·nside pixels, so the ring index advances per nl4 — not per
+        # nl2, which would invent twice as many half-width rings. `fodd` staggers alternate rings by
+        # half a pixel: 1 when (iring+nside) is odd, 1/2 when even.
         ip = ipix - ncap
-        iring = ip ÷ nl2 + nside
-        iphi = (ip % nl2) + 1
-        fodd = T(0.5) * ((iring + nside) % 2)
+        tmp = ip ÷ nl4
+        iring = tmp + nside
+        iphi = ip - tmp * nl4 + 1
+        fodd = isodd(iring + nside) ? one(T) : T(0.5)
         z = (T(nl2) - T(iring)) / fact1
         ϕ = (T(iphi) - fodd) * T(π) / (T(2) * fn)
     else
@@ -606,45 +972,83 @@ end
 
 # ---- Cubed sphere -----------------------------------------------------------
 
+"""
+    cubed_sphere_points!(λ, φ, panel, n; backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
+
+Gnomonic cubed-sphere CELL CENTRES into caller-owned buffers of length `6n²`, plus each point's panel
+index. Pass `panel = nothing` when the panel id is not wanted, and it is not computed.
+
+See [`cubed_sphere_points`](@ref) for the allocating form.
+"""
 function cubed_sphere_points!(
-    λ::AbstractVector{T}, φ::AbstractVector{T}, panel::AbstractVector{<:Integer}, n::Integer,
+    λ::AbstractVector{T}, φ::AbstractVector{T},
+    panel::Union{Nothing,AbstractVector{<:Integer}}, n::Integer; backend = nothing,
 ) where {T<:AbstractFloat}
     n = Int(n)
+    n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1, got $n"))
     N = 6 * n * n
-    length(λ) == N && length(φ) == N && length(panel) == N || throw(DimensionMismatch("buffers must have length 6n²"))
-    a = range(-T(π) / 4, T(π) / 4; length = n)
-    k = 1
-    @inbounds for f in 1:6, j in 1:n, i in 1:n
-        ξ, η = a[i], a[j]
-        X, Y = tan(ξ), tan(η)
-        p = _cubed_face_to_xyz(f, X, Y, T)
-        r = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
-        x = p.x / r; y = p.y / r; z = p.z / r
-        θ = acos(clamp(z, -one(T), one(T)))
-        ϕ = atan(y, x)
-        ϕ < 0 && (ϕ += T(2π))
-        λ[k] = ϕ
-        φ[k] = geographic_latitude(θ)
-        panel[k] = f
-        k += 1
+    length(λ) == N && length(φ) == N || throw(DimensionMismatch("buffers must have length 6n²"))
+    panel === nothing || length(panel) == N || throw(DimensionMismatch("buffers must have length 6n²"))
+    # CELL CENTRES, not panel vertices: ξ_i = -π/4 + (i-½)·(π/2)/n.
+    #
+    # An endpoint-inclusive `range(-π/4, π/4; length=n)` puts nodes ON the panel edges, so adjacent
+    # panels emit coincident points — measured, exactly 12(n-2)+16 duplicates — while
+    # `_cubed_neighbor` simultaneously treats those edges as folding onto a *different* panel's
+    # cells. Points and connectivity would then disagree, and any grid built from them carries
+    # coincident nodes (degenerate tessellation, zero-area cells). Cell centres give 6n² genuinely
+    # distinct points that match the connectivity, and make n=1 (one cell per face, at the face
+    # centre) fall out of the formula instead of needing a special case.
+    Δ = T(π) / 2 / T(n)
+    a = range(-T(π) / 4 + Δ / 2; step = Δ, length = n)
+    # Each output slot is a pure function of its own linear index, so chunks are independent.
+    Execution.run_chunks(N, backend) do rng
+        @inbounds for k in rng
+            q, r0 = divrem(k - 1, n * n)
+            j, i = divrem(r0, n)
+            f = q + 1
+            p = _cubed_face_to_xyz(f, tan(a[i + 1]), tan(a[j + 1]), T)
+            r = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
+            x = p.x / r; y = p.y / r; z = p.z / r
+            θ = acos(clamp(z, -one(T), one(T)))
+            ϕ = atan(y, x)
+            ϕ < 0 && (ϕ += T(2π))
+            λ[k] = ϕ
+            φ[k] = geographic_latitude(θ)
+            _put!(panel, k, f)
+        end
     end
     return (; λ, φ, panel)
 end
 
-function cubed_sphere_points(n::Integer; T::Type{<:AbstractFloat} = Float64)
+"""
+    cubed_sphere_points(n; T=Float64, backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
+
+Gnomonic cubed-sphere CELL CENTRES: `6n²` distinct points, plus each point's panel index.
+
+Allocating wrapper around [`cubed_sphere_points!`](@ref). Use
+[`spherical_points`](@ref)`(CubedSphereSampling(), n)` when the panel id is not needed.
+"""
+function cubed_sphere_points(n::Integer; T::Type{<:AbstractFloat} = Float64, backend = nothing)
     N = npoints(CubedSphereSampling(), n)
-    return cubed_sphere_points!(Vector{T}(undef, N), Vector{T}(undef, N), Vector{Int}(undef, N), n)
+    return cubed_sphere_points!(
+        Vector{T}(undef, N), Vector{T}(undef, N), Vector{Int}(undef, N), n; backend = backend,
+    )
 end
 
-function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, ::CubedSphereSampling, n::Integer) where {T<:AbstractFloat}
-    panel = Vector{Int}(undef, length(λ))
-    cubed_sphere_points!(λ, φ, panel, n)
+function spherical_points!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, ::CubedSphereSampling, n::Integer; backend = nothing,
+) where {T<:AbstractFloat}
+    cubed_sphere_points!(λ, φ, nothing, n; backend = backend)   # panel id is not part of this result
     return (; λ, φ)
 end
 
-function spherical_points(::CubedSphereSampling, n::Integer; T::Type{<:AbstractFloat} = Float64)
+function spherical_points(
+    ::CubedSphereSampling, n::Integer; T::Type{<:AbstractFloat} = Float64, backend = nothing,
+)
     N = npoints(CubedSphereSampling(), n)
-    return spherical_points!(Vector{T}(undef, N), Vector{T}(undef, N), CubedSphereSampling(), n)
+    return spherical_points!(
+        Vector{T}(undef, N), Vector{T}(undef, N), CubedSphereSampling(), n; backend = backend,
+    )
 end
 
 @inline function _cubed_face_to_xyz(face::Int, X::T, Y::T, ::Type{T}) where {T}
@@ -667,49 +1071,61 @@ end
 
 # ---- Yin–Yang ---------------------------------------------------------------
 
-function yin_yang_axes!(
+"""
+    yin_yang_panels!(λyin, φyin, λyang, φyang, nlon, nlat) -> (; yin, yang)
+
+The two Kageyama–Sato panels. `yin` is a pair of AXES (`nlon` and `nlat` long): in its own frame the
+panel is a separable lat–lon patch. `yang` is that panel rotated onto the sphere, which is no longer
+separable in global lon/lat, so it is a pair of `nlon × nlat` FIELDS — one `(λ, φ)` per cell.
+
+The shapes differ because the geometry does, not by convention; the argument types say so.
+"""
+function yin_yang_panels!(
     λyin::AbstractVector{T}, φyin::AbstractVector{T},
-    λyang::AbstractVector{T}, φyang::AbstractVector{T},
+    λyang::AbstractMatrix{T}, φyang::AbstractMatrix{T},
     nlon::Integer, nlat::Integer,
 ) where {T<:AbstractFloat}
     nlon = Int(nlon); nlat = Int(nlat)
-    length(λyin) == nlon && length(φyin) == nlat || throw(DimensionMismatch("yin axes sizes"))
-    length(λyang) == nlon * nlat && length(φyang) == nlon * nlat || throw(DimensionMismatch("yang point sizes"))
-    if nlon == 1
-        λyin[1] = zero(T)
-    else
-        @inbounds for i in 1:nlon
-            λyin[i] = -T(3π) / 4 + (T(3π) / 2) * T(i - 1) / T(nlon - 1)
-        end
+    length(λyin) == nlon && length(φyin) == nlat ||
+        throw(DimensionMismatch("yin axes must be nlon and nlat long"))
+    size(λyang) == (nlon, nlat) && size(φyang) == (nlon, nlat) ||
+        throw(DimensionMismatch("yang fields must be nlon × nlat"))
+    # Cell centres, not panel edges: each node carries one cell, so the nlon×nlat cells tile
+    # [-3π/4, 3π/4] × [-π/4, π/4] exactly. Sampling the endpoints instead would give the two
+    # boundary columns/rows half-width cells while the connectivity still counts them whole.
+    Δλ = (T(3π) / 2) / T(nlon)
+    Δφ = (T(π) / 2) / T(nlat)
+    @inbounds for i in 1:nlon
+        λyin[i] = -T(3π) / 4 + (T(i) - T(0.5)) * Δλ
     end
-    if nlat == 1
-        φyin[1] = zero(T)
-    else
-        @inbounds for j in 1:nlat
-            φyin[j] = -T(π) / 4 + (T(π) / 2) * T(j - 1) / T(nlat - 1)
-        end
+    @inbounds for j in 1:nlat
+        φyin[j] = -T(π) / 4 + (T(j) - T(0.5)) * Δφ
     end
-    k = 1
-    @inbounds for φ in φyin, λ in λyin
-        x = cos(φ) * cos(λ)
-        y = cos(φ) * sin(λ)
-        z = sin(φ)
-        X = -z; Y = x; Z = -y
-        θ = acos(clamp(Z, -one(T), one(T)))
-        ϕ = atan(Y, X)
-        ϕ < 0 && (ϕ += T(2π))
-        λyang[k] = ϕ
-        φyang[k] = geographic_latitude(θ)
-        k += 1
+    @inbounds for j in 1:nlat
+        sinφ, cosφ = sincos(φyin[j])   # constant along the row; hoisted out of the longitude loop
+        for i in 1:nlon
+            sinλ, cosλ = sincos(λyin[i])
+            X = -sinφ; Y = cosφ * cosλ; Z = -cosφ * sinλ
+            θ = acos(clamp(Z, -one(T), one(T)))
+            ϕ = atan(Y, X)
+            ϕ < 0 && (ϕ += T(2π))
+            λyang[i, j] = ϕ
+            φyang[i, j] = geographic_latitude(θ)
+        end
     end
     return (; yin = (; λ = λyin, φ = φyin), yang = (; λ = λyang, φ = φyang))
 end
 
-function yin_yang_axes(nlon::Integer, nlat::Integer; T::Type{<:AbstractFloat} = Float64)
+"""
+    yin_yang_panels(nlon, nlat; T=Float64) -> (; yin, yang)
+
+Allocating wrapper around [`yin_yang_panels!`](@ref).
+"""
+function yin_yang_panels(nlon::Integer, nlat::Integer; T::Type{<:AbstractFloat} = Float64)
     nlon = Int(nlon); nlat = Int(nlat)
-    return yin_yang_axes!(
+    return yin_yang_panels!(
         Vector{T}(undef, nlon), Vector{T}(undef, nlat),
-        Vector{T}(undef, nlon * nlat), Vector{T}(undef, nlon * nlat),
+        Matrix{T}(undef, nlon, nlat), Matrix{T}(undef, nlon, nlat),
         nlon, nlat,
     )
 end
@@ -720,14 +1136,14 @@ function spherical_points!(Λ::AbstractVector{T}, Φ::AbstractVector{T}, ::YinYa
     length(Λ) == n && length(Φ) == n || throw(DimensionMismatch("buffers must have length 2*nlon*nlat"))
     λyin = Vector{T}(undef, nlon)
     φyin = Vector{T}(undef, nlat)
-    λyang = Vector{T}(undef, nlon * nlat)
-    φyang = Vector{T}(undef, nlon * nlat)
-    yin_yang_axes!(λyin, φyin, λyang, φyang, nlon, nlat)
+    λyang = Matrix{T}(undef, nlon, nlat)
+    φyang = Matrix{T}(undef, nlon, nlat)
+    yin_yang_panels!(λyin, φyin, λyang, φyang, nlon, nlat)
     k = 1
     @inbounds for φ in φyin, λ in λyin
         Λ[k] = λ; Φ[k] = φ; k += 1
     end
-    @inbounds for i in eachindex(λyang)
+    @inbounds for i in eachindex(λyang)   # column-major, so this is the same (i, j) order as yin
         Λ[k] = λyang[i]; Φ[k] = φyang[i]; k += 1
     end
     return (; λ = Λ, φ = Φ)
@@ -755,13 +1171,16 @@ function _xyz_to_lonlat!(λ::AbstractVector{T}, φ::AbstractVector{T}, verts) wh
 end
 
 """
-    icosahedral_mesh(frequency; T=Float64) -> (; λ, φ, edges)
+    icosahedral_mesh(frequency; T=Float64) -> (; λ, φ, edges, triangles, verts)
 
-Geodesic vertices at frequency `ν` plus undirected triangular-mesh edges
-`(i,j)` with `i < j` (1-based). Vertex ordering is deterministic (sorted by
-quantized XYZ key).
+Geodesic vertices at frequency `ν` as both lon/lat (`λ`, `φ`) and unit vectors (`verts`), plus the
+`10ν²+2` mesh's undirected edges `(i,j)` with `i < j` and its `20ν²` triangles `(i,j,k)` (1-based).
+Vertex numbering is topological — corners, then macro-edge interiors, then face interiors — so it is
+deterministic and every vertex is generated exactly once.
 """
-function icosahedral_mesh(frequency::Integer = 1; T::Type{<:AbstractFloat} = Float64)
+function icosahedral_mesh(
+    frequency::Integer = 1; T::Type{<:AbstractFloat} = Float64, topology::Bool = true,
+)
     ν = Int(frequency)
     nexp = icosahedral_nvertices(ν)
     φg = (one(T) + sqrt(T(5))) / T(2)
@@ -777,124 +1196,164 @@ function icosahedral_mesh(frequency::Integer = 1; T::Type{<:AbstractFloat} = Flo
         r = sqrt(x * x + y * y + z * z)
         (x / r, y / r, z / r)
     end
-    key(p) = (round(Int, p[1] * 1_000_000), round(Int, p[2] * 1_000_000), round(Int, p[3] * 1_000_000))
-    if ν == 1
-        # Stable order by key, then recover base-icosahedron edges via distance.
-        order = sortperm(1:12; by = i -> key(base[i]))
-        verts = [base[i] for i in order]
-        inv = Dict(key(verts[i]) => i for i in 1:12)
-        faces = _icosahedron_faces(base)
-        edgeset = Set{NTuple{2,Int}}()
-        for (a, b, c) in faces
-            for (u, v) in ((a, b), (b, c), (c, a))
-                iu, iv = inv[key(base[u])], inv[key(base[v])]
-                push!(edgeset, iu < iv ? (iu, iv) : (iv, iu))
-            end
-        end
-        λ = Vector{T}(undef, 12)
-        φ = Vector{T}(undef, 12)
-        _xyz_to_lonlat!(λ, φ, verts)
-        return (; λ, φ, edges = collect(edgeset))
+    faces = _ICOSAHEDRON_FACES
+    macro_edges = _icosahedron_edges(faces)     # the 30 canonical (lo, hi) corner pairs
+    edge_index = zeros(Int, 12, 12)
+    for (e, (lo, hi)) in enumerate(macro_edges)
+        edge_index[lo, hi] = e
     end
-    faces = _icosahedron_faces(base)
-    # Map quantized key → vertex; also accumulate edges during subdivision.
-    seen = Dict{NTuple{3,Int},NTuple{3,T}}()
-    function add_vert!(p)
-        r = sqrt(p[1]^2 + p[2]^2 + p[3]^2)
-        q = (p[1] / r, p[2] / r, p[3] / r)
-        k = key(q)
-        seen[k] = q
-        return k
+
+    # Vertices are numbered by TOPOLOGY, not by hashing their coordinates: the 12 corners, then the
+    # ν-1 interior points of each of the 30 macro-edges, then the (ν-1)(ν-2)/2 interior points of
+    # each of the 20 faces — which sums to exactly 10ν²+2. Every vertex therefore has one owner and
+    # is generated once, so no dedup dictionary, no quantized keys, and no per-vertex hashing.
+    nint = ((ν - 1) * (ν - 2)) ÷ 2
+    verts = Vector{NTuple{3,T}}(undef, nexp)
+    @inline norm3(p) = (r = sqrt(p[1]^2 + p[2]^2 + p[3]^2); (p[1] / r, p[2] / r, p[3] / r))
+    @inline lerp3(P, Q, a, b) = (a * P[1] + b * Q[1], a * P[2] + b * Q[2], a * P[3] + b * Q[3])
+
+    @inbounds for v in 1:12
+        verts[v] = base[v]
     end
-    edgeset = Set{NTuple{2,NTuple{3,Int}}}()
-    @inline function add_edge!(ka, kb)
-        ka == kb && return nothing
-        push!(edgeset, ka < kb ? (ka, kb) : (kb, ka))
-        return nothing
+    @inbounds for (e, (lo, hi)) in enumerate(macro_edges), t in 1:(ν - 1)
+        verts[12 + (e - 1) * (ν - 1) + t] =
+            norm3(lerp3(base[lo], base[hi], T(ν - t) / T(ν), T(t) / T(ν)))
     end
-    for (ia, ib, ic) in faces
+    face_base = 12 + 30 * (ν - 1)
+    @inbounds for (f, (ia, ib, ic)) in enumerate(faces)
         A, B, C = base[ia], base[ib], base[ic]
-        # Barycentric lattice on the face: nodes (i,j) with i+j ≤ ν.
-        nodekey = Dict{NTuple{2,Int},NTuple{3,Int}}()
-        for i in 0:ν, j in 0:(ν - i)
-            u = T(i) / T(ν); v = T(j) / T(ν); w = one(T) - u - v
-            nodekey[(i, j)] = add_vert!((
+        k = 0
+        for i in 1:(ν - 1), j in 1:(ν - 1 - i)
+            k += 1
+            w = T(ν - i - j) / T(ν); u = T(i) / T(ν); v = T(j) / T(ν)
+            verts[face_base + (f - 1) * nint + k] = norm3((
                 w * A[1] + u * B[1] + v * C[1],
                 w * A[2] + u * B[2] + v * C[2],
                 w * A[3] + u * B[3] + v * C[3],
             ))
         end
+    end
+
+    # Triangles and edges from ONE walk of the three lattice directions on each face. A
+    # face-boundary edge is generated by both adjacent faces, so the edge list is canonicalized and
+    # deduped by sorting — a single sort of ~30ν² pairs, rather than hashing every edge into a Set.
+    # Triangles need no dedup: each belongs to exactly one face. The two lattice orientations give
+    # ν(ν+1)/2 upward plus ν(ν-1)/2 downward per face, i.e. 20ν² in total.
+    per_face = 3 * ((ν * (ν + 1)) ÷ 2)
+    edges = Vector{NTuple{2,Int}}(undef, topology ? 20 * per_face : 0)
+    triangles = Vector{NTuple{3,Int}}(undef, topology ? 20 * ν * ν : 0)
+    ne = 0
+    nt = 0
+    @inbounds topology && for (f, face) in enumerate(faces)
         for i in 0:ν, j in 0:(ν - i)
-            k0 = nodekey[(i, j)]
+            v0 = _ico_node_id(f, face, i, j, ν, edge_index, nint, face_base)
             if i + j < ν
-                # edge toward B (increase i)
-                add_edge!(k0, nodekey[(i + 1, j)])
-                # edge toward C (increase j)
-                add_edge!(k0, nodekey[(i, j + 1)])
+                vi = _ico_node_id(f, face, i + 1, j, ν, edge_index, nint, face_base)
+                vj = _ico_node_id(f, face, i, j + 1, ν, edge_index, nint, face_base)
+                ne += 1; edges[ne] = minmax(v0, vi)
+                ne += 1; edges[ne] = minmax(v0, vj)
+                nt += 1; triangles[nt] = (v0, vi, vj)
+                if i + j < ν - 1
+                    nt += 1
+                    triangles[nt] =
+                        (vi, vj, _ico_node_id(f, face, i + 1, j + 1, ν, edge_index, nint, face_base))
+                end
             end
-            if i ≥ 1 && (i - 1) + (j + 1) ≤ ν
-                # hypotenuse of the up-pointing micro-triangle
-                add_edge!(nodekey[(i, j)], nodekey[(i - 1, j + 1)])
+            if i ≥ 1
+                ne += 1; edges[ne] = minmax(v0, _ico_node_id(f, face, i - 1, j + 1, ν, edge_index, nint, face_base))
             end
         end
     end
-    length(seen) == nexp || throw(ArgumentError("icosahedral subdivision produced $(length(seen)) ≠ $nexp vertices"))
-    keys_sorted = sort!(collect(keys(seen)))
-    id_of = Dict{NTuple{3,Int},Int}(keys_sorted[i] => i for i in eachindex(keys_sorted))
-    verts = [seen[k] for k in keys_sorted]
-    edges = NTuple{2,Int}[(id_of[a], id_of[b]) for (a, b) in edgeset]
+    if topology
+        nt == 20 * ν * ν || throw(AssertionError("icosahedral triangle count $nt ≠ $(20 * ν * ν)"))
+        resize!(edges, ne)
+        sort!(edges)
+        unique!(edges)
+    end
+
     λ = Vector{T}(undef, nexp)
     φ = Vector{T}(undef, nexp)
     _xyz_to_lonlat!(λ, φ, verts)
-    return (; λ, φ, edges)
+    return (; λ, φ, edges, triangles, verts)
+end
+
+# The 30 canonical (lo, hi) corner pairs of the base icosahedron, in a deterministic order.
+function _icosahedron_edges(faces)
+    edges = NTuple{2,Int}[]
+    for (a, b, c) in faces, (u, v) in ((a, b), (b, c), (c, a))
+        push!(edges, minmax(u, v))
+    end
+    sort!(edges)
+    unique!(edges)
+    length(edges) == 30 || throw(ArgumentError("icosahedron edge recovery failed (got $(length(edges)))"))
+    return edges
+end
+
+"""
+    _ico_node_id(f, face, i, j, ν, edge_index, nint, face_base) -> Int
+
+Global vertex id of barycentric lattice node `(i, j)` (with `i + j ≤ ν`, weights `ν-i-j`, `i`, `j`
+on the face's corners `A`, `B`, `C`) of face `f`. Nodes on a corner or a macro-edge resolve to that
+shared entity's id, which is what makes the two faces meeting at an edge agree without any lookup
+table.
+"""
+@inline function _ico_node_id(
+    f::Int, face::NTuple{3,Int}, i::Int, j::Int, ν::Int,
+    edge_index::AbstractMatrix{Int}, nint::Int, face_base::Int,
+)
+    A, B, C = face
+    # Corners.
+    (i == 0 && j == 0) && return A
+    (i == ν) && return B
+    (j == ν) && return C
+    # Macro-edge interiors: walk from `u` toward `v` with parameter `t`.
+    if j == 0
+        return _ico_edge_id(A, B, i, ν, edge_index)
+    elseif i == 0
+        return _ico_edge_id(A, C, j, ν, edge_index)
+    elseif i + j == ν
+        return _ico_edge_id(B, C, j, ν, edge_index)
+    end
+    # Face interior. Closed form for the position of (i, j) in the same `for ii, jj` order the
+    # vertex pass used, so this stays O(1) instead of rescanning the lattice per lookup.
+    k = (i - 1) * (ν - 1) - ((i - 1) * i) ÷ 2 + j
+    return face_base + (f - 1) * nint + k
+end
+
+@inline function _ico_edge_id(u::Int, v::Int, t::Int, ν::Int, edge_index::AbstractMatrix{Int})
+    lo, hi = minmax(u, v)
+    e = @inbounds edge_index[lo, hi]
+    # `t` counts from `u`; the stored interior points count from `lo`.
+    s = (u == lo) ? t : (ν - t)
+    return 12 + (e - 1) * (ν - 1) + s
 end
 
 function icosahedral_vertices!(λ::AbstractVector{T}, φ::AbstractVector{T}, frequency::Integer = 1) where {T<:AbstractFloat}
-    mesh = icosahedral_mesh(frequency; T = T)
+    mesh = icosahedral_mesh(frequency; T = T, topology = false)
     length(λ) == length(mesh.λ) && length(φ) == length(mesh.φ) || throw(DimensionMismatch("buffers must have length 10ν²+2"))
     copyto!(λ, mesh.λ)
     copyto!(φ, mesh.φ)
     return (; λ, φ)
 end
 
+"""
+    icosahedral_vertices(frequency=1; T=Float64) -> NamedTuple{(:λ,:φ)}
+
+The `10ν²+2` geodesic vertices as longitude/latitude, without building the mesh topology — several
+times faster than [`icosahedral_mesh`](@ref) at large `ν`, which also returns edges and triangles.
+"""
 function icosahedral_vertices(frequency::Integer = 1; T::Type{<:AbstractFloat} = Float64)
-    mesh = icosahedral_mesh(frequency; T = T)
+    mesh = icosahedral_mesh(frequency; T = T, topology = false)
     return (; λ = mesh.λ, φ = mesh.φ)
 end
 
-function _icosahedron_faces(verts::Vector{NTuple{3,T}}) where {T}
-    n = length(verts)
-    n == 12 || throw(ArgumentError("expected 12 icosahedron vertices"))
-    dmin = T(Inf)
-    for i in 1:n, j in (i + 1):n
-        d = _xyz_dist(verts[i], verts[j])
-        d < dmin && (dmin = d)
-    end
-    tol = dmin * T(1.01)
-    nbrs = [Int[] for _ in 1:n]
-    for i in 1:n, j in (i + 1):n
-        if _xyz_dist(verts[i], verts[j]) ≤ tol
-            push!(nbrs[i], j); push!(nbrs[j], i)
-        end
-    end
-    faces = NTuple{3,Int}[]
-    seen = Set{NTuple{3,Int}}()
-    for a in 1:n, b in nbrs[a], c in nbrs[a]
-        b < c || continue
-        c in nbrs[b] || continue
-        key = (min(a, b, c), sum((a, b, c)) - min(a, b, c) - max(a, b, c), max(a, b, c))
-        if !(key in seen)
-            push!(seen, key)
-            push!(faces, (a, b, c))
-        end
-    end
-    length(faces) == 20 || throw(ArgumentError("icosahedron face recovery failed (got $(length(faces)))"))
-    return faces
-end
-
-@inline function _xyz_dist(a::NTuple{3,T}, b::NTuple{3,T}) where {T}
-    return sqrt((a[1] - b[1])^2 + (a[2] - b[2])^2 + (a[3] - b[3])^2)
-end
+# The 20 faces, as index triples into the 12 base vertices in the order `icosahedral_mesh` lists them.
+const _ICOSAHEDRON_FACES = (
+    (1, 2, 9), (1, 2, 11), (1, 5, 6), (1, 5, 9), (1, 6, 11),
+    (2, 7, 8), (2, 7, 9), (2, 8, 11), (3, 4, 10), (3, 4, 12),
+    (3, 5, 6), (3, 5, 10), (3, 6, 12), (4, 7, 8), (4, 7, 10),
+    (4, 8, 12), (5, 9, 10), (6, 11, 12), (7, 9, 10), (8, 11, 12),
+)
 
 function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, s::IcosahedralSampling) where {T<:AbstractFloat}
     return icosahedral_vertices!(λ, φ, s.frequency)

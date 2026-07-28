@@ -1,11 +1,16 @@
 module FlowGeometriesQuickhullExt
 
 using Quickhull: Quickhull as QH
-using LinearAlgebra: LinearAlgebra as LA
 using FlowGeometries.Geometry: Geometry
 using FlowGeometries.Grids: Grids
 
-# Exact per-node spherical Voronoi-cell areas via 3D convex hull of the unit-sphere embedding.
+# Exact per-node spherical Voronoi-cell areas: the spherical Voronoi diagram is the dual of the
+# convex hull of the unit-sphere embedding, so a node's cell is the spherical polygon through the
+# circumcenters of its incident hull facets.
+#
+# Everything stays in UNIT VECTORS from hull to area. The circumcenters come out of the hull as
+# directions already, so converting them to (λ, φ) only to have the area formula convert them back
+# costs four transcendentals per (node, facet) pair and buys nothing.
 
 @inline function _circumcenter_direction(a::NTuple{3,T}, b::NTuple{3,T}, c::NTuple{3,T}) where {T}
     ab = (b[1] - a[1], b[2] - a[2], b[3] - a[3])
@@ -21,71 +26,102 @@ using FlowGeometries.Grids: Grids
     return s < 0 ? (-n[1], -n[2], -n[3]) : n
 end
 
-@inline function _dir_to_lonlat(v::NTuple{3,T}) where {T}
-    return (; λ = atan(v[2], v[1]), φ = asin(clamp(v[3], -one(T), one(T))))
-end
+@inline _dot3(a::NTuple{3,T}, b::NTuple{3,T}) where {T} = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
 
 function Grids._voronoi_areas(
     geo::Geometry.AbstractSphericalGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
 ) where {T<:AbstractFloat}
     N = length(x)
-    pts = [
-        NTuple{3,T}(cos(y[i]) * cos(x[i]), cos(y[i]) * sin(x[i]), sin(y[i]))
-        for i in eachindex(x)
-    ]
+    length(y) == N || throw(DimensionMismatch("λ/φ length mismatch"))
+    N ≥ 4 || throw(ArgumentError(
+        "a spherical Voronoi tessellation needs at least 4 non-coplanar points (got $N)",
+    ))
+
+    # Hull input as a contiguous 3×N matrix: one allocation rather than one tuple per node.
+    pts = Matrix{T}(undef, 3, N)
+    @inbounds for i in 1:N
+        sinλ, cosλ = sincos(x[i])
+        sinφ, cosφ = sincos(y[i])
+        pts[1, i] = cosφ * cosλ
+        pts[2, i] = cosφ * sinλ
+        pts[3, i] = sinφ
+    end
+    @inline vert(i) = (@inbounds(pts[1, i]), @inbounds(pts[2, i]), @inbounds(pts[3, i]))
+
     hull = QH.quickhull(pts)
     fs = QH.facets(hull)
     nf = length(fs)
 
-    centers = Vector{NTuple{3,T}}(undef, nf)
+    # `facets` is a lazy mapped view that rebuilds a face object on EVERY element access, so the
+    # three passes below would each pay for it. Materialize the vertex indices once into a plain
+    # contiguous 3×nf block and read that instead.
+    fv = Matrix{Int}(undef, 3, nf)
     @inbounds for (fi, f) in enumerate(fs)
-        centers[fi] = _circumcenter_direction(pts[f[1]], pts[f[2]], pts[f[3]])
+        fv[1, fi] = f[1]
+        fv[2, fi] = f[2]
+        fv[3, fi] = f[3]
     end
 
-    deg = zeros(Int, N)
-    @inbounds for f in fs, v in f
-        deg[v] += 1
+    centers = Vector{NTuple{3,T}}(undef, nf)
+    @inbounds for fi in 1:nf
+        centers[fi] = _circumcenter_direction(vert(fv[1, fi]), vert(fv[2, fi]), vert(fv[3, fi]))
     end
-    ptr = Vector{Int}(undef, N + 1)
-    ptr[1] = 1
+
+    # Node → incident facets as CSR: count, scan, fill. No per-node vectors.
+    ptr = zeros(Int, N + 1)
+    @inbounds for fi in 1:nf, k in 1:3
+        ptr[fv[k, fi] + 1] += 1
+    end
+    @inbounds ptr[1] = 1
     @inbounds for i in 1:N
-        ptr[i + 1] = ptr[i] + deg[i]
+        ptr[i + 1] += ptr[i]
     end
     adj = Vector{Int}(undef, ptr[end] - 1)
-    cursor = copy(ptr[1:(end - 1)])
-    @inbounds for (fi, f) in enumerate(fs), v in f
+    cursor = copy(ptr)
+    @inbounds for fi in 1:nf, k in 1:3
+        v = fv[k, fi]
         adj[cursor[v]] = fi
         cursor[v] += 1
     end
 
+    # Sized to the largest valence once, so the per-node sort allocates nothing.
+    maxdeg = 0
+    @inbounds for i in 1:N
+        maxdeg = max(maxdeg, ptr[i + 1] - ptr[i])
+    end
+    angs = Vector{T}(undef, maxdeg)
+    order = Vector{Int}(undef, maxdeg)
+
     areas = Vector{T}(undef, N)
-    angs = Vector{T}(undef, 0)
-    cidxs = Vector{Int}(undef, 0)
     @inbounds for i in 1:N
         lo, hi = ptr[i], ptr[i + 1] - 1
         m = hi - lo + 1
         if m < 3
-            areas[i] = zero(T)
+            areas[i] = zero(T)   # degenerate: no polygon to enclose
             continue
         end
-        center_i = (x[i], y[i])
-        resize!(angs, m)
-        resize!(cidxs, m)
-        for (k, idx) in enumerate(lo:hi)
-            fi = adj[idx]
-            nb = _dir_to_lonlat(centers[fi])
-            d = Geometry.project_to_tangent_plane(geo, center_i, nb)
-            angs[k] = atan(d.φ, d.λ)
-            cidxs[k] = fi
+        # Local tangent frame at the node, computed once; the incident circumcenters are ordered by
+        # their azimuth in it so the polygon is traversed consistently.
+        sinλ, cosλ = sincos(x[i])
+        sinφ, cosφ = sincos(y[i])
+        ci = (cosφ * cosλ, cosφ * sinλ, sinφ)
+        êλ = (-sinλ, cosλ, zero(T))
+        êφ = (-sinφ * cosλ, -sinφ * sinλ, cosφ)
+        va = view(angs, 1:m)
+        vo = view(order, 1:m)
+        for k in 1:m
+            c = centers[adj[lo + k - 1]]
+            chord = (c[1] - ci[1], c[2] - ci[2], c[3] - ci[3])
+            va[k] = atan(_dot3(chord, êφ), _dot3(chord, êλ))
         end
-        order = sortperm(angs)
+        sortperm!(vo, va)
         A = zero(T)
         for k in 1:m
-            v1 = _dir_to_lonlat(centers[cidxs[order[k]]])
-            v2 = _dir_to_lonlat(centers[cidxs[order[mod1(k + 1, m)]]])
-            A += Grids._sph_triangle_area(geo, center_i, v1, v2)
+            c1 = centers[adj[lo + vo[k] - 1]]
+            c2 = centers[adj[lo + vo[mod1(k + 1, m)] - 1]]
+            A += Grids._tri_excess(ci, c1, c2)
         end
-        areas[i] = A
+        areas[i] = geo.R^2 * A
     end
     return areas
 end

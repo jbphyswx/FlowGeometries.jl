@@ -6,10 +6,10 @@ authors = ["Jordan Benjamin <jordantbenjamin@gmail.com>"]
 [workspace]
 projects = ["test"]
 
-[deps]
-LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-
 [weakdeps]
+AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+ComputationalBackends = "5c6e2104-4040-447f-8fc0-66ec2223b019"
 DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
 NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 Quickhull = "baca2653-9c88-49d2-a488-12dbf25fc4fb"
@@ -17,6 +17,9 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [extensions]
+FlowGeometriesAbstractFFTsExt = "AbstractFFTs"
+FlowGeometriesAdaptExt = "Adapt"
+FlowGeometriesComputationalBackendsExt = "ComputationalBackends"
 FlowGeometriesDelaunayTriangulationExt = "DelaunayTriangulation"
 FlowGeometriesNearestNeighborsExt = "NearestNeighbors"
 FlowGeometriesQuickhullExt = "Quickhull"
@@ -24,6 +27,9 @@ FlowGeometriesSparseArraysExt = "SparseArrays"
 FlowGeometriesStaticArraysExt = "StaticArrays"
 
 [compat]
+AbstractFFTs = "1"
+Adapt = "4"
+ComputationalBackends = "0.1, 1"
 DelaunayTriangulation = "1"
 NearestNeighbors = "0.4"
 Quickhull = "0.2"
