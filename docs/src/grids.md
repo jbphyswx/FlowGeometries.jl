@@ -105,8 +105,16 @@ uniform `4πR²/N` fallback, which is right only for equal-area samplings and si
 | Yin–Yang | lat–lon patch area, `R²Δλ·2sin(Δφ/2)·cosφ` |
 | arbitrary points | Voronoi areas, via the Quickhull or DelaunayTriangulation extension |
 
+![Cell area relative to the mean](assets/cell_areas.png)
+
+Only HEALPix is one flat colour. The dark spots on the icosahedral panel are its twelve pentagons —
+the smallest cells on the mesh, and the reason a uniform default is off by nearly a factor of two
+between the largest and smallest cell there.
+
 All four closed forms sum to `4πR²` to machine precision and need no optional dependency. Pass
 `areas = …` to override any of them.
+
+![Yin–Yang overlap](assets/yinyang.png)
 
 !!! note "Yin–Yang panels overlap"
     The two panels overlap by construction, so their cell areas sum to `3√2πR²` — 6.07% more than the

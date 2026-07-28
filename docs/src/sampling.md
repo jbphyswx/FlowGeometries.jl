@@ -23,6 +23,13 @@ stored.
 | `YinYangSampling` | 2 overlapping panels | `2·nlon·nlat` | no polar singularity |
 | `ScatteredSphericalSampling` | arbitrary | any | for NUFFT-style paths |
 
+
+![Six spherical samplings](assets/samplings.png)
+
+Gauss–Legendre and Clenshaw–Curtis put their points on iso-latitude rings that crowd toward the
+poles; HEALPix, the cubed sphere and the icosahedral geodesic are quasi-uniform. Yin–Yang is two
+overlapping panels, which is why it has no polar singularity.
+
 ## Traits
 
 Rather than testing types, ask:

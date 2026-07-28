@@ -40,6 +40,14 @@ for ~2M nodes, not overhead.
 
 ## Quadrature
 
+![Quadrature exactness and cost](assets/quadrature.png)
+
+Gauss–Legendre holds machine precision past degree `2N−1`; Driscoll–Healy and Clenshaw–Curtis lose
+exactness just after `N−1`, which is the distinction
+[`admits_exact_bandlimited_quadrature`](@ref) encodes. The fitted exponents on the right are measured
+per run, not asserted.
+
+
 Gauss–Legendre uses asymptotic expansions (Bogaert 2014; Hale & Townsend 2013) above `n = 60`: each
 node sits near `j_k/(n+½)` for `j_k` a zero of `J₀`, with corrections in powers of `(n+½)⁻²`. Nothing
 iterates and no root depends on its neighbours, so it is `O(1)` per node and allocation-free.

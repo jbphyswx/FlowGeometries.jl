@@ -13,6 +13,9 @@ separate implementation from a structured one: it is the `N = 2` case of the sam
 
 ## Querying neighbours
 
+![HEALPix and icosahedral connectivity](assets/connectivity.png)
+
+
 Three forms, in increasing order of how much they allocate:
 
 ```julia

@@ -13,6 +13,9 @@ extensions, so you pay for exactly what you load.
 
 ## Three orthogonal choices
 
+![Six spherical samplings](assets/samplings.png)
+
+
 The central idea is that three questions people usually conflate are kept separate:
 
 | question | answered by | examples |

@@ -37,6 +37,14 @@ g = FG.unstructured_grid(FG.IcosahedralSampling(16))     # 2562 nodes, Σarea = 
 FG.neighbors(g, 1)
 ```
 
+
+![Six spherical samplings](docs/src/assets/samplings.png)
+
+Cell areas are exact in closed form for every built-in sampling — a uniform `4πR²/N` would be right
+only for HEALPix:
+
+![Cell area relative to the mean](docs/src/assets/cell_areas.png)
+
 ## Connectivity
 
 Topology of a *grid* or of a *sampling that defines a mesh*. A neighbour computation reads only
