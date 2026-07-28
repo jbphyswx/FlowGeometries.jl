@@ -293,6 +293,60 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Grids.coords(g32, 2, 3) === (x = 0.25f0, y = 0.5f0)
     end
 
+    Test.@testset "A uniform axis is an AbstractRange, and behaves like one" begin
+        A = FG.Axes
+        a = A.UniformAxis(0.0, 0.25, 5)
+        v = collect(a)
+        Test.@test a isa AbstractRange
+        Test.@test step(a) === 0.25 && first(a) === 0.0 && last(a) === 1.0
+        Test.@test length(a) == 5 && size(a) == (5,)
+
+        # Base's range machinery rebuilds a range from its endpoints and step. Without the protocol
+        # methods these recurse until the stack runs out, so each is asserted.
+        Test.@test collect(a .+ a) == v .+ v
+        Test.@test collect(a .- a) == v .- v
+        Test.@test collect(a .+ 1.0) == v .+ 1.0
+        Test.@test collect(1.0 .- a) == 1.0 .- v
+        Test.@test collect(2.0 .* a) == 2.0 .* v
+        Test.@test collect(a ./ 2.0) == v ./ 2.0
+        Test.@test collect(-a) == -v
+        Test.@test collect(a + 1.0) == v .+ 1.0
+        Test.@test collect(a * 2.0) == v .* 2.0
+        Test.@test copy(a) === a                      # immutable
+        Test.@test occursin("UniformAxis", sprint(show, a))
+        Test.@test a == A.UniformAxis(0.0, 0.25, 5)
+        Test.@test a != A.UniformAxis(0.0, 0.5, 5)
+        Test.@test a != A.UniformAxis(0.0, 0.25, 6)
+        Test.@test promote_type(A.UniformAxis{Float32}, A.UniformAxis{Float64}) ===
+                   A.UniformAxis{Float64}
+
+        # An affine map of an affine sequence is affine, so the spacing guarantee survives arithmetic
+        # instead of collapsing to a Vector.
+        Test.@test A.isuniform(a .+ 1.0) && A.spacing(a .+ 1.0) === 0.25
+        Test.@test A.isuniform(2.0 .* a) && A.spacing(2.0 .* a) === 0.5
+        Test.@test A.isuniform(a .+ a) && A.spacing(a .+ a) === 0.5
+        Test.@test A.isuniform(-a) && A.spacing(-a) === -0.25
+        # Anything not affine must become a plain array rather than claim to be uniform.
+        Test.@test !A.isuniform(cos.(a))
+        Test.@test cos.(a) ≈ cos.(v)
+        Test.@test_throws DimensionMismatch A.UniformAxis(0.0, 1.0, 3) .+ A.UniformAxis(0.0, 1.0, 4)
+
+        # The reason for the subtyping: Base solves `searchsorted` on a range in closed form, so the
+        # cost does not grow with the axis length the way bisection does.
+        best(f) = (f(); minimum(@elapsed(f()) for _ in 1:2000))
+        t_small = best(() -> searchsortedfirst(A.UniformAxis(0.0, 1e-1, 10), 0.5))
+        t_large = best(() -> searchsortedfirst(A.UniformAxis(0.0, 1e-7, 10^7), 0.5))
+        Test.@test t_large < 2 * t_small
+        # …and it still gives the right index.
+        for n in (10, 1000)
+            u = A.UniformAxis(0.0, 1 / n, n)
+            for t in (0.0, 0.25, 0.5, 1.0)
+                Test.@test searchsortedfirst(u, t) == searchsortedfirst(collect(u), t)
+                Test.@test searchsortedlast(u, t) == searchsortedlast(collect(u), t)
+            end
+        end
+    end
+
     Test.@testset "Uniform axes and constant factors are O(1), and exact" begin
         A = FG.Axes
         a = A.UniformAxis(0.0, 0.25, 5)
@@ -321,10 +375,10 @@ Test.@testset "FlowGeometries.jl" begin
         v = collect(a)
         Test.@test !A.isuniform(v)
         geo0 = FG.Geometry.CartesianGeometry()
-        gv = G.StructuredGrid(geo0, v, v)
-        Test.@test G.minimum_spacing(gv, 1) == G.maximum_spacing(gv, 1)      # equally spaced, exactly
-        gs2 = G.StructuredGrid(geo0, [0.0, 1.0, 3.0, 6.0], [0.0, 1.0, 3.0, 6.0])
-        Test.@test G.minimum_spacing(gs2, 1) != G.maximum_spacing(gs2, 1)    # genuinely stretched
+        gv = FG.Grids.StructuredGrid(geo0, v, v)
+        Test.@test FG.Grids.minimum_spacing(gv, 1) == FG.Grids.maximum_spacing(gv, 1)
+        gs2 = FG.Grids.StructuredGrid(geo0, [0.0, 1.0, 3.0, 6.0], [0.0, 1.0, 3.0, 6.0])
+        Test.@test FG.Grids.minimum_spacing(gs2, 1) != FG.Grids.maximum_spacing(gs2, 1)
         Test.@test_throws ArgumentError A.spacing([0.0, 1.0, 3.0])
         Test.@test_throws ArgumentError A.uniform_axis(Float64, [0.0, 1.0, 3.0])
 

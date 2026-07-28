@@ -75,8 +75,11 @@ Preferred over `range`/`StepRangeLen` for a grid axis:
 
 Unlike `LinRange` this does not pin `last` to a prescribed endpoint: on a grid the spacing is the
 primary datum.
+
+An `AbstractRange`: that gets Base's O(1) `searchsorted` (flat 42 ns over `n = 10 … 10⁷`, against
+35→69 ns as an `AbstractVector`) and `isa AbstractRange` dispatch from other packages.
 """
-struct UniformAxis{T<:AbstractFloat} <: AbstractVector{T}
+struct UniformAxis{T<:AbstractFloat} <: AbstractRange{T}
     origin::T
     Δ::T
     n::Int
@@ -96,6 +99,8 @@ spacing_trait(::UniformAxis) = UniformSpacing()
 @inline spacing(a::UniformAxis) = a.Δ
 
 @inline Base.size(a::UniformAxis) = (a.n,)
+# `AbstractRange` requires this directly; it does not derive it from `size`.
+@inline Base.length(a::UniformAxis) = a.n
 Base.IndexStyle(::Type{<:UniformAxis}) = IndexLinear()
 
 @inline function Base.getindex(a::UniformAxis{T}, i::Int) where {T}
@@ -139,6 +144,58 @@ Base.show(io::IO, a::UniformAxis{T}) where {T} =
 
 Base.show(io::IO, ::MIME"text/plain", a::UniformAxis{T}) where {T} =
     print(io, a.n, "-element UniformAxis{", T, "}: ", a.origin, " : ", a.Δ, " : ", last(a))
+
+# ---------------------------------------------------------------------------
+# The AbstractRange protocol
+# ---------------------------------------------------------------------------
+#
+# Base's generic range methods rebuild a range from its endpoints and step, reaching for constructors
+# that do not exist here; without these, `x .+ x` recurses until the stack runs out.
+
+Base.copy(a::UniformAxis) = a   # immutable
+
+# An affine map of an affine sequence is affine, so these keep the spacing guarantee.
+Base.:(+)(a::UniformAxis{T}, c::Number) where {T} =
+    UniformAxis(a.origin + c, a.Δ, a.n)
+Base.:(+)(c::Number, a::UniformAxis) = a + c
+Base.:(-)(a::UniformAxis, c::Number) = a + (-c)
+Base.:(-)(c::Number, a::UniformAxis) = UniformAxis(c - a.origin, -a.Δ, a.n)
+Base.:(-)(a::UniformAxis) = UniformAxis(-a.origin, -a.Δ, a.n)
+Base.:(*)(a::UniformAxis, c::Number) = UniformAxis(a.origin * c, a.Δ * c, a.n)
+Base.:(*)(c::Number, a::UniformAxis) = a * c
+Base.:(/)(a::UniformAxis, c::Number) = UniformAxis(a.origin / c, a.Δ / c, a.n)
+
+# Intercepted at `broadcasted`; the generic range path is what recurses.
+Base.broadcasted(::typeof(+), a::UniformAxis, c::Number) = a + c
+Base.broadcasted(::typeof(+), c::Number, a::UniformAxis) = a + c
+Base.broadcasted(::typeof(-), a::UniformAxis, c::Number) = a - c
+Base.broadcasted(::typeof(-), c::Number, a::UniformAxis) = c - a
+Base.broadcasted(::typeof(-), a::UniformAxis) = -a
+Base.broadcasted(::typeof(*), a::UniformAxis, c::Number) = a * c
+Base.broadcasted(::typeof(*), c::Number, a::UniformAxis) = a * c
+Base.broadcasted(::typeof(/), a::UniformAxis, c::Number) = a / c
+
+function Base.broadcasted(::typeof(+), a::UniformAxis, b::UniformAxis)
+    a.n == b.n || throw(DimensionMismatch("axis lengths $(a.n) and $(b.n) do not match"))
+    return UniformAxis(a.origin + b.origin, a.Δ + b.Δ, a.n)
+end
+
+function Base.broadcasted(::typeof(-), a::UniformAxis, b::UniformAxis)
+    a.n == b.n || throw(DimensionMismatch("axis lengths $(a.n) and $(b.n) do not match"))
+    return UniformAxis(a.origin - b.origin, a.Δ - b.Δ, a.n)
+end
+
+# Anything else is not affine — `cos.(axis)` must become a plain array, not pretend otherwise.
+Base.BroadcastStyle(::Type{<:UniformAxis}) = Broadcast.DefaultArrayStyle{1}()
+
+Base.promote_rule(::Type{UniformAxis{T}}, ::Type{UniformAxis{S}}) where {T,S} =
+    UniformAxis{promote_type(T, S)}
+# Another range has its own spacing, so the affine representation cannot survive the mix.
+Base.promote_rule(::Type{UniformAxis{T}}, ::Type{<:AbstractRange{S}}) where {T,S} =
+    Vector{promote_type(T, S)}
+
+Base.:(==)(a::UniformAxis, b::UniformAxis) =
+    a.n == b.n && (a.n == 0 || (a.origin == b.origin && (a.n == 1 || a.Δ == b.Δ)))
 
 """
     uniform_axis(x) -> UniformAxis
