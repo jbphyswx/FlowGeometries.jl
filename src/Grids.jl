@@ -79,7 +79,7 @@ Direction `d`'s coordinate axis. Only rectilinear grids have axes; this is
 Whether coordinate direction `d` has constant spacing known from its TYPE (all directions, for the
 no-`d` form). This is the compile-time answer, so it can select a fast path by dispatch rather than
 by a runtime scan — see [`Axes.spacing_trait`](@ref) for the trait it reads and
-[`Axes.detect_uniform`](@ref) for the `O(n)` question about the stored values.
+No code path inspects coordinate VALUES to decide this; the answer comes from the type alone.
 
 A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields, not axes.
 """
@@ -130,7 +130,8 @@ end
 Smallest gap between consecutive samples along direction `d`, as a non-negative magnitude. `O(1)` when
 the direction is [`isuniform`](@ref) and `O(N_d)` otherwise. With [`maximum_spacing`](@ref) it bounds
 how far an index window must reach to cover a given physical distance, which is what a
-neighbourhood-by-distance query needs on a stretched axis.
+neighbourhood-by-distance query needs on a stretched axis. They are also the exact test of whether a
+stretched axis happens to be equally spaced: its gaps are identical when the two are equal.
 
 A direction of fewer than two samples has no gap, and reports `Inf` — the identity for `min`.
 """

@@ -27,8 +27,8 @@ The axis's spacing trait. [`UniformAxis`](@ref) and any `AbstractRange` carry a 
 their type; every other array is nonuniform.
 
 This is the compile-time question, not the data question: a `Vector` holding an arithmetic sequence is
-`NonuniformSpacing()` because its type does not say otherwise. See [`detect_uniform`](@ref) for the
-`O(n)` check and [`uniform_axis`](@ref) to convert.
+`NonuniformSpacing()` because its type does not say otherwise, and no code path here inspects values to
+decide otherwise — the fast paths are selected by type alone.
 """
 spacing_trait(::AbstractArray) = NonuniformSpacing()
 spacing_trait(::AbstractRange) = UniformSpacing()
@@ -145,7 +145,8 @@ Base.show(io::IO, ::MIME"text/plain", a::UniformAxis{T}) where {T} =
     uniform_axis(T, x) -> UniformAxis{T}
 
 The [`UniformAxis`](@ref) equal to `x`, for any axis whose spacing is known from its type. A
-nonuniform vector raises; check with [`detect_uniform`](@ref) first if the data might qualify.
+nonuniform vector raises, because it has no uniform form: replacing its coordinates with a fitted
+sequence is a decision only its owner can make, and they can build the axis directly.
 """
 uniform_axis(x) = uniform_axis(float(eltype(x)), x)
 
@@ -154,42 +155,11 @@ uniform_axis(::Type{T}, a::UniformAxis) where {T<:AbstractFloat} =
 uniform_axis(::Type{T}, r::AbstractRange) where {T<:AbstractFloat} =
     UniformAxis{T}(first(r), step(r), length(r))
 uniform_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = throw(ArgumentError(
-    "$(typeof(x)) has no compile-time spacing, so it has no UniformAxis form; check the data with " *
-    "`detect_uniform` and pass its result, or keep the axis as-is (nonuniform axes are fully " *
-    "supported everywhere).",
+    "$(typeof(x)) has no compile-time spacing, so it has no UniformAxis form. Build one directly if " *
+    "its spacing is known — `UniformAxis(origin, Δ, n)` — or keep it as it is, since nonuniform axes " *
+    "are supported everywhere.",
 ))
 
-"""
-    detect_uniform(x; rtol = 8eps(T), atol = 0) -> Bool
-
-Whether the stored values of `x` are equally spaced, by an `O(n)` scan — the data question
-[`isuniform`](@ref) does not answer.
-
-Compared against the arithmetic sequence through the endpoints, with the tolerance scaled by the
-coordinate magnitude rather than the spacing: a uniform axis's roundoff is proportional to `|x|`,
-which exceeds roundoff proportional to `Δ` when the coordinates are large next to the spacing.
-
-Fewer than two samples is uniform trivially.
-"""
-function detect_uniform(
-    x::AbstractVector{T}; rtol::Real = 8 * eps(T), atol::Real = 0,
-) where {T<:AbstractFloat}
-    n = length(x)
-    n < 2 && return true
-    @inbounds x1, xn = x[1], x[n]
-    Δ = (xn - x1) / T(n - 1)
-    tol = max(T(atol), T(rtol) * max(abs(x1), abs(xn)))
-    # A zero tolerance on a zero-magnitude axis would demand bit-exactness of the fit; fall back to
-    # the spacing scale so the check stays meaningful there.
-    iszero(tol) && (tol = T(rtol) * abs(Δ))
-    @inbounds for i in 2:(n - 1)
-        abs(x[i] - (x1 + T(i - 1) * Δ)) ≤ tol || return false
-    end
-    return true
-end
-
-detect_uniform(::AbstractRange; _...) = true
-detect_uniform(::UniformAxis; _...) = true
 
 # ---------------------------------------------------------------------------
 # ConstantVector

@@ -57,8 +57,11 @@ neighbourhood bound.
 ```julia
 FG.Grids.isuniform(grid, d)      # compile-time; const-folds
 FG.Grids.spacing(grid, d)        # the constant Δ, signed
-FG.Axes.detect_uniform(v)        # the O(n) question about the DATA
 ```
+
+No code path inspects coordinate values to decide this, and there is no tolerance anywhere. Where the
+data question matters, the spacing accessors answer it exactly — an axis is equally spaced precisely
+when `minimum_spacing == maximum_spacing`.
 
 A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
 is a few hundred bytes rather than tens of kilobytes — and nothing is materialized onto a device that

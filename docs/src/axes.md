@@ -21,16 +21,25 @@ v = collect(u)                       # the same numbers, as a plain Vector
 A.isuniform(u), A.isuniform(v)
 ```
 
-`isuniform` is the compile-time question. A `Vector` that happens to hold an arithmetic sequence
-answers `false`, because nothing in its type says otherwise — use `detect_uniform` for the `O(n)` data
-question, and `uniform_axis` to convert:
+`isuniform` is the compile-time question, and it is the only one this package asks. A `Vector` holding
+an arithmetic sequence answers `false` because nothing in its type says otherwise, and **no code path
+inspects coordinate values to decide otherwise** — no constructor sniffs your data, and there is no
+tolerance anywhere.
+
+Where the data question genuinely matters, the spacing accessors answer it exactly: an axis is equally
+spaced precisely when its smallest gap equals its largest.
 
 ```@example axes
-A.detect_uniform(v)
+geo = FG.Geometry.CartesianGeometry()
+gv = FG.Grids.StructuredGrid(geo, v, v)
+FG.Grids.minimum_spacing(gv, 1) == FG.Grids.maximum_spacing(gv, 1)
 ```
 
+If that holds and you want the fast path, build the axis and say so — the conversion replaces your
+coordinates with the exact arithmetic sequence, which is your call to make, not this package's:
+
 ```@example axes
-A.spacing(A.UniformAxis(first(v), (last(v) - first(v)) / (length(v) - 1), length(v)))
+A.spacing(A.UniformAxis(first(v), FG.Grids.spacing(gv, 1), length(v)))
 ```
 
 A [`UniformAxis`](@ref) stores three numbers and computes `origin + (i-1)·Δ` in its own element type.

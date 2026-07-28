@@ -314,14 +314,17 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test_throws BoundsError a[6]
         Test.@test_throws BoundsError a[0]
 
-        # `isuniform` is the TYPE question; `detect_uniform` is the data question. A Vector holding an
-        # arithmetic sequence is not `isuniform` (nothing in its type says so) but is detectable.
+        # `isuniform` is the TYPE question, and nothing here answers it from the values: a Vector
+        # holding an arithmetic sequence is still not `isuniform`, and no constructor inspects data to
+        # decide otherwise. Where the data question genuinely matters, the existing spacing accessors
+        # answer it exactly — identical gaps iff the smallest equals the largest — with no tolerance.
         v = collect(a)
         Test.@test !A.isuniform(v)
-        Test.@test A.detect_uniform(v)
-        Test.@test !A.detect_uniform([0.0, 1.0, 3.0, 6.0])
-        Test.@test A.detect_uniform(Float64[])       # fewer than two samples: uniform trivially
-        Test.@test A.detect_uniform([2.5])
+        geo0 = FG.Geometry.CartesianGeometry()
+        gv = G.StructuredGrid(geo0, v, v)
+        Test.@test G.minimum_spacing(gv, 1) == G.maximum_spacing(gv, 1)      # equally spaced, exactly
+        gs2 = G.StructuredGrid(geo0, [0.0, 1.0, 3.0, 6.0], [0.0, 1.0, 3.0, 6.0])
+        Test.@test G.minimum_spacing(gs2, 1) != G.maximum_spacing(gs2, 1)    # genuinely stretched
         Test.@test_throws ArgumentError A.spacing([0.0, 1.0, 3.0])
         Test.@test_throws ArgumentError A.uniform_axis(Float64, [0.0, 1.0, 3.0])
 
