@@ -3093,6 +3093,155 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test_throws ArgumentError GR.UnstructuredGrid(geo, (px, py, pz), trues(nn); k = 4)
     end
 
+    Test.@testset "Distance and displacement between cells honour the topology" begin
+        GE = FG.Geometry
+        GR = FG.Grids
+        geo = GE.CartesianGeometry()
+        n, Δ = 10, 1.0
+        L = n * Δ
+        gp = GR.StructuredGrid(geo, range(0.0; step = Δ, length = n),
+                               range(0.0; step = Δ, length = 6); periodic = true, period = L)
+        gb = GR.StructuredGrid(geo, range(0.0; step = Δ, length = n),
+                               range(0.0; step = Δ, length = 6))
+
+        # The point form on the raw coordinates would give the full extent; across a seam the cells are
+        # one spacing apart.
+        Test.@test GE.distance(gp, (1, 1), (n, 1)) ≈ Δ
+        Test.@test GE.distance(gb, (1, 1), (n, 1)) ≈ (n - 1) * Δ
+        Test.@test GE.distance(gp, (3, 2), (5, 4)) ≈ sqrt(2 * (2Δ)^2)   # interior is unaffected
+        Test.@test GE.distance(gp, (1, 1), (n, 3)) ≈ GE.distance(gp, (n, 3), (1, 1))
+        Test.@test GE.distance(gp, (4, 4), (4, 4)) == 0
+        Test.@test GE.distance(gp, CartesianIndex(1, 1), CartesianIndex(n, 1)) ≈ Δ
+
+        d = GR.displacement(gp, (1, 1), (n, 1))
+        Test.@test d[1] ≈ -Δ && d[2] == 0                                # the short way round
+        Test.@test sqrt(sum(abs2, GR.displacement(gp, (2, 5), (n, 2)))) ≈
+                   GE.distance(gp, (2, 5), (n, 2))
+        Test.@test all(GR.displacement(gp, (3, 1), (7, 4)) .≈ .-GR.displacement(gp, (7, 4), (3, 1)))
+        Test.@test GR.displacement(gb, (1, 1), (n, 1))[1] ≈ (n - 1) * Δ
+
+        # Longitude is intrinsically 2π-periodic, so the cell form must agree with the point form on the
+        # raw coordinates — the minimum image changes nothing there.
+        sph = FG.Geometry.SphericalGeometry(6.371e6)
+        λ = collect(range(0, 2π; length = 25)[1:24])
+        φ = collect(range(-1.0, 1.0; length = 9))
+        gs = GR.StructuredGrid(sph, λ, φ)
+        Test.@test GR.isperiodic(gs, 1)
+        Test.@test all(GE.distance(gs, (i, j), (k, l)) ≈ GE.distance(sph, (λ[i], φ[j]), (λ[k], φ[l]))
+                       for i in (1, 5, 24), j in (1, 5, 9), k in (1, 12, 24), l in (1, 5, 9))
+
+        Λ = [λi for λi in range(0, π; length = 7), _ in 1:5]
+        Φ = [φj for _ in 1:7, φj in range(-0.8, 0.8; length = 5)]
+        gc = GR.CurvilinearGrid(sph, Λ, Φ, trues(7, 5))
+        Test.@test GE.distance(gc, (2, 2), (4, 4)) ≈
+                   GE.distance(sph, (Λ[2, 2], Φ[2, 2]), (Λ[4, 4], Φ[4, 4]))
+        gu = GR.UnstructuredGrid(geo, ([0.5, 2.0, 9.5],), ones(3), trues(3);
+                                 periodic = (true,), period = (10.0,))
+        Test.@test GE.distance(gu, 1, 3) ≈ 1.0
+        Test.@test GR.displacement(gu, 1, 3)[1] ≈ -1.0
+
+        dd() = FG.Geometry.distance(gp, (3, 2), (9, 5))
+        pp() = FG.Grids.displacement(gp, (3, 2), (9, 5))
+        dd(); pp()
+        Test.@test @allocated(dd()) == 0
+        Test.@test @allocated(pp()) == 0
+    end
+
+    Test.@testset "A ball query can sum periodic images, which a convolution needs" begin
+        C = FG.Connectivity
+        GR = FG.Grids
+        Nx, Δx = 32, 62.5
+        L = Nx * Δx
+        ax = range(0.0; step = Δx, length = Nx)
+        g = GR.StructuredGrid(FG.Geometry.CartesianGeometry(), ax, ax;
+                              periodic = (true, true), period = (L, L))
+        # ℓ = L, so the kernel still carries 0.22 of its peak at L/2 — the regime where the images the
+        # nearest-image convention discards actually matter.
+        ℓ, α = 2000.0, 6.0
+        kern(d) = exp(-α * d^2 / ℓ^2)
+        fold(I, rad, conv) = C.fold_within((0.0, 0.0, 0), g, I...;
+                                           ball = rad, images = conv, self = true) do a, J, d
+            w = kern(d)
+            (a[1] + w * cos(2π * ax[J[1]] / L), a[2] + w, a[3] + 1)
+        end
+        # Brute force: every cell at every image within ±K periods, gated on the radius. The definition
+        # of the periodized sum, with no window and no minimum image.
+        function brute(I, rad; K = 3)
+            p0 = (ax[I[1]], ax[I[2]])
+            num = 0.0; den = 0.0; cnt = 0
+            for jy in 1:Nx, jx in 1:Nx, ky in -K:K, kx in -K:K
+                dd = hypot(ax[jx] + kx * L - p0[1], ax[jy] + ky * L - p0[2])
+                dd ≤ rad || continue
+                w = kern(dd)
+                num += w * cos(2π * ax[jx] / L); den += w; cnt += 1
+            end
+            return (num, den, cnt)
+        end
+
+        # `rad = 3500 > L` reaches images several turns out, which is what the uncapped window is for:
+        # `metric_window`'s cap at the axis length would drop every one of them.
+        for rad in (1469.0, 3500.0), I in ((1, 1), (5, 9), (17, 32))
+            v = fold(I, rad, C.AllImages())
+            b = brute(I, rad)
+            Test.@test v[3] == b[3]
+            Test.@test v[1] ≈ b[1] rtol = 1e-14
+            Test.@test v[2] ≈ b[2] rtol = 1e-14
+        end
+        # Below L/2 the conventions are the same walk, so nothing existing changes.
+        for rad in (200.0, 600.0, 999.0)
+            a = fold((7, 11), rad, C.AllImages())
+            b = fold((7, 11), rad, C.NearestImage())
+            Test.@test a == b
+        end
+
+        # The physics: filtering one Fourier mode must reproduce the analytic Gaussian transfer.
+        # Projected over the whole field rather than cell-by-cell, since `cos` vanishes at some cells.
+        want = exp(-(2π / L)^2 * ℓ^2 / (4α))
+        function transfer(rad, conv)
+            num = 0.0; den = 0.0
+            for j in 1:Nx, i in 1:Nx
+                a = fold((i, j), rad, conv)
+                f0 = cos(2π * ax[i] / L)
+                num += (a[1] / a[2]) * f0; den += f0 * f0
+            end
+            return num / den
+        end
+        errs = [abs(transfer(rad, C.AllImages()) - want) / want for rad in (1469.0, 2600.0, 4000.0)]
+        Test.@test errs[1] > errs[2] > errs[3]        # only truncation is left, and it shrinks
+        Test.@test errs[3] < 1e-10
+        # The nearest-image error is irreducible: widening the support cannot recover images the
+        # convention discards.
+        Test.@test abs(transfer(4000.0, C.NearestImage()) - want) / want > 0.3
+        Test.@test fold((1, 1), 2600.0, C.NearestImage())[2] <
+                   0.95 * fold((1, 1), 2600.0, C.AllImages())[2]
+
+        # Summing images is a statement about a translation, so an angular periodic direction refuses it.
+        gs = GR.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
+                               collect(range(0, 2π; length = 25)[1:24]),
+                               collect(range(-1.0, 1.0; length = 9)))
+        Test.@test GR.isperiodic(gs, 1)
+        Test.@test_throws ArgumentError C.fold_within((a, J, d) -> a, 0, gs, 3, 4;
+                                                      ball = 2.0e6, images = C.AllImages())
+        Test.@test C.fold_within((a, J, d) -> a + 1, 0, gs, 3, 4; ball = 2.0e6) ==
+                   C.nneighbors_within(gs, 3, 4; ball = 2.0e6)
+        # Nothing periodic ⇒ there are no images, so the request is a no-op rather than an error.
+        gnp = GR.StructuredGrid(FG.Geometry.CartesianGeometry(), ax, ax)
+        Test.@test C.fold_within((a, J, d) -> a + 1, 0, gnp, 5, 5;
+                                 ball = 300.0, images = C.AllImages()) ==
+                   C.fold_within((a, J, d) -> a + 1, 0, gnp, 5, 5; ball = 300.0)
+
+        # The existing entry points are this fold, and both stay allocation-free over a whole sweep.
+        Test.@test C.nneighbors_within(g, 7, 11; ball = 600.0) ==
+                   C.fold_within((a, J, d) -> a + 1, 0, g, 7, 11; ball = 600.0)
+        cnt(gr, m) = (t = 0; for j in 1:m, i in 1:m
+            t += FG.Connectivity.fold_within((a, J, d) -> a + 1, 0, gr, i, j; ball = 600.0) end; t)
+        nnw(gr, m) = (t = 0; for j in 1:m, i in 1:m
+            t += FG.Connectivity.nneighbors_within(gr, i, j; ball = 600.0) end; t)
+        cnt(g, Nx); nnw(g, Nx)
+        Test.@test @allocated(cnt(g, Nx)) == 0
+        Test.@test @allocated(nnw(g, Nx)) == 0
+    end
+
     Test.@testset "MetricBall queries match a brute-force scan of the same metric" begin
         C = FG.Connectivity
         GE = FG.Geometry

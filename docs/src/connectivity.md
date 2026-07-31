@@ -140,6 +140,59 @@ FG.Connectivity.neighbors_within(g, 1, 7; ball = 1.5e6) ==
     FG.Connectivity.neighbors_within(g, 1, 7; ball = S.MetricBall(1.5e6))
 ```
 
+### Distance between two cells
+
+`Geometry.distance` also takes two cell indices, resolving them through the grid's own topology. Across a
+periodic seam that is the short way round, not the full extent:
+
+```@example conn
+gper = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
+                               range(0.0; step = 1.0, length = 10),
+                               range(0.0; step = 1.0, length = 6);
+                               periodic = true, period = 10.0)
+FG.Geometry.distance(gper, (1, 1), (10, 1)), FG.Grids.displacement(gper, (1, 1), (10, 1))
+```
+
+[`Grids.displacement`](@ref) is the signed per-direction offset that distance was taken from — a
+coordinate quantity, which is why it sits in `Grids` while the distance extends `Geometry.distance`.
+
+### Convolutions need every image, not the nearest one
+
+A neighbour set visits each cell once, at its nearest image. A convolution on a torus cannot: with period
+`L`,
+
+```math
+\\bar f(x) = \\int K(x-y) f(y)\\,dy = \\sum_k \\int_\\text{cell} K(x-y-kL) f(y)\\,dy
+```
+
+so once the kernel support exceeds `L/2` one cell contributes through several images at different
+displacements. [`Connectivity.fold_within`](@ref) takes the convention as an argument —
+[`NearestImage`](@ref) or [`AllImages`](@ref) — and `AllImages` also widens the window, since
+`metric_window`'s one-turn cap would itself discard those images.
+
+```@example conn
+Nx, Δx = 32, 62.5; Lx = Nx * Δx
+axx = range(0.0; step = Δx, length = Nx)
+gt = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), axx, axx;
+                             periodic = (true, true), period = (Lx, Lx))
+count_within(conv, rad) = FG.Connectivity.fold_within(
+    (a, J, d) -> a + 1, 0, gt, 1, 1; ball = rad, images = conv)
+count_within(FG.Connectivity.NearestImage(), 3500.0),
+count_within(FG.Connectivity.AllImages(), 3500.0)
+```
+
+Below `L/2` the two agree exactly, so nothing that was already correct changes. Above it, filtering one
+Fourier mode with a Gaussian of width `ℓ = L` reproduces the analytic transfer `exp(-k²ℓ²/4α)` to
+roundoff under `AllImages`, while the nearest-image error stays at 40% no matter how far the support is
+widened — the images it drops cannot be recovered by searching further.
+
+Summing images asserts that a periodic direction is a *translation* of the domain. On a sphere it is an
+identification instead — `λ` and `λ+2π` are the same point — so `AllImages` is refused there rather than
+counting one cell repeatedly.
+
+`self = true` folds the centre cell too, at distance zero. A neighbour set excludes it; a convolution
+needs it, and it carries the kernel's largest weight.
+
 To query every cell, materialize the whole graph once instead —
 [`Connectivity.build_connectivity_within`](@ref) is the ball analogue of `build_connectivity`, row `k`
 holding exactly what the per-cell query returns for cell `k`, and symmetric because the metric is:

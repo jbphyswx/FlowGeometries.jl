@@ -1833,4 +1833,100 @@ end
     return ntuple(d -> @inbounds(c[d][idx]), Val(N))
 end
 
+# ---------------------------------------------------------------------------
+# Minimum image, and the distance between two cells
+# ---------------------------------------------------------------------------
+
+"""
+    _wrap_lengths(grid, Val(N)) -> NTuple{N,T}
+
+Wrap length per direction, zero where the direction is bounded, so [`_min_image`](@ref) leaves those
+components alone.
+"""
+@inline _wrap_lengths(grid::AbstractGrid, ::Val{N}) where {N} =
+    ntuple(d -> isperiodic(grid, d) ? period(grid, d) : zero(period(grid, d)), Val(N))
+
+"""
+    _min_image(p0, pt, prd) -> NTuple
+
+`pt` brought to the image nearest `p0`, per component, for each direction with a nonzero wrap length.
+
+For an angular coordinate the geometry's own distance is already `2π`-periodic and this changes nothing
+(it also keeps Vincenty inside its `|Δλ| ≤ π` regime); for a periodic Cartesian coordinate it is what
+makes the seam invisible. Per-component minimum image is the global minimum for a separable metric,
+which the Euclidean one is.
+"""
+@inline function _min_image(p0::NTuple{N,Any}, pt::NTuple{N,Any}, prd::NTuple{N,Any}) where {N}
+    return ntuple(Val(N)) do d
+        p = prd[d]
+        p > zero(p) ? p0[d] + (pt[d] - p0[d] - p * round((pt[d] - p0[d]) / p)) : pt[d]
+    end
+end
+
+"""
+    displacement(grid, I, J) -> NTuple{N,T}
+    displacement(grid::UnstructuredGrid, i, j) -> NTuple{N,T}
+
+The signed per-direction coordinate offset from cell `I` to cell `J`, reduced to the nearest image in
+every periodic direction — the offset [`Geometry.distance`](@ref) is taken from.
+
+A coordinate quantity rather than a metric one, which is why it lives here while the distance itself
+extends `Geometry.distance`: across a periodic seam the two cells' *stored* coordinates differ by nearly
+a full period, and this reports the short way round instead.
+"""
+function displacement end
+
+@inline function displacement(
+    grid::Union{StructuredGrid{G,T,N},CurvilinearGrid{T,G,N}},
+    I::NTuple{N,Integer}, J::NTuple{N,Integer},
+) where {G,T,N}
+    p0 = _raw_coords(grid, I...)
+    q = _min_image(p0, _raw_coords(grid, J...), _wrap_lengths(grid, Val(N)))
+    return ntuple(d -> q[d] - p0[d], Val(N))
+end
+
+@inline function displacement(
+    grid::UnstructuredGrid{T,G,N}, i::Integer, j::Integer,
+) where {T,G,N}
+    p0 = _raw_coords(grid, i)
+    q = _min_image(p0, _raw_coords(grid, j), _wrap_lengths(grid, Val(N)))
+    return ntuple(d -> q[d] - p0[d], Val(N))
+end
+
+"""
+    Geometry.distance(grid, I, J) -> T
+    Geometry.distance(grid::UnstructuredGrid, i, j) -> T
+
+Distance between the centres of two cells under the grid's own geometry and topology: the coordinates
+are resolved from the indices, reduced to the nearest image in every periodic direction, and handed to
+the point form of [`Geometry.distance`](@ref).
+
+Across a periodic seam this is the short way round — one spacing between the first and last cell of a
+periodic direction, not the full extent, which is what the point form on the raw coordinates would give.
+A bounded direction contributes its plain coordinate difference. See [`displacement`](@ref) for the
+offset it was taken from.
+"""
+@inline function Geometry.distance(
+    grid::Union{StructuredGrid{G,T,N},CurvilinearGrid{T,G,N}},
+    I::NTuple{N,Integer}, J::NTuple{N,Integer},
+) where {G,T,N}
+    p0 = _raw_coords(grid, I...)
+    q = _min_image(p0, _raw_coords(grid, J...), _wrap_lengths(grid, Val(N)))
+    return Geometry.distance(grid_geometry(grid), p0, q)
+end
+
+@inline function Geometry.distance(
+    grid::UnstructuredGrid{T,G,N}, i::Integer, j::Integer,
+) where {T,G,N}
+    p0 = _raw_coords(grid, i)
+    q = _min_image(p0, _raw_coords(grid, j), _wrap_lengths(grid, Val(N)))
+    return Geometry.distance(grid_geometry(grid), p0, q)
+end
+
+# `CartesianIndex` is what `CartesianIndices` hands a traversal, so accept it directly.
+@inline Geometry.distance(grid::AbstractGrid, I::CartesianIndex, J::CartesianIndex) =
+    Geometry.distance(grid, Tuple(I), Tuple(J))
+@inline displacement(grid::AbstractGrid, I::CartesianIndex, J::CartesianIndex) =
+    displacement(grid, Tuple(I), Tuple(J))
+
 end # module

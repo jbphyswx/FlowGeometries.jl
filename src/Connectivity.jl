@@ -515,10 +515,37 @@ function metric_window(
     return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
 end
 
-# Per-direction candidate offsets. Bounded: the window, clipped at the walls. Periodic: the window,
-# clamped to one full turn — offsets congruent mod `n` are the same cell, and the coordinate each cell
-# is measured at is decided by minimum image below, not by which offset reached it.
-@inline function _delta_range(w::Int, i::Int, n::Int, periodic::Bool)
+"""
+    AbstractImageConvention
+
+How a ball query treats a periodic direction: [`NearestImage`](@ref) or [`AllImages`](@ref).
+
+Singleton **types** rather than a `Bool`, for the reason given above about stencils: the traversal branches
+on this per candidate, so a runtime value leaves the coordinate expression unresolved and the whole walk
+allocates — measured at 14 KB for one query on a 32² grid, against nothing when it is a type.
+"""
+abstract type AbstractImageConvention end
+
+"""
+    NearestImage()
+
+Visit each cell at most once, at its nearest image. The neighbour-set convention, and the default.
+"""
+struct NearestImage <: AbstractImageConvention end
+
+"""
+    AllImages()
+
+Visit every image of a cell that lands inside the ball, each carrying its own displacement rather than a
+reduced one — what a periodic convolution sums over. See [`fold_within`](@ref).
+"""
+struct AllImages <: AbstractImageConvention end
+
+# Per-direction candidate offsets. Bounded: the window, clipped at the walls. Periodic under
+# `NearestImage`: the window clamped to one full turn — offsets congruent mod `n` are the same cell, and
+# the coordinate each is measured at is decided by minimum image, not by which offset reached it.
+# Periodic under `AllImages`: no clamp, because each offset is then a distinct POSITION of that cell.
+@inline function _delta_range(w::Int, i::Int, n::Int, periodic::Bool, ::NearestImage)
     if periodic
         2w + 1 ≤ n && return (-w):w
         lo = -(n >> 1)
@@ -527,22 +554,84 @@ end
     return max(1 - i, -w):min(n - i, w)
 end
 
-# Each coordinate with a nonzero wrap length is brought to the image nearest `p0` before the metric
-# sees it. For an angular coordinate the geometry's distance is already `2π`-periodic and this changes
-# nothing (it also keeps Vincenty in its |Δλ| ≤ π regime); for a periodic Cartesian coordinate it is
-# what makes the seam invisible. Per-component minimum image is the global minimum for a separable
-# metric, which the Euclidean one is.
-@inline function _min_image(p0::NTuple{N,Any}, pt::NTuple{N,Any}, prd::NTuple{N,Any}) where {N}
+@inline _delta_range(w::Int, i::Int, n::Int, periodic::Bool, ::AllImages) =
+    periodic ? ((-w):w) : (max(1 - i, -w):min(n - i, w))
+
+# Consecutive images of one cell are `period` apart, which is the relevant step for a direction holding a
+# single sample — there `_min_step` has no interior gap to report.
+@inline function _image_step(grid::Grids.StructuredGrid{G,T}, d::Int) where {G,T}
+    s = _min_step(grid, d)
+    if Grids.isperiodic(grid, d)
+        p = T(Grids.period(grid, d))
+        p > 0 && (s = min(s, p))
+    end
+    return s
+end
+
+# The window for an image-summing walk. `_steps` caps its half-width at the axis length, which is right
+# when each cell is visited once and wrong here: a kernel wider than the period reaches images several
+# turns out, and capping at `n` drops every one of them. So a periodic direction gets the UNCAPPED
+# `ceil(r/s)`; a bounded one is unchanged, its offsets being clipped at the walls anyway.
+function _image_window(
+    grid::Grids.StructuredGrid{G,T,N}, ball,
+) where {G<:Geometry.AbstractCartesianGeometry, T, N}
+    r = T(_ball_radius(ball))
+    sz = Grids.size_tuple(grid)
     return ntuple(Val(N)) do d
-        p = prd[d]
-        p > zero(p) ? p0[d] + (pt[d] - p0[d] - p * round((pt[d] - p0[d]) / p)) : pt[d]
+        s = _image_step(grid, d)
+        if Grids.isperiodic(grid, d)
+            (s > 0 && isfinite(s)) ? Int(ceil(r / s)) : sz[d]
+        else
+            _steps(r, s, sz[d])
+        end
     end
 end
 
-# Wrap length per direction, zero where bounded so `_min_image` leaves those components alone.
-@inline _wrap_lengths(grid::Grids.AbstractGrid, ::Val{N}) where {N} =
-    map((flag, d) -> flag ? Grids.period(grid, d) : zero(Grids.period(grid, d)),
-        _periodic_flags(grid), ntuple(identity, Val(N)))
+# Summing images treats a periodic direction as a TRANSLATION of the domain, which it is on a Cartesian
+# torus: `x` and `x+L` are distinct positions of the same cell, so a convolution must count each. An
+# angular direction is an IDENTIFICATION instead — `λ` and `λ+2π` are the same point, and the geometry's
+# distance is already `2π`-periodic in it — so the images are not distinct positions and summing them
+# would count one cell repeatedly. Refused rather than silently wrong.
+@inline _check_images(::Grids.AbstractGrid, ::NTuple{N,Bool}, ::NearestImage) where {N} = nothing
+
+@inline function _check_images(
+    grid::Grids.AbstractGrid, per::NTuple{N,Bool}, ::AllImages,
+) where {N}
+    any(per) || return nothing     # nothing wraps, so there is nothing to sum
+    Grids.grid_geometry(grid) isa Geometry.AbstractCartesianGeometry || throw(ArgumentError(
+        "AllImages() sums periodic images, which is only meaningful where a periodic direction is a " *
+        "translation of the domain. This geometry's periodic direction is an angular identification — " *
+        "λ and λ+2π are the same point, and its distance is already 2π-periodic — so summing images " *
+        "would count one cell repeatedly. Use NearestImage().",
+    ))
+    return nothing
+end
+
+@inline _ball_window(grid, I, ball, ::NearestImage) = metric_window(grid, I, ball)
+@inline _ball_window(grid, _I, ball, ::AllImages) = _image_window(grid, ball)
+
+# The candidate's position. Under `NearestImage` the stored coordinate reduced to the image nearest the
+# centre; under `AllImages` the image the offset actually names, built as
+# `x[mod1(raw, n)] + (periods wrapped)·L` — the same construction `Discretization.axis_stencils` uses for
+# a wrapped stencil node. Reducing that by minimum image is exactly what must not happen.
+@inline _cand_coords(
+    grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::NearestImage,
+) where {N} = _min_image(p0, Grids._raw_coords(grid, J...), prd)
+
+@inline function _cand_coords(
+    grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::AllImages,
+) where {N}
+    return ntuple(Val(N)) do d
+        x = Grids.coordinates(grid, d)
+        raw = I[d] + δ[d]
+        @inbounds per[d] ?
+            x[mod1(raw, sz[d])] + oftype(prd[d], fld(raw - 1, sz[d])) * prd[d] * sgn[d] : x[raw]
+    end
+end
+
+# Minimum image and the per-direction wrap lengths live in `Grids`, which owns coordinates and periods,
+# and are what `Geometry.distance(grid, I, J)` is built on as well.
+using ..Grids: _min_image, _wrap_lengths
 
 """
     neighbors_within!(out, grid, I...; ball, active_only=true) -> n_written
@@ -576,35 +665,85 @@ The allocating form of [`neighbors_within!`](@ref): counts, sizes, and fills in 
 """
 function neighbors_within end
 
-# One traversal, shared by the counting and writing forms: `write === nothing` counts.
-@inline function _within_scan(
-    out, grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball, active_only::Bool,
-) where {G,T,N}
+"""
+    fold_within(f, init, grid, I...; ball, images=NearestImage(), self=false, active_only=true)
+
+Fold `acc = f(acc, J, d)` over every cell `J` within `ball` of cell `I`, `d` being its distance. The
+traversal every distance query here is built on; the accumulator is threaded through as a value rather
+than mutated, so nothing is captured and nothing is boxed.
+
+`images` selects how a periodic direction is treated — [`NearestImage`](@ref) (the default, each cell
+once, the convention [`neighbors_within!`](@ref) exposes) or [`AllImages`](@ref), which visits every
+image of a cell that lands inside the ball, each carrying its own displacement rather than a reduced one.
+
+`AllImages` is what a periodic convolution needs: on a torus of period `L`,
+`f̄(x) = Σₖ ∫ K(x − y − kL) f(y) dy`, so where the kernel support exceeds `L/2` one cell contributes
+through several images at different displacements, and keeping only the nearest drops the rest. Below
+`L/2` the two conventions coincide exactly. It also widens the search — the window becomes the uncapped
+`ceil(r/s)` per periodic direction rather than [`metric_window`](@ref)'s one-turn cap — and it is refused
+where a periodic direction is angular rather than a translation.
+
+`self = true` also folds the centre cell, at distance zero. A neighbour set excludes it, which is the
+default; a convolution needs it, and it carries the kernel's largest weight, so omitting it is not a
+small error.
+"""
+function fold_within end
+
+@inline function _fold_within(
+    f::F, init, grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball,
+    images::AbstractImageConvention, active_only::Bool, self::Bool,
+) where {F,G,T,N}
     sz = Grids.size_tuple(grid)
     @inbounds for d in 1:N
         (1 ≤ I[d] ≤ sz[d]) || throw(BoundsError(Grids.mask(grid), I))
     end
-    (active_only && !Grids.isactive(grid, I...)) && return 0
+    per = _periodic_flags(grid)
+    _check_images(grid, per, images)
+    (active_only && !Grids.isactive(grid, I...)) && return init
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
-    w = metric_window(grid, I, ball)
-    per = _periodic_flags(grid)
+    w = _ball_window(grid, I, ball, images)
     prd = map(T, _wrap_lengths(grid, Val(N)))
+    sgn = ntuple(d -> T(Grids._wrap_sign(Grids.coordinates(grid, d))), Val(N))
     p0 = Grids._raw_coords(grid, I...)
     msk = Grids.mask(grid)
-    n = 0
-    rng = ntuple(d -> _delta_range(w[d], I[d], sz[d], per[d]), Val(N))
+    acc = init
+    # Getting past the activity check above means the centre is active, so no further test is needed.
+    self && (acc = f(acc, I, zero(T)))
+    rng = ntuple(d -> _delta_range(w[d], I[d], sz[d], per[d], images), Val(N))
     @inbounds for ci in CartesianIndices(rng)
         δ = Tuple(ci)
         all(iszero, δ) && continue
         J = ntuple(d -> per[d] ? mod1(I[d] + δ[d], sz[d]) : I[d] + δ[d], Val(N))
         active_only && !msk[J...] && continue
-        q = _min_image(p0, Grids._raw_coords(grid, J...), prd)
-        Geometry.distance(geo, p0, q) ≤ r || continue
-        n += 1
-        out === nothing || _keep!(out, n, _linidx(sz, J...))
+        q = _cand_coords(grid, p0, I, δ, J, sz, per, prd, sgn, images)
+        dist = Geometry.distance(geo, p0, q)
+        dist ≤ r || continue
+        acc = f(acc, J, dist)
     end
-    return n
+    return acc
+end
+
+# `f::F` rather than a bare `f`: Julia does not specialize on a function-typed argument that is only
+# passed through, so the inner call would be dynamic and box the grid, the index tuple and the radius —
+# 224 bytes per query, against nothing once `F` forces a specialization.
+fold_within(
+    f::F, init, grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
+    ball, images::AbstractImageConvention = NearestImage(),
+    active_only::Bool = true, self::Bool = false,
+) where {F,G,T,N} = _fold_within(f, init, grid, map(Int, I), ball, images, active_only, self)
+
+# The counting and writing forms are the one-image fold with a counting/appending step: one traversal, so
+# the window bound and the distance gate cannot drift between conventions.
+@inline function _within_scan(
+    out, grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball, active_only::Bool,
+) where {G,T,N}
+    sz = Grids.size_tuple(grid)
+    return _fold_within(0, grid, I, ball, NearestImage(), active_only, false) do n, J, _
+        m = n + 1
+        out === nothing || _keep!(out, m, _linidx(sz, J...))
+        return m
+    end
 end
 
 neighbors_within!(
