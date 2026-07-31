@@ -16,6 +16,12 @@ Pages = ["api.md"]
 Depth = 2
 ```
 
+## Package
+
+```@docs
+FlowGeometries
+```
+
 ## Axes
 
 ```@autodocs

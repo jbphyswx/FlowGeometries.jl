@@ -45,8 +45,8 @@ makedocs(;
     # Every example in the docs is executed, and a docstring that names a signature the code does not
     # have is an error. Without this, documented examples drift from the code silently.
     doctest = true,
-    warnonly = [:missing_docs, :cross_references],
-    checkdocs = :none,
+    warnonly = false,
+    checkdocs = :all,
 )
 
 deploydocs(;
