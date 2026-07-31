@@ -4032,4 +4032,437 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test all(isapprox.(G.rotate(idr, 1.2, 0.4), (1.2, 0.4); atol = 1e-12))
     end
 
+    Test.@testset "An arc longer than half the sphere still finds every node" begin
+        # `2sin(σ/2)` is the chord of an arc σ, and it turns back down past σ = π: a query radius built
+        # from it without a clamp SHRINKS as the requested arc grows, and vanishes at σ = 2π.
+        R = 6.371e6
+        geo = FG.Geometry.SphericalGeometry(R)
+        λ = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        φ = [0.0, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9]
+        for frac in (0.5, 1.0, 1.05, 2.0)      # a quarter turn, then at, past and twice the antipode
+            r = frac * π * R
+            g = FG.Grids.UnstructuredGrid(geo, (λ, φ), trues(7); radius = r)
+            for k in 1:7
+                got = sort(collect(FG.Grids.neighbors(g, k)))
+                want = sort([j for j in 1:7 if j != k &&
+                             FG.Geometry.distance(geo, (λ[k], φ[k]), (λ[j], φ[j])) ≤ r])
+                Test.@test got == want
+            end
+            # `2sin(σ/2)` is not monotone past `σ = π`, so the query radius has to be clamped there: no
+            # two points on a sphere are more than π R apart, so from the antipode up every node must see
+            # all six others however much further the radius reaches.
+            frac ≥ 1 && Test.@test all(k -> length(FG.Grids.neighbors(g, k)) == 6, 1:7)
+        end
+    end
+
+    Test.@testset "A ball query recomputes no grid invariant" begin
+        C = FG.Connectivity
+        # `MetricTopology` carries the per-direction minimum steps, so bounding the candidate window is
+        # O(1) per direction on a stretched axis rather than a scan of the axis per query.
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        # Spacing ~1 whatever `n` is, so a fixed radius spans a fixed number of cells and any growth in
+        # per-query cost is overhead rather than more candidates.
+        function stretched(n)
+            x = cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n)))
+            return FG.Grids.StructuredGrid(geo, x, trues(n))
+        end
+        # The fully-qualified path, and a warm-up call: a local `C` is captured as a `Module` field, so
+        # `C.nneighbors_within` is a dynamic lookup and boxes what it passes.
+        function nalloc(g, mt)
+            FG.Connectivity.nneighbors_within(g, 32; ball = 3.0, topology = mt)
+            return @allocated FG.Connectivity.nneighbors_within(g, 32; ball = 3.0, topology = mt)
+        end
+        percall(g, mt, r, reps) = begin
+            I = (length(FG.Grids.mask(g)) ÷ 2,)
+            C.nneighbors_within(g, I...; ball = r, topology = mt)
+            t = @elapsed for _ in 1:reps
+                C.nneighbors_within(g, I...; ball = r, topology = mt)
+            end
+            return t / reps
+        end
+        ts = map((256, 4096)) do n
+            g = stretched(n)
+            mt = C.MetricTopology(g)
+            Test.@test mt isa C.MetricTopology
+            Test.@test isbits(mt)                              # nothing heap-allocated to carry
+            Test.@test nalloc(g, mt) == 0
+            (percall(g, mt, 3.0, 3000), g, mt)
+        end
+        # A 16× longer axis holding the window size fixed: cost must be flat, not 16× worse. The bound
+        # is loose enough for a noisy machine and far tighter than the linear growth it replaces.
+        Test.@test ts[2][1] < 4 * ts[1][1]
+        # And the count is the truth, whichever topology computed it.
+        for (_, g, mt) in ts
+            I = (length(FG.Grids.mask(g)) ÷ 2,)
+            Test.@test C.nneighbors_within(g, I...; ball = 3.0, topology = mt) ==
+                       C.nneighbors_within(g, I...; ball = 3.0)
+        end
+    end
+
+    Test.@testset "An index changes a ball query's cost, never its answer" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        sgeo = FG.Geometry.SphericalGeometry(6.371e6)
+        function curv(n; periodic = false, mask = trues(n, n))
+            x = [t for t in range(0.0, 10.0; length = n), _ in 1:n]
+            y = [t for _ in 1:n, t in range(0.0, 10.0; length = n)]
+            return GD.CurvilinearGrid(geo, x, y, mask; measure = fill(1.0, n, n),
+                                      periodic = (periodic, false),
+                                      period = (periodic ? 10.0 : 0.0, 0.0))
+        end
+        function curv_sph(nλ, nφ)
+            λ = [l for l in range(0.0, 2π * (1 - 1 / nλ); length = nλ), _ in 1:nφ]
+            φ = [f for _ in 1:nλ, f in range(-1.2, 1.2; length = nφ)]
+            return GD.CurvilinearGrid(sgeo, λ, φ, trues(nλ, nφ))
+        end
+        Test.@test GD.has_spatial_index(curv(8))                # the extension is loaded
+
+        R = 6.371e6
+        wall = trues(16, 16); wall[:, 9] .= false
+        # (λ, φ, r) on a sphere, where the metric is the 3-D chord of the same embedding the index uses.
+        nλ, nφ, nr = 16, 9, 4
+        sph3 = GD.CurvilinearGrid(
+            sgeo,
+            [l for l in range(0.0, 2π * (1 - 1 / nλ); length = nλ), _ in 1:nφ, _ in 1:nr],
+            [f for _ in 1:nλ, f in range(-1.0, 1.0; length = nφ), _ in 1:nr],
+            [q for _ in 1:nλ, _ in 1:nφ, q in range(6.371e6, 1.02 * 6.371e6; length = nr)],
+            fill(1.0, nλ, nφ, nr), trues(nλ, nφ, nr),
+        )
+        # A spheroid, where the ECEF chord the index searches is a LOWER bound on the Vincenty geodesic
+        # the gate applies: the index over-returns, which is what it is allowed to do, and the answer is
+        # still exactly the scan's.
+        spd = FG.Geometry.SpheroidGeometry(6.378137e6, 1 / 298.257223563)
+        λ2 = [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11]
+        φ2 = [f for _ in 1:20, f in range(-1.2, 1.2; length = 11)]
+        spd2 = GD.CurvilinearGrid(spd, λ2, φ2, fill(1.0, 20, 11), trues(20, 11))
+        nh = 3
+        spd3 = GD.CurvilinearGrid(
+            spd,
+            [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11, _ in 1:nh],
+            [f for _ in 1:20, f in range(-1.2, 1.2; length = 11), _ in 1:nh],
+            [h for _ in 1:20, _ in 1:11, h in range(0.0, 2.0e5; length = nh)],
+            fill(1.0, 20, 11, nh), trues(20, 11, nh),
+        )
+        # A box wrapping in two of three directions, so the tree needs ghost images in both.
+        nb = 8
+        axb = collect(range(0.0, 7.0; length = nb))
+        box3 = GD.CurvilinearGrid(
+            geo,
+            [x for x in axb, _ in 1:nb, _ in 1:nb],
+            [y for _ in 1:nb, y in axb, _ in 1:nb],
+            [z for _ in 1:nb, _ in 1:nb, z in axb],
+            fill(1.0, nb, nb, nb), trues(nb, nb, nb);
+            periodic = (true, true, false), period = (8.0, 8.0, 0.0),
+        )
+        cases = (
+            (curv(16), ((1, 1), (8, 8), (16, 16), (1, 16)), 2.0),
+            (curv(16; periodic = true), ((1, 1), (8, 8), (16, 8), (1, 16)), 2.0),
+            (curv(16; mask = wall), ((8, 5), (1, 1), (14, 14)), 3.0),
+            (curv_sph(24, 12), ((1, 1), (12, 6), (24, 12)), 0.2R),
+            (curv_sph(24, 12), ((12, 6),), 3.0R),               # reaches past the antipode
+            (sph3, ((1, 1, 1), (8, 5, 2), (16, 9, 4)), 0.3R),
+            (sph3, ((8, 5, 2),), 3.0R),
+            (spd2, ((1, 1), (10, 6), (20, 11)), 2.0e6),
+            (spd2, ((10, 6),), 1.2e7),
+            (spd3, ((1, 1, 1), (10, 6, 2), (20, 11, 3)), 2.0e6),
+            (box3, ((1, 1, 1), (4, 4, 4), (8, 8, 8)), 2.5),
+        )
+        for (g, seeds, r) in cases
+            ix = C.indexed(g)
+            s = C.ball_scratch()
+            for I in seeds
+                scan = C.neighbors_within(g, I...; ball = r)
+                # Identical lists, not merely identical sets: the two paths must be interchangeable.
+                Test.@test C.neighbors_within(g, I...; ball = r, topology = ix) == scan
+                Test.@test C.neighbors_within(g, I...; ball = r, topology = ix, scratch = s) == scan
+                Test.@test C.nneighbors_within(g, I...; ball = r, topology = ix) == length(scan)
+                buf = Vector{Int}(undef, length(scan))
+                C.neighbors_within!(buf, g, I...; ball = r, topology = ix, scratch = s)
+                Test.@test buf == scan
+                # The fold visits the same cells with the same distances, in the same order.
+                visit(top; sc = nothing) = C.fold_within(
+                    Tuple{Int,Float64}[], g, I...; ball = r, topology = top, scratch = sc,
+                ) do acc, J, d
+                    push!(acc, (C._linidx(size(GD.mask(g)), J...), d))
+                    return acc
+                end
+                Test.@test visit(ix; sc = s) == visit(C.MetricTopology(g))
+            end
+        end
+
+        # Node sets, including a radius past the antipode.
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+        ixu = C.indexed(gu)
+        su = C.ball_scratch()
+        for (idx, r) in ((1, 0.3R), (100, 0.3R), (192, 0.3R), (1, 3.1R))
+            scan = C.neighbors_within(gu, idx; ball = r)
+            Test.@test C.neighbors_within(gu, idx; ball = r, topology = ixu, scratch = su) == scan
+            Test.@test C.nneighbors_within(gu, idx; ball = r, topology = ixu) == length(scan)
+        end
+
+        # Cost: fixed radius, growing n. The scan is linear per query; the index must not be.
+        function percall(g, top, r, reps)
+            I = (size(GD.mask(g), 1) ÷ 2, size(GD.mask(g), 2) ÷ 2)
+            buf = Vector{Int}(undef, 4096)
+            s = C.ball_scratch()
+            C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
+            t = @elapsed for _ in 1:reps
+                C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
+            end
+            return t / reps
+        end
+        small, big = curv(24), curv(96)                      # 576 vs 9216 cells, 16× more
+        # `curv` spans the same extent at every `n`, so the radius has to shrink with the spacing to
+        # hold the ball at a fixed cell count — otherwise the growth measured is more candidates rather
+        # than more overhead, which is not the claim.
+        cells = 2.5
+        r_small, r_big = cells * 10.0 / 23, cells * 10.0 / 95
+        Test.@test C.nneighbors_within(small, 12, 12; ball = r_small) ==
+                   C.nneighbors_within(big, 48, 48; ball = r_big)
+        ix_small = percall(small, C.indexed(small), r_small, 2000)
+        ix_big = percall(big, C.indexed(big), r_big, 2000)
+        sc_big = percall(big, C.MetricTopology(big), r_big, 100)
+        Test.@test ix_big < 3 * ix_small                     # flat in `n`, loosely bounded
+        Test.@test ix_big < sc_big                           # and cheaper than the scan it replaces
+    end
+
+    Test.@testset "Connected is the reachable part of the ball, not the ball" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        St = FG.Stencils
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        function box(n; mask = trues(n, n))
+            ax = collect(range(0.0, 1.0 * (n - 1); length = n))
+            return GD.StructuredGrid(geo, ax, ax, mask)
+        end
+
+        # Maskless and convex: everything in the ball is reachable inside it, so the two agree.
+        g = box(9)
+        for I in ((5, 5), (1, 1), (9, 4))
+            Test.@test sort(C.neighbors_within(g, I...; ball = 2.5, reach = C.Connected(St.Moore(1)))) ==
+                       sort(C.neighbors_within(g, I...; ball = 2.5))
+        end
+
+        # A wall through the ball: strictly smaller, and a named cell is dropped.
+        wall = trues(9, 9); wall[:, 5] .= false
+        gm = box(9; mask = wall)
+        I = (5, 3)
+        u = sort(C.neighbors_within(gm, I...; ball = 3.5))
+        c = sort(C.neighbors_within(gm, I...; ball = 3.5, reach = C.Connected(St.Moore(1))))
+        lin = LinearIndices((9, 9))
+        Test.@test lin[5, 6] in u              # inside the ball, on the far side of the wall
+        Test.@test !(lin[5, 6] in c)
+        Test.@test issubset(c, u) && length(c) < length(u)
+
+        # The defining property: closed under adjacency through returned cells.
+        function reaches_seed_within(grid, I, r, sten)
+            got = C.neighbors_within(grid, I...; ball = r, reach = C.Connected(sten))
+            sz = size(GD.mask(grid))
+            li = LinearIndices(sz)
+            set = Set(got); push!(set, li[I...])
+            seen = Set([li[I...]]); stack = [li[I...]]
+            while !isempty(stack)
+                ci = Tuple(CartesianIndices(sz)[pop!(stack)])
+                for δ in St.offsets(sten, Val(length(sz)))
+                    J = ntuple(d -> ci[d] + δ[d], length(sz))
+                    all(d -> 1 ≤ J[d] ≤ sz[d], 1:length(sz)) || continue
+                    l = li[J...]
+                    (l in set && !(l in seen)) || continue
+                    push!(seen, l); push!(stack, l)
+                end
+            end
+            return length(seen) == length(set)
+        end
+        Test.@test reaches_seed_within(gm, I, 3.5, St.Moore(1))
+        Test.@test reaches_seed_within(g, (5, 5), 2.5, St.Axial(1))
+
+        # P–Q–R: R is inside the ball but its only path there leaves it, so a pruned walk cannot find
+        # it — which is exactly the difference between the two operators, not a bug in either.
+        m = trues(5); m[2] = false
+        chain = GD.StructuredGrid(geo, collect(0.0:4.0), m)
+        Test.@test 3 in C.neighbors_within(chain, 1; ball = 2.0)
+        Test.@test isempty(C.neighbors_within(chain, 1; ball = 2.0, reach = C.Connected()))
+
+        # Every entry point agrees with every other, under Connected as under Unrestricted.
+        for (grid, seed, r, sten) in ((gm, (5, 3), 3.5, St.Moore(1)), (g, (5, 5), 2.5, St.Axial(1)))
+            rc = C.Connected(sten)
+            n = C.nneighbors_within(grid, seed...; ball = r, reach = rc)
+            l = C.neighbors_within(grid, seed...; ball = r, reach = rc)
+            buf = Vector{Int}(undef, n)
+            C.neighbors_within!(buf, grid, seed...; ball = r, reach = rc)
+            Test.@test n == length(l)
+            Test.@test buf == l
+            # The distances a Connected fold sees are the ball's own.
+            byfold = C.fold_within(Tuple{Int,Float64}[], grid, seed...; ball = r, reach = rc) do acc, J, d
+                push!(acc, (C._linidx(size(GD.mask(grid)), J...), d))
+                return acc
+            end
+            Test.@test [p[1] for p in byfold] == l
+            ref = Dict(C.fold_within(Tuple{Int,Float64}[], grid, seed...; ball = r) do acc, J, d
+                push!(acc, (C._linidx(size(GD.mask(grid)), J...), d))
+                return acc
+            end)
+            Test.@test all(p -> ref[p[1]] == p[2], byfold)
+        end
+
+        # Curvilinear: the same, and the index does not change it.
+        xs = [x for x in range(0.0, 8.0; length = 9), _ in 1:9]
+        ys = [y for _ in 1:9, y in range(0.0, 8.0; length = 9)]
+        cmask = trues(9, 9); cmask[:, 5] .= false
+        gcv = GD.CurvilinearGrid(geo, xs, ys, cmask; measure = fill(1.0, 9, 9))
+        rc = C.Connected(St.Moore(1))
+        cc = sort(C.neighbors_within(gcv, 5, 3; ball = 3.5, reach = rc))
+        Test.@test issubset(cc, sort(C.neighbors_within(gcv, 5, 3; ball = 3.5)))
+        Test.@test length(cc) < length(C.neighbors_within(gcv, 5, 3; ball = 3.5))
+        Test.@test sort(C.neighbors_within(gcv, 5, 3; ball = 3.5, reach = rc,
+                                           topology = C.indexed(gcv))) == cc
+
+        # A node set's adjacency is the one it stores, so a stencil is meaningless there and is refused
+        # rather than ignored.
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+        R = FG.Geometry.radius(GD.grid_geometry(gu))
+        Test.@test issubset(sort(C.neighbors_within(gu, 1; ball = 0.4R, reach = C.Connected())),
+                            sort(C.neighbors_within(gu, 1; ball = 0.4R)))
+        Test.@test_throws ArgumentError C.neighbors_within(
+            gu, 1; ball = 0.4R, reach = C.Connected(St.Axial(1)),
+        )
+        # And a graph query needs each cell to be one node, so image summing is refused.
+        Test.@test_throws ArgumentError C.fold_within(
+            (a, _, _) -> a, 0, g, 5, 5; ball = 2.5, reach = C.Connected(), images = C.AllImages(),
+        )
+    end
+
+    Test.@testset "Ball connectivity builders agree with the per-cell query, on every architecture" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        xs = [x for x in range(0.0, 8.0; length = 9), _ in 1:9]
+        ys = [y for _ in 1:9, y in range(0.0, 8.0; length = 9)]
+        mask = trues(9, 9); mask[3, 7] = false
+        gcv = GD.CurvilinearGrid(geo, xs, ys, mask; measure = fill(1.0, 9, 9))
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+        R = FG.Geometry.radius(GD.grid_geometry(gu))
+
+        for (grid, r, idxs) in ((gcv, 3.5, CartesianIndices((9, 9))),
+                                (gu, 0.35R, CartesianIndices((length(GD.mask(gu)),))))
+            conn = C.build_connectivity_within(grid; ball = r)
+            Test.@test C.is_symmetric_adjacency(conn)
+            for ci in idxs
+                I = Tuple(ci)
+                Test.@test sort(collect(GD.neighbors(conn, C._linidx(size(idxs), I...)))) ==
+                           sort(C.neighbors_within(grid, I...; ball = r))
+            end
+            # Byte-identical whether an index was used, so a build is reproducible either way.
+            scanned = C.build_connectivity_within(grid; ball = r, topology = C.MetricTopology(grid))
+            Test.@test scanned.ptr == conn.ptr
+            Test.@test scanned.nbrs == conn.nbrs
+        end
+    end
+
+    Test.@testset "Connected follows a periodic seam" begin
+        C = FG.Connectivity
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        ring(mask) = FG.Grids.StructuredGrid(geo, collect(0.0:7.0), mask;
+                                             periodic = true, period = 8.0)
+
+        # A ring of 8 at unit spacing: a ball of 2.5 reaches ±2, and the wrap makes it contiguous, so
+        # the component is the whole ball.
+        g = ring(trues(8))
+        Test.@test sort(C.neighbors_within(g, 1; ball = 2.5)) == [2, 3, 7, 8]
+        Test.@test sort(C.neighbors_within(g, 1; ball = 2.5, reach = C.Connected())) == [2, 3, 7, 8]
+
+        # Masking cell 8 cuts the walk one way round. Cell 7 stays in the ball — two cells away across
+        # the seam — but every path to it now leaves the ball or passes through an inactive cell.
+        gm = ring([true, true, true, true, true, true, true, false])
+        Test.@test sort(C.neighbors_within(gm, 1; ball = 2.5)) == [2, 3, 7]
+        Test.@test sort(C.neighbors_within(gm, 1; ball = 2.5, reach = C.Connected())) == [2, 3]
+
+        # Seeded on the far side of the cut, the component runs the other way through the seam.
+        Test.@test sort(C.neighbors_within(gm, 7; ball = 2.5)) == [1, 5, 6]
+        Test.@test sort(C.neighbors_within(gm, 7; ball = 2.5, reach = C.Connected())) == [5, 6]
+    end
+
+    Test.@testset "A ball fold allocates nothing, and nothing that grows with the grid" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        function curv(n)
+            x = [t for t in range(0.0, 1.0 * (n - 1); length = n), _ in 1:n]
+            y = [t for _ in 1:n, t in range(0.0, 1.0 * (n - 1); length = n)]
+            return GD.CurvilinearGrid(geo, x, y, trues(n, n); measure = fill(1.0, n, n))
+        end
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+        R = FG.Geometry.radius(GD.grid_geometry(gu))
+
+        # Unindexed, the candidates are a range, so the traversal touches no heap at all.
+        function nalloc_curv(g, top)
+            FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = top)
+            return @allocated FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = top)
+        end
+        function nalloc_node(g, top, r)
+            FG.Connectivity.nneighbors_within(g, 1; ball = r, topology = top)
+            return @allocated FG.Connectivity.nneighbors_within(g, 1; ball = r, topology = top)
+        end
+        g16 = curv(16)
+        Test.@test nalloc_curv(g16, C.MetricTopology(g16)) == 0
+        Test.@test nalloc_node(gu, C.MetricTopology(gu), 0.3R) == 0
+
+        # Indexed with a buffer, the index's own working set is all that is left, and it does not grow
+        # with the grid — which is the property that makes a sweep's memory flat in `n`.
+        function nalloc_ix(g, ix, s)
+            FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = ix, scratch = s)
+            return @allocated FG.Connectivity.nneighbors_within(
+                g, 8, 8; ball = 3.0, topology = ix, scratch = s,
+            )
+        end
+        a16 = nalloc_ix(g16, C.indexed(g16), C.ball_scratch())
+        a64 = nalloc_ix(curv(64), C.indexed(curv(64)), C.ball_scratch())
+        Test.@test a16 == a64                  # 16× the cells, the same bytes per query
+        Test.@test a16 ≤ 256
+    end
+
+    Test.@testset "Adjacency symmetry is decided by comparison with the transpose" begin
+        C = FG.Connectivity
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        xs = [x for x in range(0.0, 15.0; length = 16), _ in 1:16]
+        ys = [y for _ in 1:16, y in range(0.0, 15.0; length = 16)]
+        g = FG.Grids.CurvilinearGrid(geo, xs, ys, trues(16, 16); measure = fill(1.0, 16, 16))
+        gs = FG.Grids.StructuredGrid(geo, collect(0.0:15.0), collect(0.0:15.0))
+
+        # Symmetric graphs are accepted at any degree, which is the case a ball graph exercises.
+        Test.@test C.is_symmetric_adjacency(C.build_connectivity(gs))
+        for r in (2.0, 6.0)
+            Test.@test C.is_symmetric_adjacency(C.build_connectivity_within(g; ball = r))
+        end
+
+        base = C.build_connectivity_within(g; ball = 2.0)
+        # A one-way edge: overwrite `i` in row `j` with another of row `j`'s own neighbours, so the row
+        # keeps its length and only the reciprocity is broken.
+        oneway = C.csr_connectivity(copy(base.nbrs), copy(base.ptr); validate = false)
+        i = 1
+        j = oneway.nbrs[oneway.ptr[i]]
+        slot = findfirst(q -> oneway.nbrs[q] == i, oneway.ptr[j]:(oneway.ptr[j + 1] - 1))
+        oneway.nbrs[oneway.ptr[j] + slot - 1] =
+            oneway.nbrs[oneway.ptr[j]] == i ? oneway.nbrs[oneway.ptr[j] + 1] : oneway.nbrs[oneway.ptr[j]]
+        Test.@test !C.is_symmetric_adjacency(oneway)
+
+        # An out-of-range neighbour is rejected, not used as an index.
+        oob = C.csr_connectivity(copy(base.nbrs), copy(base.ptr); validate = false)
+        oob.nbrs[1] = 10^6
+        Test.@test !C.is_symmetric_adjacency(oob)
+        Test.@test C.is_symmetric_adjacency(C.csr_connectivity(Int[], Int[1]; validate = false))
+    end
+
+    Test.@testset "A curvilinear measure may be given positionally or by keyword" begin
+        # The docstring offers both forms, so both must build the same grid.
+        geo = FG.Geometry.CartesianGeometry{Float64}()
+        xs = [x for x in range(0.0, 3.0; length = 4), _ in 1:4]
+        ys = [y for _ in 1:4, y in range(0.0, 3.0; length = 4)]
+        a = fill(2.5, 4, 4)
+        bykw = FG.Grids.CurvilinearGrid(geo, xs, ys, trues(4, 4); measure = a)
+        bypos = FG.Grids.CurvilinearGrid(geo, xs, ys, a, trues(4, 4))
+        Test.@test FG.Grids.measure(bykw) == FG.Grids.measure(bypos) == a
+    end
+
 end

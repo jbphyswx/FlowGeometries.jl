@@ -38,6 +38,54 @@ size step:
 Allocation counts are flat in `n` everywhere. `build_connectivity`'s 91 MiB is the CSR output itself
 for ~2M nodes, not overhead.
 
+## Ball queries: nothing per query that belongs to the grid
+
+A ball query has two costs that are properties of the *grid*, not of the query: the smallest step per
+direction, which bounds the candidate window, and — where there are no separable axes to bound with — the
+spatial index that replaces a full scan. Both live in [`Connectivity.MetricTopology`](@ref), built once
+and passed in.
+
+Hoisting the steps, on a stretched axis, with the radius and the number of cells in the window held
+fixed so any growth is overhead:
+
+| axis length | topology hoisted | rebuilt per query |
+|---|---|---|
+| 256 | 0.029 µs | 0.263 µs |
+| 1024 | 0.029 µs | 0.963 µs |
+| 4096 | 0.029 µs | 3.762 µs |
+| 16384 | 0.029 µs | **15.201 µs** |
+
+Flat against linear — and unbounded, not a constant factor, so the gap keeps widening with the axis. Any
+grid with a non-uniform axis pays it, which includes every Gaussian-latitude grid. The hoisted query
+allocates nothing.
+
+Curvilinear and node grids have no window to bound, so a query without an index tests every cell. With
+[`Connectivity.indexed`](@ref) (needs `NearestNeighbors`), one query on a 2-D curvilinear grid, radius
+fixed at 2.5 cells:
+
+| cells | indexed | scanning | speedup |
+|---|---|---|---|
+| 1 024 | 0.734 µs | 4.638 µs | 6.3× |
+| 4 096 | 0.918 µs | 19.496 µs | 21.2× |
+| 16 384 | 1.010 µs | 76.087 µs | 75.3× |
+| 65 536 | 1.426 µs | 304.427 µs | **213.5×** |
+
+and the whole-grid build, which is `n` of those queries:
+
+| cells | indexed | scanning | speedup |
+|---|---|---|---|
+| 1 024 | 0.003 s | 0.010 s | 3.7× |
+| 4 096 | 0.012 s | 0.157 s | 12.8× |
+| 16 384 | 0.049 s | 2.445 s | 50.3× |
+| 65 536 | 0.203 s | 39.597 s | **194.6×** |
+
+`O(n log n)` against `O(n²)`. The index returns a superset and the exact distance gate still decides
+membership, so both columns return byte-identical CSR — the index buys speed and changes nothing else.
+
+[`Connectivity.ball_scratch`](@ref) supplies the candidate buffer. It holds a query to 224 bytes whatever
+the grid size, against up to 6.5 KB of churn without it — the allocation is the point, since a threaded
+sweep gives every task its own buffer and the topology stays read-only.
+
 ## Quadrature
 
 ![Quadrature exactness and cost](assets/quadrature.png)
@@ -125,3 +173,6 @@ Recorded so they are not re-litigated:
   hoist `atan` out of loops.
 - **Vector-axis construction is not superlinear** — the gap against a uniform axis is a constant
   factor, not a growing one.
+- **The ball-query candidate buffer is an allocation win, not a speed win** — 1.03–1.06× in time across
+  20 and 316 candidates, i.e. within run-to-run noise, against 224 bytes per query rather than up to
+  6.5 KB. Worth passing in a sweep for the memory, not worth restructuring a call site for the time.

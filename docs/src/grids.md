@@ -141,6 +141,15 @@ cg3 = FG.Grids.CurvilinearGrid(cart, X, Y, Z, fill(1.0, 4, 3, 2), trues(4, 3, 2)
 size(cg3), FG.Grids.coordinate_names(cg3), FG.Grids.coords(cg3, 2, 3, 2)
 ```
 
+The measure goes either before the mask, as above, or as the `measure` keyword — the same array
+either way:
+
+```@example grids
+FG.Grids.measure(FG.Grids.CurvilinearGrid(cart, X, Y, Z, trues(4, 3, 2);
+                                          measure = fill(1.0, 4, 3, 2))) ==
+    FG.Grids.measure(cg3)
+```
+
 Node grids generalize the same way, with the coordinates as a tuple — a run of vectors cannot say how
 many of them are coordinates, where a curvilinear grid counts them from `ndims(mask)`:
 

@@ -397,7 +397,12 @@ end
 
 # The smallest interior gap of direction `d`, including the seam gap where it wraps — a periodic axis's
 # seam can be its narrowest gap, and a window bound built without it could under-cover across the seam.
-@inline function _min_step(grid::Grids.StructuredGrid{G,T}, d::Int) where {G,T}
+#
+# `Grids.minimum_spacing` is `O(1)` on a uniform axis and an `O(N)` scan on a stretched one, so this is
+# computed ONCE into a `MetricTopology` rather than per query. Called per query it made a stretched-axis
+# ball 53.6× slower than a uniform one at N = 16384, growing without bound, for a window holding the same
+# number of cells either way.
+@inline function _min_step_scan(grid::Grids.StructuredGrid{G,T}, d::Int) where {G,T}
     s = T(Grids.minimum_spacing(grid, d))
     if Grids.isperiodic(grid, d)
         x = Grids.coordinates(grid, d)
@@ -409,6 +414,88 @@ end
     end
     return s
 end
+
+"""
+    MetricTopology(grid; index = nothing)
+
+Everything a distance query reads that depends on the grid alone — the counterpart of
+[`IndexTopology`](@ref) for the metric path.
+
+A stencil query reads `(size, periodic, mask)` and `IndexTopology` carries it. A ball query additionally
+needs the tightest per-direction step bound, which is an `O(N)` scan on a stretched axis, and it needs it
+only to size the search window. Recomputing that per query is the dominant cost of a ball query on any
+grid whose axes are not uniform — a Gaussian latitude axis, for instance.
+
+Build one and pass it to reuse it across queries:
+
+    mt = Connectivity.MetricTopology(grid)
+    for I in CartesianIndices(size(grid))
+        n = Connectivity.nneighbors_within(grid, Tuple(I)...; ball = r, topology = mt)
+    end
+
+Omitting it constructs one per call — the same scan the window bound needs anyway — so a single query is
+no worse for leaving it out; the saving is in hoisting it out of a loop. It is not cached on the grid:
+grid types are immutable and the `Adapt`
+extension reconstructs them field-by-field for a device, so a mutable cache field would break both that
+and thread safety.
+
+`index` holds a spatial index when one is available, for the architectures with no separable axes to bound.
+"""
+struct MetricTopology{N,T,S}
+    steps::NTuple{N,T}   # smallest index step per direction, seam included
+    min3::T              # global minimum of direction 3 (geodetic height); zero below 3 directions
+    index::S
+end
+
+function MetricTopology(grid::Grids.StructuredGrid{G,T,N}; index = nothing) where {G,T,N}
+    steps = ntuple(d -> _min_step_scan(grid, d), Val(N))
+    m3 = N ≥ 3 ? T(minimum(Grids.coordinates(grid, 3))) : zero(T)
+    return MetricTopology{N,T,typeof(index)}(steps, m3, index)
+end
+
+@inline _min_step(mt::MetricTopology, d::Int) = @inbounds mt.steps[d]
+
+# Curvilinear and node grids have no separable axes, so there is no step bound to carry — the topology
+# exists for them to hold the spatial index.
+function MetricTopology(
+    grid::Union{Grids.CurvilinearGrid{T,G,N},Grids.UnstructuredGrid{T,G,N}};
+    index = nothing,
+) where {T,G,N}
+    return MetricTopology{N,T,typeof(index)}(ntuple(_ -> zero(T), Val(N)), zero(T), index)
+end
+
+"""
+    indexed(grid) -> MetricTopology
+
+A [`MetricTopology`](@ref) carrying a spatial index, so ball queries on it cost `O(log n + m)` instead of
+scanning every cell. Requires `NearestNeighbors`; without it [`Grids.spatial_index`](@ref) raises and the
+unindexed topology still works, just linearly.
+"""
+indexed(grid::Grids.AbstractGrid) = MetricTopology(grid; index = Grids.spatial_index(grid))
+
+# Candidate enumeration. Without an index every cell is a candidate; with one, the index returns a
+# superset of the ball and the caller's exact gate does the rest.
+#
+# `scratch` is the index's candidate buffer, owned by the CALLER rather than by the topology: one
+# `MetricTopology` is shared by every task in a threaded sweep, so a buffer inside it would be a data
+# race. Read-only sharing is the property that makes that safe, and it is worth one argument to keep.
+@inline _candidates(mt::MetricTopology, grid, I, r, scratch) =
+    _index_candidates(mt.index, grid, I, r, scratch)
+
+@inline _index_candidates(::Nothing, grid, _I, _r, _scratch) = Base.OneTo(length(Grids.mask(grid)))
+
+# `scratch === nothing` is a type test, not a runtime one, so the branch is resolved at compile time.
+@inline _index_candidates(index, grid, I, r, scratch) =
+    scratch === nothing ? Grids.index_within(index, grid, I, r) :
+                          Grids.index_within!(scratch, index, grid, I, r)
+
+"""
+    ball_scratch() -> Vector{Int}
+
+A candidate buffer to hand to repeated ball queries through their `scratch` argument, so an indexed
+query reuses one allocation instead of making one per call. One buffer per task.
+"""
+ball_scratch() = Int[]
 
 # The smallest `f(x[j])` over the index window, which is what bounds a scale factor that varies across
 # it. Walks the clamped window; a periodic direction can reach every sample, so it walks all of them.
@@ -429,9 +516,10 @@ end
 Per-direction index half-width guaranteed to contain every cell within `ball` of cell `I`.
 
 Each direction is bounded through its smallest gap — [`Grids.minimum_spacing`](@ref), and the seam gap
-where the direction wraps — which is one number on a uniform axis and an `O(N)` scan on a stretched
-one. On a spherical or ellipsoidal grid the longitude cut additionally walks the latitude window for
-its smallest `cosφ`, so it costs the window it returns.
+where the direction wraps — which is one number on a uniform axis and an `O(N)` scan on a stretched one.
+[`MetricTopology`](@ref) holds those gaps, so the four-argument form does no scanning at all; the
+three-argument form builds a topology per call. On a spherical or ellipsoidal grid the longitude cut
+additionally walks the latitude window for its smallest `cosφ`, so it costs the window it returns.
 
 This is a *bound*, not the answer: it is the window [`neighbors_within!`](@ref) scans before filtering on
 the geometry's own `distance`. It never under-covers, which is why it is geometry-specific. On a
@@ -441,12 +529,15 @@ range, and the window says so.
 """
 function metric_window end
 
+metric_window(grid::Grids.StructuredGrid, I::NTuple, ball) =
+    metric_window(grid, I, ball, MetricTopology(grid))
+
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball,
+    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
-    return ntuple(d -> _steps(r, _min_step(grid, d), sz[d]), Val(N))
+    return ntuple(d -> _steps(r, _min_step(mt, d), sz[d]), Val(N))
 end
 
 # Spherical `(λ, φ, r, …)`, distance the great-circle arc (2-D) or the chord (3-D). Both are bounded
@@ -456,21 +547,21 @@ end
 # smallest `cosφ` in the latitude window (`sin(σ/2) ≥ cosφ·sin(|Δλ|/2)` with both endpoint latitudes in
 # that window).
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball,
+    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractSphericalGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
     per = _periodic_flags(grid)
-    wrest = ntuple(d -> _steps(r, _min_step(grid, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
+    wrest = ntuple(d -> _steps(r, _min_step(mt, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
     ρ = if N ≥ 3
         _window_min(abs, Grids.coordinates(grid, 3), Int(I[3]), wrest[1], per[3])
     else
         T(Geometry.radius(Grids.grid_geometry(grid)))
     end
-    wφ = N ≥ 2 ? _angle_steps(r, 2ρ, _min_step(grid, 2), sz[2]) : 0
+    wφ = N ≥ 2 ? _angle_steps(r, 2ρ, _min_step(mt, 2), sz[2]) : 0
     cosmin = N ≥ 2 ?
         _window_min(φ -> abs(cos(φ)), Grids.coordinates(grid, 2), Int(I[2]), wφ, per[2]) : one(T)
-    wλ = _angle_steps(r, 2ρ * cosmin, _min_step(grid, 1), sz[1])
+    wλ = _angle_steps(r, 2ρ * cosmin, _min_step(mt, 1), sz[1])
     return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
 end
 
@@ -486,7 +577,7 @@ end
 #       (|Δφ| ≤ r/M(0) along any path of length ≤ r). 3-D: the chord bound with geocentric radius
 #       ≥ b²/a + hmin and cosψ ≥ cosφ (geocentric latitude is nearer the equator than geodetic).
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball,
+    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractEllipsoidalGeometry, T, N}
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
@@ -494,15 +585,15 @@ function metric_window(
     per = _periodic_flags(grid)
     a = T(Geometry.semimajor_axis(geo))
     M0 = a * (one(T) - T(Geometry.eccentricity²(geo)))   # M(0) = b²/a, the smallest curvature radius
-    wrest = ntuple(d -> _steps(r, _min_step(grid, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
+    wrest = ntuple(d -> _steps(r, _min_step(mt, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
     if N ≥ 3
-        hmin = minimum(Grids.coordinates(grid, 3))
-        wφ = _steps(r, (M0 + hmin - r) * _min_step(grid, 2), sz[2])
+        hmin = mt.min3
+        wφ = _steps(r, (M0 + hmin - r) * _min_step(mt, 2), sz[2])
         cosmin = _window_min(φ -> abs(cos(φ)), Grids.coordinates(grid, 2), Int(I[2]), wφ, per[2])
-        wλ = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(grid, 1), sz[1])
+        wλ = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(mt, 1), sz[1])
         return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
     end
-    wφ = N ≥ 2 ? _steps(r, M0 * _min_step(grid, 2), sz[2]) : 0
+    wφ = N ≥ 2 ? _steps(r, M0 * _min_step(mt, 2), sz[2]) : 0
     cosreach = if N ≥ 2
         φ0 = T(@inbounds Grids.coordinates(grid, 2)[I[2]])
         reach = r / M0
@@ -511,7 +602,7 @@ function metric_window(
     else
         one(T)
     end
-    wλ = _steps(r, a * cosreach * _min_step(grid, 1), sz[1])
+    wλ = _steps(r, a * cosreach * _min_step(mt, 1), sz[1])
     return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
 end
 
@@ -541,6 +632,59 @@ reduced one — what a periodic convolution sums over. See [`fold_within`](@ref)
 """
 struct AllImages <: AbstractImageConvention end
 
+"""
+    AbstractReach
+
+Which of the cells within `ball` a query returns: [`Unrestricted`](@ref), every one of them, or
+[`Connected`](@ref), those reachable from the seed without leaving the ball.
+
+A **type** rather than a flag, like [`AbstractImageConvention`](@ref): the two are different sets computed
+by different algorithms, so which one you get should be visible in the call and fixed at compile time,
+never inferred from a runtime value.
+"""
+abstract type AbstractReach end
+
+"""
+    Unrestricted()
+
+Every cell whose centre lies within `ball`. The default, and a purely spatial query: with a spatial index
+it costs `O(log n + m)` and never consults adjacency.
+
+Note that the result is a ball, **not** a connected patch — with a mask, or a concave domain, it can
+contain cells that are near the seed in space but reachable from it only by leaving the ball.
+"""
+struct Unrestricted <: AbstractReach end
+
+"""
+    Connected()
+    Connected(stencil)
+
+The cells within `ball` reachable from the seed through cells that are themselves within `ball` and
+active: the connected component of the ball that contains the seed. A graph query — it expands along
+adjacency and prunes at the ball's edge — so it is a subset of [`Unrestricted`](@ref). The two agree
+whenever the ball is connected under the adjacency, which a maskless Cartesian `StructuredGrid` always is:
+each index step moves monotonically in one coordinate, so a staircase path to a cell never leaves that
+cell's own distance. `Connected` is strictly smaller wherever a mask or a boundary separates two parts of
+the ball.
+
+Adjacency has to be named, since only a node set carries its own: with no argument, direction-1
+adjacency (`Stencils.Axial(1)`) on the index-space architectures and the stored neighbour lists on an
+`UnstructuredGrid`. `Connected(stencil)` sets it explicitly for the former, and is an error for the
+latter, which has no index space for a stencil to mean anything in.
+
+**This is not a cheaper way to compute `Unrestricted`.** Take cells `P` (the seed), `Q` and `R`, adjacent
+only as `P–Q–R`, with `d(P,Q) = 1.2r` and `d(P,R) = 0.8r`. A walk outward from `P` that drops any cell
+farther than `r` stops at `Q` and never reaches `R`, though `R` is inside the ball. That walk is not a
+broken `Unrestricted` — it is exactly `Connected`, which is why it cannot produce the other one.
+"""
+struct Connected{S} <: AbstractReach
+    adjacency::S
+end
+Connected() = Connected(nothing)
+
+@inline _reach_stencil(::Connected{Nothing}) = Stencils.Axial(1)
+@inline _reach_stencil(c::Connected) = _stencil_val(c.adjacency)
+
 # Per-direction candidate offsets. Bounded: the window, clipped at the walls. Periodic under
 # `NearestImage`: the window clamped to one full turn — offsets congruent mod `n` are the same cell, and
 # the coordinate each is measured at is decided by minimum image, not by which offset reached it.
@@ -559,8 +703,8 @@ end
 
 # Consecutive images of one cell are `period` apart, which is the relevant step for a direction holding a
 # single sample — there `_min_step` has no interior gap to report.
-@inline function _image_step(grid::Grids.StructuredGrid{G,T}, d::Int) where {G,T}
-    s = _min_step(grid, d)
+@inline function _image_step(grid::Grids.StructuredGrid{G,T}, d::Int, mt::MetricTopology) where {G,T}
+    s = _min_step(mt, d)
     if Grids.isperiodic(grid, d)
         p = T(Grids.period(grid, d))
         p > 0 && (s = min(s, p))
@@ -573,12 +717,12 @@ end
 # turns out, and capping at `n` drops every one of them. So a periodic direction gets the UNCAPPED
 # `ceil(r/s)`; a bounded one is unchanged, its offsets being clipped at the walls anyway.
 function _image_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball,
+    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
     return ntuple(Val(N)) do d
-        s = _image_step(grid, d)
+        s = _image_step(grid, d, mt)
         if Grids.isperiodic(grid, d)
             (s > 0 && isfinite(s)) ? Int(ceil(r / s)) : sz[d]
         else
@@ -607,8 +751,8 @@ end
     return nothing
 end
 
-@inline _ball_window(grid, I, ball, ::NearestImage) = metric_window(grid, I, ball)
-@inline _ball_window(grid, _I, ball, ::AllImages) = _image_window(grid, ball)
+@inline _ball_window(grid, I, ball, mt, ::NearestImage) = metric_window(grid, I, ball, mt)
+@inline _ball_window(grid, _I, ball, mt, ::AllImages) = _image_window(grid, ball, mt)
 
 # The candidate's position. Under `NearestImage` the stored coordinate reduced to the image nearest the
 # centre; under `AllImages` the image the offset actually names, built as
@@ -634,7 +778,7 @@ end
 using ..Grids: _min_image, _wrap_lengths
 
 """
-    neighbors_within!(out, grid, I...; ball, active_only=true) -> n_written
+    neighbors_within!(out, grid, I...; ball, active_only=true, topology, scratch, reach) -> n_written
 
 Write the linear indices of every cell whose centre lies within `ball` of cell `I`. `ball` is a
 [`Stencils.MetricBall`](@ref) or a bare radius in the geometry's length units.
@@ -645,9 +789,24 @@ is excluded, matching stencil semantics where the zero offset is not a neighbour
 wraps, each cell appears at most once, and its coordinate is taken by minimum image, so the seam
 neither shortens nor lengthens a distance.
 
-Cost is [`metric_window`](@ref) — `O(1)` per direction on a uniform axis — times one distance evaluation
-per candidate. Size the buffer with [`nneighbors_within`](@ref); there is no fixed count, since how many
+Cost is [`metric_window`](@ref) — `O(1)` per direction on **any** separable axis, uniform or stretched,
+given the per-direction minimum steps that `topology` carries — times one distance evaluation per
+candidate. Size the buffer with [`nneighbors_within`](@ref); there is no fixed count, since how many
 cells fall within a fixed distance varies from cell to cell on any non-uniform or curved grid.
+
+Three arguments matter for anything beyond a single query:
+
+  * `topology` — a [`MetricTopology`](@ref), the grid invariants a ball query reads. Rebuilt per call by
+    default, which is what one query costs anyway; hoist it out of a loop, and on a curvilinear or node
+    grid use [`indexed`](@ref) so each query is `O(log n + m)` rather than a scan of every cell.
+  * `scratch` — a candidate buffer from [`ball_scratch`](@ref), one per task. Accepted on every grid type
+    and used where a query goes through a spatial index, i.e. on a curvilinear or node grid; a separable
+    window has no candidate list to buffer. Without it an indexed query allocates its candidate list per
+    call: 224 bytes whatever the grid size, against up to 6.5 KB of churn. The time difference is within
+    noise — the allocation is the reason to pass one.
+  * `reach` — [`Unrestricted`](@ref) (the ball, and the default) or [`Connected`](@ref) (the part of it
+    reachable from `I` without leaving it). Note that a ball is **not** a connected patch: with a mask or
+    a concave domain it can contain cells reachable from the seed only by going outside `ball`.
 """
 function neighbors_within! end
 
@@ -686,12 +845,15 @@ where a periodic direction is angular rather than a translation.
 `self = true` also folds the centre cell, at distance zero. A neighbour set excludes it, which is the
 default; a convolution needs it, and it carries the kernel's largest weight, so omitting it is not a
 small error.
+
+`reach` selects the ball ([`Unrestricted`](@ref)) or the part of it reachable from the seed without
+leaving it ([`Connected`](@ref)); `topology` and `scratch` are as in [`neighbors_within!`](@ref).
 """
 function fold_within end
 
 @inline function _fold_within(
     f::F, init, grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball,
-    images::AbstractImageConvention, active_only::Bool, self::Bool,
+    images::AbstractImageConvention, active_only::Bool, self::Bool, mt::MetricTopology,
 ) where {F,G,T,N}
     sz = Grids.size_tuple(grid)
     @inbounds for d in 1:N
@@ -702,7 +864,7 @@ function fold_within end
     (active_only && !Grids.isactive(grid, I...)) && return init
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
-    w = _ball_window(grid, I, ball, images)
+    w = _ball_window(grid, I, ball, mt, images)
     prd = map(T, _wrap_lengths(grid, Val(N)))
     sgn = ntuple(d -> T(Grids._wrap_sign(Grids.coordinates(grid, d))), Val(N))
     p0 = Grids._raw_coords(grid, I...)
@@ -727,19 +889,24 @@ end
 # `f::F` rather than a bare `f`: Julia does not specialize on a function-typed argument that is only
 # passed through, so the inner call would be dynamic and box the grid, the index tuple and the radius —
 # 224 bytes per query, against nothing once `F` forces a specialization.
+# `scratch` is accepted and unused here, so the four entry points take the same arguments on every
+# architecture: a separable window enumerates candidates without a buffer to reuse.
 fold_within(
     f::F, init, grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
     ball, images::AbstractImageConvention = NearestImage(),
-    active_only::Bool = true, self::Bool = false,
-) where {F,G,T,N} = _fold_within(f, init, grid, map(Int, I), ball, images, active_only, self)
+    active_only::Bool = true, self::Bool = false, topology = MetricTopology(grid),
+    reach::AbstractReach = Unrestricted(), scratch = nothing,
+) where {F,G,T,N} =
+    _route_fold(f, init, reach, grid, map(Int, I), ball, images, active_only, self, topology)
 
 # The counting and writing forms are the one-image fold with a counting/appending step: one traversal, so
 # the window bound and the distance gate cannot drift between conventions.
 @inline function _within_scan(
     out, grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball, active_only::Bool,
+    mt::MetricTopology = MetricTopology(grid), reach::AbstractReach = Unrestricted(),
 ) where {G,T,N}
     sz = Grids.size_tuple(grid)
-    return _fold_within(0, grid, I, ball, NearestImage(), active_only, false) do n, J, _
+    return _route_fold(0, reach, grid, I, ball, NearestImage(), active_only, false, mt) do n, J, _
         m = n + 1
         out === nothing || _keep!(out, m, _linidx(sz, J...))
         return m
@@ -748,26 +915,47 @@ end
 
 neighbors_within!(
     out::AbstractVector{<:Integer}, grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    ball, active_only::Bool = true,
-) where {G,T,N} = _within_scan(out, grid, map(Int, I), ball, active_only)
+    ball, active_only::Bool = true, topology = MetricTopology(grid),
+    reach::AbstractReach = Unrestricted(), scratch = nothing,
+) where {G,T,N} = _within_scan(out, grid, map(Int, I), ball, active_only, topology, reach)
 
 nneighbors_within(
-    grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N}; ball, active_only::Bool = true,
-) where {G,T,N} = _within_scan(nothing, grid, map(Int, I), ball, active_only)
+    grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
+    ball, active_only::Bool = true, topology = MetricTopology(grid),
+    reach::AbstractReach = Unrestricted(), scratch = nothing,
+) where {G,T,N} = _within_scan(nothing, grid, map(Int, I), ball, active_only, topology, reach)
 
 function neighbors_within(
-    grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N}; ball, active_only::Bool = true,
+    grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
+    ball, active_only::Bool = true, topology = MetricTopology(grid),
+    reach::AbstractReach = Unrestricted(), scratch = nothing,
 ) where {G,T,N}
     Ii = map(Int, I)
-    out = Vector{Int}(undef, _within_scan(nothing, grid, Ii, ball, active_only))
-    _within_scan(out, grid, Ii, ball, active_only)
+    # `Connected` materializes its component to walk it, so a counting pass would repeat the whole walk;
+    # append in one pass instead. `Unrestricted` keeps the two-pass form, where counting is a cheap
+    # window walk and the exact size beats growing the output.
+    if reach isa Connected
+        sz = Grids.size_tuple(grid)
+        return _route_fold(Int[], reach, grid, Ii, ball, NearestImage(), active_only, false, topology) do v, J, _
+            push!(v, _linidx(sz, J...))
+            return v
+        end
+    end
+    out = Vector{Int}(undef, _within_scan(nothing, grid, Ii, ball, active_only, topology, reach))
+    _within_scan(out, grid, Ii, ball, active_only, topology, reach)
     return out
 end
 
 # ---- Curvilinear and unstructured -------------------------------------------
-# Neither has separable axes, so no index window bounds the ball and the scan is over every cell. Exact,
-# and `O(n)` per query: to query many cells of a large grid, materialize `build_connectivity_within`
-# once instead.
+# Neither has separable axes, so `metric_window` has nothing to bound with. Two ways to enumerate
+# candidates, and the fold below is written so they cannot disagree:
+#
+#   * no index — every cell, `O(n)` per query.
+#   * a spatial index — a range query, `O(log n + m)`.
+#
+# The index only has to return a SUPERSET of the ball: the exact `distance ≤ r` gate below is unchanged
+# and decides membership either way. That is what makes the indexed and unindexed results identical by
+# construction rather than by agreement of two implementations.
 
 @inline function _keep!(out, n::Int, lin::Int)
     n ≤ length(out) ||
@@ -776,81 +964,335 @@ end
     return nothing
 end
 
-function _within_scan_curvilinear(
-    out, grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball, active_only::Bool,
-) where {T,G,N}
+@inline function _fold_within(
+    f::F, init, grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball,
+    active_only::Bool, self::Bool, mt::MetricTopology, scratch = nothing,
+) where {F,T,G,N}
     sz = Grids.size_tuple(grid)
     @inbounds for d in 1:N
         (1 ≤ I[d] ≤ sz[d]) || throw(BoundsError(Grids.mask(grid), I))
     end
-    (active_only && !Grids.isactive(grid, I...)) && return 0
+    (active_only && !Grids.isactive(grid, I...)) && return init
     geo = Grids.grid_geometry(grid)
     r = _ball_radius(ball)
     p0 = Grids._raw_coords(grid, I...)
     prd = map(x -> oftype(first(p0), x), _wrap_lengths(grid, Val(N)))
     msk = Grids.mask(grid)
-    n = 0
-    @inbounds for ci in CartesianIndices(sz)
-        J = Tuple(ci)
+    acc = init
+    self && (acc = f(acc, I, zero(eltype(p0))))
+    for lin in _candidates(mt, grid, I, r, scratch)
+        J = Tuple(@inbounds CartesianIndices(sz)[lin])
         J == I && continue
-        active_only && !msk[J...] && continue
+        @inbounds active_only && !msk[J...] && continue
         q = _min_image(p0, Grids._raw_coords(grid, J...), prd)
-        Geometry.distance(geo, p0, q) ≤ r || continue
-        n += 1
-        out === nothing || _keep!(out, n, _linidx(sz, J...))
+        dist = Geometry.distance(geo, p0, q)
+        dist ≤ r || continue
+        acc = f(acc, J, dist)
     end
-    return n
+    return acc
 end
 
-function _within_scan_unstructured(
-    out, grid::Grids.UnstructuredGrid{T,G,N}, idx::Int, ball, active_only::Bool,
+fold_within(
+    f::F, init, grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
+    ball, active_only::Bool = true, self::Bool = false, topology = MetricTopology(grid),
+    scratch = nothing, reach::AbstractReach = Unrestricted(),
+) where {F,T,G,N} =
+    _route_fold(f, init, reach, grid, map(Int, I), ball, active_only, self, topology, scratch)
+
+function _within_scan_curvilinear(
+    out, grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball, active_only::Bool,
+    mt::MetricTopology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
 ) where {T,G,N}
+    sz = Grids.size_tuple(grid)
+    return _route_fold(0, reach, grid, I, ball, active_only, false, mt, scratch) do n, J, _
+        m = n + 1
+        out === nothing || _keep!(out, m, _linidx(sz, J...))
+        return m
+    end
+end
+
+# Appending fold, for the allocating `neighbors_within`. Unlike the structured window — where the
+# counting pass is a cheap walk and an exact size beats growth — here it is a second tree query or a
+# second full scan, so growing the output in one pass is the cheaper of the two.
+function _within_push_curvilinear(
+    grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball, active_only::Bool,
+    mt::MetricTopology, scratch, reach::AbstractReach,
+) where {T,G,N}
+    sz = Grids.size_tuple(grid)
+    return _route_fold(Int[], reach, grid, I, ball, active_only, false, mt, scratch) do v, J, _
+        push!(v, _linidx(sz, J...))
+        return v
+    end
+end
+
+@inline function _fold_within(
+    f::F, init, grid::Grids.UnstructuredGrid{T,G,N}, idx::Int, ball,
+    active_only::Bool, self::Bool, mt::MetricTopology, scratch = nothing,
+) where {F,T,G,N}
     msk = Grids.mask(grid)
     1 ≤ idx ≤ length(msk) || throw(BoundsError(msk, idx))
-    (active_only && !Grids.isactive(grid, idx)) && return 0
+    (active_only && !Grids.isactive(grid, idx)) && return init
     geo = Grids.grid_geometry(grid)
     r = _ball_radius(ball)
     p0 = Grids._raw_coords(grid, idx)
     prd = map(x -> oftype(first(p0), x), _wrap_lengths(grid, Val(N)))
-    n = 0
-    @inbounds for k in eachindex(msk)
+    acc = init
+    self && (acc = f(acc, idx, zero(eltype(p0))))
+    for k in _candidates(mt, grid, idx, r, scratch)
         k == idx && continue
-        active_only && !msk[k] && continue
+        @inbounds active_only && !msk[k] && continue
         q = _min_image(p0, Grids._raw_coords(grid, k), prd)
-        Geometry.distance(geo, p0, q) ≤ r || continue
-        n += 1
-        out === nothing || _keep!(out, n, k)
+        dist = Geometry.distance(geo, p0, q)
+        dist ≤ r || continue
+        acc = f(acc, k, dist)
     end
-    return n
+    return acc
+end
+
+fold_within(
+    f::F, init, grid::Grids.UnstructuredGrid, idx::Integer;
+    ball, active_only::Bool = true, self::Bool = false, topology = MetricTopology(grid),
+    scratch = nothing, reach::AbstractReach = Unrestricted(),
+) where {F} = _route_fold(f, init, reach, grid, Int(idx), ball, active_only, self, topology, scratch)
+
+function _within_scan_unstructured(
+    out, grid::Grids.UnstructuredGrid, idx::Int, ball, active_only::Bool,
+    mt::MetricTopology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+)
+    return _route_fold(0, reach, grid, idx, ball, active_only, false, mt, scratch) do n, k, _
+        m = n + 1
+        out === nothing || _keep!(out, m, k)
+        return m
+    end
+end
+
+function _within_push_unstructured(
+    grid::Grids.UnstructuredGrid, idx::Int, ball, active_only::Bool, mt::MetricTopology, scratch,
+    reach::AbstractReach,
+)
+    return _route_fold(Int[], reach, grid, idx, ball, active_only, false, mt, scratch) do v, k, _
+        push!(v, k)
+        return v
+    end
 end
 
 nneighbors_within(
-    grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N}; ball, active_only::Bool = true,
-) where {T,G,N} = _within_scan_curvilinear(nothing, grid, map(Int, I), ball, active_only)
+    grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
+    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+) where {T,G,N} =
+    _within_scan_curvilinear(nothing, grid, map(Int, I), ball, active_only, topology, scratch, reach)
 neighbors_within!(
     out::AbstractVector{<:Integer}, grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
-    ball, active_only::Bool = true,
-) where {T,G,N} = _within_scan_curvilinear(out, grid, map(Int, I), ball, active_only)
-function neighbors_within(
-    grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N}; ball, active_only::Bool = true,
-) where {T,G,N}
-    Ii = map(Int, I)
-    out = Vector{Int}(undef, _within_scan_curvilinear(nothing, grid, Ii, ball, active_only))
-    _within_scan_curvilinear(out, grid, Ii, ball, active_only)
-    return out
-end
+    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+) where {T,G,N} =
+    _within_scan_curvilinear(out, grid, map(Int, I), ball, active_only, topology, scratch, reach)
+neighbors_within(
+    grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
+    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+) where {T,G,N} =
+    _within_push_curvilinear(grid, map(Int, I), ball, active_only, topology, scratch, reach)
 
-nneighbors_within(grid::Grids.UnstructuredGrid, idx::Integer; ball, active_only::Bool = true) =
-    _within_scan_unstructured(nothing, grid, Int(idx), ball, active_only)
+nneighbors_within(
+    grid::Grids.UnstructuredGrid, idx::Integer;
+    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+) = _within_scan_unstructured(nothing, grid, Int(idx), ball, active_only, topology, scratch, reach)
 neighbors_within!(
     out::AbstractVector{<:Integer}, grid::Grids.UnstructuredGrid, idx::Integer;
-    ball, active_only::Bool = true,
-) = _within_scan_unstructured(out, grid, Int(idx), ball, active_only)
-function neighbors_within(grid::Grids.UnstructuredGrid, idx::Integer; ball, active_only::Bool = true)
-    out = Vector{Int}(undef, nneighbors_within(grid, idx; ball, active_only))
-    _within_scan_unstructured(out, grid, Int(idx), ball, active_only)
-    return out
+    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+) = _within_scan_unstructured(out, grid, Int(idx), ball, active_only, topology, scratch, reach)
+neighbors_within(
+    grid::Grids.UnstructuredGrid, idx::Integer;
+    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
+    reach::AbstractReach = Unrestricted(),
+) = _within_push_unstructured(grid, Int(idx), ball, active_only, topology, scratch, reach)
+
+# ---------------------------------------------------------------------------
+# Reach: the ball, or the part of it reachable from the seed
+# ---------------------------------------------------------------------------
+#
+# `Unrestricted` and `Connected` are declared with the image conventions above, since the entry points'
+# signatures name them; what follows is how `Connected` is computed.
+
+# Adjacency as a callable, so the walk below is written once: `adj(lin) do nb … end` visits the
+# neighbours of `lin` without materializing a list per cell.
+struct _IndexSpaceAdjacency{N,O}
+    size::NTuple{N,Int}
+    periodic::NTuple{N,Bool}
+    offsets::O
 end
+
+@inline function (a::_IndexSpaceAdjacency{N})(cb::F, lin::Int) where {N,F}
+    I = Tuple(@inbounds CartesianIndices(a.size)[lin])
+    for δ in a.offsets
+        J = ntuple(d -> _wrap_or_clip(I[d], δ[d], a.size[d], a.periodic[d]), Val(N))
+        any(==(0), J) && continue
+        cb(_linidx(a.size, J...))
+    end
+    return nothing
+end
+
+struct _StoredAdjacency{VN,VP}
+    nbrs::VN
+    ptr::VP
+end
+
+@inline function (a::_StoredAdjacency)(cb::F, k::Int) where {F}
+    @inbounds for t in a.ptr[k]:(a.ptr[k + 1] - 1)
+        cb(Int(a.nbrs[t]))
+    end
+    return nothing
+end
+
+# Sort the ball by linear index so membership is a binary search rather than a `Set`: the walk tests
+# membership once per (cell, neighbour) pair, and `searchsortedfirst` over a sorted `Vector{Int}` beats
+# hashing at these sizes without allocating a dictionary per query.
+function _sort_ball!(idxs::Vector{Int}, ds::Vector)
+    p = sortperm(idxs)
+    permute!(idxs, p)
+    permute!(ds, p)
+    return nothing
+end
+
+# The seed's component, as positions into `idxs` in breadth-first order.
+function _component(idxs::Vector{Int}, seed::Int, adj::A) where {A}
+    m = length(idxs)
+    pos = searchsortedfirst(idxs, seed)
+    (pos ≤ m && @inbounds(idxs[pos]) == seed) || return Int[]   # inactive seed: an empty ball
+    visited = falses(m)
+    order = Vector{Int}()
+    sizehint!(order, m)
+    queue = Int[pos]
+    @inbounds visited[pos] = true
+    while !isempty(queue)
+        p = popfirst!(queue)
+        push!(order, p)
+        adj(@inbounds idxs[p]) do nb
+            q = searchsortedfirst(idxs, nb)
+            (q ≤ m && @inbounds(idxs[q]) == nb && !@inbounds(visited[q])) || return nothing
+            @inbounds visited[q] = true
+            push!(queue, q)
+            return nothing
+        end
+    end
+    return order
+end
+
+# The ball as (linear indices, distances), seed included — the walk needs random access to it, which a
+# fold cannot give. `self = true` here regardless of the caller's `self`, since the seed is the walk's
+# root; it is dropped afterwards if the caller did not ask for it.
+function _ball_lists(
+    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball,
+    images::AbstractImageConvention, active_only::Bool, mt::MetricTopology,
+) where {G,T,N}
+    sz = Grids.size_tuple(grid)
+    idxs, ds = Int[], T[]
+    _fold_within(nothing, grid, I, ball, images, active_only, true, mt) do _, J, d
+        push!(idxs, _linidx(sz, J...))
+        push!(ds, d)
+        return nothing
+    end
+    _sort_ball!(idxs, ds)
+    return idxs, ds
+end
+
+function _ball_lists(
+    grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball, active_only::Bool,
+    mt::MetricTopology, scratch,
+) where {T,G,N}
+    sz = Grids.size_tuple(grid)
+    idxs, ds = Int[], T[]
+    _fold_within(nothing, grid, I, ball, active_only, true, mt, scratch) do _, J, d
+        push!(idxs, _linidx(sz, J...))
+        push!(ds, d)
+        return nothing
+    end
+    _sort_ball!(idxs, ds)
+    return idxs, ds
+end
+
+function _ball_lists(
+    grid::Grids.UnstructuredGrid{T,G,N}, idx::Int, ball, active_only::Bool,
+    mt::MetricTopology, scratch,
+) where {T,G,N}
+    idxs, ds = Int[], T[]
+    _fold_within(nothing, grid, idx, ball, active_only, true, mt, scratch) do _, k, d
+        push!(idxs, k)
+        push!(ds, d)
+        return nothing
+    end
+    _sort_ball!(idxs, ds)
+    return idxs, ds
+end
+
+# Fold over the component in breadth-first order. Distances come from the ball pass, so a `Connected`
+# fold sees exactly the distances an `Unrestricted` one does.
+@inline function _emit_component(
+    f::F, init, idxs::Vector{Int}, ds::Vector, order::Vector{Int}, seed::Int, self::Bool, to_index::C,
+) where {F,C}
+    acc = init
+    @inbounds for p in order
+        lin = idxs[p]
+        (lin == seed && !self) && continue
+        acc = f(acc, to_index(lin), ds[p])
+    end
+    return acc
+end
+
+function _connected_fold(
+    f::F, init, grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Int}, ball,
+    images::AbstractImageConvention, active_only::Bool, self::Bool, mt::MetricTopology,
+    reach::Connected,
+) where {F,G,T,N}
+    images isa NearestImage || throw(ArgumentError(
+        "`Connected` is a graph query, so a cell must be one node: use `NearestImage`, not `$(images)`",
+    ))
+    sz = Grids.size_tuple(grid)
+    idxs, ds = _ball_lists(grid, I, ball, images, active_only, mt)
+    adj = _IndexSpaceAdjacency(sz, _periodic_flags(grid), _stencil_offsets(Val{N}(), _reach_stencil(reach)))
+    seed = _linidx(sz, I...)
+    order = _component(idxs, seed, adj)
+    ci = CartesianIndices(sz)
+    return _emit_component(f, init, idxs, ds, order, seed, self, lin -> Tuple(@inbounds ci[lin]))
+end
+
+function _connected_fold(
+    f::F, init, grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball,
+    active_only::Bool, self::Bool, mt::MetricTopology, scratch, reach::Connected,
+) where {F,T,G,N}
+    sz = Grids.size_tuple(grid)
+    idxs, ds = _ball_lists(grid, I, ball, active_only, mt, scratch)
+    adj = _IndexSpaceAdjacency(sz, _periodic_flags(grid), _stencil_offsets(Val{N}(), _reach_stencil(reach)))
+    seed = _linidx(sz, I...)
+    order = _component(idxs, seed, adj)
+    ci = CartesianIndices(sz)
+    return _emit_component(f, init, idxs, ds, order, seed, self, lin -> Tuple(@inbounds ci[lin]))
+end
+
+function _connected_fold(
+    f::F, init, grid::Grids.UnstructuredGrid, idx::Int, ball,
+    active_only::Bool, self::Bool, mt::MetricTopology, scratch, reach::Connected,
+) where {F}
+    reach isa Connected{Nothing} || throw(ArgumentError(
+        "an `UnstructuredGrid` has no index space for a stencil to mean anything in; its adjacency is " *
+        "the neighbour lists it stores, so use `Connected()`",
+    ))
+    idxs, ds = _ball_lists(grid, idx, ball, active_only, mt, scratch)
+    adj = _StoredAdjacency(Grids.neighbor_nbrs(grid), Grids.neighbor_ptr(grid))
+    order = _component(idxs, idx, adj)
+    return _emit_component(f, init, idxs, ds, order, idx, self, identity)
+end
+
+# The one place reach is selected. Dispatching on the singleton keeps the choice at compile time, so
+# `Unrestricted` pays nothing for `Connected` existing.
+@inline _route_fold(f::F, init, ::Unrestricted, args...) where {F} = _fold_within(f, init, args...)
+@inline _route_fold(f::F, init, r::Connected, args...) where {F} = _connected_fold(f, init, args..., r)
 
 # ---------------------------------------------------------------------------
 # build_connectivity
@@ -883,8 +1325,15 @@ end
 Materialize the CSR adjacency of every pair of cells within `ball` of each other — the bulk form of
 [`neighbors_within`](@ref), row `k` holding exactly what the per-cell query returns for cell `k`.
 
-Symmetric by construction, since the metric is. On scattered points use the k-d-tree
-`unstructured_grid` constructor's `radius`, which builds exactly this.
+Symmetric by construction, since the metric is.
+
+On the architectures with no separable axes to bound a window with — curvilinear and node grids — the
+default `topology` is [`indexed`](@ref) when `NearestNeighbors` is loaded, making the build
+`O(n log n)` rather than `O(n²)`; pass `topology = MetricTopology(grid)` for the scanning build.
+
+Rows are balls, i.e. [`Unrestricted`](@ref), and there is no [`Connected`](@ref) form: reachability
+within one cell's ball is not a symmetric relation — a bridge cell can lie in one ball and not the
+other — so such a graph would not be an adjacency.
 """
 function build_connectivity_within end
 
@@ -897,9 +1346,10 @@ function build_connectivity_within(
     n = prod(sz)
     ci = CartesianIndices(sz)
     deg = zeros(Int, n)
+    mt = MetricTopology(grid)     # a grid invariant: built once, not once per row
     Execution.run_chunks(n, backend) do rng
         @inbounds for k in rng
-            deg[k] = _within_scan(nothing, grid, Tuple(ci[k]), ball, active_only)
+            deg[k] = _within_scan(nothing, grid, Tuple(ci[k]), ball, active_only, mt)
         end
     end
     ptr = Vector{Int}(undef, n + 1)
@@ -911,7 +1361,7 @@ function build_connectivity_within(
     Execution.run_chunks(n, backend) do rng
         @inbounds for k in rng
             deg[k] == 0 && continue
-            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Tuple(ci[k]), ball, active_only)
+            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Tuple(ci[k]), ball, active_only, mt)
         end
     end
     return csr_connectivity(nbrs, ptr; validate = false)
@@ -987,18 +1437,28 @@ function build_connectivity(
     )
 end
 
-# No index window bounds a ball on curvilinear coordinates, so each row is a full scan and the build is
-# O(n²) — done once, which is the point of materializing it.
+# A sweep is where an index pays for itself — it amortizes over `n` rows, where a single query would
+# pay `O(n log n)` to save one `O(n)` scan. So this builds one by default when one can be built, which
+# turns the whole build from `O(n²)` into `O(n log n)`. `topology` overrides that either way.
+#
+# `default_sweep_topology` is not a silent fallback: with no extension loaded there is no index to
+# have, and the unindexed topology computes the same rows.
+default_sweep_topology(grid::Grids.AbstractGrid) =
+    Grids.has_spatial_index(grid) ? indexed(grid) : MetricTopology(grid)
+
 function build_connectivity_within(
     grid::Grids.CurvilinearGrid; ball, active_only::Bool = true, backend = nothing,
+    topology = default_sweep_topology(grid),
 )
     sz = Grids.size_tuple(grid)
     n = prod(sz)
     ci = CartesianIndices(sz)
     deg = zeros(Int, n)
+    # One candidate buffer per chunk, since the topology is shared read-only across them.
     Execution.run_chunks(n, backend) do rng
+        s = ball_scratch()
         @inbounds for k in rng
-            deg[k] = _within_scan_curvilinear(nothing, grid, Tuple(ci[k]), ball, active_only)
+            deg[k] = _within_scan_curvilinear(nothing, grid, Tuple(ci[k]), ball, active_only, topology, s)
         end
     end
     ptr = Vector{Int}(undef, n + 1)
@@ -1008,10 +1468,40 @@ function build_connectivity_within(
     end
     nbrs = Vector{Int}(undef, ptr[end] - 1)
     Execution.run_chunks(n, backend) do rng
+        s = ball_scratch()
         @inbounds for k in rng
             deg[k] == 0 && continue
             _within_scan_curvilinear(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Tuple(ci[k]), ball,
-                                     active_only)
+                                     active_only, topology, s)
+        end
+    end
+    return csr_connectivity(nbrs, ptr; validate = false)
+end
+
+function build_connectivity_within(
+    grid::Grids.UnstructuredGrid; ball, active_only::Bool = true, backend = nothing,
+    topology = default_sweep_topology(grid),
+)
+    n = length(Grids.mask(grid))
+    deg = zeros(Int, n)
+    Execution.run_chunks(n, backend) do rng
+        s = ball_scratch()
+        @inbounds for k in rng
+            deg[k] = _within_scan_unstructured(nothing, grid, k, ball, active_only, topology, s)
+        end
+    end
+    ptr = Vector{Int}(undef, n + 1)
+    ptr[1] = 1
+    @inbounds for i in 1:n
+        ptr[i + 1] = ptr[i] + deg[i]
+    end
+    nbrs = Vector{Int}(undef, ptr[end] - 1)
+    Execution.run_chunks(n, backend) do rng
+        s = ball_scratch()
+        @inbounds for k in rng
+            deg[k] == 0 && continue
+            _within_scan_unstructured(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, k, ball,
+                                      active_only, topology, s)
         end
     end
     return csr_connectivity(nbrs, ptr; validate = false)
@@ -1160,22 +1650,46 @@ end
 """
     is_symmetric_adjacency(conn) -> Bool
 
-Whether `j ∈ N(i)` implies `i ∈ N(j)` throughout. `O(nedges·degree)`; guards the shortcut that reads
-a CSR as a CSC.
+Whether `j ∈ N(i)` implies `i ∈ N(j)` throughout. `O(nedges + nnodes)`, by comparing the graph with its
+transpose rather than searching a row per edge; guards the shortcut that reads a CSR as a CSC.
 """
 function is_symmetric_adjacency(conn::CSRConnectivity)
     ptr, nbrs = conn.ptr, conn.nbrs
-    @inbounds for i in 1:nnodes(conn)
+    n = nnodes(conn)
+    n == 0 && return true
+    # Transpose by counting sort, then compare each row against it. Searching row `j` for `i` per edge
+    # instead is `O(nedges·degree)`, which a stencil graph hides (degree 6) and a ball graph does not
+    # (degree in the hundreds).
+    deg = zeros(Int, n)
+    @inbounds for k in eachindex(nbrs)
+        j = Int(nbrs[k])
+        (1 ≤ j ≤ n) || return false
+        deg[j] += 1
+    end
+    tptr = Vector{Int}(undef, n + 1)
+    tptr[1] = 1
+    @inbounds for i in 1:n
+        tptr[i + 1] = tptr[i] + deg[i]
+    end
+    cursor = copy(tptr)
+    tnbrs = Vector{Int}(undef, length(nbrs))
+    @inbounds for i in 1:n
         for k in ptr[i]:(ptr[i + 1] - 1)
-            j = nbrs[k]
-            found = false
-            for q in ptr[j]:(ptr[j + 1] - 1)
-                if nbrs[q] == i
-                    found = true
-                    break
-                end
-            end
-            found || return false
+            j = Int(nbrs[k])
+            tnbrs[cursor[j]] = i
+            cursor[j] += 1
+        end
+    end
+    # Row `i` of the transpose is exactly the set of nodes naming `i`. Equal degrees plus every
+    # transpose entry present in row `i` means the two rows agree, which is the symmetry claim.
+    stamp = zeros(Int, n)
+    @inbounds for i in 1:n
+        (ptr[i + 1] - ptr[i]) == (tptr[i + 1] - tptr[i]) || return false
+        for k in ptr[i]:(ptr[i + 1] - 1)
+            stamp[Int(nbrs[k])] = i
+        end
+        for k in tptr[i]:(tptr[i + 1] - 1)
+            stamp[tnbrs[k]] == i || return false
         end
     end
     return true

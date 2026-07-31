@@ -1459,8 +1459,8 @@ function _split_curvilinear_args(args::Tuple)
 end
 
 function _curvilinear_grid(
-    geometry::G, coords::NTuple{N,AbstractArray}, measure, mask::AbstractArray{Bool,N};
-    corners = nothing, measure_kw = nothing,
+    geometry::G, coords::NTuple{N,AbstractArray}, measure_pos, mask::AbstractArray{Bool,N};
+    corners = nothing, measure = nothing,
     x_corner = nothing, y_corner = nothing,
     topology = nothing, period = nothing, periodic = nothing, backend = nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
@@ -1494,7 +1494,7 @@ function _curvilinear_grid(
         end
     end
 
-    m = measure === nothing ? measure_kw : measure
+    m = measure_pos === nothing ? measure : measure_pos
     meas = if m !== nothing
         size(m) == size(mask) || throw(ArgumentError(
             "measure size $(size(m)) does not match the coordinate arrays' $(size(mask))",
@@ -1731,6 +1731,46 @@ function _build_kdtree_neighbors(
         "(or build adjacency explicitly and pass it to `UnstructuredGrid` alongside the coordinates).",
     ))
 end
+
+"""
+    has_spatial_index(grid) -> Bool
+
+Whether [`spatial_index`](@ref) can be built for this grid — `false` until the NearestNeighbors
+extension is loaded. Lets a bulk operation choose the indexed path when it is available without
+calling `spatial_index` speculatively and catching its error.
+"""
+has_spatial_index(::AbstractGrid) = false
+
+"""
+    spatial_index(grid) -> opaque index
+
+Extension hook: a range-queryable spatial index over the grid's cell centres, overridden by the
+NearestNeighbors extension. Paired with [`index_within!`](@ref).
+"""
+function spatial_index(grid::AbstractGrid)
+    throw(ArgumentError(
+        "a spatial index requires NearestNeighbors.jl — run `using NearestNeighbors`. Without it a ball " *
+        "query on this grid scans every cell, which is correct but linear per query.",
+    ))
+end
+
+"""
+    index_within!(buffer, index, grid, I, r) -> candidate cell indices
+    index_within(index, grid, I, r) -> candidate cell indices
+
+Extension hook: the cells an index reports near `I`, as linear indices. It must return a **superset** of
+the cells within `r`; the caller applies the exact distance gate, so over-returning is safe and
+under-returning is not.
+
+`index_within!` overwrites and returns `buffer`, which is how a sweep over many cells avoids one heap
+allocation per query — 224 bytes against up to 6.5 KB, measured on a 316-candidate ball. `index_within`
+is the same query into a fresh vector.
+"""
+function index_within!(buffer::AbstractVector{<:Integer}, index, grid, I, r)
+    throw(ArgumentError("no `index_within!` method for $(typeof(index)); build one with `spatial_index`"))
+end
+
+index_within(index, grid, I, r) = index_within!(Int[], index, grid, I, r)
 
 """
     _voronoi_areas(geometry, x, y) -> Vector{T}

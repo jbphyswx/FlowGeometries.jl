@@ -129,7 +129,8 @@ FG.Connectivity.neighbors_within!(buf, g, 5, 7; ball = 2.0e6)
 buf
 ```
 
-The candidate window is [`Connectivity.metric_window`](@ref) — `O(1)` per direction on a uniform axis —
+The candidate window is [`Connectivity.metric_window`](@ref) — `O(1)` per direction on any separable
+axis, uniform or stretched, given the minimum steps [`Connectivity.MetricTopology`](@ref) carries —
 and each candidate is then kept or dropped by the geometry's `distance`, so the result is a genuine
 metric ball: great-circle on a sphere, Vincenty on a spheroid, the chord where a radial or height
 direction is present. Periodic directions wrap by minimum image, so a ball sitting on the seam is the
@@ -202,10 +203,78 @@ csr = FG.Connectivity.build_connectivity_within(g; ball = 2.0e6)
 FG.Connectivity.nedges(csr), FG.Connectivity.is_symmetric_adjacency(csr)
 ```
 
-The observation the whole module rests on is that a neighbour computation never looks at a
+### What a ball query reads about the grid
+
+The observation the stencil side of the module rests on is that a neighbour computation never looks at a
 coordinate. It reads three things — extent per dimension, wrapping per dimension, and which cells are
 active — and nothing else. That triple is `IndexTopology`, and it is why a curvilinear grid needs no
 separate implementation from a structured one: it is the `N = 2` case of the same algorithm.
+
+A ball query is the one thing that cannot work that way. It needs coordinates, and the smallest step per
+direction, which is what bounds the candidate window on a **stretched** axis. That is
+[`Connectivity.MetricTopology`](@ref), the same idea for the metric path: a grid invariant, so it should
+be built once and handed to every query rather than rebuilt per call:
+
+```@example conn
+mt = FG.Connectivity.MetricTopology(g)
+FG.Connectivity.nneighbors_within(g, 5, 7; ball = ball, topology = mt)
+```
+
+Omitting it costs what one query costs anyway. Hoisting it out of a loop is the saving, and on any grid
+with a non-uniform axis — every Gaussian-latitude grid, for instance — that saving is unbounded in the
+axis length rather than a constant factor.
+
+Curvilinear and node grids have no separable axes for a window to bound, so there is nothing to hoist
+and a query would have to test every cell. With `NearestNeighbors` loaded, [`Connectivity.indexed`](@ref)
+puts a k-d tree in the topology instead, turning each query into a range search:
+
+```@example conn
+using NearestNeighbors                                    # loads the extension
+gu = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(8))
+ixu = FG.Connectivity.indexed(gu)
+scratch = FG.Connectivity.ball_scratch()
+FG.Connectivity.nneighbors_within(gu, 1; ball = 2.0e6, topology = ixu, scratch = scratch)
+```
+
+The index only ever returns a *superset* of the ball — the exact `distance ≤ r` gate still decides
+membership — so the indexed and scanning paths return the identical list, in the identical order, and
+loading the extension changes speed and nothing else. [`Connectivity.ball_scratch`](@ref) is the
+candidate buffer, one per task; without it each query allocates its own. `build_connectivity_within`
+uses an index by default when one is available, which is what makes a whole-grid build `O(n log n)`
+rather than `O(n²)`.
+
+### The ball, and the part of it you can get to
+
+A ball is not a connected patch. With a mask, or a concave domain, it can contain cells that are close to
+the seed in space but reachable from it only by leaving the ball. Both sets are useful and they are
+different algorithms, so `reach` names which one you get:
+
+```@example conn
+wall = trues(9, 9); wall[:, 5] .= false                  # a barrier through the middle
+gw = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
+                             collect(0.0:8.0), collect(0.0:8.0), wall)
+length(FG.Connectivity.neighbors_within(gw, 5, 3; ball = 3.5)),
+length(FG.Connectivity.neighbors_within(gw, 5, 3; ball = 3.5,
+                                        reach = FG.Connectivity.Connected(S.Moore(1))))
+```
+
+[`Connectivity.Unrestricted`](@ref) is every cell within the radius, and the default.
+[`Connectivity.Connected`](@ref) is the connected component of that set containing the seed: it walks
+adjacency and prunes at the ball's edge, so it is a subset. The two agree whenever the ball is connected
+under the adjacency — always so on a maskless Cartesian `StructuredGrid`, where each index step moves
+monotonically in one coordinate — and `Connected` is strictly smaller wherever something separates two
+parts of the ball.
+
+The two are easy to conflate, so it is worth being precise about why one cannot be computed as a cheaper
+version of the other. Take cells `P` (the seed), `Q` and `R`, adjacent only as `P–Q–R`, with
+`d(P,Q) = 1.2r` and `d(P,R) = 0.8r`. Walking outward from `P` and dropping anything farther than `r`
+stops at `Q`, so it never reaches `R` — which *is* inside the ball. That walk is not a broken
+`Unrestricted`; it is exactly `Connected`.
+
+Adjacency has to be named, because only a node set carries its own: `Connected()` means direction-1
+adjacency on the index-space architectures and the stored neighbour lists on an `UnstructuredGrid`, and
+`Connected(stencil)` sets it explicitly for the former. On the latter a stencil has no index space to
+mean anything in, so it is refused rather than ignored.
 
 ## Querying neighbours
 

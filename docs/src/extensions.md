@@ -9,7 +9,7 @@ loads when — and only when — you load its trigger.
 
 | load this | and you get |
 |---|---|
-| `NearestNeighbors` | k-d-tree neighbour construction for `UnstructuredGrid` |
+| `NearestNeighbors` | k-d-tree neighbour construction for `UnstructuredGrid`, and indexed ball queries |
 | `Quickhull` | spherical Voronoi dual areas for arbitrary point sets |
 | `DelaunayTriangulation` | planar Voronoi areas |
 | `SparseArrays` | `sparse_adjacency_matrix` |
@@ -32,6 +32,21 @@ g = FG.Grids.UnstructuredGrid(geo, x, y, mask; radius = 0.02, areas = areas,  # 
 On a sphere the tree is built on the unit-sphere embedding, where nearest-by-chord is exactly
 nearest-by-great-circle — which also makes longitude wrap for free, since `λ` and `λ+2π` embed to the
 same point. Cartesian domains wrap by replicating the point set at the periodic images.
+
+It also supplies the reusable index behind [`Connectivity.indexed`](@ref), which is what makes a ball
+query on a curvilinear or node grid a range search rather than a scan of every cell:
+
+```julia
+using NearestNeighbors
+top = FG.Connectivity.indexed(grid)                    # holds a k-d tree over the cell centres
+buf = FG.Connectivity.ball_scratch()                   # candidate buffer, one per task
+FG.Connectivity.neighbors_within(grid, i, j; ball = r, topology = top, scratch = buf)
+```
+
+The same embedding serves construction and queries, and the index only ever returns a superset of the
+ball — the exact distance gate still decides membership — so the result is identical to the scan's,
+element for element. On a spheroid that superset is genuine: the ECEF chord the tree searches is a lower
+bound on the Vincenty geodesic, so the query over-returns and the gate trims.
 
 ## Quickhull / DelaunayTriangulation — Voronoi areas
 
