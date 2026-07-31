@@ -69,10 +69,85 @@ S.reach(S.Anisotropic((3, 1)), Val(2))     # halo width per direction
     concretely typed and every cell of a traversal would allocate. `stencil = S.Moore(2)` is free;
     there is no symbol form to reach for.
 
+### Your own shape
+
+A shape supplies [`Stencils.offsets`](@ref) and nothing else. Put whatever the offsets depend on in the
+type, so the tuple is inferable — then `nstencil`, `reach`, `foreach_offset`, `fold_offsets` and every
+neighbour query work on it, with the loop still unrolled and nothing allocated.
+
+```@example conn
+struct Upwind{R} <: S.AbstractStencil end
+Upwind(r::Integer) = Upwind{Int(r)}()
+S.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
+    ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
+
+S.offsets(Upwind(2), Val(2)), S.nstencil(Upwind(2), Val(3)), S.reach(Upwind(2), Val(2))
+```
+
+```@example conn
+gu = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
+                             range(0.0; step = 1.0, length = 6),
+                             range(0.0; step = 1.0, length = 5))
+FG.Connectivity.nneighbors(gu, 2, 2; stencil = Upwind(1)),
+FG.Connectivity.nneighbors(gu, 6, 5; stencil = Upwind(1))
+```
+
 Two different things get called a radius, and they are separate types.
 [`Stencils.CellRadius`](@ref) counts cells in index space; [`Stencils.MetricBall`](@ref) is a physical
 distance measured through the geometry. On a stretched or spherical grid the number of cells within a
 given distance varies across the grid, so the two cannot be collapsed into one.
+
+## Neighbourhoods by distance
+
+A [`Stencils.MetricBall`](@ref) is queried with [`Connectivity.neighbors_within`](@ref) and its
+buffer/counting forms — every cell whose centre lies within the given physical distance, under the
+geometry's own metric:
+
+```@example conn
+geo = FG.Geometry.SphericalGeometry()            # Earth radius, metres
+λ = range(0, 2π; length = 25)[1:24]
+φ = range(-π/2, π/2; length = 13)
+g = FG.Grids.StructuredGrid(geo, λ, φ)
+ball = S.MetricBall(2.0e6)                       # everything within 2000 km
+FG.Connectivity.nneighbors_within(g, 5, 7; ball = ball)
+```
+
+The same call near a pole finds many more cells, because 2000 km spans every longitude there — which is
+exactly why this cannot be a stencil:
+
+```@example conn
+FG.Connectivity.nneighbors_within(g, 5, 13; ball = ball)
+```
+
+A bare number works as the ball, and the buffer form follows the `neighbors!` pattern — size with the
+count, fill in place:
+
+```@example conn
+n = FG.Connectivity.nneighbors_within(g, 5, 7; ball = 2.0e6)
+buf = Vector{Int}(undef, n)
+FG.Connectivity.neighbors_within!(buf, g, 5, 7; ball = 2.0e6)
+buf
+```
+
+The candidate window is [`Connectivity.metric_window`](@ref) — `O(1)` per direction on a uniform axis —
+and each candidate is then kept or dropped by the geometry's `distance`, so the result is a genuine
+metric ball: great-circle on a sphere, Vincenty on a spheroid, the chord where a radial or height
+direction is present. Periodic directions wrap by minimum image, so a ball sitting on the seam is the
+same ball as anywhere else:
+
+```@example conn
+FG.Connectivity.neighbors_within(g, 1, 7; ball = 1.5e6) ==
+    FG.Connectivity.neighbors_within(g, 1, 7; ball = S.MetricBall(1.5e6))
+```
+
+To query every cell, materialize the whole graph once instead —
+[`Connectivity.build_connectivity_within`](@ref) is the ball analogue of `build_connectivity`, row `k`
+holding exactly what the per-cell query returns for cell `k`, and symmetric because the metric is:
+
+```@example conn
+csr = FG.Connectivity.build_connectivity_within(g; ball = 2.0e6)
+FG.Connectivity.nedges(csr), FG.Connectivity.is_symmetric_adjacency(csr)
+```
 
 The observation the whole module rests on is that a neighbour computation never looks at a
 coordinate. It reads three things — extent per dimension, wrapping per dimension, and which cells are

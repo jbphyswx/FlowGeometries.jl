@@ -10,6 +10,13 @@ using StaticArrays: StaticArrays
 
 const FG = FlowGeometries
 
+# A caller's own stencil shape: forward-only in every direction, radius in the type. `offsets` is the
+# whole contract — everything else in Stencils is written in terms of it.
+struct Upwind{R} <: FG.Stencils.AbstractStencil end
+Upwind(r::Integer) = Upwind{Int(r)}()
+FG.Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
+    ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
+
 Test.@testset "FlowGeometries.jl" begin
 
     Test.@testset "Abstract hierarchy" begin
@@ -33,6 +40,59 @@ Test.@testset "FlowGeometries.jl" begin
         p1 = (0.0, 0.0)
         p2 = (3.0, 4.0)
         Test.@test FG.Geometry.distance(g, p1, p2) ≈ 5.0
+
+        # A spherical geometry supplies `radius` and nothing else. The field is named unlike
+        # `SphericalGeometry`'s so that any method reaching for `.R` fails here.
+        struct ScaledSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T}
+            r0::T
+        end
+        FG.Geometry.radius(g::ScaledSphere) = g.r0
+
+        s = ScaledSphere(6.371e6)
+        ref = FG.Geometry.SphericalGeometry(6.371e6)
+        Test.@test FG.Geometry.radius(s) == FG.Geometry.radius(ref)
+        for (a, b) in ((( 0.0, 0.0), (0.0, π / 2)), ((0.3, -0.4), (2.9, 1.1)))
+            Test.@test FG.Geometry.distance(s, a, b) == FG.Geometry.distance(ref, a, b)
+        end
+        Test.@test FG.Geometry.spherical_to_cartesian(s, (0.3, 0.4)) ==
+                   FG.Geometry.spherical_to_cartesian(ref, (0.3, 0.4))
+        Test.@test FG.Geometry.area_element(s, 0.4, 0.01, 0.02) ==
+                   FG.Geometry.area_element(ref, 0.4, 0.01, 0.02)
+        Test.@test FG.Geometry.scale_factors(s, (0.3, 0.4)) ==
+                   FG.Geometry.scale_factors(ref, (0.3, 0.4))
+        # …and the whole grid stack downstream of it, including the cell measure.
+        λ = range(0.0; step = 2π / 8, length = 8)
+        φ = range(-1.2; step = 0.3, length = 9)
+        gs, gr = FG.Grids.StructuredGrid(s, λ, φ), FG.Grids.StructuredGrid(ref, λ, φ)
+        Test.@test FG.Grids.measure_array(gs) == FG.Grids.measure_array(gr)
+        Test.@test sum(FG.Grids.measure(gs)) == sum(FG.Grids.measure(gr))
+        Test.@test FG.Grids.area(gs, 3, 4) == FG.Grids.area(gr, 3, 4)
+        Test.@test FG.Grids.coords(gs, 3, 4) == FG.Grids.coords(gr, 3, 4)
+
+        # An ellipsoid supplies the two shape parameters; everything else is derived.
+        struct MySpheroid{T} <: FG.Geometry.AbstractEllipsoidalGeometry{T}
+            eq::T
+            flat::T
+        end
+        FG.Geometry.semimajor_axis(g::MySpheroid) = g.eq
+        FG.Geometry.flattening(g::MySpheroid) = g.flat
+
+        e = MySpheroid(6378137.0, inv(298.257223563))
+        eref = FG.Geometry.SpheroidGeometry()
+        for f in (FG.Geometry.semimajor_axis, FG.Geometry.flattening, FG.Geometry.semiminor_axis,
+                  FG.Geometry.eccentricity²)
+            Test.@test f(e) == f(eref)
+        end
+        Test.@test FG.Geometry.prime_vertical_radius(e, 0.7) ==
+                   FG.Geometry.prime_vertical_radius(eref, 0.7)
+        Test.@test FG.Geometry.meridional_radius(e, 0.7) ==
+                   FG.Geometry.meridional_radius(eref, 0.7)
+        Test.@test FG.Geometry.distance(e, (0.0, 0.0), (0.5, 0.6)) ==
+                   FG.Geometry.distance(eref, (0.0, 0.0), (0.5, 0.6))
+        Test.@test FG.Geometry.area_element(e, 0.4, 0.01, 0.02) ==
+                   FG.Geometry.area_element(eref, 0.4, 0.01, 0.02)
+        Test.@test FG.Geometry.scale_factors(e, (0.3, 0.4)) ==
+                   FG.Geometry.scale_factors(eref, (0.3, 0.4))
     end
 
     Test.@testset "Cartesian geometry" begin
@@ -279,18 +339,166 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Grids.spacing(gridr, 1) === 1.0
         Test.@test collect(FG.Grids.coordinates(gridr, 1)) == Float64[0, 1, 2, 3]
 
-        # A Float32 geometry must keep Float32 arithmetic throughout. `range(0f0; step=0.25f0, …)` is
-        # a `StepRangeLen{Float32, Float64, Float64, Int}` — Float32 elements over Float64 offset and
-        # step — so storing the range verbatim would silently do Float64 index arithmetic inside a
-        # Float32 grid, which costs real throughput on a device.
+        # An axis already of the geometry's element type is kept EXACTLY as given, whatever type it is.
+        # `range(0f0; step=0.25f0, …)` is a `StepRangeLen{Float32, Float64, Float64, Int}` — Float32
+        # elements over a Float64 offset and step — and that is the caller's choice to make, not this
+        # package's to override. `Axes.uniform_axis` is the opt-in for Float32-throughout arithmetic.
         geo32 = FG.Geometry.CartesianGeometry(Float32)
-        g32 = FG.Grids.StructuredGrid(geo32, range(0.0f0; step = 0.25f0, length = 5),
-                                range(0.0f0; step = 0.25f0, length = 5), trues(5, 5))
+        r32f = range(0.0f0; step = 0.25f0, length = 5)
+        g32 = FG.Grids.StructuredGrid(geo32, r32f, r32f, trues(5, 5))
         ax32 = FG.Grids.coordinates(g32, 1)
+        Test.@test ax32 === r32f                       # preserved, not replaced
         Test.@test eltype(ax32) === Float32
         Test.@test FG.Grids.spacing(g32, 1) === 0.25f0
-        Test.@test all(p -> !(p isa Type) || p === Float32, typeof(ax32).parameters)
         Test.@test FG.Grids.coords(g32, 2, 3) === (x = 0.25f0, y = 0.5f0)
+        # …and converting deliberately gives Float32 throughout.
+        u32 = FG.Axes.uniform_axis(Float32, r32f)
+        Test.@test all(p -> !(p isa Type) || p === Float32, typeof(u32).parameters)
+        Test.@test collect(u32) == collect(r32f)
+    end
+
+    Test.@testset "AbstractUniformAxis is a working extension point" begin
+        A = FG.Axes
+        # The contract is three methods, not a layout, so a subtype may name its fields anything.
+        # These are named unlike `UniformAxis`'s so that a generic method reaching for a field is a
+        # test failure instead of a coincidence.
+        struct MinimalAxis{T} <: A.AbstractUniformAxis{T}
+            lo::T
+            h::T
+            count::Int
+        end
+        Base.first(a::MinimalAxis) = a.lo
+        Base.step(a::MinimalAxis) = a.h
+        Base.length(a::MinimalAxis) = a.count
+
+        m = MinimalAxis(0.0, 0.25, 5)
+        ref = [0.0, 0.25, 0.5, 0.75, 1.0]
+        # Those three methods are the whole contract; everything below is inherited.
+        Test.@test collect(m) == ref
+        Test.@test size(m) == (5,) && length(m) == 5
+        Test.@test (first(m), last(m)) == (0.0, 1.0)
+        Test.@test step(m) == 0.25 && A.spacing(m) == 0.25 && A.isuniform(m)
+        Test.@test m isa AbstractRange
+        Test.@test m[3] == 0.5
+        Test.@test sum(m) == sum(ref)
+        Test.@test (minimum(m), maximum(m)) == (0.0, 1.0) && extrema(m) == (0.0, 1.0)
+        Test.@test collect(m[2:4]) == ref[2:4]
+        Test.@test collect(m[1:2:5]) == ref[1:2:5]
+        Test.@test collect(reverse(m)) == reverse(ref)
+        Test.@test collect(m .+ 1.0) == ref .+ 1.0
+        Test.@test collect(2.0 .* m) == 2.0 .* ref
+        Test.@test collect(m ./ 2.0) == ref ./ 2.0
+        Test.@test collect(-m) == -ref
+        Test.@test collect(1.0 .- m) == 1.0 .- ref
+        Test.@test collect(m .+ m) == ref .+ ref
+        Test.@test collect(m .- m) == ref .- ref
+        Test.@test cos.(m) ≈ cos.(ref) && !A.isuniform(cos.(m))
+        Test.@test searchsortedfirst(m, 0.5) == searchsortedfirst(ref, 0.5)
+        Test.@test copy(m) === m
+        Test.@test m == MinimalAxis(0.0, 0.25, 5) && m == A.UniformAxis(0.0, 0.25, 5)
+        Test.@test m != MinimalAxis(0.0, 0.25, 4) && m != MinimalAxis(0.0, 0.5, 5)
+        Test.@test MinimalAxis(0.0, 1.0, 0) == A.UniformAxis(9.0, 3.0, 0)
+        Test.@test MinimalAxis(2.0, 1.0, 1) == A.UniformAxis(2.0, 7.0, 1)
+        Test.@test A.uniform_axis(Float32, m) === A.UniformAxis(0.0f0, 0.25f0, 5)
+        # Messages name the actual type, not the supertype.
+        Test.@test occursin("MinimalAxis", sprint(show, m))
+        Test.@test_throws ArgumentError minimum(MinimalAxis(0.0, 1.0, 0))
+        # Without the hook, a derived axis is correct but plain.
+        Test.@test m[2:4] isa A.UniformAxis
+        Test.@test A.isuniform(m[2:4]) && A.isuniform(reverse(m)) && A.isuniform(2.0 .* m)
+
+        # `similar_axis` is the one method that makes derived axes keep the subtype.
+        struct TaggedAxis2{T} <: A.AbstractUniformAxis{T}
+            lo::T
+            h::T
+            count::Int
+            tag::Symbol
+        end
+        Base.first(a::TaggedAxis2) = a.lo
+        Base.step(a::TaggedAxis2) = a.h
+        Base.length(a::TaggedAxis2) = a.count
+        A.similar_axis(a::TaggedAxis2{T}, origin, Δ, n::Integer) where {T} =
+            TaggedAxis2{T}(convert(T, origin), convert(T, Δ), Int(n), a.tag)
+
+        t = TaggedAxis2(0.0, 0.25, 5, :mine)
+        for got in (t[2:4], t[1:2:5], reverse(t), t .+ 1.0, 2.0 .* t, -t, t ./ 2.0, t .+ t, t .- t)
+            Test.@test got isa TaggedAxis2 && got.tag === :mine
+        end
+
+        # And a subtype drives a grid, stored as itself, with every uniform fast path.
+        geo = FG.Geometry.CartesianGeometry()
+        g = FG.Grids.StructuredGrid(geo, t, t)
+        ax = FG.Grids.coordinates(g, 1)
+        Test.@test ax === t
+        Test.@test FG.Grids.isuniform(g) && FG.Grids.spacing(g, 1) == 0.25
+        Test.@test all(f -> f isa A.ConstantVector, FG.Grids.measure_factors(g))
+        Test.@test FG.Grids.measure(g, 3, 4) == 0.25^2
+        Test.@test Base.summarysize(g) < 512
+        Test.@test length(Set(FG.Grids._local_spacing(ax, i)[2] for i in 1:4)) == 1
+        Test.@test FG.Discretization.locate(ax, 0.6) ==
+                   FG.Discretization.locate(collect(ax), 0.6)
+        Test.@test A.isuniform(FG.Discretization.faces(ax))
+        # Mixing two uniform axis types lands on the canonical concrete one.
+        Test.@test promote_type(typeof(t), typeof(m)) === A.UniformAxis{Float64}
+    end
+
+    Test.@testset "A caller's own axis type is preserved, and still gets every fast path" begin
+        # An arbitrary `AbstractRange` subtype must survive untouched: nothing about the uniform fast
+        # paths requires converting it, because they dispatch on `spacing_trait`, which is
+        # `UniformSpacing()` for every range.
+        struct TaggedAxis{T} <: AbstractRange{T}
+            o::T
+            d::T
+            n::Int
+            tag::Symbol
+        end
+        Base.size(a::TaggedAxis) = (a.n,)
+        Base.length(a::TaggedAxis) = a.n
+        Base.IndexStyle(::Type{<:TaggedAxis}) = IndexLinear()
+        Base.getindex(a::TaggedAxis{T}, i::Int) where {T} =
+            (Base.@boundscheck checkbounds(a, i); a.o + T(i - 1) * a.d)
+        Base.step(a::TaggedAxis) = a.d
+        Base.first(a::TaggedAxis) = a.o
+        Base.last(a::TaggedAxis{T}) where {T} = a.o + T(a.n - 1) * a.d
+
+        geo = FG.Geometry.CartesianGeometry()
+        mine = TaggedAxis(0.0, 0.5, 9, :mine)
+        g = FG.Grids.StructuredGrid(geo, mine, mine)
+        ax = FG.Grids.coordinates(g, 1)
+        Test.@test ax === mine                          # the same object, not a copy
+        Test.@test ax isa TaggedAxis && ax.tag === :mine # and the extra field survives
+
+        # Every uniform fast path applies to it.
+        Test.@test FG.Grids.isuniform(g) && FG.Grids.spacing(g, 1) === 0.5
+        Test.@test all(f -> f isa FG.Axes.ConstantVector, FG.Grids.measure_factors(g))
+        Test.@test Base.summarysize(g) < 512
+        Test.@test FG.Grids.minimum_spacing(g, 1) == FG.Grids.maximum_spacing(g, 1) == 0.5
+        Test.@test FG.Grids.measure(g, 3, 4) === 0.25
+        # `_local_spacing` returns `step` rather than differencing, so the gap is exactly constant.
+        Test.@test length(Set(FG.Grids._local_spacing(ax, i)[2] for i in 1:8)) == 1
+        Test.@test FG.Discretization.locate(ax, 2.0) == FG.Discretization.locate(collect(ax), 2.0)
+        Test.@test FG.Discretization.nearest_index(ax, 2.0) == 5
+        Test.@test FG.Axes.isuniform(FG.Discretization.faces(ax))
+
+        # Base ranges are likewise handed back as given, including the ones whose internals a caller
+        # might specifically want.
+        for r in (range(0.0; step = 0.5, length = 9), LinRange(0.0, 4.0, 9),
+                  FG.Axes.UniformAxis(0.0, 0.5, 9))
+            gg = FG.Grids.StructuredGrid(geo, r, r)
+            Test.@test FG.Grids.coordinates(gg, 1) === r
+            Test.@test FG.Grids.isuniform(gg) && FG.Grids.spacing(gg, 1) == 0.5
+        end
+        # An integer range cannot stay one in a Float64 grid, so that is the case that rebuilds.
+        gi = FG.Grids.StructuredGrid(geo, 0:8, 0:8)
+        Test.@test FG.Grids.coordinates(gi, 1) isa FG.Axes.UniformAxis{Float64}
+        Test.@test collect(FG.Grids.coordinates(gi, 1)) == collect(0.0:1.0:8.0)
+
+        # BigFloat survives end to end at full precision.
+        gb = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(BigFloat),
+                                     range(BigFloat(0); step = BigFloat(1) / 3, length = 7),
+                                     range(BigFloat(0); step = BigFloat(1) / 3, length = 7))
+        Test.@test eltype(FG.Grids.coordinates(gb, 1)) === BigFloat
+        Test.@test FG.Grids.spacing(gb, 1) * 3 == 1
     end
 
     Test.@testset "A uniform axis is an AbstractRange, and behaves like one" begin
@@ -1415,6 +1623,15 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Connectivity.build_connectivity(g).nbrs ==
                    FG.Connectivity.build_connectivity(g; backend = thr).nbrs
 
+        # The metric-ball builder chunks the same two owned-slot passes, and per-cell degrees vary
+        # even more (polar rows reach every longitude), so the same chunk-boundary argument applies.
+        gball = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
+                                        range(0, 2π; length = 25)[1:24],
+                                        range(-π / 2, π / 2; length = 13))
+        a = FG.Connectivity.build_connectivity_within(gball; ball = 2.0e6)
+        b = FG.Connectivity.build_connectivity_within(gball; ball = 2.0e6, backend = thr)
+        Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
+
         # The candidate builder emits and dedups concurrently, so each sampling's `emit!` has to be
         # free of state shared between nodes. nside = 1 and 2 cover the singular pixels, where a node
         # has 7 neighbours rather than 8.
@@ -1579,8 +1796,8 @@ Test.@testset "FlowGeometries.jl" begin
             xc, yc = FG.Grids._centers_to_corners(λ), FG.Grids._centers_to_corners(φ)
             dirs = [(cos(yc[i, j]) * cos(xc[i, j]), cos(yc[i, j]) * sin(xc[i, j]), sin(yc[i, j]))
                     for i in 1:(n + 1), j in 1:(n + 1)]
-            ref = [geo.R^2 * (FG.Grids._tri_excess(dirs[i, j], dirs[i + 1, j], dirs[i + 1, j + 1]) +
-                              FG.Grids._tri_excess(dirs[i, j], dirs[i + 1, j + 1], dirs[i, j + 1]))
+            ref = [geo.R^2 * (FG.Geometry.spherical_excess(dirs[i, j], dirs[i + 1, j], dirs[i + 1, j + 1]) +
+                              FG.Geometry.spherical_excess(dirs[i, j], dirs[i + 1, j + 1], dirs[i, j + 1]))
                    for i in 1:n, j in 1:n]
             Test.@test a == ref     # same arithmetic, only the buffering differs
         end
@@ -1769,7 +1986,7 @@ Test.@testset "FlowGeometries.jl" begin
         build(n) = begin
             λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
             φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
-            () -> FG.Grids._build_kdtree_neighbors(geo, λ, φ; k = 6)
+            () -> FG.Grids._build_kdtree_neighbors(geo, (λ, φ); k = 6)
         end
         # Batch `knn` returns a Vector{Vector{Int}} plus a Vector{Vector{Float64}} — ~4 heap
         # allocations per query point (160,064 at N = 40k). Querying through `knn!` into reused
@@ -1800,7 +2017,7 @@ Test.@testset "FlowGeometries.jl" begin
         n = 200
         λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
         φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
-        nbrs, ptr = FG.Grids._build_kdtree_neighbors(geo, λ, φ; k = 5)
+        nbrs, ptr = FG.Grids._build_kdtree_neighbors(geo, (λ, φ); k = 5)
         v = [(cos(φ[i]) * cos(λ[i]), cos(φ[i]) * sin(λ[i]), sin(φ[i])) for i in 1:n]
         for i in 1:n
             d = [j == i ? Inf : sum(abs2, v[i] .- v[j]) for j in 1:n]
@@ -1887,11 +2104,6 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test eltype(a32) === Float32
         Test.@test sum(a32) ≈ 4Float32(π) * Float32(R)^2 rtol = 1e-4
         Test.@test_throws ArgumentError FG.Grids._voronoi_areas(geo, [0.0, 1.0], [0.0, 0.5])
-
-        # The restored helper accepts mixed point representations, as its caller passes.
-        A = FG.Grids._sph_triangle_area(geo, (0.0, 0.0), (0.1, 0.0), (λ = 0.0, φ = 0.1))
-        Test.@test A ≈ 0.5 * 0.1 * 0.1 * R^2 rtol = 2e-2
-        Test.@test FG.Grids._sph_triangle_area(geo, (0.0, 0.0), (0.1, 0.0), (0.2, 0.0)) ≈ 0 atol = 1e-3
     end
 
     Test.@testset "Planar Voronoi areas are complete and degeneracy-safe" begin
@@ -2324,6 +2536,37 @@ Test.@testset "FlowGeometries.jl" begin
         end
         Test.@test S.offsets(S.Anisotropic((2, 0)), Val(2)) == ((-2, 0), (-1, 0), (1, 0), (2, 0))
         Test.@test S.offsets(S.Custom(((1, 0), (0, 1))), Val(2)) == ((1, 0), (0, 1))
+
+        Test.@testset "A caller's own shape needs only _offset_list" begin
+            Test.@test S.offsets(Upwind(1), Val(2)) == ((1, 0), (0, 1))
+            Test.@test S.offsets(Upwind(2), Val(2)) == ((1, 0), (2, 0), (0, 1), (0, 2))
+            Test.@test S.nstencil(Upwind(3), Val(4)) == 12
+            Test.@test S.reach(Upwind(3), Val(2)) == (3, 3)
+            Test.@test S.fold_offsets((a, o) -> a + sum(o), 0, Upwind(2), Val(3)) == 9
+            acc = Int[]
+            S.foreach_offset(o -> push!(acc, sum(o)), Upwind(2), Val(2))
+            Test.@test acc == [1, 2, 1, 2]
+
+            # And it drives the connectivity stack, allocation-free like the built-ins.
+            geo = FG.Geometry.CartesianGeometry()
+            g = FG.Grids.StructuredGrid(geo, range(0.0; step = 1.0, length = 6),
+                                        range(0.0; step = 1.0, length = 5))
+            Test.@test FG.Connectivity.nneighbors(g, 2, 2; stencil = Upwind(1)) == 2
+            Test.@test FG.Connectivity.nneighbors(g, 6, 5; stencil = Upwind(1)) == 0
+            buf = Vector{Int}(undef, 8)
+            n = FG.Connectivity.neighbors!(buf, g, 2, 2; stencil = Upwind(1))
+            # Linear indices into the 6×5 grid: (3,2) and (2,3).
+            Test.@test sort(buf[1:n]) == sort([3 + 1 * 6, 2 + 2 * 6])
+            sweep(gr) = begin
+                t = 0
+                for j in 1:size(gr, 2), i in 1:size(gr, 1)
+                    t += FG.Connectivity.nneighbors(gr, i, j; stencil = Upwind(2))
+                end
+                t
+            end
+            sweep(g)
+            Test.@test @allocated(sweep(g)) == 0
+        end
         Test.@test S.reach(S.Moore(3), Val(2)) == (3, 3)
         Test.@test S.reach(S.Anisotropic((3, 1)), Val(2)) == (3, 1)
         Test.@test S.Vertex === S.Moore
@@ -2464,6 +2707,570 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test first(counts) < 20
     end
 
+    Test.@testset "Public names the suite had not been calling" begin
+        GE = FG.Geometry
+        C = FG.Connectivity
+        S = FG.SphericalSampling
+
+        # cartesian_to_spherical: the documented inverse of spherical_to_cartesian.
+        sph = GE.SphericalGeometry(6.371e6)
+        for p in ((0.0, 0.0), (1.2, -0.4), (5.9, 1.1))
+            xyz = GE.spherical_to_cartesian(sph, p)
+            back = GE.cartesian_to_spherical(sph, xyz)
+            Test.@test mod(back.λ, 2π) ≈ mod(p[1], 2π) atol = 1e-12
+            Test.@test back.φ ≈ p[2] atol = 1e-12
+        end
+        # A 3-D point carries its own radius through the round trip.
+        r3 = GE.cartesian_to_spherical(sph, GE.spherical_to_cartesian(sph, (0.3, 0.4, 7.0e6)))
+        Test.@test r3.r ≈ 7.0e6
+
+        # cartesian_index is linear_index's inverse on every architecture that has one.
+        geo = GE.CartesianGeometry()
+        g = FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:2.0, 0.0:1.0:1.0)
+        Test.@test all(C.linear_index(g, Tuple(C.cartesian_index(g, k))...) == k
+                       for k in 1:length(FG.Grids.mask(g)))
+        Test.@test C.cartesian_index(g, 1) == CartesianIndex(1, 1, 1)
+
+        # empty_csr / csr_connectivity: the storage type's own constructors.
+        e = C.empty_csr(5)
+        Test.@test C.nnodes(e) == 5 && C.nedges(e) == 0
+        Test.@test all(isempty(e.nbrs[e.ptr[i]:(e.ptr[i + 1] - 1)]) for i in 1:5)
+        Test.@test eltype(C.empty_csr(4, Int32).ptr) === Int32
+        csr = C.csr_connectivity([2, 1, 3, 2], [1, 2, 4, 5])
+        Test.@test C.nnodes(csr) == 3 && C.nedges(csr) == 4
+        Test.@test collect(csr.nbrs[csr.ptr[2]:(csr.ptr[3] - 1)]) == [1, 3]
+        Test.@test C.is_symmetric_adjacency(csr)
+        # …and it validates, rather than trusting the buffers.
+        Test.@test_throws ArgumentError C.csr_connectivity([1], [2, 2])        # ptr[1] != 1
+        Test.@test_throws ArgumentError C.csr_connectivity([1, 2], [1, 2])     # length mismatch
+
+        # StencilNeighbors is the lazy per-cell sequence; iterating it must equal neighbors!.
+        gm = FG.Grids.StructuredGrid(geo, 0.0:1.0:4.0, 0.0:1.0:3.0)
+        it = FG.Grids.neighbors(gm, 2, 2)
+        Test.@test it isa C.StencilNeighbors
+        buf = Vector{Int}(undef, 8)
+        n = C.neighbors!(buf, gm, 2, 2)
+        Test.@test sort(collect(it)) == sort(buf[1:n])
+        Test.@test length(collect(FG.Grids.neighbors(gm, 1, 1))) == C.nneighbors(gm, 1, 1)
+
+        # geographic_latitude / colatitude are each other's inverse.
+        Test.@test S.geographic_latitude(0.0) ≈ π / 2
+        Test.@test S.geographic_latitude(π) ≈ -π / 2
+        Test.@test S.geographic_latitude(S.colatitude(0.37)) ≈ 0.37
+        Test.@test S.colatitude(S.geographic_latitude(1.1)) ≈ 1.1
+
+        # ring_info: rings tile the map contiguously, and each one's latitude is pix2ang's.
+        for nside in (1, 2, 4, 8)
+            nrings = 4 * nside - 1
+            infos = [S.ring_info(nside, r) for r in 1:nrings]
+            Test.@test sum(i -> i.ringpix, infos) == 12 * nside^2
+            Test.@test infos[1].startpix == 0
+            Test.@test all(infos[r].startpix + infos[r].ringpix == infos[r + 1].startpix
+                           for r in 1:(nrings - 1))
+            Test.@test all(S.pix2ang(nside, infos[r].startpix)[1] ≈ infos[r].colatitude
+                           for r in 1:nrings)
+            Test.@test all(i -> i.latitude ≈ π / 2 - i.colatitude, infos)
+            Test.@test all(infos[r].ringpix == 4r for r in 1:(nside - 1))          # polar cap
+            Test.@test all(infos[r].ringpix == 4nside for r in nside:(3nside))     # equatorial belt
+            Test.@test all(infos[r].ringpix == infos[nrings + 1 - r].ringpix for r in 1:nrings)
+            Test.@test all(infos[r].latitude ≈ -infos[nrings + 1 - r].latitude for r in 1:nrings)
+        end
+        Test.@test abs(S.ring_info(8, 16).latitude) < 1e-15      # ring 2·nside is the equator
+        Test.@test S.ring_info(4, 3; T = Float32).colatitude isa Float32
+        Test.@test_throws ArgumentError S.ring_info(4, 0)
+        Test.@test_throws ArgumentError S.ring_info(4, 16)
+        Test.@test_throws ArgumentError S.ring_info(0, 1)
+    end
+
+    Test.@testset "A separable measure stays separable under the operations that preserve it" begin
+        GR = FG.Grids
+        geo = FG.Geometry.CartesianGeometry()
+        n = 400
+        g = GR.StructuredGrid(geo, range(0.0; step = 0.5, length = n),
+                              range(0.0; step = 0.25, length = n))
+        m = GR.measure(g)
+        dense = collect(m)
+        probes = ((1, 1), (7, 13), (n, n))
+
+        # Scaling, a multiplicative map, and a factor-wise product all keep the product form — so a
+        # unit conversion costs bytes rather than the ∏Nᵈ values a dense result would.
+        for got in (2.0 .* m, m .* 2.0, m ./ 4.0, abs.(m), abs2.(m), sqrt.(m), inv.(m),
+                    m .* m, m ./ m)
+            Test.@test got isa GR.SeparableMeasure
+            Test.@test Base.summarysize(got) < 200
+        end
+        Test.@test all(≈((2.0 .* m)[I...], 2 * dense[I...]) for I in probes)
+        Test.@test all(≈(abs2.(m)[I...], abs2(dense[I...])) for I in probes)
+        Test.@test all(≈((m .* m)[I...], dense[I...]^2) for I in probes)
+        Test.@test Base.summarysize(dense) > 1_000_000     # what the lazy form avoids
+
+        # The closed-form reductions still apply to the result, so the saving compounds.
+        s = 3.0 .* m
+        Test.@test sum(s) ≈ 3 * sum(m)
+        Test.@test maximum(s) ≈ 3 * maximum(m)
+        Test.@test all(extrema(s) .≈ 3 .* extrema(m))
+        Test.@test findmax(s)[2] == findmax(m)[2]
+        Test.@test all(f -> f isa FG.Axes.ConstantVector, GR.measure_factors(s))
+
+        # Everything else materializes — correct, just dense. A negative scale is deliberately in this
+        # group: `findmax`'s per-axis argmax is only valid for non-negative factors.
+        for got in (exp.(m), log.(m), m .+ m, m .+ 1.0, -1.0 .* m, -2.0 .* m)
+            Test.@test !(got isa GR.SeparableMeasure)
+        end
+        Test.@test exp.(m)[3, 4] ≈ exp(dense[3, 4])
+        Test.@test (-2.0 .* m)[3, 4] ≈ -2 * dense[3, 4]
+        Test.@test findmax(-2.0 .* m)[1] ≈ maximum(-2 .* dense)
+
+        Test.@test typeof(similar(m)) == Matrix{Float64}
+        d = Array{Float64}(undef, size(m))
+        copyto!(d, m)
+        Test.@test all(d[I...] == dense[I...] for I in probes)
+        Test.@test GR.measure_factors(collect(m)) === nothing
+        Test.@test_throws DimensionMismatch m .* GR.measure(
+            GR.StructuredGrid(geo, range(0.0; step = 1.0, length = 3),
+                              range(0.0; step = 1.0, length = 3)))
+    end
+
+    Test.@testset "A pole rotation applies to a point set and to a grid" begin
+        GE = FG.Geometry
+        GR = FG.Grids
+        rot = GE.PoleRotation(0.7, 0.3)
+        Test.@test GE.rotate(rot, 0.7, 0.3)[2] ≈ π / 2      # the rotation's own pole
+
+        λ = [0.1, 1.2, 3.0, 5.5]
+        φ = [0.0, -0.4, 0.9, 0.2]
+        Λ, Φ = GE.rotate(rot, λ, φ)
+        Test.@test all((Λ[i], Φ[i]) == GE.rotate(rot, λ[i], φ[i]) for i in eachindex(λ))
+        λ2, φ2 = copy(λ), copy(φ)
+        GE.rotate!(λ2, φ2, rot)
+        Test.@test λ2 == Λ && φ2 == Φ
+        GE.unrotate!(λ2, φ2, rot)
+        Test.@test all(isapprox.(λ2, λ; atol = 1e-12)) && all(isapprox.(φ2, φ; atol = 1e-12))
+        rr() = FG.Geometry.rotate!(λ2, φ2, rot)
+        rr()
+        Test.@test @allocated(rr()) == 0
+        # 2-D fields (a grid's coordinate arrays) go through the same method.
+        Λm = [0.1i for i in 1:3, _ in 1:4]
+        Test.@test size(GE.rotate!(Λm, [0.1j for _ in 1:3, j in 1:4], rot)[1]) == (3, 4)
+        Test.@test_throws DimensionMismatch GE.rotate!(zeros(3), zeros(4), rot)
+
+        # Rotating a rectilinear spherical grid gives a curvilinear one — which is what it is — and
+        # the cell measure carries over EXACTLY, because a rotation is an isometry of the sphere.
+        sph = FG.Geometry.SphericalGeometry(6.371e6)
+        λa = range(0, 2π; length = 25)[1:24]
+        φa = range(-1.2, 1.2; length = 13)
+        gs = GR.StructuredGrid(sph, λa, φa)
+        gr = GR.unrotate(gs, rot)
+        Test.@test gr isa GR.CurvilinearGrid && size(gr) == (24, 13)
+        Test.@test all(GR.measure(gr, i, j) == GR.measure(gs, i, j) for i in 1:24, j in 1:13)
+        Test.@test sum(GR.measure(gr)) ≈ sum(GR.measure(gs))
+        Test.@test GR._raw_coords(gr, 3, 4) == GE.unrotate(rot, λa[3], φa[4])
+        Test.@test GR._raw_coords(GR.rotate(gs, rot), 3, 4) == GE.rotate(rot, λa[3], φa[4])
+        # The mesh is unchanged, so its index topology and wrap length are too (λ is an angle in
+        # either frame).
+        Test.@test GR.isperiodic(gr, 1) && !GR.isperiodic(gr, 2)
+        Test.@test GR.period(gr, 1) ≈ 2π
+        Test.@test size(GR.corners(gr, 1)) == (25, 14)
+        Test.@test GR.coordinate_names(gr) == (:λ, :φ)
+        Test.@test FG.Connectivity.nneighbors(gr, 1, 5) == 4     # wraps, like the original
+    end
+
+    Test.@testset "apply_stencil! differentiates a field along one direction" begin
+        D = FG.Discretization
+        geo = FG.Geometry.CartesianGeometry()
+
+        # Exact for any polynomial the node count spans, at EVERY sample — the ends included, because
+        # the stencil shifts inward rather than clipping to a lower order.
+        x = collect(range(0.0, 2.0; length = 11))
+        f = @. 3x^2 - 2x + 5
+        out = similar(f)
+        D.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
+        Test.@test maximum(abs, out .- (6 .* x .- 2)) < 1e-12
+        D.apply_stencil!(out, f, x, 1; order = 2, nodes = 3)
+        Test.@test maximum(abs, out .- 6.0) < 1e-11
+
+        # A stretched axis is equally exact: the weights are per-sample, not one set reused.
+        xs = [0.0, 0.11, 0.37, 0.9, 1.05, 1.6, 1.62, 2.0]
+        outs = similar(xs)
+        D.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
+        Test.@test maximum(abs, outs .- (6 .* xs .- 2)) < 1e-11
+        # 3 nodes cannot span a cubic; 4 can. Both statements matter — the first shows the test bites.
+        D.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 3)
+        Test.@test maximum(abs, outs .- 3 .* xs .^ 2) > 1e-3
+        D.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 4)
+        Test.@test maximum(abs, outs .- 3 .* xs .^ 2) < 1e-11
+
+        # Periodic: the stencil stays centred and wraps, so the seam is no worse than the interior,
+        # and a 5-node stencil converges at 4th order rather than to machine precision.
+        perr(m) = begin
+            lm = collect(range(0, 2π; length = m + 1)[1:m])
+            o = similar(lm)
+            D.apply_stencil!(o, sin.(lm), lm, 1; order = 1, nodes = 5, period = 2π)
+            (maximum(abs, o .- cos.(lm)),
+             max(abs(o[1] - cos(lm[1])), abs(o[m] - cos(lm[m]))),
+             maximum(abs, o[(m ÷ 4):(m ÷ 2)] .- cos.(lm[(m ÷ 4):(m ÷ 2)])))
+        end
+        e32, _, _ = perr(32)
+        e64, seam64, mid64 = perr(64)
+        Test.@test 12 < e32 / e64 < 20
+        Test.@test seam64 ≤ 3 * mid64
+        # A descending axis wraps the other way, and getting the sign wrong shows up here.
+        λd = collect(range(2π, 0; length = 65)[1:64])
+        od = similar(λd)
+        D.apply_stencil!(od, sin.(λd), λd, 1; order = 1, nodes = 5, period = 2π)
+        Test.@test maximum(abs, od .- cos.(λd)) < 1e-5
+        Test.@test FG.Axes.wrap_sign(λd) == -1.0 && FG.Axes.wrap_sign(-λd) == 1.0
+
+        # Only the named direction is differenced.
+        X = collect(range(0.0, 1.0; length = 9))
+        Y = collect(range(0.0, 2.0; length = 7))
+        F = [xi^2 + 3yi for xi in X, yi in Y]
+        O = similar(F)
+        D.apply_stencil!(O, F, X, 1; order = 1, nodes = 3)
+        Test.@test maximum(abs, O .- [2xi for xi in X, _ in Y]) < 1e-11
+        D.apply_stencil!(O, F, Y, 2; order = 1, nodes = 3)
+        Test.@test maximum(abs, O .- 3.0) < 1e-11
+        F3 = [xi^2 + 3yi + 2zi for xi in X, yi in Y, zi in 0.0:0.5:1.0]
+        O3 = similar(F3)
+        D.apply_stencil!(O3, F3, collect(0.0:0.5:1.0), 3; order = 1, nodes = 3)
+        Test.@test maximum(abs, O3 .- 2.0) < 1e-11
+
+        # The grid form supplies axis, wrap period and mask, so none of it is restated.
+        gx = FG.Grids.StructuredGrid(geo, X, Y)
+        Og = similar(F)
+        D.apply_stencil!(Og, F, gx, 1; order = 1, nodes = 3)
+        Test.@test Og ≈ [2xi for xi in X, _ in Y]
+        λ = collect(range(0, 2π; length = 65)[1:64])
+        gp = FG.Grids.StructuredGrid(geo, λ, [0.0, 1.0]; periodic = true, period = 2π)
+        Op = similar([sin(l) for l in λ, _ in 1:2])
+        D.apply_stencil!(Op, [sin(l) for l in λ, _ in 1:2], gp, 1; order = 1, nodes = 5)
+        Test.@test maximum(abs, Op[:, 1] .- cos.(λ)) < 1e-5
+
+        # A derivative that would read an inactive cell is not invented.
+        mk = trues(9, 7)
+        mk[5, 3] = false
+        gm = FG.Grids.StructuredGrid(geo, X, Y, mk)
+        Om = fill(NaN, 9, 7)
+        D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = -1.0)
+        Test.@test Om[5, 3] == -1.0                       # the inactive cell itself
+        Test.@test Om[4, 3] == -1.0 && Om[6, 3] == -1.0   # its stencil neighbours
+        Test.@test Om[2, 3] ≈ 2X[2] && Om[8, 3] ≈ 2X[8]   # cells that never read it
+        Test.@test Om[5, 4] ≈ 2X[5]                       # a different row is unaffected
+        D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, active_only = false)
+        Test.@test Om[5, 3] ≈ 2X[5]
+
+        # A precomputed weight set gives the same answer and applies allocation-free.
+        idx, w = D.axis_stencils(X, 1, 3)
+        Test.@test size(idx) == (9, 3) && size(w) == (9, 3)
+        O2 = similar(F)
+        D.apply_stencil!(O2, F, idx, w, 1)
+        Test.@test O2 ≈ [2xi for xi in X, _ in Y]
+        ap() = FG.Discretization.apply_stencil!(O2, F, idx, w, 1)
+        ap()
+        Test.@test @allocated(ap()) == 0
+
+        Test.@test_throws ArgumentError D.axis_stencils(X, 2, 2)          # too few nodes for order 2
+        Test.@test_throws ArgumentError D.axis_stencils([0.0, 1.0], 1, 5) # more nodes than samples
+        Test.@test_throws ArgumentError D.apply_stencil!(O, F, X, 3)      # no direction 3 in a matrix
+        Test.@test_throws DimensionMismatch D.apply_stencil!(O, F, X[1:5], 1)
+        Test.@test_throws DimensionMismatch D.apply_stencil!(similar(F, 3, 3), F, idx, w, 1)
+    end
+
+    Test.@testset "Curvilinear and node grids work in any number of dimensions" begin
+        geo = FG.Geometry.CartesianGeometry()
+        C = FG.Connectivity
+        GR = FG.Grids
+
+        # 2-D still derives its corner areas: a uniform 1.0 × 0.5 mesh has exactly that cell area.
+        X2 = [x for x in 0.0:1.0:4.0, _ in 0.0:0.5:2.0]
+        Y2 = [y for _ in 0.0:1.0:4.0, y in 0.0:0.5:2.0]
+        g2 = GR.CurvilinearGrid(geo, X2, Y2, trues(5, 5))
+        Test.@test all(≈(0.5), GR.measure(g2))
+        Test.@test GR.coords(g2, 2, 3) == (x = 1.0, y = 1.0)
+        # The reconstructed corners sit exactly a half-cell outside the outermost centres.
+        Test.@test GR.corner_coords(g2, 1, 1) == (x = -0.5, y = -0.25)
+
+        X3 = [x for x in 0.0:1.0:3.0, _ in 1:3, _ in 1:2]
+        Y3 = [y for _ in 1:4, y in 0.0:2.0:4.0, _ in 1:2]
+        Z3 = [z for _ in 1:4, _ in 1:3, z in 0.0:0.5:0.5]
+        # Past 2-D the corner-area kernel does not apply, and the error has to say so rather than
+        # quietly producing a number from a 2-D formula.
+        Test.@test_throws ArgumentError GR.CurvilinearGrid(geo, X3, Y3, Z3, trues(4, 3, 2))
+        vol = fill(1.0 * 2.0 * 0.5, 4, 3, 2)
+        g3 = GR.CurvilinearGrid(geo, X3, Y3, Z3, vol, trues(4, 3, 2))
+        Test.@test size(g3) == (4, 3, 2) && ndims(g3) == 3
+        Test.@test GR.coordinate_names(g3) == (:x, :y, :z)
+        Test.@test GR.coords(g3, 2, 3, 2) == (x = 1.0, y = 4.0, z = 0.5)
+        Test.@test GR.measure(g3, 2, 2, 1) == 1.0
+        Test.@test size(GR.corners(g3, 1)) == (5, 4, 3)
+        Test.@test GR.corner_coords(g3, 1, 1, 1) == (x = -0.5, y = -1.0, z = -0.25)
+
+        W = ntuple(d -> [Tuple(ci)[d] * 1.0 for ci in CartesianIndices((3, 3, 2, 2))], 4)
+        g4 = GR.CurvilinearGrid(geo, W..., ones(3, 3, 2, 2), trues(3, 3, 2, 2))
+        Test.@test size(g4) == (3, 3, 2, 2)
+        Test.@test GR.coords(g4, 2, 3, 1, 2) == (x1 = 2.0, x2 = 3.0, x3 = 1.0, x4 = 2.0)
+
+        # The ghost ring is exact for a field linear in each direction, corners included — the
+        # property the reconstruction exists to have, in 2-D and beyond.
+        L3 = [1.5i - 2.0j + 0.5k for i in 1:4, j in 1:5, k in 1:3]
+        Test.@test all(FG.Grids._ghosted(L3, (i, j, k)) ≈ 1.5i - 2.0j + 0.5k
+                       for i in 0:5, j in 0:6, k in 0:4)
+        # …and reconstruction costs only its own output. Minimum of several samples: a single
+        # `@allocated` can land on a collection or on the tail of compilation, and the true cost is a
+        # floor, so the minimum converges to it.
+        cc(A) = (FG.Grids._centers_to_corners(A);
+                 minimum(@allocated(FG.Grids._centers_to_corners(A)) for _ in 1:3))
+        big = [1.0i + 2.0j for i in 1:120, j in 1:120]
+        Test.@test cc(big) < 1.2 * 8 * 121^2
+
+        # Connectivity follows into N-D, and the dense adjacency agrees with the CSR.
+        Test.@test C.nneighbors(g3, 2, 2, 1) == 5          # 6 face neighbours minus one wall
+        Test.@test C.linear_index(g3, 2, 3, 2) == 2 + 2 * 4 + 1 * 12
+        Test.@test length(collect(GR.neighbors(g3, 2, 2, 1))) == 5
+        Test.@test C.neighbors!(Vector{Int}(undef, 8), g3, 2, 2, 1) == 5
+        csr3 = C.build_connectivity(g3)
+        Test.@test C.is_symmetric_adjacency(csr3)
+        Test.@test C.adjacency_matrix!(Matrix{Bool}(undef, 24, 24), g3) == C.adjacency_matrix(csr3)
+        Test.@test C.adjacency_matrix!(Matrix{Bool}(undef, 25, 25), g2) ==
+                   C.adjacency_matrix(C.build_connectivity(g2))
+        ball3 = C.build_connectivity_within(g3; ball = 1.01)
+        k3 = C.linear_index(g3, 2, 2, 1)
+        Test.@test sort(ball3.nbrs[ball3.ptr[k3]:(ball3.ptr[k3 + 1] - 1)]) ==
+                   sort(C.neighbors_within(g3, 2, 2, 1; ball = 1.01))
+
+        # Periodicity is per-direction in N-D too.
+        gp = GR.CurvilinearGrid(geo, X3, Y3, Z3, vol, trues(4, 3, 2);
+                                periodic = (true, false, false), period = (4.0, 0.0, 0.0))
+        Test.@test GR.isperiodic(gp, 1) && !GR.isperiodic(gp, 2)
+        Test.@test GR.period(gp, 1) == 4.0
+        Test.@test C.nneighbors(gp, 1, 2, 1) == 5
+
+        # Node grids: coordinates as a tuple, since a run of vectors cannot say how many are
+        # coordinates (a CurvilinearGrid counts them from `ndims(mask)`; a node set has no such handle).
+        x, y, z = rand(6), rand(6), rand(6)
+        gu3 = GR.UnstructuredGrid(geo, (x, y, z), ones(6), trues(6))
+        Test.@test GR.coordinate_names(gu3) == (:x, :y, :z)
+        Test.@test GR.coords(gu3, 4) == (x = x[4], y = y[4], z = z[4])
+        Test.@test isempty(GR.neighbors(gu3, 4))          # no CSR given ⇒ no adjacency
+        gu3a = GR.UnstructuredGrid(geo, (x, y, z), ones(6), trues(6), [2, 1], [1, 2, 3, 3, 3, 3, 3])
+        Test.@test collect(GR.neighbors(gu3a, 1)) == [2]
+        gu1 = GR.UnstructuredGrid(geo, ([0.0, 1.0, 5.0],), ones(3), trues(3))
+        Test.@test GR.coordinate_names(gu1) == (:x,)
+        Test.@test sort(C.neighbors_within(gu1, 1; ball = 1.5)) == [2]
+        # The two-direction positional form is unchanged.
+        Test.@test GR.coordinate_names(
+            GR.UnstructuredGrid(geo, rand(8), rand(8), ones(8), trues(8))) == (:x, :y)
+
+        # A k-d tree is dimension-agnostic, so the neighbour search generalizes even though the
+        # Voronoi control volumes behind the 2-D measure do not.
+        nn = 40
+        px, py, pz, pw = rand(nn), rand(nn), rand(nn), rand(nn)
+        bruteknn(pts, i, kk) = sort([t[2] for t in sort(
+            [(sqrt(sum((pts[q][i] - pts[q][j])^2 for q in eachindex(pts))), j)
+             for j in 1:nn if j != i])[1:kk]])
+        nbrs3, ptr3 = GR._build_kdtree_neighbors(geo, (px, py, pz); k = 4)
+        Test.@test all(sort(nbrs3[ptr3[i]:(ptr3[i + 1] - 1)]) == bruteknn((px, py, pz), i, 4)
+                       for i in 1:nn)
+        nbrs4, ptr4 = GR._build_kdtree_neighbors(geo, (px, py, pz, pw); k = 3)
+        Test.@test all(sort(nbrs4[ptr4[i]:(ptr4[i + 1] - 1)]) == bruteknn((px, py, pz, pw), i, 3)
+                       for i in 1:nn)
+        # Periodic ghost images are placed per direction, so a face node finds the opposite face.
+        fx, fy, fz = [0.02, 0.98, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
+        nbw, ptw = GR._build_kdtree_neighbors(geo, (fx, fy, fz); k = 1,
+                                              periodic = (true, false, false),
+                                              period = (1.0, 0.0, 0.0))
+        Test.@test nbw[ptw[1]] == 2
+        nbb, ptb = GR._build_kdtree_neighbors(geo, (fx, fy, fz); k = 1)
+        Test.@test nbb[ptb[1]] == 3
+        # `(λ, φ, r)` embeds at its own radius, so a radius query there is a true chord.
+        sph1 = FG.Geometry.SphericalGeometry(1.0)
+        sλ, sφ, sr = [0.0, 0.0], [0.0, 0.0], [1.0, 1.5]
+        Test.@test GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr); k = 1, radius = 0.6)[2][2] == 2
+        Test.@test GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr); k = 1, radius = 0.4)[2][2] == 1
+        Test.@test_throws ArgumentError GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr, sr); k = 1)
+        g3kd = GR.UnstructuredGrid(geo, (px, py, pz), trues(nn); k = 4, areas = ones(nn))
+        Test.@test length(collect(GR.neighbors(g3kd, 1))) == 4
+        Test.@test_throws ArgumentError GR.UnstructuredGrid(geo, (px, py, pz), trues(nn); k = 4)
+    end
+
+    Test.@testset "MetricBall queries match a brute-force scan of the same metric" begin
+        C = FG.Connectivity
+        GE = FG.Geometry
+        # Every cell, same minimum-image + geometry-distance filter, no window: equality proves the
+        # window never under-covers and the traversal never duplicates a cell.
+        function brute(grid, I, r; active_only = true)
+            N = ndims(FG.Grids.mask(grid))
+            sz = size(FG.Grids.mask(grid))
+            prd = ntuple(d -> FG.Grids.isperiodic(grid, d) ? FG.Grids.period(grid, d) : 0.0, N)
+            geom = FG.Grids.grid_geometry(grid)
+            p0 = FG.Grids._raw_coords(grid, I...)
+            out = Int[]
+            for ci in CartesianIndices(sz)
+                J = Tuple(ci)
+                J == I && continue
+                active_only && !FG.Grids.isactive(grid, J...) && continue
+                pt = FG.Grids._raw_coords(grid, J...)
+                q = ntuple(N) do d
+                    p = prd[d]
+                    p > 0 ? p0[d] + (pt[d] - p0[d] - p * round((pt[d] - p0[d]) / p)) : pt[d]
+                end
+                GE.distance(geom, p0, q) ≤ r || continue
+                push!(out, C._linidx(sz, J...))
+            end
+            return sort(out)
+        end
+        agrees(grid, I, r; kw...) = begin
+            got = sort(C.neighbors_within(grid, I...; ball = r, kw...))
+            got == brute(grid, I, r; kw...) &&
+                C.nneighbors_within(grid, I...; ball = r, kw...) == length(got) && allunique(got)
+        end
+
+        geo = FG.Geometry.CartesianGeometry()
+        gu = FG.Grids.StructuredGrid(geo, range(0.0; step = 1.0, length = 12),
+                                     range(0.0; step = 0.7, length = 9))
+        for (I, r) in (((6, 5), 2.5), ((1, 1), 3.0), ((12, 9), 0.7), ((6, 5), 0.0), ((6, 5), 100.0))
+            Test.@test agrees(gu, I, r)
+        end
+        xs = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 0.2, 1.4])
+        gst = FG.Grids.StructuredGrid(geo, xs, cumsum([0.0, 0.5, 1.7, 0.2, 0.9]))
+        for (I, r) in (((3, 2), 1.5), ((1, 5), 2.0), ((7, 3), 3.1))
+            Test.@test agrees(gst, I, r)
+        end
+        # Periodic: the seam wraps by minimum image, and a ball reaching all the way around must not
+        # count any cell twice.
+        gp = FG.Grids.StructuredGrid(geo, range(0.0; step = 1.0, length = 10),
+                                     range(0.0; step = 1.0, length = 6);
+                                     periodic = true, period = 10.0)
+        for (I, r) in (((1, 3), 2.2), ((10, 1), 1.5), ((5, 3), 4.9), ((5, 3), 50.0))
+            Test.@test agrees(gp, I, r)
+        end
+        g4 = FG.Grids.StructuredGrid(geo, ntuple(_ -> range(0.0; step = 1.0, length = 5), 4)...)
+        Test.@test agrees(g4, (3, 3, 3, 3), 1.8)
+        Test.@test agrees(g4, (1, 2, 5, 4), 2.6)
+
+        R = 6.371e6
+        sph = FG.Geometry.SphericalGeometry(R)
+        λ = range(0, 2π; length = 25)[1:24]
+        φ = range(-π / 2, π / 2; length = 13)
+        g2 = FG.Grids.StructuredGrid(sph, λ, φ)
+        # Pole cells (full longitude ring in range), the seam, and a radius past the antipode.
+        for (I, r) in (((5, 7), 2.0e6), ((1, 13), 1.5e6), ((3, 1), 1.0e6), ((24, 6), 2.0e6),
+                       ((5, 7), 2.5e7))
+            Test.@test agrees(g2, I, r)
+        end
+        g2s = FG.Grids.StructuredGrid(sph, collect(range(2π; step = -2π / 16, length = 16)),
+                                      asin.(range(-1, 1; length = 9)))
+        Test.@test agrees(g2s, (4, 8), 2.0e6)
+        Test.@test agrees(g2s, (16, 2), 3.0e6)
+        # 3-D is the CHORD metric, shorter than the arc — a window derived for arcs under-covers it,
+        # which is what the near-antipodal radii on the unit shell probe.
+        g3 = FG.Grids.StructuredGrid(sph, λ, φ, range(R, R + 3e5; length = 4))
+        for (I, r) in (((5, 7, 2), 2.0e6), ((1, 13, 1), 1.0e6), ((3, 7, 4), 1.5e5))
+            Test.@test agrees(g3, I, r)
+        end
+        gunit = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(1.0), λ, φ,
+                                        range(1.0, 1.1; length = 3))
+        for (I, r) in (((5, 7, 2), 1.95), ((5, 7, 2), 1.2), ((1, 1, 1), 2.05))
+            Test.@test agrees(gunit, I, r)
+        end
+
+        # A 1-D transect's metric is the shorter arc of its circle — the same convention its measure
+        # uses — so a ball can wrap the seam.
+        g1 = FG.Grids.StructuredGrid(sph, λ)
+        Test.@test GE.distance(sph, (0.1,), (0.1 + 2π - 0.3,)) ≈ R * 0.3
+        for (I, r) in (((1,), 2.0e6), ((24,), 1.7e6), ((12,), 2.5e7))
+            Test.@test agrees(g1, I, r)
+        end
+
+        wgs = FG.Geometry.SpheroidGeometry()
+        ge2 = FG.Grids.StructuredGrid(wgs, λ, φ)
+        for (I, r) in (((5, 7), 2.0e6), ((1, 13), 1.0e6), ((24, 6), 8.0e5))
+            Test.@test agrees(ge2, I, r)
+        end
+        ge1 = FG.Grids.StructuredGrid(wgs, λ)
+        Test.@test GE.distance(wgs, (0.0,), (π,)) ≈ π * GE.semimajor_axis(wgs)
+        Test.@test agrees(ge1, (1,), 2.0e6)
+        ge3 = FG.Grids.StructuredGrid(wgs, λ, φ, range(0.0, 3.0e5; length = 4))
+        for (I, r) in (((5, 7, 2), 2.0e6), ((1, 13, 1), 1.0e6), ((3, 7, 4), 1.5e5), ((5, 7, 2), 1.4e7))
+            Test.@test agrees(ge3, I, r)
+        end
+        # The geodetic 3-D metric is the ECEF chord: at f = 0 it must equal the sphere's, and the
+        # closed forms pin the conversion.
+        Test.@test GE.distance(FG.Geometry.SpheroidGeometry(R, 0.0), (0.3, 0.4, 1e4), (1.1, -0.2, 3e4)) ≈
+                   GE.distance(sph, (0.3, 0.4, R + 1e4), (1.1, -0.2, R + 3e4)) rtol = 1e-12
+        a, b = GE.semimajor_axis(wgs), GE.semiminor_axis(wgs)
+        Test.@test GE.distance(wgs, (0.0, 0.0, 0.0), (0.0, π / 2, 0.0)) ≈ sqrt(a^2 + b^2)
+        Test.@test GE.distance(wgs, (0.7, 0.5, 0.0), (0.7, 0.5, 250.0)) ≈ 250.0
+        ecef = GE.geodetic_to_cartesian(wgs, (0.0, 0.0, 0.0))
+        Test.@test (ecef.x, ecef.y, ecef.z) == (a, 0.0, 0.0)
+        Test.@test GE.geodetic_to_cartesian(wgs, (0.0, π / 2, 100.0)).z ≈ b + 100.0
+
+        # Mask, MetricBall-vs-bare-radius, argument errors, and the two-call buffer pattern.
+        mk = trues(24, 13)
+        mk[4, 7] = false
+        gm = FG.Grids.StructuredGrid(sph, λ, φ, mk)
+        Test.@test agrees(gm, (5, 7), 2.0e6)
+        Test.@test C.nneighbors_within(gm, 4, 7; ball = 2.0e6) == 0
+        Test.@test sort(C.neighbors_within(g2, 5, 7; ball = FG.Stencils.MetricBall(2.0e6))) ==
+                   brute(g2, (5, 7), 2.0e6)
+        Test.@test_throws ArgumentError C.nneighbors_within(g2, 5, 7; ball = -1.0)
+        Test.@test_throws ArgumentError FG.Stencils.MetricBall(-2.0)
+        Test.@test_throws BoundsError C.nneighbors_within(g2, 99, 7; ball = 1.0)
+        nb = C.nneighbors_within(g2, 5, 7; ball = 2.0e6)
+        buf = Vector{Int}(undef, nb)
+        Test.@test C.neighbors_within!(buf, g2, 5, 7; ball = 2.0e6) == nb
+        Test.@test sort(buf) == brute(g2, (5, 7), 2.0e6)
+        Test.@test_throws ArgumentError C.neighbors_within!(Vector{Int}(undef, nb - 1), g2, 5, 7;
+                                                            ball = 2.0e6)
+
+        # The bulk builder: row k of the CSR is exactly the per-cell query for cell k, the graph is
+        # symmetric because the metric is, and the stencil builder's own default is untouched by it.
+        csrb = C.build_connectivity_within(g2; ball = 2.0e6)
+        Test.@test all(1:prod(size(g2))) do k
+            Ik = Tuple(CartesianIndices(size(g2))[k])
+            sort(csrb.nbrs[csrb.ptr[k]:(csrb.ptr[k + 1] - 1)]) ==
+                sort(C.neighbors_within(g2, Ik...; ball = 2.0e6))
+        end
+        Test.@test C.is_symmetric_adjacency(csrb)
+        Test.@test C.build_connectivity_within(g2; ball = FG.Stencils.MetricBall(2.0e6)).nbrs == csrb.nbrs
+        Test.@test C.nedges(C.build_connectivity(g2)) > 0
+        csrbm = C.build_connectivity_within(gm; ball = 2.0e6)
+        deadk = 4 + (7 - 1) * 24
+        Test.@test csrbm.ptr[deadk] == csrbm.ptr[deadk + 1] && deadk ∉ csrbm.nbrs
+
+        # Curvilinear and unstructured scan every cell against the same metric.
+        Λm = [λi for λi in range(0, π; length = 9), _ in 1:7]
+        Φm = [φj for _ in 1:9, φj in range(-1.0, 1.0; length = 7)]
+        gc = FG.Grids.CurvilinearGrid(sph, Λm, Φm, trues(9, 7))
+        rc = 3.0e6
+        wantc = [ii + (jj - 1) * 9 for jj in 1:7, ii in 1:9 if !(ii == 4 && jj == 3) &&
+                 GE.distance(sph, (Λm[4, 3], Φm[4, 3]), (Λm[ii, jj], Φm[ii, jj])) ≤ rc]
+        Test.@test !isempty(wantc)
+        Test.@test sort(C.neighbors_within(gc, 4, 3; ball = rc)) == sort(vec(wantc))
+        Test.@test C.nneighbors_within(gc, 4, 3; ball = rc) == length(wantc)
+        csrbc = C.build_connectivity_within(gc; ball = rc)
+        k43 = 4 + (3 - 1) * 9
+        Test.@test sort(csrbc.nbrs[csrbc.ptr[k43]:(csrbc.ptr[k43 + 1] - 1)]) == sort(vec(wantc))
+        Test.@test C.is_symmetric_adjacency(csrbc)
+        pts = [(0.1, 0.2), (0.3, 0.25), (2.0, -0.5), (0.11, 0.19), (1.0, 1.0)]
+        gu2 = FG.Grids.UnstructuredGrid(sph, first.(pts), last.(pts),
+                                        fill(1.0, 5), trues(5), Int[], ones(Int, 6))
+        Test.@test sort(C.neighbors_within(gu2, 1; ball = 2.0e6)) ==
+                   [k for k in 2:5 if GE.distance(sph, pts[1], pts[k]) ≤ 2.0e6]
+
+        # Repeated queries allocate nothing on a rectilinear grid. Called through the const `FG` path:
+        # a captured non-const module local would defeat const-folding and charge dispatch to the sweep.
+        ballsweep(gr) = begin
+            t = 0
+            for j in 1:size(gr, 2), i in 1:size(gr, 1)
+                t += FG.Connectivity.nneighbors_within(gr, i, j; ball = 2.5)
+            end
+            t
+        end
+        ballsweep(gu)
+        Test.@test @allocated(ballsweep(gu)) == 0
+    end
+
     Test.@testset "Grids and connectivity work in any number of dimensions" begin
         geo = FG.Geometry.CartesianGeometry()
         # A 4-D and a 5-D rectilinear grid, built through the one varargs constructor.
@@ -2482,6 +3289,43 @@ Test.@testset "FlowGeometries.jl" begin
         g5 = FG.Grids.StructuredGrid(geo, ntuple(_ -> 0.0:1.0:2.0, 5)...)
         Test.@test size(g5) == (3, 3, 3, 3, 3)
         Test.@test FG.Connectivity.nneighbors(g5, 2, 2, 2, 2, 2) == 10
+
+        # A traversal must stay allocation-free past N = 3 too. Coordinate names are numbered rather
+        # than lettered from N = 4 on, and a per-cell query reaches them; building those symbols at run
+        # time would allocate on every call, so this covers more than the loop itself.
+        sweep4(gr) = begin
+            t = 0
+            for l in 1:size(gr, 4), k in 1:size(gr, 3), j in 1:size(gr, 2), i in 1:size(gr, 1)
+                t += FG.Connectivity.nneighbors(gr, i, j, k, l; stencil = FG.Stencils.Moore(1))
+            end
+            t
+        end
+        sweep5(gr) = begin
+            t = 0
+            for m in 1:size(gr, 5), l in 1:size(gr, 4), k in 1:size(gr, 3),
+                j in 1:size(gr, 2), i in 1:size(gr, 1)
+                t += FG.Connectivity.nneighbors(gr, i, j, k, l, m)
+            end
+            t
+        end
+        coordsweep4(gr) = begin
+            t = 0.0
+            for l in 1:size(gr, 4), k in 1:size(gr, 3), j in 1:size(gr, 2), i in 1:size(gr, 1)
+                t += FG.Grids.coords(gr, i, j, k, l).x1 + FG.Grids.measure(gr, i, j, k, l)
+            end
+            t
+        end
+        sweep4(g4); sweep5(g5); coordsweep4(g4)
+        Test.@test @allocated(sweep4(g4)) == 0
+        Test.@test @allocated(sweep5(g5)) == 0
+        Test.@test @allocated(coordsweep4(g4)) == 0
+        # The names themselves must be a compile-time constant past the lettered directions.
+        names4() = FG.Geometry.point_names(FG.Geometry.CartesianGeometry(), Val(4))
+        names7() = FG.Geometry.point_names(FG.Geometry.SphericalGeometry(1.0), Val(7))
+        names4(); names7()
+        Test.@test @allocated(names4()) == 0
+        Test.@test @allocated(names7()) == 0
+        Test.@test names7() == (:λ, :φ, :r, :q4, :q5, :q6, :q7)
 
         # A spherical grid in 1-D measures arc length, and in 4-D keeps its metric directions.
         sgeo = FG.Geometry.SphericalGeometry(2.0)
@@ -2900,8 +3744,115 @@ Test.@testset "FlowGeometries.jl" begin
         # Coordinate names follow the geodetic convention.
         Test.@test G.point_names(g, Val(2)) == (:λ, :φ)
         Test.@test G.point_names(g, Val(3)) == (:λ, :φ, :h)
+        Test.@test G.point_names(g, Val(5)) == (:λ, :φ, :h, :q4, :q5)
         Test.@test_throws ArgumentError G.SpheroidGeometry(-1.0, 0.1)
         Test.@test_throws ArgumentError G.SpheroidGeometry(1.0, 1.5)
+
+        # The geodetic volume element offsets BOTH curvature radii by h, so it does not factor.
+        Test.@test G.volume_element(g, 0.4, 0.0, 1.0, 1.0, 1.0) ≈
+                   G.area_element(g, 0.4, 1.0, 1.0)
+        Test.@test G.volume_element(g, 0.4, 100.0, 1e-3, 1e-3, 2.0) ≈
+                   (G.prime_vertical_radius(g, 0.4) + 100.0) * cos(0.4) *
+                   (G.meridional_radius(g, 0.4) + 100.0) * 1e-3 * 1e-3 * 2.0
+    end
+
+    Test.@testset "A spheroid drives the grid stack in every dimension" begin
+        GE = FG.Geometry
+        geo = GE.SpheroidGeometry()
+        a, e² = GE.semimajor_axis(geo), GE.eccentricity²(geo)
+        λ8 = collect(range(0, 2π; length = 9)[1:8])
+        φ7 = collect(range(-π / 2, π / 2; length = 7))
+        h4 = collect(range(0.0, 3000.0; length = 4))
+        g1 = FG.Grids.StructuredGrid(geo, λ8)
+        g2 = FG.Grids.StructuredGrid(geo, λ8, φ7)
+        g3 = FG.Grids.StructuredGrid(geo, λ8, φ7, h4)
+        g4 = FG.Grids.StructuredGrid(geo, λ8, φ7, h4, [0.0, 2.0])
+        Test.@test size.((g1, g2, g3, g4)) == ((8,), (8, 7), (8, 7, 4), (8, 7, 4, 2))
+        # Longitude closes the circle, so it is periodic without being asked; latitude is not.
+        Test.@test FG.Grids.isperiodic(g2, 1) && !FG.Grids.isperiodic(g2, 2)
+        Test.@test FG.Grids.coordinate_names(g3) == (:λ, :φ, :h)
+        Test.@test FG.Grids.coords(g3, 2, 3, 2) == (λ = λ8[2], φ = φ7[3], h = h4[2])
+
+        # 1-D: with no latitude the parallel is the equator, so the circumference is exactly 2πa.
+        Test.@test sum(FG.Grids.measure(g1)) ≈ 2π * a rtol = 1e-14
+
+        # 2-D factors; 3-D cannot, so it is stored dense.
+        Test.@test FG.Grids.measure_factors(g2) !== nothing
+        Test.@test FG.Grids.measure_factors(g3) === nothing
+
+        # Every cell equals the geometry's own element, exactly — not to a tolerance.
+        wλ = FG.Grids._axis_widths(FG.Grids.coordinates(g2, 1), 2π)
+        wφ = FG.Grids._axis_widths(FG.Grids.coordinates(g2, 2), nothing)
+        wh = FG.Grids._axis_widths(FG.Grids.coordinates(g3, 3), nothing)
+        Test.@test all(
+            FG.Grids.measure(g2, i, j) ≈ GE.area_element(geo, φ7[j], wλ[i], wφ[j])
+            for j in eachindex(φ7), i in eachindex(λ8)
+        )
+        Test.@test all(
+            FG.Grids.measure(g3, i, j, k) ≈
+            GE.volume_element(geo, φ7[j], h4[k], wλ[i], wφ[j], wh[k])
+            for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8)
+        )
+        # A further direction enters as a plain width.
+        Test.@test sum(FG.Grids.measure(g4)) ≈
+                   sum(FG.Grids._axis_widths([0.0, 2.0], nothing)) * sum(FG.Grids.measure(g3)) rtol = 1e-13
+
+        # Independent check: the closed-form ellipsoid area, approached at second order.
+        e = sqrt(e²)
+        A_exact = 2π * a^2 * (1 + (1 - e²) / e * atanh(e))
+        errs = map((24, 96, 384)) do n
+            gn = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = n + 1)[1:n]),
+                                         collect(range(-π / 2, π / 2; length = n ÷ 2 + 1)))
+            abs(sum(FG.Grids.measure(gn)) - A_exact) / A_exact
+        end
+        Test.@test errs[3] < 3e-5
+        Test.@test errs[1] / errs[2] > 8 && errs[2] / errs[3] > 8   # 4× refinement ⇒ ~16×
+        # A sphere is the f = 0 spheroid, and must agree with SphericalGeometry cell for cell.
+        gsph = FG.Grids.StructuredGrid(GE.SphericalGeometry(a), λ8, φ7)
+        gflat = FG.Grids.StructuredGrid(GE.SpheroidGeometry(a, 0.0), λ8, φ7)
+        Test.@test all(FG.Grids.measure(gflat, i, j) ≈ FG.Grids.measure(gsph, i, j)
+                       for j in eachindex(φ7), i in eachindex(λ8))
+
+        Test.@test FG.Connectivity.nneighbors(g2, 1, 3) == 4       # wraps in λ
+        Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(g2)) > 0
+
+        # A degenerate angular direction drops the differential that no longer exists, so a transect
+        # measures arc length rather than an area with a placeholder in it.
+        # Zonal at the equator: the parallel radius is N(0)·cos0 = a, so the circle closes at 2πa.
+        gzon = FG.Grids.StructuredGrid(geo, λ8, [0.0])
+        Test.@test sum(FG.Grids.measure(gzon)) ≈ 2π * a rtol = 1e-14
+        # Zonal at latitude φ: radius N(φ)·cosφ.
+        gzon2 = FG.Grids.StructuredGrid(geo, λ8, [0.7])
+        Test.@test sum(FG.Grids.measure(gzon2)) ≈
+                   2π * GE.prime_vertical_radius(geo, 0.7) * cos(0.7) rtol = 1e-14
+        # Meridional: each cell is exactly M(φ)·Δφ, the meridian arc element.
+        φm = collect(range(-π / 2, π / 2; length = 33))
+        gmer = FG.Grids.StructuredGrid(geo, [0.0], φm)
+        wm = FG.Grids._axis_widths(φm, nothing)
+        Test.@test all(FG.Grids.measure(gmer, 1, j) ≈ GE.meridional_radius(geo, φm[j]) * wm[j]
+                       for j in eachindex(φm))
+        # The total approaches ∫M dφ — twice the published quarter meridian — at FIRST order, because
+        # `n` cell-centres own `n` widths and so span π(1 + 1/n). Unlike the area case there is no cosφ
+        # factor to annihilate that end-cell excess, and the error is exactly the 1/n it predicts.
+        mer = map((48, 192, 768)) do n
+            gm = FG.Grids.StructuredGrid(geo, [0.0], collect(range(-π / 2, π / 2; length = n + 1)))
+            abs(sum(FG.Grids.measure(gm)) - 2 * 10001965.729) / (2 * 10001965.729)
+        end
+        Test.@test all(isapprox(mer[i], 1 / (48 * 4^(i - 1)); rtol = 0.02) for i in 1:3)
+        # A single point has no extent in either direction.
+        Test.@test sum(FG.Grids.measure(FG.Grids.StructuredGrid(geo, [0.3], [0.4]))) == 1.0
+
+        # The dense measure is a second storage form, so the accessors around it get their own checks.
+        Test.@test size(FG.Grids.measure_array(g3)) == size(g3)
+        Test.@test sum(FG.Grids.measure(g3)) == sum(FG.Grids.measure_array(g3))
+        Test.@test_throws BoundsError FG.Grids.measure(g3, 99, 1, 1)
+        Test.@test_throws BoundsError FG.Grids.coords(g3, 1, 99, 1)
+        Test.@test occursin("h ", sprint(show, MIME"text/plain"(), g3))
+        mk = trues(size(g3)...)
+        mk[1, 1, 1] = false
+        gm = FG.Grids.StructuredGrid(geo, λ8, φ7, h4, mk)
+        Test.@test !FG.Grids.isactive(gm, 1, 1, 1) && FG.Grids.isactive(gm, 2, 2, 2)
+        Test.@test FG.Connectivity.nneighbors(gm, 2, 2, 2) == 6
     end
 
     Test.@testset "Pole rotation" begin

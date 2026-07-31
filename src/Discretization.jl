@@ -7,8 +7,12 @@ using ..Geometry: Geometry
 # interpolate to it, where a cell's faces are, the metric factors of the coordinate system, and the
 # finite-difference weights of an arbitrary stencil.
 #
-# All of it is a function of coordinates alone. Applying weights to a FIELD is not here: that needs a
-# result location, a boundary-condition policy and a halo convention, which are the caller's to choose.
+# Nearly all of it is a function of coordinates alone. The one exception is `apply_stencil!`, which
+# applies a weight set along ONE direction leaving the result where the input was — a case in which
+# every convention is already fixed (no staggering to pick, `fd_weights`' inward shift at a bounded end,
+# wrapping on a periodic one, hence no halo). Operators that genuinely do need a result location and a
+# boundary-condition policy — a staggered difference, a divergence, a curl — are the caller's to
+# assemble, from these weights and the metric factors below.
 
 # ---------------------------------------------------------------------------
 # Staggering
@@ -66,8 +70,11 @@ function faces(x::AbstractVector{T}) where {T<:AbstractFloat}
     return f
 end
 
-faces(a::Axes.UniformAxis{T}) where {T} =
-    Axes.UniformAxis{T}(a.n == 0 ? a.origin : a.origin - a.Δ / T(2), a.Δ, a.n + 1)
+function faces(a::AbstractRange{T}) where {T<:AbstractFloat}
+    n = length(a)
+    Δ = T(step(a))
+    return Axes.UniformAxis{T}(n == 0 ? T(first(a)) : T(first(a)) - Δ / T(2), Δ, n + 1)
+end
 
 """
     centers(f) -> AbstractVector
@@ -88,8 +95,10 @@ function centers(f::AbstractVector{T}) where {T<:AbstractFloat}
     return c
 end
 
-centers(a::Axes.UniformAxis{T}) where {T} =
-    Axes.UniformAxis{T}(a.origin + a.Δ / T(2), a.Δ, max(a.n - 1, 0))
+function centers(a::AbstractRange{T}) where {T<:AbstractFloat}
+    Δ = T(step(a))
+    return Axes.UniformAxis{T}(T(first(a)) + Δ / T(2), Δ, max(length(a) - 1, 0))
+end
 
 """
     nodes(x, loc) -> AbstractVector
@@ -120,13 +129,14 @@ function locate(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     return _locate_in_faces(f, T(v), n)
 end
 
-function locate(a::Axes.UniformAxis{T}, v::Real) where {T<:AbstractFloat}
-    n = a.n
+function locate(a::AbstractRange{T}, v::Real) where {T<:AbstractFloat}
+    n = length(a)
     n == 0 && return 0
-    iszero(a.Δ) && return 1
+    Δ = T(step(a))
+    iszero(Δ) && return 1
     # Faces start half a cell before the first centre, so the cell index is the number of whole cells
     # from that first face — no search, and no faces materialized.
-    t = (T(v) - (a.origin - a.Δ / T(2))) / a.Δ
+    t = (T(v) - (T(first(a)) - Δ / T(2))) / Δ
     i = Int(floor(t)) + 1
     return 1 ≤ i ≤ n ? i : 0
 end
@@ -174,14 +184,16 @@ function nearest_index(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     return best
 end
 
-function nearest_index(a::Axes.UniformAxis{T}, v::Real) where {T<:AbstractFloat}
-    a.n == 0 && throw(ArgumentError("an empty axis has no nearest sample"))
-    iszero(a.Δ) && return 1
-    t = (T(v) - a.origin) / a.Δ
+function nearest_index(a::AbstractRange{T}, v::Real) where {T<:AbstractFloat}
+    n = length(a)
+    n == 0 && throw(ArgumentError("an empty axis has no nearest sample"))
+    Δ = T(step(a))
+    iszero(Δ) && return 1
+    t = (T(v) - T(first(a))) / Δ
     # `ceil(t - 1/2)` rounds to nearest and sends an exact tie DOWN in index for either sign of Δ,
     # matching the scan above; `round` would send ties to even and disagree.
     i = Int(ceil(t - one(T) / 2)) + 1
-    return clamp(i, 1, a.n)
+    return clamp(i, 1, n)
 end
 
 # ---------------------------------------------------------------------------
@@ -226,9 +238,10 @@ function _bracket(x::AbstractVector{T}, v::T, n::Int) where {T}
     return lo
 end
 
-function _bracket(a::Axes.UniformAxis{T}, v::T, n::Int) where {T}
-    iszero(a.Δ) && return 1
-    return clamp(Int(floor((v - a.origin) / a.Δ)) + 1, 1, n - 1)
+function _bracket(a::AbstractRange{T}, v::T, n::Int) where {T<:AbstractFloat}
+    Δ = T(step(a))
+    iszero(Δ) && return 1
+    return clamp(Int(floor((v - T(first(a))) / Δ)) + 1, 1, n - 1)
 end
 
 """
@@ -367,5 +380,137 @@ choose a staggering or a boundary condition.
 """
 @inline jacobian(geometry::Geometry.AbstractGeometry, point) =
     Geometry.jacobian(geometry, point)
+
+# ---------------------------------------------------------------------------
+# Applying a weight set along one direction
+# ---------------------------------------------------------------------------
+
+"""
+    axis_stencils(x, order, nodes; period=nothing) -> (indices, weights)
+
+The `order`-th derivative's [`fd_weights`](@ref) at **every** sample of axis `x`, as two `n × nodes`
+matrices: the axis indices each sample reads, and the weight on each.
+
+One row per sample, so a stretched axis costs nothing extra downstream — the varying weights are
+already here. Built once and reused by [`apply_stencil!`](@ref).
+
+`period === nothing` shifts the stencil inward at the two ends, exactly as the single-sample
+[`fd_weights`](@ref) does. Given a period the stencil stays centred everywhere and wraps, with the
+wrapped samples' coordinates carried across the seam so the spacing there is the true one.
+"""
+function axis_stencils(
+    x::AbstractVector{T}, order::Integer, nodes::Integer; period::Union{Nothing,Real} = nothing,
+) where {T<:AbstractFloat}
+    n = length(x)
+    k = Int(nodes)
+    ord = Int(order)
+    k ≥ ord + 1 || throw(ArgumentError(
+        "an order-$ord derivative needs at least $(ord + 1) nodes, got $k",
+    ))
+    k ≤ n || throw(ArgumentError("cannot use $k nodes on an axis of $n samples"))
+    idx = Matrix{Int}(undef, n, k)
+    wts = Matrix{T}(undef, n, k)
+    half = (k - 1) ÷ 2
+    buf = Vector{T}(undef, k)
+    P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
+    @inbounds for i in 1:n
+        if period === nothing
+            i0 = clamp(i - half, 1, n - k + 1)
+            for q in 1:k
+                idx[i, q] = i0 + q - 1
+                buf[q] = x[i0 + q - 1]
+            end
+        else
+            for q in 1:k
+                raw = i - half + q - 1
+                idx[i, q] = mod1(raw, n)
+                buf[q] = x[mod1(raw, n)] + T(fld(raw - 1, n)) * P
+            end
+        end
+        w = fd_weights(buf, x[i], ord)
+        for q in 1:k
+            wts[i, q] = w[q]
+        end
+    end
+    return idx, wts
+end
+
+"""
+    apply_stencil!(out, field, x, dim; order=1, nodes=order+1, period=nothing,
+                   mask=nothing, masked=zero) -> out
+    apply_stencil!(out, field, indices, weights, dim; mask=nothing, masked=zero) -> out
+
+Apply a weight set along direction `dim` of `field`, writing
+`out[I] = Σ_q weights[I[dim], q] · field[…, indices[I[dim], q], …]`.
+
+This is the one field-touching operation here, and it is here because every convention it needs is
+already settled elsewhere in the package rather than being the caller's to choose: the result sits at
+the same location as the input, so there is no staggering decision; the stencil shifts inward at a
+bounded end and wraps on a periodic one, which is [`fd_weights`](@ref)'s stated boundary behaviour and
+removes any need for a halo. What is *not* here is anything that does need those choices — a staggered
+difference, or a multi-direction operator like a divergence or a curl, which additionally needs a
+result location and a boundary-condition policy.
+
+Pass the axis and an order to have the weights built for you, or precomputed `indices`/`weights` from
+[`axis_stencils`](@ref) to reuse them across many fields.
+
+With a `mask`, a cell is written as `masked` when it is inactive **or when its stencil reads an
+inactive cell** — the derivative there is not determined by the active data, so it is not invented.
+`out` and `field` may not alias.
+"""
+function apply_stencil!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
+    dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
+    period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
+) where {S,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    size(field, dim) == length(x) || throw(DimensionMismatch(
+        "axis has $(length(x)) samples but direction $dim of the field has $(size(field, dim))",
+    ))
+    idx, wts = axis_stencils(x, order, nodes; period = period)
+    return apply_stencil!(out, field, idx, wts, dim; mask = mask, masked = masked)
+end
+
+function apply_stencil!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
+    indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
+    mask = nothing, masked = zero(S),
+) where {S,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    size(out) == size(field) || throw(DimensionMismatch(
+        "out $(size(out)) and field $(size(field)) must have the same size",
+    ))
+    size(indices) == size(weights) || throw(DimensionMismatch(
+        "indices $(size(indices)) and weights $(size(weights)) must have the same size",
+    ))
+    size(indices, 1) == size(field, dim) || throw(DimensionMismatch(
+        "got $(size(indices, 1)) stencil rows for direction $dim of length $(size(field, dim))",
+    ))
+    mask === nothing || size(mask) == size(field) || throw(DimensionMismatch(
+        "mask $(size(mask)) and field $(size(field)) must have the same size",
+    ))
+    k = size(indices, 2)
+    m = masked
+    @inbounds for ci in CartesianIndices(size(field))
+        I = Tuple(ci)
+        j = I[dim]
+        if mask !== nothing && !mask[ci]
+            out[ci] = m
+            continue
+        end
+        acc = zero(S)
+        blocked = false
+        for q in 1:k
+            J = ntuple(d -> d == dim ? indices[j, q] : I[d], Val(N))
+            if mask !== nothing && !mask[J...]
+                blocked = true
+                break
+            end
+            acc += S(weights[j, q]) * S(field[J...])
+        end
+        out[ci] = blocked ? m : acc
+    end
+    return out
+end
 
 end # module Discretization

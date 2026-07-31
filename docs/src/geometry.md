@@ -97,12 +97,10 @@ FG.Geometry.nonuniform_first_derivative(1.0, 0.0, 4.0, 1.0, 2.0)
 Second-order accurate on an unequally spaced stencil — the usual three-point formula degrades to
 first order when `h₋ ≠ h₊`, which is the common case on a stretched grid.
 
-## Adding a geometry
+## A spheroid drives the whole stack
 
-Subtype `AbstractCartesianGeometry`, `AbstractSphericalGeometry` or `AbstractEllipsoidalGeometry` and
-you inherit the whole grid, sampling and connectivity stack. Only override what genuinely differs —
-which `SpheroidGeometry` demonstrates: it supplies its own `distance` (Vincenty), `area_element` and
-`scale_factors`, and nothing else changes.
+`SpheroidGeometry` overrides `distance` (Vincenty), `area_element`, `volume_element` and
+`scale_factors`; the grid, sampling and connectivity layers are inherited.
 
 ```@example geometry
 FG.Geometry.distance(wgs, (0.0, 0.0), (0.0, π/2))    # quarter meridian, WGS 84
@@ -111,6 +109,58 @@ FG.Geometry.distance(wgs, (0.0, 0.0), (0.0, π/2))    # quarter meridian, WGS 84
 ```@example geometry
 FG.Geometry.prime_vertical_radius(wgs, 0.0), FG.Geometry.meridional_radius(wgs, π/2)
 ```
+
+Grid directions are `(λ, φ, h)`, with `h` the height **above the ellipsoid** — not the absolute radius
+that a spherical grid's third direction carries.
+
+```@example geometry
+λ = range(0, 2π; length = 9)[1:8]
+φ = range(-π/2, π/2; length = 7)
+gs = FG.Grids.StructuredGrid(wgs, λ, φ)
+FG.Grids.coordinate_names(gs), FG.Grids.isperiodic(gs, 1), size(gs)
+```
+
+The surface element `M(φ)·N(φ)cosφ·Δλ·Δφ` factors, so the measure stays separable and an interior cell
+matches the geometry's own element exactly:
+
+```@example geometry
+Δλ, Δφ = FG.Grids.spacing(gs, 1), FG.Grids.spacing(gs, 2)
+FG.Grids.measure(gs, 3, 4) ≈ FG.Geometry.area_element(wgs, φ[4], Δλ, Δφ)
+```
+
+Adding a height direction changes that. The geodetic volume element offsets *both* curvature radii by
+`h`, coupling `φ` and `h`, so no product of per-axis factors reproduces it and the measure is stored
+dense — which `measure_factors` reports by returning `nothing`:
+
+```@example geometry
+g3 = FG.Grids.StructuredGrid(wgs, λ, φ, range(0.0, 2000.0; length = 3))
+FG.Grids.measure_factors(gs) !== nothing, FG.Grids.measure_factors(g3) === nothing
+```
+
+```@example geometry
+Δh = FG.Grids.spacing(g3, 3)
+FG.Grids.measure(g3, 3, 4, 2) ≈ FG.Geometry.volume_element(wgs, φ[4], 1000.0, Δλ, Δφ, Δh)
+```
+
+## Adding a geometry
+
+Subtype `AbstractCartesianGeometry`, `AbstractSphericalGeometry` or `AbstractEllipsoidalGeometry` and
+you inherit the whole grid, sampling and connectivity stack. Each hierarchy asks for its shape
+parameters through accessors, so that is all a new geometry has to supply — a sphere defines
+[`radius`](@ref), an ellipsoid [`semimajor_axis`](@ref) and [`flattening`](@ref), and no method reads a
+field, so store them however you like:
+
+```@example geometry
+struct UnitSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
+FG.Geometry.radius(::UnitSphere{T}) where {T} = one(T)
+
+u = UnitSphere{Float64}()
+gu = FG.Grids.StructuredGrid(u, λ, φ)
+sum(FG.Grids.measure(gu)), FG.Geometry.distance(u, (0.0, 0.0), (0.0, π/2))
+```
+
+That total is the unit sphere's area to the discretization's accuracy, and the distance is a quarter
+great circle — both from the one method above.
 
 ## Rotated frames
 
@@ -121,4 +171,36 @@ FG.Geometry.rotate(rot, 0.7, 0.3)            # that pole maps to φ = π/2
 
 ```@example geometry
 FG.Geometry.unrotate(rot, FG.Geometry.rotate(rot, 1.2, -0.4)...)   # round-trips
+```
+
+A whole point set rotates in place — the shape a sampling's `spherical_points` output has — and the
+array forms allocate nothing:
+
+```@example geometry
+λs = [0.1, 1.2, 3.0, 5.5]
+φs = [0.0, -0.4, 0.9, 0.2]
+FG.Geometry.rotate!(λs, φs, rot)
+λs
+```
+
+Rotating a rectilinear spherical grid gives a **curvilinear** one, because that is what it is: only its
+own frame's axes are separable. `unrotate` is the usual direction, taking a rotated-pole grid's
+`(λ′, φ′)` axes to the geographic coordinates of each cell.
+
+```@example geometry
+sph = FG.Geometry.SphericalGeometry()
+λr = range(0, 2π; length = 25)[1:24]
+φr = range(-1.2, 1.2; length = 13)
+grot = FG.Grids.unrotate(FG.Grids.StructuredGrid(sph, λr, φr), rot)
+typeof(grot).name.name, size(grot), FG.Grids.coordinate_names(grot)
+```
+
+The cell measure carries over *exactly* rather than being recomputed, since a rotation is an isometry of
+the sphere — recomputing from the rotated corners would only add roundoff. The index topology carries
+over too: same mesh, same neighbours, so a direction that wrapped still wraps.
+
+```@example geometry
+gplain = FG.Grids.StructuredGrid(sph, λr, φr)
+FG.Grids.measure(grot, 3, 4) == FG.Grids.measure(gplain, 3, 4),
+FG.Grids.isperiodic(grot, 1)
 ```

@@ -95,6 +95,16 @@ FG.Connectivity.nneighbors(grid, i, j; stencil = S.Anisotropic((3, 1)))
 A stencil is named by its type, never a symbol: a symbol could only be resolved at run time, so the
 neighbour iterator built from it would allocate once per cell.
 
+A neighbourhood by physical distance rather than by cells is a `MetricBall`, queried under the
+geometry's own metric — great-circle, Vincenty, or the chord where a radial direction is present —
+with periodic seams wrapped by minimum image:
+
+```julia
+FG.Connectivity.neighbors_within(grid, i, j; ball = S.MetricBall(500e3))   # within 500 km
+FG.Connectivity.nneighbors_within(grid, i, j; ball = 500e3)                # a bare radius works too
+FG.Connectivity.build_connectivity_within(grid; ball = 500e3)              # the whole graph, as CSR
+```
+
 ## Discretization primitives
 
 Point location, interpolation weights, staggering, metric factors, and finite-difference weights for
@@ -108,11 +118,15 @@ D.faces(axis), D.nodes(axis, D.Face())
 D.interpolation_weights(axis, v)
 D.fd_weights([-1.0, 0.0, 1.0], 0.0, 2)   # [1, -2, 1]
 FG.Geometry.scale_factors(geo, point)    # (R cosφ, R) on a sphere
+D.apply_stencil!(out, field, grid, 1; order = 1, nodes = 5)   # along one direction
 ```
 
-Weights and metric terms only. Applying them to a field needs a result location, a
-boundary-condition policy and a halo convention — modelling choices that belong to the caller, so the
-package supplies every geometric input and imposes none of them.
+`apply_stencil!` is the one function that touches a field, and only along a single direction with the
+result left where the input was — a case whose conventions are all already fixed: nothing to stagger,
+the stencil shifts inward at a bounded end and wraps on a periodic one, so no halo either. Anything
+that genuinely needs a result location and a boundary-condition policy — a staggered difference, a
+divergence, a curl — is a short call at the call site from these weights and metric terms, and is not
+imposed here.
 
 ## Mask topology
 

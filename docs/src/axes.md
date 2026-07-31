@@ -43,10 +43,38 @@ coordinates with the exact arithmetic sequence, which is your call to make, not 
 A.spacing(A.UniformAxis(first(v), Δ, length(v)))
 ```
 
-A [`UniformAxis`](@ref) stores three numbers and computes `origin + (i-1)·Δ` in its own element type.
-That matters against `range`: `range(0f0; step = 0.25f0, length = 5)` is a
-`StepRangeLen{Float32, Float64, Float64, Int}` — `Float32` elements over a `Float64` offset and step —
-so a `Float32` grid built from one would do `Float64` index arithmetic.
+## Your axis type is kept
+
+A grid stores the axis you hand it. Any `AbstractRange` already of the geometry's element type passes
+through untouched — your own range subtype, a `StepRangeLen` whose `TwicePrecision` internals you want,
+a `BigFloat`-backed range:
+
+```@example axes
+r = range(0.0; step = 0.5, length = 9)
+g = FG.Grids.StructuredGrid(geo, r, r)
+FG.Grids.coordinates(g, 1) === r, typeof(FG.Grids.coordinates(g, 1))
+```
+
+Nothing needs converting to earn the fast paths — they dispatch on `spacing_trait`, which is
+`UniformSpacing()` for *every* range, so whatever you brought gets them:
+
+```@example axes
+FG.Grids.isuniform(g), FG.Grids.spacing(g, 1), typeof.(FG.Grids.measure_factors(g))
+```
+
+Conversion happens only where the element type must change, since an arbitrary range subtype cannot be
+rebuilt at a new eltype generically. That case becomes a `UniformAxis{T}`:
+
+```@example axes
+gi = FG.Grids.StructuredGrid(geo, 0:8, 0:8)      # Int range, Float64 grid
+typeof(FG.Grids.coordinates(gi, 1))
+```
+
+A [`UniformAxis`](@ref) stores three numbers and computes `origin + (i-1)·Δ` in its own element type,
+which is what `uniform_axis` gives you when you want it.
+`range(0f0; step = 0.25f0, length = 5)` is a `StepRangeLen{Float32, Float64, Float64, Int}` — `Float32`
+elements over a `Float64` offset and step — so a `Float32` grid built from one does `Float64` index
+arithmetic. That is kept because it is what you passed; converting is the opt-in:
 
 ```@example axes
 typeof(range(0.0f0; step = 0.25f0, length = 5)), typeof(A.uniform_axis(Float32, range(0.0f0; step = 0.25f0, length = 5)))
@@ -71,6 +99,53 @@ Anything that is not affine becomes a plain array, as it must:
 
 ```@example axes
 A.isuniform(cos.(u))
+```
+
+## Your own uniform axis type
+
+If you want a uniform axis carrying something extra — a name, a unit tag, a provenance field — subtype
+[`AbstractUniformAxis`](@ref) and implement the three methods `AbstractRange` requires anyway:
+
+```@example axes
+struct NamedAxis{T} <: A.AbstractUniformAxis{T}
+    start::T
+    h::T
+    count::Int
+    name::Symbol
+end
+Base.first(a::NamedAxis) = a.start
+Base.step(a::NamedAxis) = a.h
+Base.length(a::NamedAxis) = a.count
+
+z = NamedAxis(0.0, 0.25, 5, :depth)
+collect(z), sum(z), extrema(z), z[3], collect(z[2:4]), collect(reverse(z))
+```
+
+That is the whole contract. Indexing, the `O(1)` reductions, slicing, reversal and the affine
+arithmetic all follow, and no generic method reads a field — the names above are nothing like
+`UniformAxis`'s and it makes no difference:
+
+```@example axes
+collect(2.0 .* z .+ 1.0), A.isuniform(z), A.spacing(z)
+```
+
+A derived axis is a plain `UniformAxis`, since the extra field has no generic meaning under a slice.
+Define [`similar_axis`](@ref) to say what it should be instead:
+
+```@example axes
+A.similar_axis(a::NamedAxis{T}, origin, Δ, n::Integer) where {T} =
+    NamedAxis{T}(convert(T, origin), convert(T, Δ), Int(n), a.name)
+
+zz = reverse(z)[2:3] .+ 1.0
+typeof(zz), zz.name, collect(zz)
+```
+
+Such an axis is stored as itself on a grid and takes every uniform fast path:
+
+```@example axes
+gz = FG.Grids.StructuredGrid(geo, z, z)
+FG.Grids.coordinates(gz, 1) === z, FG.Grids.isuniform(gz),
+typeof.(FG.Grids.measure_factors(gz)), Base.summarysize(gz)
 ```
 
 ## It is an `AbstractRange`

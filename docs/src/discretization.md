@@ -109,6 +109,68 @@ idx1, idxm
 
 `FG.Geometry.nonuniform_first_derivative` is the three-node, first-derivative case of the same thing.
 
+## Applying a weight set
+
+[`apply_stencil!`](@ref) is the one function here that touches a field, and only along a single
+direction with the result left where the input was. That case needs no convention the package has not
+already fixed: nothing to stagger, `fd_weights`' inward shift at a bounded end, wrapping on a periodic
+one — so no halo either.
+
+```@example disc
+x = collect(range(0.0, 2.0; length = 11))
+f = @. 3x^2 - 2x + 5
+out = similar(f)
+D.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
+maximum(abs, out .- (6x .- 2))          # exact for a quadratic, ends included
+```
+
+A stretched axis is equally exact, because the weights are built per sample rather than one set reused:
+
+```@example disc
+xs = [0.0, 0.11, 0.37, 0.9, 1.05, 1.6, 1.62, 2.0]
+outs = similar(xs)
+D.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
+maximum(abs, outs .- (6xs .- 2))
+```
+
+Given a `period` the stencil stays centred and wraps, carrying the wrapped samples' coordinates across
+the seam so the spacing there is the true one — the seam is then no worse than the interior:
+
+```@example disc
+λ = collect(range(0, 2π; length = 65)[1:64])
+o = similar(λ)
+D.apply_stencil!(o, sin.(λ), λ, 1; order = 1, nodes = 5, period = 2π)
+maximum(abs, o .- cos.(λ)), abs(o[1] - cos(λ[1]))
+```
+
+The grid form takes the axis, the wrap period and the mask from the grid, so a periodic direction wraps
+without being told. Where a mask bites, a value whose stencil would read an inactive cell is written as
+`masked` rather than invented:
+
+```@example disc
+geo = FG.Geometry.CartesianGeometry()
+X = collect(range(0.0, 1.0; length = 9)); Y = collect(range(0.0, 2.0; length = 7))
+F = [xi^2 + 3yi for xi in X, yi in Y]
+mk = trues(9, 7); mk[5, 3] = false
+gm = FG.Grids.StructuredGrid(geo, X, Y, mk)
+Om = similar(F)
+D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = NaN)
+Om[3:7, 3]                               # the masked cell and the two that read it
+```
+
+Build the weights once with [`axis_stencils`](@ref) to reuse them across many fields; applying a
+precomputed set allocates nothing.
+
+```@example disc
+idx, w = D.axis_stencils(X, 1, 3)
+size(idx), size(w)
+```
+
+Anything that *does* need a convention the package has not chosen — a staggered difference, or a
+multi-direction operator like a divergence or a curl, which also need a result location and a
+boundary-condition policy — is assembled at the call site from these weights and the metric factors
+below.
+
 ## Metric factors
 
 ```@example disc

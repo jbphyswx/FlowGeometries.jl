@@ -25,7 +25,7 @@ and an activity mask.
 | type | coordinates | use |
 |---|---|---|
 | `StructuredGrid` | one 1-D axis per direction | rectilinear: lat–lon, any tensor-product sampling |
-| `CurvilinearGrid` | an `Nx × Ny` array per direction | logically rectangular, geometrically warped |
+| `CurvilinearGrid` | one `N`-D array per direction | logically rectangular, geometrically warped |
 | `UnstructuredGrid` | one value per node, plus CSR neighbours | HEALPix, icosahedral, cubed sphere, scattered |
 
 ## Building one
@@ -83,6 +83,23 @@ differs, and the values are bit-identical. At 2000² that is **61.0 MiB → 0.04
 *faster* on every access pattern measured, because the factors stay in cache while a 61 MiB array is
 DRAM-bound. See [Performance](@ref performance-page).
 
+Operations that keep the measure a *product* stay factored, so a unit conversion does not undo the
+saving: scaling, a multiplicative map (`abs`, `abs2`, `sqrt`, `inv`), and a factor-wise product or
+quotient of two measures.
+
+```@example grids
+km² = m ./ 1e6
+typeof(km²).name.name, Base.summarysize(km²), sum(km²) ≈ sum(m) / 1e6
+```
+
+Anything else materializes — correct, just dense. `exp` is the clean example: it is not multiplicative,
+so `exp(∏wᵈ) ≠ ∏exp(wᵈ)` and there is no factored form to keep. A *negative* scale also materializes
+deliberately: non-negative factors are an invariant the `findmax`/`findmin` shortcut relies on.
+
+```@example grids
+typeof(exp.(m)).name.name, typeof((-1.0) .* m).name.name
+```
+
 `sum` being O(∑Nᵈ) is also what stops `show` from adding eight million numbers to print one line.
 
 ## Masks
@@ -109,6 +126,28 @@ size(FG.Grids.corners(cg2, 1)), FG.Grids.corner_coords(cg2, i, j)
 
 Supply `x_corner`/`y_corner` when your source model ships its own cell-vertex grid; otherwise they
 are reconstructed from the centres, which needs at least a 2×2 grid.
+
+A curvilinear grid takes any number of directions — one `N`-D array each, `mask` last. Beyond 2-D the
+cell measure is yours to pass: the corner-area kernel is an exact-quadrilateral algorithm, not the 2-D
+case of an N-D one, so asking for a 3-D measure it cannot compute is an error rather than a number from
+the wrong formula.
+
+```@example grids
+cart = FG.Geometry.CartesianGeometry()
+X = [x for x in 0.0:1.0:3.0, _ in 1:3, _ in 1:2]
+Y = [y for _ in 1:4, y in 0.0:2.0:4.0, _ in 1:2]
+Z = [z for _ in 1:4, _ in 1:3, z in 0.0:0.5:0.5]
+cg3 = FG.Grids.CurvilinearGrid(cart, X, Y, Z, fill(1.0, 4, 3, 2), trues(4, 3, 2))
+size(cg3), FG.Grids.coordinate_names(cg3), FG.Grids.coords(cg3, 2, 3, 2)
+```
+
+Node grids generalize the same way, with the coordinates as a tuple — a run of vectors cannot say how
+many of them are coordinates, where a curvilinear grid counts them from `ndims(mask)`:
+
+```@example grids
+nodes = FG.Grids.UnstructuredGrid(cart, (rand(6), rand(6), rand(6)), ones(6), trues(6))
+FG.Grids.coordinate_names(nodes), FG.Grids.coords(nodes, 4)
+```
 
 ## Cell areas on unstructured grids
 

@@ -33,18 +33,18 @@ function Adapt.adapt_structure(to, grid::Grids.StructuredGrid{G,T,N}) where {G,T
     )
 end
 
-function Adapt.adapt_structure(to, grid::Grids.CurvilinearGrid{T,G}) where {T,G}
+function Adapt.adapt_structure(to, grid::Grids.CurvilinearGrid{T,G,N}) where {T,G,N}
     coords = _adapt_tuple(to, Grids.coordinates(grid))
     corners = _adapt_tuple(to, getfield(grid, :corners))
     measure = Adapt.adapt(to, Grids.measure(grid))
     mask = Adapt.adapt(to, Grids.mask(grid))
     tp = Grids.topology(grid)
-    return Grids.CurvilinearGrid{T,G,typeof(tp),typeof(coords),typeof(measure),typeof(mask)}(
+    return Grids.CurvilinearGrid{T,G,N,typeof(tp),typeof(coords),typeof(measure),typeof(mask)}(
         Grids.grid_geometry(grid), coords, corners, measure, mask, tp, getfield(grid, :period),
     )
 end
 
-function Adapt.adapt_structure(to, grid::Grids.UnstructuredGrid{T,G}) where {T,G}
+function Adapt.adapt_structure(to, grid::Grids.UnstructuredGrid{T,G,N}) where {T,G,N}
     coords = _adapt_tuple(to, Grids.coordinates(grid))
     measure = Adapt.adapt(to, Grids.measure(grid))
     mask = Adapt.adapt(to, Grids.mask(grid))
@@ -52,7 +52,7 @@ function Adapt.adapt_structure(to, grid::Grids.UnstructuredGrid{T,G}) where {T,G
     ptr = Adapt.adapt(to, getfield(grid, :neighbor_ptr))
     tp = Grids.topology(grid)
     return Grids.UnstructuredGrid{
-        T,G,typeof(coords),typeof(measure),typeof(mask),typeof(tp),typeof(nbrs),typeof(ptr),
+        T,G,N,typeof(coords),typeof(measure),typeof(mask),typeof(tp),typeof(nbrs),typeof(ptr),
     }(
         Grids.grid_geometry(grid), coords, measure, mask, nbrs, ptr,
         tp, getfield(grid, :period),

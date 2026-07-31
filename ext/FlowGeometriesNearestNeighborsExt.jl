@@ -26,18 +26,21 @@ Euclidean query over them: a node near one face then finds the nodes across the 
 their true wrapped separation.
 """
 function _ghost_points(
-    pts::AbstractMatrix{T}, periodic::NTuple{2,Bool}, period::NTuple{2,T},
-) where {T}
-    sx = _shift_set(periodic[1], period[1])
-    sy = _shift_set(periodic[2], period[2])
+    pts::AbstractMatrix{T}, periodic::NTuple{D,Bool}, period::NTuple{D,T},
+) where {D,T}
+    shifts = ntuple(d -> _shift_set(periodic[d], period[d]), Val(D))
     N = size(pts, 2)
-    ng = length(sx) * length(sy)
-    out = similar(pts, size(pts, 1), N * ng)
+    ng = prod(map(length, shifts))
+    out = similar(pts, D, N * ng)
     g = 0
-    for dy in sy, dx in sx
+    # Column-major over the per-direction shift sets, so the all-zero combination comes first and the
+    # originals occupy columns `1:N`.
+    for ci in CartesianIndices(map(eachindex, shifts))
         cols = (g * N + 1):((g + 1) * N)
-        @views out[1, cols] .= pts[1, :] .+ dx
-        @views out[2, cols] .= pts[2, :] .+ dy
+        for d in 1:D
+            δ = shifts[d][ci[d]]
+            @views out[d, cols] .= pts[d, :] .+ δ
+        end
         g += 1
     end
     return out, ng
@@ -149,35 +152,51 @@ end
 # Points go to the tree as a contiguous `D × N` matrix: `KDTree` takes that form directly, and it
 # avoids one heap allocation per node.
 function Grids._build_kdtree_neighbors(
-    ::Geometry.AbstractCartesianGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T};
+    ::Geometry.AbstractCartesianGeometry{T}, coords::NTuple{D,AbstractVector{T}};
     k::Integer = 6, radius::Union{Nothing,Real} = nothing,
-    periodic::NTuple{2,Bool} = (false, false), period = (0, 0),
-) where {T<:AbstractFloat}
-    pts = similar(x, T, 2, length(x))
-    @views pts[1, :] .= x
-    @views pts[2, :] .= y
-    all_pts, ng = any(periodic) ? _ghost_points(pts, periodic, NTuple{2,T}(period)) : (pts, 1)
+    periodic::NTuple{D,Bool} = ntuple(_ -> false, Val(D)),
+    period = ntuple(_ -> zero(T), Val(D)),
+) where {D, T<:AbstractFloat}
+    n = length(coords[1])
+    pts = similar(coords[1], T, D, n)
+    for d in 1:D
+        @views pts[d, :] .= coords[d]
+    end
+    all_pts, ng = any(periodic) ? _ghost_points(pts, periodic, NTuple{D,T}(period)) : (pts, 1)
     return radius === nothing ? _csr_from_knn(all_pts, k, ng) :
                                 _csr_from_radius(all_pts, T(radius), ng)
 end
 
+# `(λ, φ)` embeds on the unit sphere and `(λ, φ, r)` at its own radius: nearest-by-chord is then
+# nearest-by-great-circle, and longitude wraps for free because λ and λ+2π embed to the same point —
+# so no ghost images are needed in either case.
 function Grids._build_kdtree_neighbors(
-    geo::Geometry.AbstractSphericalGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T};
+    geo::Geometry.AbstractSphericalGeometry{T}, coords::NTuple{D,AbstractVector{T}};
     k::Integer = 6, radius::Union{Nothing,Real} = nothing,
-    periodic::NTuple{2,Bool} = (true, false), period = (2π, 0),
-) where {T<:AbstractFloat}
-    # No ghosting needed: the unit-sphere embedding already identifies λ with λ+2π.
-    pts = similar(x, T, 3, length(x))
-    @views pts[1, :] .= cos.(y) .* cos.(x)
-    @views pts[2, :] .= cos.(y) .* sin.(x)
-    @views pts[3, :] .= sin.(y)
-    if radius === nothing
-        return _csr_from_knn(pts, k)
+    periodic::NTuple{D,Bool} = ntuple(d -> d == 1, Val(D)),
+    period = ntuple(d -> d == 1 ? T(2π) : zero(T), Val(D)),
+) where {D, T<:AbstractFloat}
+    D == 2 || D == 3 || throw(ArgumentError(
+        "a spherical node set is `(λ, φ)` or `(λ, φ, r)`; got $D coordinate vectors",
+    ))
+    λ, φ = coords[1], coords[2]
+    n = length(λ)
+    pts = similar(λ, T, 3, n)
+    if D == 2
+        @views pts[1, :] .= cos.(φ) .* cos.(λ)
+        @views pts[2, :] .= cos.(φ) .* sin.(λ)
+        @views pts[3, :] .= sin.(φ)
     else
-        arc = T(radius) / geo.R
-        chord_radius = T(2) * sin(arc / T(2))
-        return _csr_from_radius(pts, chord_radius)
+        r = coords[3]
+        @views pts[1, :] .= r .* cos.(φ) .* cos.(λ)
+        @views pts[2, :] .= r .* cos.(φ) .* sin.(λ)
+        @views pts[3, :] .= r .* sin.(φ)
     end
+    radius === nothing && return _csr_from_knn(pts, k)
+    # In 2-D the embedding is the UNIT sphere, so a physical arc has to become a unit chord; in 3-D the
+    # embedding carries true lengths and the radius is already a chord.
+    rq = D == 2 ? T(2) * sin(T(radius) / Geometry.radius(geo) / T(2)) : T(radius)
+    return _csr_from_radius(pts, rq)
 end
 
 end # module

@@ -1260,6 +1260,39 @@ function _hp_ang2xyf(nside::Int, θ::T, ϕ::T) where {T<:AbstractFloat}
 end
 
 """
+    ring_info(nside, ring; T = Float64) -> NamedTuple
+
+What HEALPix ring `ring ∈ 1:(4·nside-1)` contains, counted from the north pole: `startpix` (the 0-based
+RING index of its first pixel, matching [`ang2pix`](@ref)), `ringpix` (how many pixels it holds),
+`colatitude`, `latitude`, and `shifted` — whether its pixel centres are offset half a pixel in `ϕ`.
+
+Ring width grows `4, 8, …` through the polar cap, is `4·nside` across the equatorial belt, and shrinks
+again symmetrically, so this is how to walk a HEALPix map ring by ring without decoding every pixel.
+"""
+function ring_info(nside::Integer, ring::Integer; T::Type{<:AbstractFloat} = Float64)
+    ns = Int(nside)
+    ns ≥ 1 || throw(ArgumentError("HEALPix nside must be ≥ 1, got $ns"))
+    r = Int(ring)
+    1 ≤ r ≤ 4 * ns - 1 || throw(ArgumentError(
+        "ring must lie in 1:$(4 * ns - 1) for nside = $ns, got $r",
+    ))
+    info = _hp_get_ring_info_small(ns, r)
+    # `z = cosθ` on the ring, by the same two-regime formula the pixel centres use.
+    fn = T(ns)
+    z = if r < ns
+        one(T) - T(r * r) / (T(3) * fn * fn)
+    elseif r ≤ 3 * ns
+        (T(2 * ns) - T(r)) / (T(1.5) * fn)
+    else
+        nr = 4 * ns - r
+        T(nr * nr) / (T(3) * fn * fn) - one(T)
+    end
+    θ = acos(clamp(z, -one(T), one(T)))
+    return (; startpix = info.startpix, ringpix = info.ringpix,
+              colatitude = θ, latitude = geographic_latitude(θ), shifted = info.shifted)
+end
+
+"""
     ang2pix(nside, θ, ϕ; scheme = Ring()) -> Int
 
 The 0-based index of the pixel containing colatitude `θ ∈ [0, π]` and longitude `ϕ`.

@@ -22,9 +22,17 @@ abstract type AbstractCartesianGeometry{T<:AbstractFloat} <: AbstractGeometry{T}
     AbstractSphericalGeometry{T} <: AbstractGeometry{T}
 
 Spherical metrics.  Default: [`SphericalGeometry`](@ref).
-Subtypes should provide `R` (or specialize the methods).
+
+A subtype implements [`radius`](@ref); every other method here is written in terms of it.
 """
 abstract type AbstractSphericalGeometry{T<:AbstractFloat} <: AbstractGeometry{T} end
+
+"""
+    radius(geo) -> T
+
+The sphere radius. The one method a spherical geometry supplies; defaults to the `R` field.
+"""
+@inline radius(geo::AbstractSphericalGeometry) = geo.R
 
 """
     CartesianGeometry()
@@ -79,9 +87,12 @@ point_names(::AbstractSphericalGeometry, ::Val{2}) = (:λ, :φ)
 point_names(::AbstractSphericalGeometry, ::Val{3}) = (:λ, :φ, :r)
 
 # Past the named directions the letters run out, so they are numbered from where each convention ends.
-point_names(::AbstractCartesianGeometry, ::Val{N}) where {N} = ntuple(d -> Symbol(:x, d), Val(N))
-point_names(::AbstractSphericalGeometry, ::Val{N}) where {N} =
-    (:λ, :φ, :r, ntuple(d -> Symbol(:q, d + 3), Val(N - 3))...)
+# Generated, so the symbols are built once at compile time: `Symbol(:x, d)` goes through `string`, and
+# these are reached per-cell by `getproperty`, where a runtime symbol build would allocate on every access.
+@generated point_names(::AbstractCartesianGeometry, ::Val{N}) where {N} =
+    :($(ntuple(d -> Symbol(:x, d), N)))
+@generated point_names(::AbstractSphericalGeometry, ::Val{N}) where {N} =
+    :($((:λ, :φ, :r, ntuple(d -> Symbol(:q, d + 3), N - 3)...)))
 
 """
     build_point(S, names::NTuple{N,Symbol}, vals::NTuple{N}) -> S
@@ -140,7 +151,8 @@ end
     distance(geo::AbstractGeometry, pt1, pt2)
 
 Distance between two points. Spherical 2D uses great-circle (Haversine); spherical 3D uses the
-chord through Cartesian, with `r` the absolute radius from the origin.
+chord through Cartesian, with `r` the absolute radius from the origin; a lone `(λ,)` is the shorter
+arc of its circle.
 """
 @inline distance(geo::AbstractGeometry, pt1, pt2) = _distance(geo, as_ntuple(pt1), as_ntuple(pt2))
 
@@ -157,6 +169,14 @@ chord through Cartesian, with `r` the absolute radius from the origin.
     return sqrt(s)
 end
 
+# One coordinate is a point on the circle of latitude 0: the distance is the shorter arc.
+@inline function _distance(
+    geo::AbstractSphericalGeometry{T}, coords1::Tuple{Real}, coords2::Tuple{Real},
+) where {T}
+    Δλ = convert(T, coords2[1]) - convert(T, coords1[1])
+    return radius(geo) * abs(rem2pi(Δλ, RoundNearest))
+end
+
 @inline function _distance(
     geo::AbstractSphericalGeometry{T}, coords1::Tuple{Real,Real}, coords2::Tuple{Real,Real},
 ) where {T}
@@ -166,7 +186,7 @@ end
     dφ = φ2 - φ1
     a = sin(dφ / T(2))^2 + cos(φ1) * cos(φ2) * sin(dλ / T(2))^2
     c = T(2) * atan(sqrt(a), sqrt(max(zero(T), one(T) - a)))
-    return geo.R * c
+    return radius(geo) * c
 end
 
 @inline function _distance(
@@ -182,7 +202,7 @@ end
     spherical_to_cartesian(geo, coords) -> NamedTuple{(:x,:y,:z)}
     spherical_to_cartesian(S, geo, coords) -> S
 
-`(λ, φ)` on the reference sphere of radius `geo.R`, or `(λ, φ, r)` with `r` the absolute radius from
+`(λ, φ)` on the reference sphere of [`radius`](@ref) `R`, or `(λ, φ, r)` with `r` the absolute radius from
 the origin, mapped to Cartesian coordinates of the same space.
 """
 @inline spherical_to_cartesian(geo::AbstractSphericalGeometry, coords) =
@@ -206,7 +226,8 @@ end
     λ, φ = _at(T, coords)
     sinλ, cosλ = sincos(λ)
     sinφ, cosφ = sincos(φ)
-    return (; x = geo.R * cosφ * cosλ, y = geo.R * cosφ * sinλ, z = geo.R * sinφ)
+    R = radius(geo)
+    return (; x = R * cosφ * cosλ, y = R * cosφ * sinλ, z = R * sinφ)
 end
 
 """
@@ -245,7 +266,7 @@ Local cell area from the cell's own extents: `dx·dy` on the plane, `R²·cosφ�
     convert(T, dx) * convert(T, dy)
 
 @inline function area_element(geo::AbstractSphericalGeometry{T}, φ::T, dλ::T, dφ::T) where {T}
-    return geo.R^2 * cos(φ) * dλ * dφ
+    return radius(geo)^2 * cos(φ) * dλ * dφ
 end
 
 """
@@ -253,7 +274,7 @@ end
     volume_element(geo::AbstractSphericalGeometry, r, φ, dλ, dφ, dr)
 
 Local cell volume from the cell's own extents. The spherical form uses the LOCAL radius `r` at this
-level, not the reference `geo.R`, so it is the genuine shell element `r²·cosφ·dλ·dφ·dr`.
+level, not the reference [`radius`](@ref), so it is the genuine shell element `r²·cosφ·dλ·dφ·dr`.
 """
 @inline volume_element(::AbstractCartesianGeometry{T}, dx::Real, dy::Real, dz::Real) where {T} =
     convert(T, dx) * convert(T, dy) * convert(T, dz)
@@ -448,11 +469,12 @@ surface of radius `R`, and `(r·cosφ, r, 1)` where a radius direction is presen
 point's own radius.
 """
 @inline scale_factors(::AbstractCartesianGeometry{T}, p::Tuple{Vararg{Real,N}}) where {T,N} =
-    ntuple(_ -> one(T), N)
+    ntuple(_ -> one(T), Val(N))
 
 @inline function scale_factors(geo::AbstractSphericalGeometry{T}, p::Tuple{Real,Real}) where {T}
     φ = convert(T, p[2])
-    return (geo.R * cos(φ), geo.R)
+    R = radius(geo)
+    return (R * cos(φ), R)
 end
 
 @inline function scale_factors(::AbstractSphericalGeometry{T}, p::Tuple{Real,Real,Real}) where {T}
@@ -480,12 +502,32 @@ end
 
 Oblate-spheroid metrics. Default: [`SpheroidGeometry`](@ref). Coordinate names match the spherical
 convention, `(λ, φ[, h])`, with `φ` the GEODETIC latitude.
+
+A subtype implements [`semimajor_axis`](@ref) and [`flattening`](@ref); the rest — `semiminor_axis`,
+`eccentricity²`, the curvature radii, `distance`, `area_element`, `scale_factors` — follow from those
+two.
 """
 abstract type AbstractEllipsoidalGeometry{T<:AbstractFloat} <: AbstractGeometry{T} end
+
+"""
+    semimajor_axis(geo) -> T
+
+Equatorial radius `a`. Defaults to the `a` field.
+"""
+@inline semimajor_axis(g::AbstractEllipsoidalGeometry) = g.a
+
+"""
+    flattening(geo) -> T
+
+Flattening `f = (a-b)/a`. Defaults to the `f` field.
+"""
+@inline flattening(g::AbstractEllipsoidalGeometry) = g.f
 
 point_names(::AbstractEllipsoidalGeometry, ::Val{1}) = (:λ,)
 point_names(::AbstractEllipsoidalGeometry, ::Val{2}) = (:λ, :φ)
 point_names(::AbstractEllipsoidalGeometry, ::Val{3}) = (:λ, :φ, :h)
+@generated point_names(::AbstractEllipsoidalGeometry, ::Val{N}) where {N} =
+    :($((:λ, :φ, :h, ntuple(d -> Symbol(:q, d + 3), N - 3)...)))
 
 """
     SpheroidGeometry(a, f)
@@ -494,8 +536,15 @@ point_names(::AbstractEllipsoidalGeometry, ::Val{3}) = (:λ, :φ, :h)
 Oblate spheroid of equatorial radius `a` and flattening `f = (a-b)/a`. The no-argument form is WGS 84,
 `a = 6378137.0`, `f = 1/298.257223563`.
 
-Only `distance`, `area_element` and `scale_factors` differ from a sphere; the grid, sampling and
-connectivity stack is inherited unchanged.
+`distance`, `area_element`, `volume_element` and `scale_factors` differ from a sphere. Grid directions
+are `(λ, φ, h)`, with `h` the height above the ellipsoid — not an absolute radius, which is what the
+spherical third direction is.
+
+Rectilinear grids and the index-space connectivity built on them work as they do for a sphere; the
+samplings are purely angular and so carry over unchanged. The spherical *area* routines
+(`unstructured_grid`'s Voronoi areas, the cell areas behind `spherical_grid`) do not: they are built on
+spherical excess and `4πR²/n`, which are sphere identities, so they stay restricted to
+[`AbstractSphericalGeometry`](@ref) rather than silently returning sphere areas for an ellipsoid.
 """
 struct SpheroidGeometry{T<:AbstractFloat} <: AbstractEllipsoidalGeometry{T}
     a::T
@@ -513,10 +562,13 @@ SpheroidGeometry(a::Real, f::Real) = SpheroidGeometry{float(promote_type(typeof(
 SpheroidGeometry() = SpheroidGeometry(6378137.0, inv(298.257223563))
 
 """Semi-minor axis `b = a(1-f)`."""
-@inline semiminor_axis(g::AbstractEllipsoidalGeometry) = g.a * (one(g.f) - g.f)
+@inline function semiminor_axis(g::AbstractEllipsoidalGeometry)
+    f = flattening(g)
+    return semimajor_axis(g) * (one(f) - f)
+end
 
 """First eccentricity squared, `e² = f(2-f)`."""
-@inline eccentricity²(g::AbstractEllipsoidalGeometry) = g.f * (2 - g.f)
+@inline eccentricity²(g::AbstractEllipsoidalGeometry) = flattening(g) * (2 - flattening(g))
 
 """
     prime_vertical_radius(geo, φ) -> T
@@ -526,7 +578,7 @@ longitude covers `N(φ)cosφ`.
 """
 @inline function prime_vertical_radius(g::AbstractEllipsoidalGeometry{T}, φ::Real) where {T}
     s = sin(convert(T, φ))
-    return g.a / sqrt(one(T) - eccentricity²(g) * s * s)
+    return semimajor_axis(g) / sqrt(one(T) - eccentricity²(g) * s * s)
 end
 
 """
@@ -539,7 +591,7 @@ latitude covers `M(φ)`.
     s = sin(convert(T, φ))
     e² = eccentricity²(g)
     w = one(T) - e² * s * s
-    return g.a * (one(T) - e²) / (w * sqrt(w))
+    return semimajor_axis(g) * (one(T) - e²) / (w * sqrt(w))
 end
 
 @inline function scale_factors(g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real}) where {T}
@@ -568,26 +620,163 @@ end
 end
 
 """
+    volume_element(geo::AbstractEllipsoidalGeometry, φ, h, dλ, dφ, dh)
+
+`(N(φ)+h)cosφ · (M(φ)+h) · dλ·dφ·dh`, the geodetic volume element at ellipsoidal height `h`.
+
+Unlike the spherical form this does not factor into a function of `φ` times a function of `h`: both
+curvature radii are offset by `h`, so the two directions are coupled.
+"""
+@inline function volume_element(
+    g::AbstractEllipsoidalGeometry{T}, φ::Real, h::Real, dλ::Real, dφ::Real, dh::Real,
+) where {T}
+    φT, hT = convert(T, φ), convert(T, h)
+    return (prime_vertical_radius(g, φT) + hT) * cos(φT) * (meridional_radius(g, φT) + hT) *
+           convert(T, dλ) * convert(T, dφ) * convert(T, dh)
+end
+
+"""
     distance(geo::AbstractEllipsoidalGeometry, p1, p2)
 
-Geodesic distance by Vincenty's inverse method, iterated to `1e-12` in the auxiliary longitude, which
-holds the result to well under a millimetre at Earth scale.
+2-D `(λ, φ)`: geodesic distance by Vincenty's inverse method, iterated to `1e-12` in the auxiliary
+longitude, which holds the result to well under a millimetre at Earth scale.
 
 Vincenty's iteration converges slowly for very nearly antipodal point pairs. It is capped, and on
 reaching the cap the great-circle distance on a sphere of the mean radius is returned instead of a
 half-converged number.
+
+3-D `(λ, φ, h)`: the chord through Cartesian (ECEF), mirroring the spherical 3-D convention. A lone
+`(λ,)` is the shorter arc of the equator.
 """
 @inline distance(geo::AbstractEllipsoidalGeometry, pt1, pt2) =
     _spheroid_distance(geo, as_ntuple(pt1), as_ntuple(pt2))
+
+"""
+    unit_vector(T, p) -> NTuple{3,T}
+
+The direction of the `(λ, φ)` point `p` on the unit sphere, in any accepted point representation. This
+is [`spherical_to_cartesian`](@ref) with the radius divided out, as a bare tuple: the form the
+spherical-triangle kernels want, computed once per vertex and reused across every triangle sharing it.
+"""
+@inline function unit_vector(::Type{T}, p) where {T<:AbstractFloat}
+    λ, φ = as_ntuple(p)
+    sinλ, cosλ = sincos(T(λ))
+    sinφ, cosφ = sincos(T(φ))
+    return (cosφ * cosλ, cosφ * sinλ, sinφ)
+end
+
+"""
+    spherical_excess(a, b, c) -> T
+
+Spherical excess of the triangle spanned by three UNIT vectors, via Van Oosterom & Strackee (1983):
+
+    tan(E/2) = |a · (b × c)| / (1 + a·b + b·c + c·a)
+
+One `atan` and no other transcendental, versus L'Huilier's three great-circle distances (each its own
+trig) plus four tangents. It takes directions rather than `(λ, φ)` so a mesh can convert each vertex
+once — see [`unit_vector`](@ref) — instead of re-deriving them per triangle. Multiply by `R²` for an
+area, which is what [`triangle_area`](@ref) does.
+"""
+@inline function spherical_excess(a::NTuple{3,T}, b::NTuple{3,T}, c::NTuple{3,T}) where {T}
+    num = a[1] * (b[2] * c[3] - b[3] * c[2]) +
+          a[2] * (b[3] * c[1] - b[1] * c[3]) +
+          a[3] * (b[1] * c[2] - b[2] * c[1])
+    ab = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+    bc = b[1] * c[1] + b[2] * c[2] + b[3] * c[3]
+    ca = c[1] * a[1] + c[2] * a[2] + c[3] * a[3]
+    return T(2) * abs(atan(num, one(T) + ab + bc + ca))
+end
+
+"""
+    triangle_area(geo, p1, p2, p3) -> T
+
+Exact area of the spherical triangle through three `(λ, φ)` points, each in any accepted representation.
+`R²` times [`spherical_excess`](@ref).
+
+Convenient rather than fast: it converts all three points every call. A mesh that already holds vertex
+directions should use `spherical_excess` on those and scale once.
+"""
+@inline function triangle_area(
+    geo::AbstractSphericalGeometry{T}, p1, p2, p3,
+) where {T<:AbstractFloat}
+    return triangle_area_from_unit_vectors(radius(geo)^2, unit_vector(T, p1), unit_vector(T, p2), unit_vector(T, p3))
+end
+
+"""
+    triangle_area_from_unit_vectors(geo, u1, u2, u3) -> T
+    triangle_area_from_unit_vectors(R², u1, u2, u3) -> T
+
+[`triangle_area`](@ref) for vertices already held as unit vectors — `R²` times
+[`spherical_excess`](@ref), with no coordinate conversion.
+
+A separate name rather than a `triangle_area` method because the two cannot be told apart by dispatch:
+a unit vector and a 3-D spherical point `(λ, φ, r)` are both 3-tuples.
+
+Pass `R²` itself to walk many triangles: a mesh shares vertices between cells, so the squaring belongs
+outside the loop alongside the one-per-vertex [`unit_vector`](@ref) call. That is the form the cell-area
+and Voronoi paths here use.
+"""
+@inline function triangle_area_from_unit_vectors(
+    geo::AbstractSphericalGeometry{T}, u1::NTuple{3,T}, u2::NTuple{3,T}, u3::NTuple{3,T},
+) where {T<:AbstractFloat}
+    return triangle_area_from_unit_vectors(radius(geo)^2, u1, u2, u3)
+end
+
+@inline function triangle_area_from_unit_vectors(
+    R²::T, u1::NTuple{3,T}, u2::NTuple{3,T}, u3::NTuple{3,T},
+) where {T<:AbstractFloat}
+    return R² * spherical_excess(u1, u2, u3)
+end
+
+"""
+    geodetic_to_cartesian(geo, coords) -> (; x, y, z)
+
+`(λ, φ, h)` — geodetic latitude and height above the ellipsoid — to Earth-centred Cartesian:
+`x = (N(φ)+h)cosφ·cosλ`, `y = (N(φ)+h)cosφ·sinλ`, `z = (N(φ)(1-e²)+h)sinφ`. The 2-D form takes
+`h = 0`, the surface.
+"""
+@inline geodetic_to_cartesian(geo::AbstractEllipsoidalGeometry, coords) =
+    _geodetic_to_cartesian(geo, as_ntuple(coords))
+
+@inline _geodetic_to_cartesian(g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real}) where {T} =
+    _geodetic_to_cartesian(g, (p[1], p[2], zero(T)))
+
+@inline function _geodetic_to_cartesian(
+    g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real,Real},
+) where {T}
+    λ, φ, h = _at(T, p)
+    sinλ, cosλ = sincos(λ)
+    sinφ, cosφ = sincos(φ)
+    Nφ = prime_vertical_radius(g, φ)
+    return (; x = (Nφ + h) * cosφ * cosλ, y = (Nφ + h) * cosφ * sinλ,
+              z = (Nφ * (one(T) - eccentricity²(g)) + h) * sinφ)
+end
+
+# One coordinate is a point on the equator, a circle of radius `a`: the distance is the shorter arc —
+# the same convention the 1-D grid measure uses.
+@inline function _spheroid_distance(
+    g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real}, p2::Tuple{Real},
+) where {T}
+    Δλ = convert(T, p2[1]) - convert(T, p1[1])
+    return semimajor_axis(g) * abs(rem2pi(Δλ, RoundNearest))
+end
+
+function _spheroid_distance(
+    g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real,Real,Real}, p2::Tuple{Real,Real,Real},
+) where {T}
+    c1 = _geodetic_to_cartesian(g, p1)
+    c2 = _geodetic_to_cartesian(g, p2)
+    return sqrt((c1.x - c2.x)^2 + (c1.y - c2.y)^2 + (c1.z - c2.z)^2)
+end
 
 function _spheroid_distance(
     g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real,Real}, p2::Tuple{Real,Real},
 ) where {T}
     λ1, φ1 = _at(T, p1)
     λ2, φ2 = _at(T, p2)
-    a = g.a
+    a = semimajor_axis(g)
     b = semiminor_axis(g)
-    f = g.f
+    f = flattening(g)
     L = λ2 - λ1
     U1 = atan((one(T) - f) * tan(φ1))
     U2 = atan((one(T) - f) * tan(φ2))
@@ -684,6 +873,41 @@ function unrotate(rot::PoleRotation{T}, λ::Real, φ::Real) where {T}
     xr = cosθ * x - sinθ * z
     zr = sinθ * x + cosθ * z
     return (mod(atan(y, xr) + rot.λp, T(2π)), asin(clamp(zr, -one(T), one(T))))
+end
+
+"""
+    rotate!(λ, φ, rot) -> (λ, φ)
+    unrotate!(λ, φ, rot) -> (λ, φ)
+
+Rotate a whole point set in place — the form a sampling's `spherical_points` output takes. `λ` and `φ`
+are any arrays of matching shape, so this covers a scattered node set and a grid's 2-D coordinate
+fields alike. Allocates nothing.
+"""
+function rotate! end
+function unrotate! end
+
+for (f!, f) in ((:rotate!, :rotate), (:unrotate!, :unrotate))
+    @eval function $f!(λ::AbstractArray, φ::AbstractArray, rot::PoleRotation)
+        axes(λ) == axes(φ) || throw(DimensionMismatch(
+            "λ has axes $(axes(λ)) but φ has $(axes(φ))",
+        ))
+        @inbounds for i in eachindex(λ, φ)
+            λ[i], φ[i] = $f(rot, λ[i], φ[i])
+        end
+        return (λ, φ)
+    end
+
+    @eval function $f(rot::PoleRotation{T}, λ::AbstractArray, φ::AbstractArray) where {T}
+        axes(λ) == axes(φ) || throw(DimensionMismatch(
+            "λ has axes $(axes(λ)) but φ has $(axes(φ))",
+        ))
+        out_λ = similar(λ, T)
+        out_φ = similar(φ, T)
+        @inbounds for i in eachindex(λ, φ)
+            out_λ[i], out_φ[i] = $f(rot, λ[i], φ[i])
+        end
+        return (out_λ, out_φ)
+    end
 end
 
 end # module

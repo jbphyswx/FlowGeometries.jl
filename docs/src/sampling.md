@@ -167,6 +167,26 @@ SS.ring2nest(8, 100), SS.nest2ring(8, SS.ring2nest(8, 100))
 `Nested()` selects the quadtree ordering, which needs `nside` to be a power of two; `Ring()` works for
 any `nside`. `pix2vec`/`vec2pix` are the same maps through a unit vector.
 
+[`ring_info`](@ref) describes a whole iso-latitude ring at once, so a map can be walked ring by ring
+without decoding every pixel. Ring widths run `4, 8, …` through the polar cap, hold at `4·nside` across
+the equatorial belt, then shrink symmetrically:
+
+```@example sampling
+[SS.ring_info(4, r).ringpix for r in 1:(4 * 4 - 1)]
+```
+
+```@example sampling
+info = SS.ring_info(4, 6)
+info.startpix, info.ringpix, info.latitude, info.shifted
+```
+
+The rings tile the map exactly — `startpix` is contiguous and the widths sum to `12·nside²`:
+
+```@example sampling
+rings = [SS.ring_info(4, r) for r in 1:15]
+sum(i -> i.ringpix, rings) == 12 * 4^2, rings[1].startpix == 0
+```
+
 ## Cell centres, not panel edges
 
 Every sampling here places points at **cell centres**. This matters more than it sounds: sampling the

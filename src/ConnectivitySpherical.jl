@@ -566,7 +566,7 @@ function _default_node_areas(
     geometry::Geometry.AbstractSphericalGeometry{T}, λ::AbstractVector, φ::AbstractVector,
 ) where {T<:AbstractFloat}
     # Equal-area by construction: every cell is exactly the sphere's area over the pixel count.
-    return fill(T(4π) * geometry.R^2 / T(length(λ)), length(λ))
+    return fill(T(4π) * Geometry.radius(geometry)^2 / T(length(λ)), length(λ))
 end
 
 """
@@ -592,7 +592,7 @@ function _default_node_areas(
     edge = range(-T(π) / 4; step = Δ, length = n + 1)   # cell boundaries, not centres
     areas = Vector{T}(undef, N)
     corner = Matrix{NTuple{3,T}}(undef, n + 1, n + 1)
-    R2 = geometry.R^2
+    R2 = Geometry.radius(geometry)^2
     @inbounds for f in 1:6
         for jj in 1:(n + 1), ii in 1:(n + 1)
             p = SphericalSampling._cubed_face_to_xyz(f, tan(edge[ii]), tan(edge[jj]), T)
@@ -603,7 +603,7 @@ function _default_node_areas(
             c1 = corner[i, j]; c2 = corner[i + 1, j]
             c3 = corner[i + 1, j + 1]; c4 = corner[i, j + 1]
             areas[_cubed_lin(f, i, j, n)] =
-                R2 * (Grids._tri_excess(c1, c2, c3) + Grids._tri_excess(c1, c3, c4))
+                R2 * (Geometry.spherical_excess(c1, c2, c3) + Geometry.spherical_excess(c1, c3, c4))
         end
     end
     return areas
@@ -629,7 +629,7 @@ function _yin_yang_areas(
     np = nlon * nlat
     Δλ = (T(3π) / 2) / T(nlon)
     Δφ = (T(π) / 2) / T(nlat)
-    c = geometry.R^2 * Δλ * 2 * sin(Δφ / 2)
+    c = Geometry.radius(geometry)^2 * Δλ * 2 * sin(Δφ / 2)
     areas = Vector{T}(undef, 2 * np)
     @inbounds for j in 1:nlat
         aj = c * cos(-T(π) / 4 + (T(j) - T(0.5)) * Δφ)
@@ -668,7 +668,7 @@ function _icosahedral_dual_areas(
 ) where {TG<:AbstractFloat,TV<:AbstractFloat}
     T = promote_type(TG, TV)
     areas = zeros(T, Int(nvert))
-    R2 = T(geometry.R)^2
+    R2 = T(Geometry.radius(geometry))^2
     @inline nrm(p) = (r = sqrt(p[1]^2 + p[2]^2 + p[3]^2); (p[1] / r, p[2] / r, p[3] / r))
     @inbounds for (ia, ib, ic) in triangles
         A = verts[ia]; B = verts[ib]; C = verts[ic]
@@ -680,9 +680,9 @@ function _icosahedral_dual_areas(
         Mab = nrm((A[1] + B[1], A[2] + B[2], A[3] + B[3]))
         Mbc = nrm((B[1] + C[1], B[2] + C[2], B[3] + C[3]))
         Mca = nrm((C[1] + A[1], C[2] + A[2], C[3] + A[3]))
-        areas[ia] += R2 * (Grids._tri_excess(A, Mab, O) + Grids._tri_excess(A, O, Mca))
-        areas[ib] += R2 * (Grids._tri_excess(B, Mbc, O) + Grids._tri_excess(B, O, Mab))
-        areas[ic] += R2 * (Grids._tri_excess(C, Mca, O) + Grids._tri_excess(C, O, Mbc))
+        areas[ia] += R2 * (Geometry.spherical_excess(A, Mab, O) + Geometry.spherical_excess(A, O, Mca))
+        areas[ib] += R2 * (Geometry.spherical_excess(B, Mbc, O) + Geometry.spherical_excess(B, O, Mab))
+        areas[ic] += R2 * (Geometry.spherical_excess(C, Mca, O) + Geometry.spherical_excess(C, O, Mbc))
     end
     return areas
 end

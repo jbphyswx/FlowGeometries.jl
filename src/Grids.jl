@@ -3,6 +3,7 @@ module Grids
 using ..Execution: Execution
 using ..Axes: Axes
 using ..Geometry: Geometry
+using ..Discretization: Discretization
 
 # Public API via `FlowGeometries.Grids.*` or `FlowGeometries.coords` (parent rebind). No exports.
 
@@ -51,7 +52,7 @@ abstract type AbstractUnstructuredGrid{G<:Geometry.AbstractGeometry, T<:Abstract
     coordinates(grid, d::Integer) -> AbstractArray
 
 The grid's coordinate arrays, or just direction `d`'s. Shape depends on the grid architecture: a
-`StructuredGrid` stores one 1-D axis vector per direction, a `CurvilinearGrid` an `Nx × Ny` array
+`StructuredGrid` stores one 1-D axis vector per direction, a `CurvilinearGrid` one `N`-D array
 per direction, an `UnstructuredGrid` one value per node. Direction order matches
 [`Geometry.point_names`](@ref) — `(x, y, z)` for Cartesian, `(λ, φ, r)` for spherical.
 
@@ -84,8 +85,7 @@ No code path inspects coordinate VALUES to decide this; the answer comes from th
 A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields, not axes.
 """
 @inline isuniform(grid::AbstractGrid, d::Integer) = Axes.isuniform(coordinates(grid, d))
-@inline isuniform(grid::AbstractGrid) =
-    all(d -> isuniform(grid, d), ntuple(identity, length(coordinates(grid))))
+@inline isuniform(grid::AbstractGrid) = all(Axes.isuniform, coordinates(grid))
 
 """
     spacing(grid, d) -> T
@@ -198,7 +198,7 @@ struct Bounded <: AbstractTopology end
 
 The grid's per-direction topology. Singletons, so this occupies no storage.
 """
-topology(grid::AbstractGrid) = ntuple(_ -> Bounded(), length(coordinates(grid)))
+topology(grid::AbstractGrid) = map(_ -> Bounded(), coordinates(grid))
 @inline topology(grid::AbstractGrid, d::Integer) = topology(grid)[d]
 
 """
@@ -336,6 +336,60 @@ end
 Base.argmax(m::SeparableMeasure) = findmax(m)[2]
 Base.argmin(m::SeparableMeasure) = findmin(m)[2]
 
+# ---------------------------------------------------------------------------
+# Separability-preserving broadcast
+# ---------------------------------------------------------------------------
+#
+# Converting a 2000×2000 grid's measure to other units is `c .* m`, which through the generic array
+# path turns 32 bytes into 32 MB. The operations that keep the measure a PRODUCT of per-axis factors
+# stay a measure; everything else falls through to Base and materializes, which is correct, just dense.
+#
+# Non-negative factors are an invariant of this type — widths are `abs`-ed at construction — and
+# `findmax`/`findmin` above rely on it, since "largest cell at the per-axis argmax" is a statement
+# about non-negative factors only. A scale that would break it therefore does NOT stay lazy.
+
+@inline _scaled_factor(w::Axes.ConstantVector, c) = Axes.ConstantVector(w.value * c, length(w))
+@inline _scaled_factor(w::AbstractVector, c) = w .* c
+
+# Scaling the product means scaling exactly one factor.
+_scale_separable(m::SeparableMeasure{T,N}, c::T) where {T,N} = SeparableMeasure(
+    ntuple(d -> d == 1 ? _scaled_factor(m.factors[d], c) : m.factors[d], Val(N)),
+)
+
+function _broadcast_scale(m::SeparableMeasure{T,N}, c::Real) where {T,N}
+    cT = convert(T, c)
+    cT ≥ zero(T) && return _scale_separable(m, cT)
+    return collect(m) .* cT
+end
+
+Base.broadcasted(::typeof(*), c::Real, m::SeparableMeasure) = _broadcast_scale(m, c)
+Base.broadcasted(::typeof(*), m::SeparableMeasure, c::Real) = _broadcast_scale(m, c)
+Base.broadcasted(::typeof(/), m::SeparableMeasure, c::Real) = _broadcast_scale(m, inv(c))
+
+# `f(∏ wᵈ) = ∏ f(wᵈ)` exactly when `f` is multiplicative — the same condition the reductions above
+# dispatch on, and the same `f`s.
+@inline _mapped_factor(f, w::Axes.ConstantVector) = Axes.ConstantVector(f(w.value), length(w))
+@inline _mapped_factor(f, w::AbstractVector) = f.(w)
+
+Base.broadcasted(f::_MultiplicativeF, m::SeparableMeasure{<:Any,N}) where {N} =
+    SeparableMeasure(ntuple(d -> _mapped_factor(f, m.factors[d]), Val(N)))
+
+@inline _combine_factors(op, u::Axes.ConstantVector, v::Axes.ConstantVector) =
+    Axes.ConstantVector(op(u.value, v.value), length(u))
+@inline _combine_factors(op, u::AbstractVector, v::AbstractVector) = op.(u, v)
+
+# An elementwise product or quotient of two separable arrays is separable factor by factor.
+for op in (:*, :/)
+    @eval function Base.broadcasted(
+        ::typeof($op), a::SeparableMeasure{T,N}, b::SeparableMeasure{T,N},
+    ) where {T,N}
+        size(a) == size(b) || throw(DimensionMismatch(
+            "separable measures of size $(size(a)) and $(size(b)) do not match",
+        ))
+        return SeparableMeasure(ntuple(d -> _combine_factors($op, a.factors[d], b.factors[d]), Val(N)))
+    end
+end
+
 """
     measure_factors(grid) -> NTuple{N,AbstractVector} or nothing
 
@@ -344,6 +398,9 @@ separability (a zonal mean weights by one factor only, a global integral is a pr
 avoid touching `∏ Nᵈ` values at all.
 """
 @inline measure_factors(grid::AbstractGrid) = _measure_factors_of(measure(grid))
+# Also on a measure directly: a separability-preserving broadcast returns one of these, so the factors
+# of the result have to be reachable without going back through a grid.
+@inline measure_factors(m::AbstractArray) = _measure_factors_of(m)
 @inline _measure_factors_of(m::SeparableMeasure) = m.factors
 @inline _measure_factors_of(::AbstractArray) = nothing
 
@@ -515,7 +572,7 @@ Positional coordinate values at indices `I`. Internal; prefer [`coords`](@ref).
     @boundscheck for d in 1:N
         checkbounds(c[d], I[d])
     end
-    return ntuple(d -> @inbounds(c[d][I[d]]), N)
+    return ntuple(d -> @inbounds(c[d][I[d]]), Val(N))
 end
 
 # CurvilinearGrid / UnstructuredGrid _raw_coords are defined after those types exist.
@@ -567,7 +624,12 @@ end
 #
 # Compares magnitudes, so the answer is the same in either storage order.
 _auto_periodic_x(::Geometry.AbstractCartesianGeometry, x::AbstractVector) = false
-function _auto_periodic_x(::Geometry.AbstractSphericalGeometry, x::AbstractVector{T}) where {T<:AbstractFloat}
+_auto_periodic_x(
+    ::Union{Geometry.AbstractSphericalGeometry,Geometry.AbstractEllipsoidalGeometry},
+    x::AbstractVector{T},
+) where {T<:AbstractFloat} = _closes_circle(x)
+
+function _closes_circle(x::AbstractVector{T}) where {T<:AbstractFloat}
     length(x) > 2 || return false
     dλ = abs(x[2] - x[1])
     iszero(dλ) && return false
@@ -611,24 +673,19 @@ end
     _wrap_sign(x) -> ±1
 
 `+1` for an ascending axis and `-1` for a descending one: the sign that turns a period magnitude into
-the wrapped neighbour's offset in index order.
+the wrapped neighbour's offset in index order. Defined in [`Axes`](@ref) — it is a property of the axis
+alone, and the discretization layer needs the same answer.
 """
-@inline function _wrap_sign(x::AbstractVector{T}) where {T<:AbstractFloat}
-    n = length(x)
-    n < 2 && return one(T)
-    return @inbounds(x[n] ≥ x[1]) ? one(T) : -one(T)
-end
+@inline _wrap_sign(x::AbstractVector) = Axes.wrap_sign(x)
 
-@inline _wrap_sign(x::Axes.UniformAxis{T}) where {T<:AbstractFloat} =
-    x.Δ ≥ 0 ? one(T) : -one(T)
-
-# The interior gap IS the stored spacing, so it is returned rather than recovered by differencing two
-# reconstructed coordinates — which makes it exactly constant, where differencing varies by an ulp.
+# On ANY range the interior gap is `step`, so it is returned rather than recovered by differencing two
+# coordinates — which makes it exactly constant, where differencing varies by an ulp. This is why a
+# caller's own range does not need converting to get the fast path.
 @inline function _local_spacing(
-    x::Axes.UniformAxis{T}, i::Integer, period::Union{Nothing,Real} = nothing,
+    x::AbstractRange{T}, i::Integer, period::Union{Nothing,Real} = nothing,
 ) where {T<:AbstractFloat}
     n = length(x)
-    Δ = x.Δ
+    Δ = T(step(x))
     if period === nothing
         h_m = i > 1 ? Δ : zero(T)
         h_p = i < n ? Δ : zero(T)
@@ -646,26 +703,25 @@ end
 Adapt axis input `x` to element type `T`, keeping whatever is known about its spacing and never
 collapsing a provably uniform axis into a plain `Vector`.
 
-An axis whose spacing is known from its type — an [`Axes.UniformAxis`](@ref) or any
-`AbstractRange` — becomes a `UniformAxis{T}`, so [`Axes.isuniform`](@ref) stays `true` and every
-fast path that depends on constant spacing remains selectable by dispatch. `UniformAxis` is the
-package's own uniform representation rather than `AbstractRange` for reasons measured in its
-docstring: a `Range` reconstructed at a narrower eltype keeps `Float64` offset and step internals,
-and its `Base.TwicePrecision` arithmetic is the slowest of the available options on exactly the
-adjacent-gap pattern [`_local_spacing`](@ref) uses.
+An axis already of element type `T` is **kept exactly as it is**, whatever type it is. A caller's own
+range subtype, a `StepRangeLen` whose `TwicePrecision` internals they want, a `BigFloat`-backed range —
+all pass through untouched. Nothing needs converting to get the uniform fast paths: those dispatch on
+[`Axes.spacing_trait`](@ref), which is `UniformSpacing()` for every `AbstractRange`, so the caller's own
+range takes them.
 
-Six methods, ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
-`AbstractVector{T}`, so both parameterized forms are needed to break that tie):
-- `UniformAxis{T}`: passthrough, zero cost.
-- `UniformAxis` (wrong eltype): rebuilt at eltype `T`, still `isbits` and still uniform.
-- `AbstractRange{T}` / `AbstractRange`: converted to `UniformAxis{T}`.
-- `AbstractVector{T}` (not uniform, already the right eltype): passthrough, zero cost.
-- `AbstractVector` (not uniform, wrong eltype): the one case that must copy, made with `similar` so
-  a device-resident array stays in its own storage.
+Conversion happens only where the element type must change, and there an arbitrary range subtype cannot
+generically be rebuilt at a new eltype. That case becomes an [`Axes.UniformAxis`](@ref)`{T}`, which is
+also how a `Float32` axis stops carrying `Float64` internals. To convert deliberately rather than by
+side effect, call [`Axes.uniform_axis`](@ref).
+
+Four methods, ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
+`AbstractVector{T}`, so the parameterized range form is needed to break that tie):
+- `AbstractRange{T}` / `AbstractVector{T}`: passthrough, zero cost, type preserved.
+- `AbstractRange` (wrong eltype): rebuilt as `UniformAxis{T}`, still uniform and now `isbits`.
+- `AbstractVector` (wrong eltype): copied with `similar`, so a device-resident array stays in its own
+  storage.
 """
-_to_axis(::Type{T}, x::Axes.UniformAxis{T}) where {T<:AbstractFloat} = x
-_to_axis(::Type{T}, x::Axes.UniformAxis) where {T<:AbstractFloat} = Axes.uniform_axis(T, x)
-_to_axis(::Type{T}, x::AbstractRange{T}) where {T<:AbstractFloat} = Axes.uniform_axis(T, x)
+_to_axis(::Type{T}, x::AbstractRange{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractRange) where {T<:AbstractFloat} = Axes.uniform_axis(T, x)
 _to_axis(::Type{T}, x::AbstractVector{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = copyto!(similar(x, T), x)
@@ -707,10 +763,10 @@ function _max_gap(x::AbstractVector{T}) where {T<:AbstractFloat}
 end
 
 # A uniform axis has one gap, known from its type — no scan.
-_min_gap(x::Axes.UniformAxis{T}) where {T<:AbstractFloat} =
-    length(x) < 2 ? T(Inf) : abs(x.Δ)
-_max_gap(x::Axes.UniformAxis{T}) where {T<:AbstractFloat} =
-    length(x) < 2 ? zero(T) : abs(x.Δ)
+_min_gap(x::AbstractRange{T}) where {T<:AbstractFloat} =
+    length(x) < 2 ? T(Inf) : abs(T(step(x)))
+_max_gap(x::AbstractRange{T}) where {T<:AbstractFloat} =
+    length(x) < 2 ? zero(T) : abs(T(step(x)))
 
 """
     _cell_width(x, i, period=nothing) -> width
@@ -751,8 +807,8 @@ end
 @inline _cartesian_period(x::AbstractVector{T}) where {T} =
     length(x) < 2 ? one(T) : @inbounds(abs(x[end] - x[1]) + abs(x[2] - x[1]))
 
-@inline _cartesian_period(x::Axes.UniformAxis{T}) where {T} =
-    length(x) < 2 ? one(T) : T(length(x)) * abs(x.Δ)
+@inline _cartesian_period(x::AbstractRange{T}) where {T<:AbstractFloat} =
+    length(x) < 2 ? one(T) : T(length(x)) * abs(T(step(x)))
 
 """
     _curvilinear_topology(geometry, x, topo) -> NTuple{2,AbstractTopology}
@@ -761,36 +817,39 @@ Per-direction closure. Absent a caller's choice, direction 1 is auto-detected fr
 centres read as a longitude-like axis, as [`StructuredGrid`](@ref) does.
 """
 function _curvilinear_topology(
-    geometry::Geometry.AbstractGeometry, x::AbstractMatrix, topo,
-)
-    topo === nothing || return _as_topology(Val(2), topo)
-    wraps = size(x, 1) ≥ 3 && _auto_periodic_x(geometry, @view(x[:, 1]))
-    return (wraps ? Periodic() : Bounded(), Bounded())
+    geometry::Geometry.AbstractGeometry, x::AbstractArray{<:Any,N}, topo,
+) where {N}
+    topo === nothing || return _as_topology(Val(N), topo)
+    # Auto-detection reads direction 1 along its own line through the first cell of every other.
+    line = @view x[:, ntuple(_ -> 1, Val(N - 1))...]
+    wraps = size(x, 1) ≥ 3 && _auto_periodic_x(geometry, line)
+    return ntuple(d -> d == 1 && wraps ? Periodic() : Bounded(), Val(N))
 end
 
 """
-    _curvilinear_periods(geometry, x, y, topology, period) -> NTuple{2,T}
+    _curvilinear_periods(geometry, centers, topology, period) -> NTuple{N,T}
 
 Wrap length per periodic direction, zero where bounded. Spherical longitude closes at `2π`; a
-Cartesian direction's comes from the corresponding row/column of centres.
+Cartesian direction's comes from that direction's own line of centres.
 """
 function _curvilinear_periods(
-    geometry::Geometry.AbstractGeometry{T}, x::AbstractMatrix{T}, y::AbstractMatrix{T},
-    tp::NTuple{2,AbstractTopology}, period,
-) where {T<:AbstractFloat}
-    given = _period_tuple(Val(2), T, period)
-    samples = (@view(x[:, 1]), @view(y[1, :]))
-    return ntuple(Val(2)) do d
+    geometry::Geometry.AbstractGeometry{T}, centers::NTuple{N,AbstractArray{T,N}},
+    tp::NTuple{N,AbstractTopology}, period,
+) where {N, T<:AbstractFloat}
+    given = _period_tuple(Val(N), T, period)
+    return ntuple(Val(N)) do d
         if !_is_periodic(tp[d])
             zero(T)
         elseif given[d] !== nothing
             T(given[d])
-        elseif geometry isa Geometry.AbstractSphericalGeometry
+        elseif geometry isa Geometry.AbstractSphericalGeometry ||
+               geometry isa Geometry.AbstractEllipsoidalGeometry
             d == 1 ? T(2π) : throw(ArgumentError(
-                "direction 2 of a spherical curvilinear grid has no intrinsic period; pass `period`",
+                "direction $d of a spherical curvilinear grid has no intrinsic period; pass `period`",
             ))
         else
-            _cartesian_period(samples[d])
+            # Direction `d`'s own line: vary index `d`, hold every other at 1.
+            _cartesian_period(@view centers[d][ntuple(k -> k == d ? Colon() : 1, Val(N))...])
         end
     end
 end
@@ -812,13 +871,13 @@ end
 # regional axis declared periodic against a larger period has a genuinely wider seam, so it falls
 # through to the dense path.
 function _axis_widths(
-    x::Axes.UniformAxis{T}, period::Union{Nothing,Real} = nothing,
+    x::AbstractRange{T}, period::Union{Nothing,Real} = nothing,
 ) where {T<:AbstractFloat}
     n = length(x)
     # A singleton axis contributes a multiplicative identity (see `_cell_width`).
     n == 1 && return Axes.ConstantVector(one(T), 1)
     n == 0 && return Axes.ConstantVector(zero(T), 0)
-    w = abs(x.Δ)
+    w = abs(T(step(x)))
     period === nothing && return Axes.ConstantVector(w, n)
     _, h_seam = _local_spacing(x, n, period)
     isapprox(abs(h_seam), w; rtol = 8 * eps(T)) && return Axes.ConstantVector(w, n)
@@ -876,14 +935,14 @@ end
 function _measure_factors(
     geometry::G, axes::NTuple{1,AbstractVector{T}}, periods::NTuple{1,Union{Nothing,Real}},
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
-    return (geometry.R .* _axis_widths(axes[1], periods[1]),)
+    return (Geometry.radius(geometry) .* _axis_widths(axes[1], periods[1]),)
 end
 
 function _measure_factors(
     geometry::G, axes::NTuple{2,AbstractVector{T}}, periods::NTuple{2,Union{Nothing,Real}},
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     λ, φ = axes
-    R = geometry.R
+    R = Geometry.radius(geometry)
     Nλ, Nφ = length(λ), length(φ)
     if Nλ == 1 && Nφ == 1
         return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))  # a point has no extent
@@ -906,6 +965,71 @@ function _measure_factors(
         (r .^ 2) .* _axis_widths(r, periods[3]),
         ntuple(d -> _axis_widths(axes[d + 3], periods[d + 3]), Val(N - 3))...,
     )
+end
+
+# An ellipsoid's surface element is `M(φ)·N(φ)cosφ·Δλ·Δφ`, separable exactly as the sphere's is — only
+# the latitude factor differs. With no latitude direction the parallel is the equator, radius `a`.
+function _measure_factors(
+    geometry::G, axes::NTuple{1,AbstractVector{T}}, periods::NTuple{1,Union{Nothing,Real}},
+) where {T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
+    return (Geometry.semimajor_axis(geometry) .* _axis_widths(axes[1], periods[1]),)
+end
+
+function _measure_factors(
+    geometry::G, axes::NTuple{2,AbstractVector{T}}, periods::NTuple{2,Union{Nothing,Real}},
+) where {T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
+    λ, φ = axes
+    Nλ, Nφ = length(λ), length(φ)
+    # Closures, so each broadcast runs over `φ` alone — a geometry is not a broadcastable scalar.
+    _area_factor(φj) = Geometry.meridional_radius(geometry, φj) *
+                       Geometry.prime_vertical_radius(geometry, φj) * cos(φj)
+    _mer_factor(φj) = Geometry.meridional_radius(geometry, φj)
+    if Nλ == 1 && Nφ == 1
+        return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))
+    elseif Nφ == 1
+        φ1 = @inbounds φ[1]
+        return (_axis_widths(λ, periods[1]),
+                Axes.ConstantVector(Geometry.prime_vertical_radius(geometry, φ1) * cos(φ1), 1))
+    elseif Nλ == 1
+        return (Axes.ConstantVector(one(T), 1),
+                _mer_factor.(φ) .* _axis_widths(φ, periods[2]))
+    end
+    return (_axis_widths(λ, periods[1]), _area_factor.(φ) .* _axis_widths(φ, periods[2]))
+end
+
+"""
+    _cell_measure(geometry, axes, periods)
+
+The grid's stored measure: a [`SeparableMeasure`](@ref) wherever the metric factors, and a dense array
+where it genuinely does not.
+"""
+_cell_measure(geometry, ax, per) = SeparableMeasure(_measure_factors(geometry, ax, per))
+
+# Geodetic `(λ, φ, h)`: the volume element `(N(φ)+h)cosφ·(M(φ)+h)` offsets BOTH curvature radii by the
+# height, so φ and h are coupled and no product of per-axis factors reproduces it. Stored dense; further
+# directions still enter as plain widths.
+function _cell_measure(
+    geometry::G, ax::NTuple{N,AbstractVector{T}}, per::NTuple{N,Union{Nothing,Real}},
+) where {N, T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
+    N ≥ 3 || return SeparableMeasure(_measure_factors(geometry, ax, per))
+    λ, φ, h = ax[1], ax[2], ax[3]
+    wλ = _axis_widths(λ, per[1])
+    wφ = _axis_widths(φ, per[2])
+    wh = _axis_widths(h, per[3])
+    rest = ntuple(d -> _axis_widths(ax[d + 3], per[d + 3]), Val(N - 3))
+    dims = ntuple(d -> length(ax[d]), Val(N))
+    out = similar(wλ, T, dims)
+    @inbounds for I in CartesianIndices(dims)
+        i, j, k = I[1], I[2], I[3]
+        φj, hk = φ[j], h[k]
+        v = (Geometry.prime_vertical_radius(geometry, φj) + hk) * cos(φj) *
+            (Geometry.meridional_radius(geometry, φj) + hk) * wλ[i] * wφ[j] * wh[k]
+        for d in 1:(N - 3)
+            v *= rest[d][I[d + 3]]
+        end
+        out[I] = v
+    end
+    return out
 end
 
 """
@@ -993,7 +1117,7 @@ function _structured_grid(
         "mask size $(size(m)) does not match the axis lengths $dims",
     ))
 
-    measure = SeparableMeasure(_measure_factors(geometry, ax, period_args))
+    measure = _cell_measure(geometry, ax, period_args)
     return StructuredGrid{G, T, N, typeof(tp), typeof(ax), typeof(measure), typeof(m)}(
         geometry, ax, measure, m, tp, per,
     )
@@ -1025,7 +1149,10 @@ _period_tuple(::Val{N}, ::Type{T}, p::AbstractVector) where {N,T} =
     ntuple(d -> d ≤ length(p) ? p[d] : nothing, Val(N))
 
 # Longitude closes after exactly one turn whatever its samples look like.
-_inferred_period(::Geometry.AbstractSphericalGeometry{T}, ::AbstractVector, d::Int) where {T} =
+_inferred_period(
+    ::Union{Geometry.AbstractSphericalGeometry{T},Geometry.AbstractEllipsoidalGeometry{T}},
+    ::AbstractVector, d::Int,
+) where {T} =
     d == 1 ? T(2π) : throw(ArgumentError(
         "direction $d of a spherical grid has no intrinsic period; pass `period` explicitly",
     ))
@@ -1042,82 +1169,119 @@ function _inferred_period(
     return _cartesian_period(x)
 end
 
+"""
+    apply_stencil!(out, field, grid, dim; order=1, nodes=order+1, active_only=true, masked=zero) -> out
+
+[`Discretization.apply_stencil!`](@ref) with the axis, wrap period and mask taken from `grid`, so a
+periodic direction wraps and an inactive cell is honoured without restating any of it.
+
+Only a rectilinear direction has a 1-D axis to difference along, so this is a `StructuredGrid` method.
+"""
+function Discretization.apply_stencil!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
+    dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
+    active_only::Bool = true, masked = zero(S),
+) where {S,G,T,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
+    return Discretization.apply_stencil!(
+        out, field, coordinates(grid, dim), dim;
+        order = order, nodes = nodes,
+        period = isperiodic(grid, dim) ? period(grid, dim) : nothing,
+        mask = msk, masked = masked,
+    )
+end
+
 # ---------------------------------------------------------------------------
 # Curvilinear Grid
 # ---------------------------------------------------------------------------
 
 """
-    CurvilinearGrid{T, G, C, MA, B}
+    CurvilinearGrid{T, G, N, TP, C, MA, B}
 
-Curvilinear grid whose cell-center coordinates are 2-D arrays (e.g. an orthogonal curvilinear mesh). `coordinates` holds one `Nx × Ny` cell-center array
-per direction and `corners` the matching `(Nx+1) × (Ny+1)` cell-vertex arrays, from which the exact
-quadrilateral cell `measure` is computed directly rather than by a cell-center spacing approximation.
+Curvilinear grid whose cell-center coordinates are `N`-dimensional arrays (e.g. an orthogonal
+curvilinear mesh). `coordinates` holds one `N`-D cell-center array per direction and `corners` the
+matching cell-vertex arrays, each one larger in every direction.
+
+At `N = 2` the cell `measure` is computed from those corners as the exact quadrilateral area rather
+than by a cell-center spacing approximation. In any other dimension the measure is the caller's to
+supply: the corner-area kernel is a genuinely 2-D algorithm, not a 2-D special case of an N-D one.
 
 # Type parameters
 - `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it (a mismatched-eltype geometry is
   a type error, not a silent promotion) — hence `T` precedes `G` (Julia forbids the forward
   reference `G<:AbstractGeometry{T}, T` needed to keep the `{G,T}` order).
+- `N`: number of coordinate directions.
 - `C`: tuple type shared by the center and corner coordinate arrays — a mesh's own coordinate arrays
   are legitimately almost always the same concrete type.
-- `MA`: matrix type of the derived `measure` field — independent of `C`, since it is a computed field
+- `MA`: array type of the derived `measure` field — independent of `C`, since it is a computed field
   with no reason to match the coordinate arrays' storage type.
-- `B`: matrix type of the active `mask`.
+- `B`: array type of the active `mask`.
 """
 struct CurvilinearGrid{
     T<:AbstractFloat,
     G<:Geometry.AbstractGeometry{T},
-    TP<:NTuple{2,AbstractTopology},
-    C<:NTuple{2,AbstractMatrix{T}},
-    MA<:AbstractMatrix{T},
-    B<:AbstractMatrix{Bool},
+    N,
+    TP<:NTuple{N,AbstractTopology},
+    C<:NTuple{N,AbstractArray{T,N}},
+    MA<:AbstractArray{T,N},
+    B<:AbstractArray{Bool,N},
 } <: AbstractCurvilinearGrid{G, T}
     geometry::G
-    coordinates::C            # cell-center coordinate array per direction (Nx × Ny)
-    corners::C                # cell-vertex coordinate array per direction ((Nx+1) × (Ny+1))
-    measure::MA               # exact quadrilateral cell areas (Nx × Ny)
+    coordinates::C            # cell-center coordinate array per direction
+    corners::C                # cell-vertex coordinate array per direction, one larger in each
+    measure::MA               # cell measure
     mask::B                   # active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
-    period::NTuple{2,T}       # wrap length per direction; meaningless where Bounded
+    period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
 end
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
 @inline period(grid::CurvilinearGrid, d::Integer) = @inbounds getfield(grid, :period)[d]
 
-@inline function _raw_coords(grid::CurvilinearGrid, i::Integer, j::Integer)
+@inline function _raw_coords(
+    grid::CurvilinearGrid{T,G,N}, I::Vararg{Integer,N},
+) where {T,G,N}
     c = coordinates(grid)
-    @boundscheck checkbounds(c[1], i, j)
-    return (@inbounds(c[1][i, j]), @inbounds(c[2][i, j]))
+    @boundscheck checkbounds(c[1], I...)
+    return ntuple(d -> @inbounds(c[d][I...]), Val(N))
 end
 
 """
-    corners(grid::CurvilinearGrid) -> NTuple{2,AbstractMatrix}
-    corners(grid::CurvilinearGrid, d::Integer) -> AbstractMatrix
+    corners(grid::CurvilinearGrid) -> NTuple{N,AbstractArray}
+    corners(grid::CurvilinearGrid, d::Integer) -> AbstractArray
 
-The `(Nx+1) × (Ny+1)` cell-vertex coordinate arrays, in the same direction order as
-[`coordinates`](@ref).
+The cell-vertex coordinate arrays — one larger than [`coordinates`](@ref) in every direction, and in
+the same direction order.
 """
-@inline corners(grid::CurvilinearGrid) = grid.corners
-@inline corners(grid::CurvilinearGrid, d::Integer) = @inbounds grid.corners[d]
+@inline corners(grid::CurvilinearGrid) = getfield(grid, :corners)
+@inline corners(grid::CurvilinearGrid, d::Integer) = @inbounds corners(grid)[d]
 
 """
-    corner_coords(grid::CurvilinearGrid, i, j) -> NamedTuple
-    corner_coords(S, grid::CurvilinearGrid, i, j) -> S
+    corner_coords(grid::CurvilinearGrid, I...) -> NamedTuple
+    corner_coords(S, grid::CurvilinearGrid, I...) -> S
 
-Vertex `(i, j)` of the cell-vertex array, named by the geometry exactly as [`coords`](@ref) names
+Vertex `I` of the cell-vertex array, named by the geometry exactly as [`coords`](@ref) names
 cell centers.
 """
-@inline function corner_coords(grid::CurvilinearGrid, i::Integer, j::Integer)
-    return Geometry.named_point(grid_geometry(grid), _raw_corner_coords(grid, i, j))
+@inline function corner_coords(
+    grid::CurvilinearGrid{T,G,N}, I::Vararg{Integer,N},
+) where {T,G,N}
+    return Geometry.named_point(grid_geometry(grid), _raw_corner_coords(grid, I...))
 end
 
-@inline function corner_coords(::Type{S}, grid::CurvilinearGrid, i::Integer, j::Integer) where {S}
-    return Geometry.build_point(S, coordinate_names(grid), _raw_corner_coords(grid, i, j))
+@inline function corner_coords(
+    ::Type{S}, grid::CurvilinearGrid{T,G,N}, I::Vararg{Integer,N},
+) where {S,T,G,N}
+    return Geometry.build_point(S, coordinate_names(grid), _raw_corner_coords(grid, I...))
 end
 
-@inline function _raw_corner_coords(grid::CurvilinearGrid, i::Integer, j::Integer)
+@inline function _raw_corner_coords(
+    grid::CurvilinearGrid{T,G,N}, I::Vararg{Integer,N},
+) where {T,G,N}
     k = corners(grid)
-    @boundscheck checkbounds(k[1], i, j)
-    return (@inbounds(k[1][i, j]), @inbounds(k[2][i, j]))
+    @boundscheck checkbounds(k[1], I...)
+    return ntuple(d -> @inbounds(k[d][I...]), Val(N))
 end
 
 # ---------------------------------------------------------------------------
@@ -1126,99 +1290,66 @@ end
 
 # Adapt a coordinate matrix to element type `T`, preserving the concrete array type (`similar`, not
 # `Matrix{T}`) and copying only when the eltype actually differs.
-_to_mat(::Type{T}, M::AbstractMatrix{T}) where {T<:AbstractFloat} = M
-_to_mat(::Type{T}, M::AbstractMatrix) where {T<:AbstractFloat} = copyto!(similar(M, T), M)
+_to_arr(::Type{T}, A::AbstractArray{T}) where {T<:AbstractFloat} = A
+_to_arr(::Type{T}, A::AbstractArray) where {T<:AbstractFloat} = copyto!(similar(A, T), A)
 
 """
     _centers_to_corners(C) -> K
 
-Reconstruct an `(n+1) × (m+1)` cell-vertex array from an `n × m` cell-center array `C` by averaging
-the (up to four) surrounding centers, with a linearly-extrapolated one-cell ghost ring so the true
-domain-boundary vertices are placed a half-cell outside the outermost centers. Used only when the
-caller does not supply explicit corner arrays; requires `n, m ≥ 2`.
+Reconstruct a cell-vertex array one larger in every direction from the `N`-D cell-center array `C`, by
+averaging the (up to `2^N`) surrounding centers with a linearly-extrapolated one-cell ghost ring, so
+the true domain-boundary vertices land a half-cell outside the outermost centers. Used only when the
+caller does not supply explicit corner arrays; requires at least 2 centers across every direction.
+
+Unlike the corner-area kernel this is dimension-generic: it is a multilinear midpoint, and the ghost
+ring is a per-direction linear extension of it.
 """
-function _centers_to_corners(C::AbstractMatrix{T}) where {T<:AbstractFloat}
-    n, m = size(C)
-    (n >= 2 && m >= 2) || throw(ArgumentError(
-        "auto-deriving curvilinear cell corners needs a grid of at least 2×2 centers; " *
-        "supply `x_corner`/`y_corner` explicitly for a smaller grid",
+function _centers_to_corners(C::AbstractArray{T,N}) where {T<:AbstractFloat, N}
+    all(≥(2), size(C)) || throw(ArgumentError(
+        "auto-deriving curvilinear cell corners needs at least 2 centers across every direction " *
+        "(got $(size(C))); supply the `corners` arrays explicitly for a smaller grid",
     ))
     # The padded ghost ring is indexed rather than materialized: `_ghosted` returns the same value a
     # padded copy would hold, so the vertex pass reads straight from `C` and only the result is
     # allocated (one array instead of two, and one pass over the data instead of three).
-    K = similar(C, T, n + 1, m + 1)
-    @inbounds for j in 1:(m+1), i in 1:(n+1)
-        K[i, j] = (_ghosted(C, i - 1, j - 1) + _ghosted(C, i, j - 1) +
-                   _ghosted(C, i - 1, j) + _ghosted(C, i, j)) / T(4)
+    K = similar(C, T, (size(C) .+ 1)...)
+    shifts = CartesianIndices(ntuple(_ -> 0:1, Val(N)))
+    scale = one(T) / T(2^N)
+    @inbounds for ci in CartesianIndices(K)
+        I = Tuple(ci)
+        acc = zero(T)
+        for s in shifts
+            acc += _ghosted(C, ntuple(d -> I[d] - 1 + s[d], Val(N)))
+        end
+        K[ci] = acc * scale
     end
     return K
 end
 
-# Value of the one-cell linearly-extrapolated ghost ring around `C` at (possibly out-of-range)
-# center index `(i, j)`; corners use the bilinear extension of the two adjacent ghost edges.
-@inline function _ghosted(C::AbstractMatrix{T}, i::Int, j::Int) where {T}
-    n, m = size(C)
+# Value of the one-cell linearly-extrapolated ghost ring around `C` at the (possibly out-of-range)
+# center index `I`. Each out-of-range direction contributes its own linear extrapolation `2·edge − inner`
+# taken with every other direction clamped, and where several are out at once those contributions add
+# with the shared clamped value counted once — the standard halo fill, exact for a field linear in each
+# direction. Written as a flat loop rather than a recursion over directions: a recursive form cannot
+# inline, and its intermediate index tuples then box (measured at 992 bytes per call).
+@inline function _ghosted(C::AbstractArray{T,N}, I::NTuple{N,Int}) where {T,N}
+    sz = size(C)
+    cl = ntuple(d -> clamp(I[d], 1, sz[d]), Val(N))
+    nout = 0
+    acc = zero(T)
     @inbounds begin
-        if 1 ≤ i ≤ n && 1 ≤ j ≤ m
-            return C[i, j]
-        elseif 1 ≤ j ≤ m
-            return i < 1 ? T(2) * C[1, j] - C[2, j] : T(2) * C[n, j] - C[n-1, j]
-        elseif 1 ≤ i ≤ n
-            return j < 1 ? T(2) * C[i, 1] - C[i, 2] : T(2) * C[i, m] - C[i, m-1]
+        for d in 1:N
+            (1 ≤ I[d] ≤ sz[d]) && continue
+            nout += 1
+            inner = I[d] < 1 ? 2 : sz[d] - 1
+            acc += T(2) * C[cl...] - C[ntuple(k -> k == d ? inner : cl[k], Val(N))...]
         end
-        # Diagonal ghost corner: P[edge_j] + P[edge_i] - P[interior]
-        ii = i < 1 ? 1 : n
-        jj = j < 1 ? 1 : m
-        return _ghosted(C, i, jj) + _ghosted(C, ii, j) - C[ii, jj]
+        nout == 0 && return C[cl...]
+        return acc - T(nout - 1) * C[cl...]
     end
 end
 
-"""
-    _tri_excess(a, b, c) -> T
 
-Spherical excess of the triangle spanned by three UNIT vectors, via Van Oosterom & Strackee (1983):
-
-    tan(E/2) = |a · (b × c)| / (1 + a·b + b·c + c·a)
-
-One `atan` and no other transcendental, versus L'Huilier's three great-circle distances (each its own
-trig) plus four tangents — and it takes the corner directions precomputed once per vertex instead of
-re-deriving them for every triangle of every cell that shares them.
-"""
-@inline function _tri_excess(a::NTuple{3,T}, b::NTuple{3,T}, c::NTuple{3,T}) where {T}
-    num = a[1] * (b[2] * c[3] - b[3] * c[2]) +
-          a[2] * (b[3] * c[1] - b[1] * c[3]) +
-          a[3] * (b[1] * c[2] - b[2] * c[1])
-    ab = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
-    bc = b[1] * c[1] + b[2] * c[2] + b[3] * c[3]
-    ca = c[1] * a[1] + c[2] * a[2] + c[3] * a[3]
-    return T(2) * abs(atan(num, one(T) + ab + bc + ca))
-end
-
-"""
-    _unit_vector(T, p) -> NTuple{3,T}
-
-Unit direction of the `(λ, φ)` point `p`, in any accepted point representation.
-"""
-@inline function _unit_vector(::Type{T}, p) where {T<:AbstractFloat}
-    λ, φ = Geometry.as_ntuple(p)
-    sinλ, cosλ = sincos(T(λ))
-    sinφ, cosφ = sincos(T(φ))
-    return (cosφ * cosλ, cosφ * sinλ, sinφ)
-end
-
-"""
-    _sph_triangle_area(geo, p1, p2, p3) -> T
-
-Exact area of the spherical triangle through three `(λ, φ)` points, in any accepted representation
-(they need not all be the same one). Built on [`_tri_excess`](@ref), so it costs one `atan` plus the
-three points' `sincos`; callers that already hold unit vectors should use `_tri_excess` directly and
-skip the conversion entirely.
-"""
-@inline function _sph_triangle_area(
-    geo::Geometry.AbstractSphericalGeometry{T}, p1, p2, p3,
-) where {T<:AbstractFloat}
-    return geo.R^2 * _tri_excess(_unit_vector(T, p1), _unit_vector(T, p2), _unit_vector(T, p3))
-end
 
 # Exact planar quadrilateral area (shoelace) over the (Nx+1)×(Ny+1) corner arrays.
 function _corner_areas(
@@ -1262,7 +1393,7 @@ function _corner_areas(
     backend = nothing,
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     nk = Nx + 1
-    R2 = geometry.R^2
+    R2 = Geometry.radius(geometry)^2
     areas = similar(λc, T, Nx, Ny)
     # Chunked over ROWS, each chunk with its own two-row buffer: a chunk re-derives its first row
     # rather than sharing one with its neighbour, which costs one extra row of trig per chunk and
@@ -1275,7 +1406,8 @@ function _corner_areas(
             _fill_dir_row!(hi, λc, φc, j + 1, nk)
             for i in 1:Nx
                 d1 = lo[i]; d2 = lo[i + 1]; d3 = hi[i + 1]; d4 = hi[i]
-                areas[i, j] = R2 * (_tri_excess(d1, d2, d3) + _tri_excess(d1, d3, d4))
+                areas[i, j] = R2 * (Geometry.spherical_excess(d1, d2, d3) +
+                                    Geometry.spherical_excess(d1, d3, d4))
             end
             lo, hi = hi, lo      # row j+1 becomes the next cell row's lower edge
         end
@@ -1284,92 +1416,142 @@ function _corner_areas(
 end
 
 """
-    CurvilinearGrid(geometry, x, y, mask; x_corner=nothing, y_corner=nothing, periodic=nothing)
+    CurvilinearGrid(geometry, coords..., mask; measure=nothing, corners=nothing, …)
+    CurvilinearGrid(geometry, coords..., measure, mask; corners=nothing, …)
 
-Build a curvilinear grid from `Nx × Ny` cell-center coordinate arrays `x`/`y`, computing
-exact quadrilateral cell areas from the `(Nx+1) × (Ny+1)` cell-vertex arrays. Supply
-`x_corner`/`y_corner` for exact corners (e.g. from the source model's own cell-vertex grid);
-otherwise they are reconstructed
-from the centers (see [`_centers_to_corners`](@ref)), which requires at least a 2×2 grid.
+Build a curvilinear grid in **any** number of directions from one `N`-D cell-center coordinate array
+per direction. `mask` is the trailing array; a `measure` array before it is used verbatim (common when
+a dataset ships its own cell areas), and may equally be given as the `measure` keyword.
 
-Spherical cell areas are the exact spherical-quadrilateral area, as the spherical excess of the two
-triangles through the cell's four corner directions (see [`_tri_excess`](@ref)); Cartesian cells use
-the exact planar shoelace area.
+With no measure supplied, one is computed from the cell-vertex arrays — **at `N = 2` only**, as the
+exact quadrilateral cell area. Spherical cells use the exact spherical-quadrilateral area, the
+spherical excess of the two triangles through the cell's four corner directions (see
+[`Geometry.spherical_excess`](@ref)); Cartesian cells the exact planar shoelace area. That kernel is a 2-D algorithm
+rather than the 2-D case of an N-D one, so in any other dimension the measure must be given.
 
-`periodic` is a `Bool` (applied to axis 1) or `NTuple{2,Bool}`. When omitted, axis-1 periodicity
-is auto-detected the same way as [`StructuredGrid`](@ref) (full-circle spherical longitude), and
-axis 2 is non-periodic.
+Pass `corners` (a tuple of arrays, each one larger than the centers in every direction) for exact
+cell vertices, e.g. from the source mesh's own vertex grid; otherwise they are reconstructed from the
+centers per direction (see [`_centers_to_corners`](@ref)), which requires at least 2 cells across.
+
+`periodic` is a `Bool` (applied to direction 1) or an `NTuple{N,Bool}`. When omitted, direction-1
+periodicity is auto-detected the same way as [`StructuredGrid`](@ref) (full-circle spherical
+longitude), and every other direction is bounded.
 """
-function CurvilinearGrid(
-    geometry::G,
-    x::AbstractMatrix,
-    y::AbstractMatrix,
-    mask::AbstractMatrix{Bool};
-    x_corner::Union{Nothing,AbstractMatrix} = nothing,
-    y_corner::Union{Nothing,AbstractMatrix} = nothing,
-    topology = nothing,
-    period = nothing,
-    periodic = nothing,
-    backend = nothing,
-) where {T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
-    size(x) == size(y) || throw(ArgumentError("x and y must have the same size"))
-    size(x) == size(mask) || throw(ArgumentError("x/y and mask must have the same size"))
-    Nx, Ny = size(x)
+function CurvilinearGrid(geometry::Geometry.AbstractGeometry, args...; kwargs...)
+    coords, measure, mask = _split_curvilinear_args(args)
+    return _curvilinear_grid(geometry, coords, measure, mask; kwargs...)
+end
 
-    x_T = _to_mat(T, x)
-    y_T = _to_mat(T, y)
-    xc = x_corner === nothing ? _centers_to_corners(x_T) : _to_mat(T, x_corner)
-    yc = y_corner === nothing ? _centers_to_corners(y_T) : _to_mat(T, y_corner)
-    size(xc) == (Nx + 1, Ny + 1) || throw(ArgumentError(
-        "x_corner/y_corner must be (Nx+1)×(Ny+1) = $((Nx+1, Ny+1)); got $(size(xc))",
+# Trailing `mask`, optionally preceded by a `measure`; everything before them is a coordinate array.
+function _split_curvilinear_args(args::Tuple)
+    length(args) ≥ 2 || throw(ArgumentError(
+        "a CurvilinearGrid needs at least one coordinate array and a mask",
     ))
-    size(yc) == size(xc) || throw(ArgumentError("x_corner and y_corner must have the same size"))
+    mask = last(args)
+    mask isa AbstractArray{Bool} ||
+        throw(ArgumentError("the last positional argument must be the Bool mask, got $(typeof(mask))"))
+    rest = Base.front(args)
+    if length(rest) ≥ 2 && last(rest) isa AbstractArray{<:Real} &&
+       !(last(rest) isa AbstractArray{Bool}) && length(rest) - 1 == ndims(mask)
+        return (Base.front(rest), last(rest), mask)
+    end
+    return (rest, nothing, mask)
+end
 
-    areas = _corner_areas(geometry, xc, yc, Nx, Ny; backend = backend)
-    # Auto-periodicity uses the first row of centers as a longitude-like axis sample.
-    tp = _curvilinear_topology(geometry, x_T, topology === nothing ? periodic : topology)
-    prd = _curvilinear_periods(geometry, x_T, y_T, tp, period)
-    centers = (x_T, y_T)
-    corners = (xc, yc)
-    return CurvilinearGrid{T, G, typeof(tp), typeof(centers), typeof(areas), typeof(mask)}(
-        geometry, centers, corners, areas, mask, tp, prd,
+function _curvilinear_grid(
+    geometry::G, coords::NTuple{N,AbstractArray}, measure, mask::AbstractArray{Bool,N};
+    corners = nothing, measure_kw = nothing,
+    x_corner = nothing, y_corner = nothing,
+    topology = nothing, period = nothing, periodic = nothing, backend = nothing,
+) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
+    N == ndims(mask) || throw(ArgumentError(
+        "got $N coordinate arrays for a $(ndims(mask))-dimensional mask",
+    ))
+    all(c -> ndims(c) == N, coords) || throw(ArgumentError(
+        "every coordinate array must be $N-dimensional, got $(map(ndims, coords))",
+    ))
+    all(c -> size(c) == size(mask), coords) || throw(ArgumentError(
+        "coordinate arrays and mask must have the same size; got $(map(size, coords)) and $(size(mask))",
+    ))
+    centers = ntuple(d -> _to_arr(T, coords[d]), Val(N))
+
+    given_corners = corners === nothing && N == 2 && !(x_corner === nothing && y_corner === nothing) ?
+        (x_corner, y_corner) : corners
+    kc = if given_corners === nothing
+        ntuple(d -> _centers_to_corners(centers[d]), Val(N))
+    else
+        length(given_corners) == N || throw(ArgumentError(
+            "expected $N corner arrays, got $(length(given_corners))",
+        ))
+        want = size(mask) .+ 1
+        ntuple(Val(N)) do d
+            k = _to_arr(T, given_corners[d])
+            size(k) == want || throw(ArgumentError(
+                "corner array $d must be $(want) (one larger than the centers in every direction); " *
+                "got $(size(k))",
+            ))
+            k
+        end
+    end
+
+    m = measure === nothing ? measure_kw : measure
+    meas = if m !== nothing
+        size(m) == size(mask) || throw(ArgumentError(
+            "measure size $(size(m)) does not match the coordinate arrays' $(size(mask))",
+        ))
+        _to_arr(T, m)
+    elseif N == 2
+        _corner_areas(geometry, kc[1], kc[2], size(mask, 1), size(mask, 2); backend = backend)
+    else
+        throw(ArgumentError(
+            "a $N-dimensional CurvilinearGrid has no measure to derive: the corner-area kernel is a " *
+            "2-D algorithm (exact quadrilateral area), not the 2-D case of an N-D one. Pass the cell " *
+            "measure explicitly.",
+        ))
+    end
+
+    tp = _curvilinear_topology(geometry, centers[1], topology === nothing ? periodic : topology)
+    prd = _curvilinear_periods(geometry, centers, tp, period)
+    return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(meas), typeof(mask)}(
+        geometry, centers, kc, meas, mask, tp, prd,
     )
 end
 
 """
-    CurvilinearGrid(geometry, x, y, areas, mask; x_corner=nothing, y_corner=nothing, periodic=nothing)
+    rotate(grid::StructuredGrid, rot) -> CurvilinearGrid
+    unrotate(grid::StructuredGrid, rot) -> CurvilinearGrid
 
-Build a curvilinear grid from cell-center coordinates with caller-supplied cell `areas` (common when
-a dataset ships its own cell areas). Corner arrays are still stored (reconstructed from the centers
-if not supplied) but the supplied `areas` are used verbatim rather than recomputed.
+The same mesh with its coordinates expressed in the other frame of [`Geometry.PoleRotation`](@ref)
+`rot` — `unrotate` being the usual direction, taking a rotated-pole grid's rectilinear `(λ′, φ′)` axes
+to the geographic coordinates of each cell.
+
+The result is curvilinear because that is what it is: a rotated lat–lon mesh is logically rectangular
+and geometrically warped, and only its own frame's axes are separable.
+
+Two things carry over rather than being recomputed. The **cell measure** is exact, because a rotation is
+an isometry of the sphere — recomputing it from the rotated corners would only add roundoff. The
+**index topology** is too: it is the same mesh with the same neighbours, so a direction that wrapped
+still wraps. Longitude remains an angle mod `2π` in either frame, so the wrap length is unchanged.
 """
-function CurvilinearGrid(
-    geometry::G,
-    x::AbstractMatrix,
-    y::AbstractMatrix,
-    areas::AbstractMatrix{<:Real},
-    mask::AbstractMatrix{Bool};
-    x_corner::Union{Nothing,AbstractMatrix} = nothing,
-    y_corner::Union{Nothing,AbstractMatrix} = nothing,
-    topology = nothing,
-    period = nothing,
-    periodic = nothing,
-) where {T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
-    size(x) == size(y) || throw(ArgumentError("x and y must have the same size"))
-    size(x) == size(mask) || throw(ArgumentError("x/y and mask must have the same size"))
-    size(x) == size(areas) || throw(ArgumentError("x/y and areas must have the same size"))
+rotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
+    _reframe(Geometry.rotate, grid, rot)
+unrotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
+    _reframe(Geometry.unrotate, grid, rot)
 
-    x_T = _to_mat(T, x)
-    y_T = _to_mat(T, y)
-    areas_T = _to_mat(T, areas)
-    xc = x_corner === nothing ? _centers_to_corners(x_T) : _to_mat(T, x_corner)
-    yc = y_corner === nothing ? _centers_to_corners(y_T) : _to_mat(T, y_corner)
-    tp = _curvilinear_topology(geometry, x_T, topology === nothing ? periodic : topology)
-    prd = _curvilinear_periods(geometry, x_T, y_T, tp, period)
-    centers = (x_T, y_T)
-    corners = (xc, yc)
-    return CurvilinearGrid{T, G, typeof(tp), typeof(centers), typeof(areas_T), typeof(mask)}(
-        geometry, centers, corners, areas_T, mask, tp, prd,
+function _reframe(
+    pointwise::F, grid::StructuredGrid{G,T,2}, rot::Geometry.PoleRotation,
+) where {F, T, G<:Geometry.AbstractSphericalGeometry{T}}
+    λ, φ = coordinates(grid, 1), coordinates(grid, 2)
+    _first(a, b) = T(pointwise(rot, a, b)[1])
+    _second(a, b) = T(pointwise(rot, a, b)[2])
+    centers = ([_first(a, b) for a in λ, b in φ], [_second(a, b) for a in λ, b in φ])
+    fλ, fφ = Discretization.faces(λ), Discretization.faces(φ)
+    corners = ([_first(a, b) for a in fλ, b in fφ], [_second(a, b) for a in fλ, b in fφ])
+    tp = topology(grid)
+    msk = mask(grid)
+    return CurvilinearGrid{T, G, 2, typeof(tp), typeof(centers), Matrix{T}, typeof(msk)}(
+        grid_geometry(grid), centers, corners, measure_array(grid), msk, tp,
+        (period(grid, 1), period(grid, 2)),
     )
 end
 
@@ -1405,10 +1587,11 @@ allocations total) holds the same information.
 struct UnstructuredGrid{
     T<:AbstractFloat,
     G<:Geometry.AbstractGeometry{T},
-    C<:NTuple{2,AbstractVector{T}},
+    N,
+    C<:NTuple{N,AbstractVector{T}},
     VA<:AbstractVector{T},
     B<:AbstractVector{Bool},
-    TP<:NTuple{2,AbstractTopology},
+    TP<:NTuple{N,AbstractTopology},
     VN<:AbstractVector{<:Integer},
     VP<:AbstractVector{<:Integer},
 } <: AbstractUnstructuredGrid{G, T}
@@ -1419,15 +1602,22 @@ struct UnstructuredGrid{
     neighbor_nbrs::VN  # flat neighbor-index array (CSR)
     neighbor_ptr::VP   # CSR offsets, length Nnodes+1
     topology::TP       # per-direction closure of the enclosing domain (singletons: no storage)
-    period::NTuple{2,T}       # wrap length per direction; meaningless where Bounded
+    period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
 end
 
 @inline topology(grid::UnstructuredGrid) = getfield(grid, :topology)
 
 """
-    UnstructuredGrid(geometry, x, y, measure, mask, neighbor_nbrs, neighbor_ptr; periodic, period)
+    UnstructuredGrid(geometry, coords::Tuple, measure, mask[, neighbor_nbrs, neighbor_ptr]; periodic, period)
+    UnstructuredGrid(geometry, x, y, measure, mask[, neighbor_nbrs, neighbor_ptr]; periodic, period)
 
-Build a node grid from explicit per-direction coordinate vectors and CSR adjacency.
+Build a node grid in **any** number of directions from one coordinate vector per direction and CSR
+adjacency. Coordinates come as a tuple; the two-direction case may pass `x, y` positionally.
+
+Omitting the CSR pair gives a grid with no adjacency — every node reports zero neighbours, which is
+enough for scattered-point spectral methods that never query it. Real-space neighbourhood operations
+need adjacency: build it (e.g. through the k-d-tree constructor below) and pass it in, or query by
+distance with `Connectivity.neighbors_within`, which reads coordinates rather than edges.
 
 `periodic` declares that the enclosing domain wraps in a direction, and `period` gives the wrap
 length there. A scattered point set carries no axis to infer this from, so both are explicit —
@@ -1435,54 +1625,76 @@ except on a sphere, where longitude wraps at 2π by construction and is the defa
 [`isperiodic`](@ref) and [`period`](@ref).
 """
 function UnstructuredGrid(
-    geometry::G, x::AbstractVector, y::AbstractVector,
-    measure::AbstractVector, mask::AbstractVector{Bool},
-    neighbor_nbrs::AbstractVector{<:Integer}, neighbor_ptr::AbstractVector{<:Integer};
+    geometry::G, coords::NTuple{N,AbstractVector}, measure::AbstractVector,
+    mask::AbstractVector{Bool}, nbrs = nothing, ptr = nothing;
     periodic = nothing, period = nothing,
-) where {T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
-    x_T = _to_axis(T, x)
-    y_T = _to_axis(T, y)
-    length(x_T) == length(y_T) || throw(ArgumentError("x and y must have the same length"))
-    length(x_T) == length(mask) || throw(ArgumentError("x/y and mask must have the same length"))
-    length(x_T) == length(measure) || throw(ArgumentError("x/y and measure must have the same length"))
-    length(neighbor_ptr) == length(x_T) + 1 || throw(ArgumentError(
-        "neighbor_ptr must have length Nnodes+1 = $(length(x_T) + 1); got $(length(neighbor_ptr))",
+) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
+    c = ntuple(d -> _to_axis(T, coords[d]), N)
+    n = length(c[1])
+    all(v -> length(v) == n, c) || throw(ArgumentError(
+        "coordinate vectors must have the same length; got $(map(length, c))",
     ))
-    per, prd = _node_periodicity(geometry, periodic, period)
-    c = (x_T, y_T)
+    length(mask) == n || throw(ArgumentError("coordinates and mask must have the same length"))
+    length(measure) == n || throw(ArgumentError("coordinates and measure must have the same length"))
+    # No CSR pair given: every node reports zero neighbours, which `ptr` all-ones expresses.
+    p = ptr === nothing ? ones(Int, n + 1) : ptr
+    nb = ptr === nothing ? Int[] : nbrs
+    length(p) == n + 1 || throw(ArgumentError(
+        "neighbor_ptr must have length Nnodes+1 = $(n + 1); got $(length(p))",
+    ))
+    per, prd = _node_periodicity(geometry, Val(N), periodic, period)
     m = _to_axis(T, measure)
     return UnstructuredGrid{
-        T, G, typeof(c), typeof(m), typeof(mask), typeof(per),
-        typeof(neighbor_nbrs), typeof(neighbor_ptr),
-    }(geometry, c, m, mask, neighbor_nbrs, neighbor_ptr, per, prd)
+        T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p),
+    }(geometry, c, m, mask, nb, p, per, prd)
 end
+
+# Two-direction convenience forms. Node coordinates are all `AbstractVector`s, so — unlike a
+# `CurvilinearGrid`, where `ndims(mask)` counts them — nothing in the types says how many of a run of
+# vectors are coordinates: `(x, y, mask)` and `(x, measure, mask)` are the same call. Hence the tuple
+# above for the general case, and explicit methods for the two-direction one.
+UnstructuredGrid(
+    geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
+    measure::AbstractVector, mask::AbstractVector{Bool},
+    nbrs::AbstractVector{<:Integer}, ptr::AbstractVector{<:Integer}; kwargs...,
+) = UnstructuredGrid(geometry, (x, y), measure, mask, nbrs, ptr; kwargs...)
+
+UnstructuredGrid(
+    geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
+    measure::AbstractVector, mask::AbstractVector{Bool}; kwargs...,
+) = UnstructuredGrid(geometry, (x, y), measure, mask; kwargs...)
 
 # Longitude on a sphere wraps at 2π whatever the point set looks like; a Cartesian box has no
 # intrinsic period, so wrapping there is opt-in and the length must be given.
 function _node_periodicity(
-    ::Geometry.AbstractSphericalGeometry{T}, periodic, period,
-) where {T<:AbstractFloat}
-    per = _as_topology(Val(2), periodic === nothing ? (true, false) : periodic)
-    prd = period === nothing ? (T(2π), zero(T)) : NTuple{2,T}(period)
+    ::Union{Geometry.AbstractSphericalGeometry{T},Geometry.AbstractEllipsoidalGeometry{T}},
+    ::Val{N}, periodic, period,
+) where {N, T<:AbstractFloat}
+    per = _as_topology(Val(N), periodic === nothing ?
+        ntuple(d -> d == 1, Val(N)) : periodic)
+    prd = period === nothing ? ntuple(d -> d == 1 ? T(2π) : zero(T), Val(N)) :
+        _node_period_tuple(Val(N), T, period, per)
     return per, prd
 end
 
 function _node_periodicity(
-    ::Geometry.AbstractCartesianGeometry{T}, periodic, period,
-) where {T<:AbstractFloat}
-    per = _as_topology(Val(2), periodic === nothing ? (false, false) : periodic)
-    if !any(_is_periodic, per)
-        return per, (zero(T), zero(T))
-    end
+    ::Geometry.AbstractCartesianGeometry{T}, ::Val{N}, periodic, period,
+) where {N, T<:AbstractFloat}
+    per = _as_topology(Val(N), periodic === nothing ? ntuple(_ -> false, Val(N)) : periodic)
+    any(_is_periodic, per) || return per, ntuple(_ -> zero(T), Val(N))
     period === nothing && throw(ArgumentError(
         "a periodic Cartesian node grid needs an explicit `period` (the wrap length per direction): " *
         "scattered points carry no axis to infer it from",
     ))
-    prd = NTuple{2,T}(period)
-    all(d -> !_is_periodic(per[d]) || prd[d] > 0, 1:2) || throw(ArgumentError(
+    return per, _node_period_tuple(Val(N), T, period, per)
+end
+
+function _node_period_tuple(::Val{N}, ::Type{T}, period, per) where {N,T}
+    prd = period isa Real ? ntuple(d -> d == 1 ? T(period) : zero(T), Val(N)) : NTuple{N,T}(period)
+    all(d -> !_is_periodic(per[d]) || prd[d] > 0, 1:N) || throw(ArgumentError(
         "period must be positive in every periodic direction; got $prd for topology=$per",
     ))
-    return per, prd
+    return prd
 end
 
 """
@@ -1492,21 +1704,6 @@ Wrap length of coordinate direction `d`, meaningful only where [`isperiodic`](@r
 """
 @inline period(grid::UnstructuredGrid, d::Integer) = @inbounds getfield(grid, :period)[d]
 
-"""
-    UnstructuredGrid(geometry, x, y, measure, mask; periodic, period)
-
-Convenience constructor with no neighbor adjacency (every node reports zero neighbors) — enough for
-scattered-point spectral methods, which never query adjacency. Real-space neighborhood operations
-need actual adjacency; build it explicitly (e.g. via the k-d-tree constructor below) and pass it to
-the 7-argument form.
-"""
-function UnstructuredGrid(
-    geometry::Geometry.AbstractGeometry{T}, x::AbstractVector, y::AbstractVector,
-    measure::AbstractVector, mask::AbstractVector{Bool}; kwargs...,
-) where {T<:AbstractFloat}
-    N = length(x)
-    return UnstructuredGrid(geometry, x, y, measure, mask, Int[], ones(Int, N + 1); kwargs...)
-end
 
 # ---------------------------------------------------------------------------
 # Unstructured grid construction: k-d-tree adjacency + (optional) Voronoi areas
@@ -1518,7 +1715,7 @@ end
 # dispatched on the geometry type since each needs a different tessellation library).
 
 """
-    _build_kdtree_neighbors(geometry, x, y; k=6, radius=nothing) -> (nbrs, ptr)
+    _build_kdtree_neighbors(geometry, coords::Tuple; k=6, radius=nothing) -> (nbrs, ptr)
 
 Extension hook: build CSR neighbor adjacency via a k-d tree. Overridden by
 a consumer NearestNeighbors extension (load `using NearestNeighbors`). `radius`, if given,
@@ -1527,13 +1724,11 @@ grid's physical distance units (`Geometry.distance` — meters for `SphericalGeo
 units for `CartesianGeometry`), NOT a raw chord/angle.
 """
 function _build_kdtree_neighbors(
-    geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector;
-    k::Integer = 6, radius::Union{Nothing,Real} = nothing,
-    periodic::NTuple{2,Bool} = (false, false), period = (0, 0),
-)
+    geometry::Geometry.AbstractGeometry, coords::NTuple{D,AbstractVector}; _...,
+) where {D}
     throw(ArgumentError(
         "k-d-tree neighbor construction requires NearestNeighbors.jl — run `using NearestNeighbors` " *
-        "(or build adjacency explicitly and pass it via the full 7-argument `UnstructuredGrid` constructor).",
+        "(or build adjacency explicitly and pass it to `UnstructuredGrid` alongside the coordinates).",
     ))
 end
 
@@ -1578,23 +1773,47 @@ leave `nothing` to auto-compute exact Voronoi-cell areas from a Delaunay/convex-
 face finds the nodes across the opposite face as genuine neighbors. Spherical longitude wraps by
 default; a Cartesian box is opt-in and needs its `period`.
 """
+UnstructuredGrid(
+    geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
+    mask::AbstractVector{Bool}; kwargs...,
+) = UnstructuredGrid(geometry, (x, y), mask; kwargs...)
+
 function UnstructuredGrid(
-    geometry::Geometry.AbstractGeometry{T}, x::AbstractVector, y::AbstractVector, mask::AbstractVector{Bool};
+    geometry::Geometry.AbstractGeometry{T}, coords::NTuple{N,AbstractVector},
+    mask::AbstractVector{Bool};
     k::Integer = 6, radius::Union{Nothing,Real} = nothing, areas::Union{Nothing,AbstractVector} = nothing,
     periodic = nothing, period = nothing,
-) where {T<:AbstractFloat}
-    x_T = _to_axis(T, x)
-    y_T = _to_axis(T, y)
-    per, prd = _node_periodicity(geometry, periodic, period)
+) where {N, T<:AbstractFloat}
+    c = ntuple(d -> _to_axis(T, coords[d]), Val(N))
+    per, prd = _node_periodicity(geometry, Val(N), periodic, period)
     nbrs, ptr = _build_kdtree_neighbors(
-        geometry, x_T, y_T; k = k, radius = radius,
+        geometry, c; k = k, radius = radius,
         periodic = map(_is_periodic, per), period = prd,
     )
-    areas_T = areas === nothing ? _voronoi_areas(geometry, x_T, y_T) : _to_axis(T, areas)
-    return UnstructuredGrid(
-        geometry, x_T, y_T, areas_T, mask, nbrs, ptr; periodic = per, period = prd,
-    )
+    # Voronoi tessellation is a 2-D algorithm (planar Delaunay / spherical convex hull), so past two
+    # directions the control volumes are the caller's to supply — the neighbour search is not, and is
+    # built for any `N` above.
+    areas_T = if areas !== nothing
+        _to_axis(T, areas)
+    elseif N == 2
+        _voronoi_areas(geometry, c[1], c[2])
+    else
+        throw(ArgumentError(
+            "a $N-direction node grid has no control volumes to derive: the Voronoi tessellation " *
+            "behind them is a 2-D algorithm (planar Delaunay / spherical convex hull). Pass `areas`.",
+        ))
+    end
+    return UnstructuredGrid(geometry, c, areas_T, mask, nbrs, ptr; periodic = per, period = prd)
 end
+
+"""
+    neighbor_nbrs(grid::UnstructuredGrid) -> AbstractVector{<:Integer}
+    neighbor_ptr(grid::UnstructuredGrid) -> AbstractVector{<:Integer}
+
+The CSR adjacency arrays: the flat neighbour indices, and the per-node offsets into them.
+"""
+@inline neighbor_nbrs(grid::UnstructuredGrid) = getfield(grid, :neighbor_nbrs)
+@inline neighbor_ptr(grid::UnstructuredGrid) = getfield(grid, :neighbor_ptr)
 
 """
     neighbors(grid::UnstructuredGrid, idx::Integer) -> AbstractVector{<:Integer}
@@ -1602,15 +1821,16 @@ end
 Neighbor node indices of node `idx`, as a zero-copy view into the CSR-flattened adjacency storage.
 """
 @inline function neighbors(grid::UnstructuredGrid, idx::Integer)
-    @inbounds lo = grid.neighbor_ptr[idx]
-    @inbounds hi = grid.neighbor_ptr[idx+1] - 1
-    return view(grid.neighbor_nbrs, lo:hi)
+    ptr = neighbor_ptr(grid)
+    @inbounds lo = ptr[idx]
+    @inbounds hi = ptr[idx+1] - 1
+    return view(neighbor_nbrs(grid), lo:hi)
 end
 
-@inline function _raw_coords(grid::UnstructuredGrid, idx::Integer)
+@inline function _raw_coords(grid::UnstructuredGrid{T,G,N}, idx::Integer) where {T,G,N}
     c = coordinates(grid)
     @boundscheck checkbounds(c[1], idx)
-    return (@inbounds(c[1][idx]), @inbounds(c[2][idx]))
+    return ntuple(d -> @inbounds(c[d][idx]), Val(N))
 end
 
 end # module

@@ -119,9 +119,9 @@ function Grids._voronoi_areas(
         for k in 1:m
             c1 = centers[adj[lo + vo[k] - 1]]
             c2 = centers[adj[lo + vo[mod1(k + 1, m)] - 1]]
-            A += Grids._tri_excess(ci, c1, c2)
+            A += Geometry.spherical_excess(ci, c1, c2)
         end
-        areas[i] = geo.R^2 * A
+        areas[i] = Geometry.radius(geo)^2 * A
     end
     return areas
 end

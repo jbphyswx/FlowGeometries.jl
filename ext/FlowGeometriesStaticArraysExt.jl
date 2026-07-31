@@ -38,7 +38,7 @@ end
     λ1, φ1 = T(p1[1]), T(p1[2])
     λ2, φ2 = T(p2[1]), T(p2[2])
     a = sin((φ2 - φ1) / T(2))^2 + cos(φ1) * cos(φ2) * sin((λ2 - λ1) / T(2))^2
-    return geo.R * T(2) * atan(sqrt(a), sqrt(max(zero(T), one(T) - a)))
+    return Geometry.radius(geo) * T(2) * atan(sqrt(a), sqrt(max(zero(T), one(T) - a)))
 end
 
 @inline function Geometry.distance(
@@ -58,7 +58,7 @@ end
 ) where {T<:AbstractFloat, S<:SA.StaticVector}
     sinλ, cosλ = sincos(T(p[1]))
     sinφ, cosφ = sincos(T(p[2]))
-    R = geo.R
+    R = Geometry.radius(geo)
     return S((R * cosφ * cosλ, R * cosφ * sinλ, R * sinφ))
 end
 

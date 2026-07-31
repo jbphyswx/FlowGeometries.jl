@@ -57,6 +57,33 @@ spacing(x) = throw(ArgumentError(
 # ---------------------------------------------------------------------------
 
 """
+    AbstractUniformAxis{T} <: AbstractRange{T}
+
+Supertype for axes whose spacing is constant and known from their type. Default:
+[`UniformAxis`](@ref).
+
+To add one, implement the three methods `AbstractRange` already requires — `Base.first`, `Base.step`
+and `Base.length` — and everything else here follows: indexing, the `O(1)` reductions, slicing,
+reversal, and the affine arithmetic. None of the generic methods touch a field, so a subtype may store
+whatever it likes under whatever names.
+
+Implement [`similar_axis`](@ref) as well if derived axes should keep the subtype rather than becoming a
+plain `UniformAxis`.
+"""
+abstract type AbstractUniformAxis{T} <: AbstractRange{T} end
+
+"""
+    similar_axis(a, origin, Δ, n) -> AbstractUniformAxis
+
+The axis of `a`'s own kind with the given origin, spacing and length: the hook every derived axis goes
+through — a slice, a reversal, `2a`, `a .+ c`.
+
+Defaults to a [`UniformAxis`](@ref), so a subtype that does not define it still gets correct results,
+just not its own type back.
+"""
+similar_axis(::AbstractUniformAxis, origin, Δ, n::Integer) = UniformAxis(origin, Δ, n)
+
+"""
     UniformAxis(origin, Δ, n)
     UniformAxis{T}(origin, Δ, n)
 
@@ -79,7 +106,7 @@ primary datum.
 An `AbstractRange`: that gets Base's O(1) `searchsorted` (flat 42 ns over `n = 10 … 10⁷`, against
 35→69 ns as an `AbstractVector`) and `isa AbstractRange` dispatch from other packages.
 """
-struct UniformAxis{T<:AbstractFloat} <: AbstractRange{T}
+struct UniformAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
     origin::T
     Δ::T
     n::Int
@@ -95,55 +122,67 @@ function UniformAxis(origin::Real, Δ::Real, n::Integer)
     return UniformAxis{T}(origin, Δ, n)
 end
 
-spacing_trait(::UniformAxis) = UniformSpacing()
-@inline spacing(a::UniformAxis) = a.Δ
-
-@inline Base.size(a::UniformAxis) = (a.n,)
-# `AbstractRange` requires this directly; it does not derive it from `size`.
-@inline Base.length(a::UniformAxis) = a.n
-Base.IndexStyle(::Type{<:UniformAxis}) = IndexLinear()
-
-@inline function Base.getindex(a::UniformAxis{T}, i::Int) where {T}
-    @boundscheck checkbounds(a, i)
-    return a.origin + T(i - 1) * a.Δ
-end
-
+# The three methods a subtype supplies, for the concrete type.
 @inline Base.step(a::UniformAxis) = a.Δ
 @inline Base.first(a::UniformAxis) = a.origin
-@inline Base.last(a::UniformAxis{T}) where {T} = a.origin + T(a.n - 1) * a.Δ
+# `AbstractRange` requires `length` directly; it does not derive it from `size`.
+@inline Base.length(a::UniformAxis) = a.n
+@inline similar_axis(::UniformAxis{T}, origin, Δ, n::Integer) where {T} =
+    UniformAxis{T}(origin, Δ, n)
+
+# Everything below is written in terms of `first`/`step`/`length` alone, so it holds for any subtype.
+spacing_trait(::AbstractUniformAxis) = UniformSpacing()
+@inline spacing(a::AbstractUniformAxis) = step(a)
+
+@inline Base.size(a::AbstractUniformAxis) = (length(a),)
+Base.IndexStyle(::Type{<:AbstractUniformAxis}) = IndexLinear()
+
+@inline function Base.getindex(a::AbstractUniformAxis{T}, i::Int) where {T}
+    @boundscheck checkbounds(a, i)
+    return first(a) + T(i - 1) * step(a)
+end
+
+@inline Base.last(a::AbstractUniformAxis{T}) where {T} =
+    first(a) + T(length(a) - 1) * step(a)
 
 # O(1): a monotone sequence's extremes are its endpoints, and its sum is the arithmetic series.
-@inline Base.minimum(a::UniformAxis) = isempty(a) ? _empty_reduce(a, "minimum") :
-    (a.Δ ≥ 0 ? first(a) : last(a))
-@inline Base.maximum(a::UniformAxis) = isempty(a) ? _empty_reduce(a, "maximum") :
-    (a.Δ ≥ 0 ? last(a) : first(a))
-@inline Base.extrema(a::UniformAxis) = (minimum(a), maximum(a))
-@inline Base.sum(a::UniformAxis{T}) where {T} =
-    isempty(a) ? zero(T) : T(a.n) * (first(a) + last(a)) / T(2)
+@inline Base.minimum(a::AbstractUniformAxis) = isempty(a) ? _empty_reduce(a, "minimum") :
+    (step(a) ≥ 0 ? first(a) : last(a))
+@inline Base.maximum(a::AbstractUniformAxis) = isempty(a) ? _empty_reduce(a, "maximum") :
+    (step(a) ≥ 0 ? last(a) : first(a))
+@inline Base.extrema(a::AbstractUniformAxis) = (minimum(a), maximum(a))
+@inline Base.sum(a::AbstractUniformAxis{T}) where {T} =
+    isempty(a) ? zero(T) : T(length(a)) * (first(a) + last(a)) / T(2)
 
-_empty_reduce(a, name) = throw(ArgumentError("$name of an empty UniformAxis is undefined"))
+_empty_reduce(a, name) =
+    throw(ArgumentError("$name of an empty $(nameof(typeof(a))) is undefined"))
 
-# A slice or reversal of a uniform axis is uniform; keep the proof.
-@inline function Base.getindex(a::UniformAxis{T}, r::AbstractUnitRange{<:Integer}) where {T}
+# A slice or reversal of a uniform axis is uniform; keep the proof, and the subtype.
+@inline function Base.getindex(a::AbstractUniformAxis, r::AbstractUnitRange{<:Integer})
     @boundscheck checkbounds(a, r)
-    isempty(r) && return UniformAxis{T}(a.origin, a.Δ, 0)
-    return UniformAxis{T}(@inbounds(a[first(r)]), a.Δ, length(r))
+    isempty(r) && return similar_axis(a, first(a), step(a), 0)
+    return similar_axis(a, @inbounds(a[first(r)]), step(a), length(r))
 end
 
-@inline function Base.getindex(a::UniformAxis{T}, r::StepRange{<:Integer}) where {T}
+@inline function Base.getindex(a::AbstractUniformAxis{T}, r::StepRange{<:Integer}) where {T}
     @boundscheck checkbounds(a, r)
-    isempty(r) && return UniformAxis{T}(a.origin, a.Δ * T(step(r)), 0)
-    return UniformAxis{T}(@inbounds(a[first(r)]), a.Δ * T(step(r)), length(r))
+    Δ = step(a) * T(step(r))
+    isempty(r) && return similar_axis(a, first(a), Δ, 0)
+    return similar_axis(a, @inbounds(a[first(r)]), Δ, length(r))
 end
 
-@inline Base.reverse(a::UniformAxis{T}) where {T} =
-    isempty(a) ? a : UniformAxis{T}(last(a), -a.Δ, a.n)
+@inline Base.reverse(a::AbstractUniformAxis) =
+    isempty(a) ? a : similar_axis(a, last(a), -step(a), length(a))
 
-Base.show(io::IO, a::UniformAxis{T}) where {T} =
-    print(io, "UniformAxis{", T, "}(", a.origin, ", Δ=", a.Δ, ", n=", a.n, ")")
+Base.show(io::IO, a::AbstractUniformAxis{T}) where {T} =
+    print(io, nameof(typeof(a)), "{", T, "}(", first(a), ", Δ=", step(a), ", n=", length(a), ")")
 
-Base.show(io::IO, ::MIME"text/plain", a::UniformAxis{T}) where {T} =
-    print(io, a.n, "-element UniformAxis{", T, "}: ", a.origin, " : ", a.Δ, " : ", last(a))
+function Base.show(io::IO, ::MIME"text/plain", a::AbstractUniformAxis{T}) where {T}
+    print(io, length(a), "-element ", nameof(typeof(a)), "{", T, "}")
+    isempty(a) && return
+    print(io, ": ", first(a), " : ", step(a), " : ", last(a))
+    return
+end
 
 # ---------------------------------------------------------------------------
 # The AbstractRange protocol
@@ -152,50 +191,59 @@ Base.show(io::IO, ::MIME"text/plain", a::UniformAxis{T}) where {T} =
 # Base's generic range methods rebuild a range from its endpoints and step, reaching for constructors
 # that do not exist here; without these, `x .+ x` recurses until the stack runs out.
 
-Base.copy(a::UniformAxis) = a   # immutable
+Base.copy(a::AbstractUniformAxis) = a   # immutable
 
-# An affine map of an affine sequence is affine, so these keep the spacing guarantee.
-Base.:(+)(a::UniformAxis{T}, c::Number) where {T} =
-    UniformAxis(a.origin + c, a.Δ, a.n)
-Base.:(+)(c::Number, a::UniformAxis) = a + c
-Base.:(-)(a::UniformAxis, c::Number) = a + (-c)
-Base.:(-)(c::Number, a::UniformAxis) = UniformAxis(c - a.origin, -a.Δ, a.n)
-Base.:(-)(a::UniformAxis) = UniformAxis(-a.origin, -a.Δ, a.n)
-Base.:(*)(a::UniformAxis, c::Number) = UniformAxis(a.origin * c, a.Δ * c, a.n)
-Base.:(*)(c::Number, a::UniformAxis) = a * c
-Base.:(/)(a::UniformAxis, c::Number) = UniformAxis(a.origin / c, a.Δ / c, a.n)
+# An affine map of an affine sequence is affine, so these keep the spacing guarantee — and, through
+# `similar_axis`, the subtype.
+Base.:(+)(a::AbstractUniformAxis, c::Number) = similar_axis(a, first(a) + c, step(a), length(a))
+Base.:(+)(c::Number, a::AbstractUniformAxis) = a + c
+Base.:(-)(a::AbstractUniformAxis, c::Number) = a + (-c)
+Base.:(-)(c::Number, a::AbstractUniformAxis) = similar_axis(a, c - first(a), -step(a), length(a))
+Base.:(-)(a::AbstractUniformAxis) = similar_axis(a, -first(a), -step(a), length(a))
+Base.:(*)(a::AbstractUniformAxis, c::Number) =
+    similar_axis(a, first(a) * c, step(a) * c, length(a))
+Base.:(*)(c::Number, a::AbstractUniformAxis) = a * c
+Base.:(/)(a::AbstractUniformAxis, c::Number) =
+    similar_axis(a, first(a) / c, step(a) / c, length(a))
 
 # Intercepted at `broadcasted`; the generic range path is what recurses.
-Base.broadcasted(::typeof(+), a::UniformAxis, c::Number) = a + c
-Base.broadcasted(::typeof(+), c::Number, a::UniformAxis) = a + c
-Base.broadcasted(::typeof(-), a::UniformAxis, c::Number) = a - c
-Base.broadcasted(::typeof(-), c::Number, a::UniformAxis) = c - a
-Base.broadcasted(::typeof(-), a::UniformAxis) = -a
-Base.broadcasted(::typeof(*), a::UniformAxis, c::Number) = a * c
-Base.broadcasted(::typeof(*), c::Number, a::UniformAxis) = a * c
-Base.broadcasted(::typeof(/), a::UniformAxis, c::Number) = a / c
+Base.broadcasted(::typeof(+), a::AbstractUniformAxis, c::Number) = a + c
+Base.broadcasted(::typeof(+), c::Number, a::AbstractUniformAxis) = a + c
+Base.broadcasted(::typeof(-), a::AbstractUniformAxis, c::Number) = a - c
+Base.broadcasted(::typeof(-), c::Number, a::AbstractUniformAxis) = c - a
+Base.broadcasted(::typeof(-), a::AbstractUniformAxis) = -a
+Base.broadcasted(::typeof(*), a::AbstractUniformAxis, c::Number) = a * c
+Base.broadcasted(::typeof(*), c::Number, a::AbstractUniformAxis) = a * c
+Base.broadcasted(::typeof(/), a::AbstractUniformAxis, c::Number) = a / c
 
-function Base.broadcasted(::typeof(+), a::UniformAxis, b::UniformAxis)
-    a.n == b.n || throw(DimensionMismatch("axis lengths $(a.n) and $(b.n) do not match"))
-    return UniformAxis(a.origin + b.origin, a.Δ + b.Δ, a.n)
+function Base.broadcasted(::typeof(+), a::AbstractUniformAxis, b::AbstractUniformAxis)
+    length(a) == length(b) ||
+        throw(DimensionMismatch("axis lengths $(length(a)) and $(length(b)) do not match"))
+    return similar_axis(a, first(a) + first(b), step(a) + step(b), length(a))
 end
 
-function Base.broadcasted(::typeof(-), a::UniformAxis, b::UniformAxis)
-    a.n == b.n || throw(DimensionMismatch("axis lengths $(a.n) and $(b.n) do not match"))
-    return UniformAxis(a.origin - b.origin, a.Δ - b.Δ, a.n)
+function Base.broadcasted(::typeof(-), a::AbstractUniformAxis, b::AbstractUniformAxis)
+    length(a) == length(b) ||
+        throw(DimensionMismatch("axis lengths $(length(a)) and $(length(b)) do not match"))
+    return similar_axis(a, first(a) - first(b), step(a) - step(b), length(a))
 end
 
 # Anything else is not affine — `cos.(axis)` must become a plain array, not pretend otherwise.
-Base.BroadcastStyle(::Type{<:UniformAxis}) = Broadcast.DefaultArrayStyle{1}()
+Base.BroadcastStyle(::Type{<:AbstractUniformAxis}) = Broadcast.DefaultArrayStyle{1}()
 
-Base.promote_rule(::Type{UniformAxis{T}}, ::Type{UniformAxis{S}}) where {T,S} =
+# A subtype cannot be reconstructed at a promoted eltype generically, so mixing two different uniform
+# axis types lands on the canonical concrete one.
+Base.promote_rule(::Type{<:AbstractUniformAxis{T}}, ::Type{<:AbstractUniformAxis{S}}) where {T,S} =
     UniformAxis{promote_type(T, S)}
 # Another range has its own spacing, so the affine representation cannot survive the mix.
 Base.promote_rule(::Type{UniformAxis{T}}, ::Type{<:AbstractRange{S}}) where {T,S} =
     Vector{promote_type(T, S)}
+Base.promote_rule(::Type{UniformAxis{T}}, ::Type{<:AbstractUniformAxis{S}}) where {T,S} =
+    UniformAxis{promote_type(T, S)}
 
-Base.:(==)(a::UniformAxis, b::UniformAxis) =
-    a.n == b.n && (a.n == 0 || (a.origin == b.origin && (a.n == 1 || a.Δ == b.Δ)))
+Base.:(==)(a::AbstractUniformAxis, b::AbstractUniformAxis) =
+    length(a) == length(b) &&
+    (isempty(a) || (first(a) == first(b) && (length(a) == 1 || step(a) == step(b))))
 
 """
     uniform_axis(x) -> UniformAxis
@@ -207,8 +255,6 @@ sequence is a decision only its owner can make, and they can build the axis dire
 """
 uniform_axis(x) = uniform_axis(float(eltype(x)), x)
 
-uniform_axis(::Type{T}, a::UniformAxis) where {T<:AbstractFloat} =
-    UniformAxis{T}(a.origin, a.Δ, a.n)
 uniform_axis(::Type{T}, r::AbstractRange) where {T<:AbstractFloat} =
     UniformAxis{T}(first(r), step(r), length(r))
 uniform_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = throw(ArgumentError(
@@ -282,5 +328,21 @@ Base.show(io::IO, c::ConstantVector{T}) where {T} =
 
 Base.show(io::IO, ::MIME"text/plain", c::ConstantVector{T}) where {T} =
     print(io, c.n, "-element ConstantVector{", T, "}: all ", c.value)
+
+"""
+    wrap_sign(x) -> ±1
+
+`+1` for an ascending axis and `-1` for a descending one: the sign that turns a period magnitude into
+the wrapped neighbour's offset in index order. A descending axis is routine in stored data, and its
+wrapped neighbour lies at `x[1] - period`, not `x[1] + period`.
+"""
+@inline function wrap_sign(x::AbstractVector{T}) where {T<:AbstractFloat}
+    n = length(x)
+    n < 2 && return one(T)
+    return @inbounds(x[n] ≥ x[1]) ? one(T) : -one(T)
+end
+
+@inline wrap_sign(x::AbstractRange{T}) where {T<:AbstractFloat} =
+    step(x) ≥ 0 ? one(T) : -one(T)
 
 end # module Axes

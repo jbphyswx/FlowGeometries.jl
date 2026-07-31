@@ -18,6 +18,14 @@ A neighbourhood shape in index space. Materialize it with [`offsets`](@ref).
 
 Concrete shapes: [`Axial`](@ref), [`VonNeumann`](@ref), [`Moore`](@ref) (alias [`Vertex`](@ref)),
 [`Diagonal`](@ref), [`Anisotropic`](@ref), [`Custom`](@ref).
+
+A shape supplies one method, [`offsets`](@ref)`(s, ::Val{N})`, returning its offsets as a tuple;
+`foreach_offset`, `fold_offsets`, `nstencil` and `reach` all follow from it, and their loops still
+unroll at compile time. Put whatever the offsets depend on in the type, so the tuple is inferable:
+
+    struct Upwind{R} <: AbstractStencil end
+    Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
+        ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
 """
 abstract type AbstractStencil end
 
@@ -130,17 +138,25 @@ The stencil's offsets in `N` dimensions, as a tuple built at compile time so a l
 
 Offsets come out in column-major order of the enclosing box (direction 1 varying fastest), which puts
 `Axial(1)` and `Moore(1)` in the conventional order.
+
+This is the one method a new shape defines; see [`AbstractStencil`](@ref).
 """
-@generated function offsets(s::AbstractStencil, ::Val{N}) where {N}
+function offsets end
+
+# The shapes defined here, whose offsets `_offset_list` can build at generation time from the type.
+const _BuiltinStencil = Union{Axial,VonNeumann,Moore,Diagonal,Anisotropic,Custom}
+
+@generated function offsets(s::_BuiltinStencil, ::Val{N}) where {N}
     return :($(Tuple(_offset_list(s, N))))
 end
 
 @inline _axis_unit(N::Int, d::Int, k::Int) = ntuple(i -> i == d ? k : 0, N)
 
 # Built at generation time, never at run time. `offsets` returns the whole tuple, which is convenient
-# but heap-allocates once it outgrows a register — measured at 412 bytes per call for `Moore(2)` in 2-D.
-# `foreach_offset` exists for that reason: it unrolls the body over the offsets, so each one reaches the
-# body as a literal register-sized tuple and nothing is materialized.
+# but heap-allocates once it outgrows a register — measured at 400 bytes per call for `Moore(2)` in 2-D
+# and 76,864 for `Moore(3)` in 4-D. `foreach_offset` exists for that reason: it unrolls the body over the
+# offsets, so each reaches the body as a literal register-sized tuple and nothing is materialized. That
+# holds for a caller's own shape too, whose offsets arrive as a tuple that then never escapes.
 function _offset_list(::Type{Axial{R}}, N::Int) where {R}
     offs = NTuple{N,Int}[]
     for d in 1:N, k in 1:R
@@ -199,13 +215,26 @@ end
 
 Apply `f` to each of the stencil's offsets, with the loop unrolled at compile time.
 
-Each offset reaches `f` as a literal `NTuple{N,Int}`, so nothing is materialized — unlike
-[`offsets`](@ref), whose returned tuple is heap-allocated once it outgrows a register. Every bulk
-neighbour kernel goes through this.
+Each offset reaches `f` as a register-sized `NTuple{N,Int}` and the offset set is never materialized on
+the heap — unlike [`offsets`](@ref), whose returned tuple is allocated once it outgrows a register.
+Every bulk neighbour kernel goes through this.
 """
-@generated function foreach_offset(f, s::AbstractStencil, ::Val{N}) where {N}
+@inline foreach_offset(f, s::AbstractStencil, ::Val{N}) where {N} =
+    _foreach_tuple(f, offsets(s, Val(N)))
+
+# For the shapes defined here the offset list exists at generation time, so each offset can be emitted
+# as a literal and inference never carries the offset tuple as a value. That matters for a wide stencil:
+# `Moore(3)` in 4-D is 2400 offsets, and compiling it through the tuple below costs ~30× as long.
+@generated function foreach_offset(f, s::_BuiltinStencil, ::Val{N}) where {N}
     offs = _offset_list(s, N)
     return Expr(:block, (:(f($(o))) for o in offs)..., :nothing)
+end
+
+# Generated on the TUPLE's type, not the stencil's: a shape defined anywhere answers `offsets` by
+# ordinary dispatch, and the unroll over what it returns is still flat and compile-time.
+@generated function _foreach_tuple(f, t::Tuple)
+    K = length(t.parameters)
+    return Expr(:block, (:(f(@inbounds t[$i])) for i in 1:K)..., :nothing)
 end
 
 """
@@ -217,21 +246,26 @@ The accumulator is threaded through as a value rather than mutated, so nothing i
 is boxed — which is what a counting or filling kernel needs, and what a closure over a mutated local
 would cost.
 """
-@generated function fold_offsets(f, init, s::AbstractStencil, ::Val{N}) where {N}
-    offs = _offset_list(s, N)
+@inline fold_offsets(f, init, s::AbstractStencil, ::Val{N}) where {N} =
+    _fold_tuple(f, init, offsets(s, Val(N)))
+
+@generated function fold_offsets(f, init, s::_BuiltinStencil, ::Val{N}) where {N}
     body = Expr(:block, :(acc = init))
-    for o in offs
+    for o in _offset_list(s, N)
         push!(body.args, :(acc = f(acc, $(o))))
     end
     push!(body.args, :acc)
     return body
 end
 
-
-
-
-
-
+@generated function _fold_tuple(f, init, t::Tuple)
+    body = Expr(:block, :(acc = init))
+    for i in 1:length(t.parameters)
+        push!(body.args, :(acc = f(acc, @inbounds t[$i])))
+    end
+    push!(body.args, :acc)
+    return body
+end
 
 """
     nstencil(stencil, Val(N)) -> Int
@@ -261,6 +295,9 @@ end
 Every cell within physical distance `r`, measured through the geometry rather than in cells. Distinct
 from a [`CellRadius`](@ref): on a stretched or spherical grid the number of cells within `r` varies
 across the grid, so this cannot be reduced to a fixed offset set.
+
+Query it with `Connectivity.neighbors_within!` / `nneighbors_within` / `neighbors_within`, which take
+it as their `ball` keyword.
 """
 struct MetricBall{T<:Real}
     radius::T
