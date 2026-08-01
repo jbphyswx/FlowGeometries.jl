@@ -2,7 +2,9 @@ using FlowGeometries: FlowGeometries
 using Test: Test
 
 # Every weak dependency is loaded up front so the extensions are exercised by the whole suite.
+using Adapt: Adapt
 using DelaunayTriangulation: DelaunayTriangulation
+using KernelAbstractions: KernelAbstractions
 using NearestNeighbors: NearestNeighbors
 using Quickhull: Quickhull
 using SparseArrays: SparseArrays
@@ -16,6 +18,121 @@ struct Upwind{R} <: FG.Stencils.AbstractStencil end
 Upwind(r::Integer) = Upwind{Int(r)}()
 FG.Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
     ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
+
+# Fixed arity, and the cell index travels as a tuple that is splatted inside the callee: forwarding
+# through `args...` allocates 240 bytes on its own, so a vararg harness would measure itself.
+for n in 1:6
+    args = [Symbol(:a, i) for i in 1:n]
+    @eval function _alloc(f::F, $(args...)) where {F}
+        a = typemax(Int)
+        for _ in 1:4                       # first calls carry compilation
+            a = min(a, @allocated f($(args...)))
+        end
+        return a
+    end
+end
+
+q_coords(g, I)           = FG.Grids.coords(g, I...)
+q_measure(g, I)          = FG.Grids.measure(g, I...)
+q_active(g, I)           = FG.Grids.isactive(g, I...)
+q_dist(g, I, J)          = FG.Geometry.distance(g, I, J)
+q_disp(g, I, J)          = FG.Grids.displacement(g, I, J)
+q_nn(g, I)               = FG.Connectivity.nneighbors(g, I...)
+q_nbrs!(out, g, I)       = FG.Connectivity.neighbors!(out, g, I...)
+q_iter(g, I)             = (t = 0; for j in FG.Grids.neighbors(g, I...); t += j; end; t)
+q_top(g)                 = FG.Connectivity.MetricTopology(g)
+q_win(g, I, r, mt)       = FG.Connectivity.metric_window(g, I, r, mt)
+q_nwithin(g, r, I)       = FG.Connectivity.nneighbors_within(g, I...; ball = r)
+q_within!(b, g, r, I)    = FG.Connectivity.neighbors_within!(b, g, I...; ball = r)
+q_fold(g, r, I)          = FG.Connectivity.fold_within((a, _, d) -> a + d, 0.0, g, I...; ball = r)
+q_knn!(ix, dt, g, k, I)  = FG.Connectivity.k_nearest!(ix, dt, g, I...; k = k)
+q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
+q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
+q_area(g, I)             = FG.Grids.area(g, I...)
+q_coords!(o, g, I)       = FG.Grids.coords!(o, g, I...)
+q_axis(g, d)             = length(FG.Grids.axis(g, d))
+q_spacing(g, d)          = FG.Grids.spacing(g, d)
+q_origin(g, d)           = FG.Grids.origin(g, d)
+q_extent(g, d)           = FG.Grids.extent(g, d)
+q_bounds(g, d)           = FG.Grids.bounds(g, d)
+q_isper(g, d)            = FG.Grids.isperiodic(g, d)
+q_isuni(g, d)            = FG.Grids.isuniform(g, d)
+q_period(g, d)           = FG.Grids.period(g, d)
+q_minsp(g, d)            = FG.Grids.minimum_spacing(g, d)
+q_maxsp(g, d)            = FG.Grids.maximum_spacing(g, d)
+q_size(g)                = FG.Grids.size_tuple(g)
+q_mask(g)                = FG.Grids.mask(g)
+q_names(g)               = FG.Grids.coordinate_names(g)
+q_perflags(g)            = FG.Grids.periodic_flags(g)
+q_topo(g)                = FG.Grids.topology(g)
+
+function check_shape(label, g, I)
+    r = FG.Grids.grid_geometry(g) isa FG.Geometry.AbstractSphericalGeometry ? 6.371e5 : 2.5
+    out = Vector{Int}(undef, 64)
+    buf = Vector{Int}(undef, 4096)
+    pt = Vector{Float64}(undef, length(I))
+    dts = Vector{Float64}(undef, 64)
+    mt = FG.Connectivity.MetricTopology(g)
+    J = ntuple(d -> I[d] + 1, length(I))
+    checks = (
+        ("coords",             _alloc(q_coords, g, I)),
+        ("measure",            _alloc(q_measure, g, I)),
+        ("isactive",           _alloc(q_active, g, I)),
+        ("distance(g,I,J)",    _alloc(q_dist, g, I, J)),
+        ("displacement",       _alloc(q_disp, g, I, J)),
+        ("nneighbors",         _alloc(q_nn, g, I)),
+        ("neighbors!",         _alloc(q_nbrs!, out, g, I)),
+        ("neighbors iterator", _alloc(q_iter, g, I)),
+        ("MetricTopology",     _alloc(q_top, g)),
+        ("nneighbors_within",  _alloc(q_nwithin, g, r, I)),
+        ("neighbors_within!",  _alloc(q_within!, buf, g, r, I)),
+        ("fold_within",        _alloc(q_fold, g, r, I)),
+        ("area",               _alloc(q_area, g, I)),
+        ("k_nearest!",         _alloc(q_knn!, out, dts, g, 6, I)),
+        ("coords!",            _alloc(q_coords!, pt, g, I)),
+        ("size_tuple",         _alloc(q_size, g)),
+        ("mask",               _alloc(q_mask, g)),
+        ("coordinate_names",   _alloc(q_names, g)),
+        ("periodic_flags",     _alloc(q_perflags, g)),
+        ("topology",           _alloc(q_topo, g)),
+    )
+    for (name, a) in checks
+        a == 0 || println("    ", label, " / ", name, " -> ", a, " B")
+        Test.@test a == 0
+    end
+    if g isa FG.Grids.StructuredGrid
+        a = _alloc(q_win, g, I, r, mt)
+        a == 0 || println("    ", label, " / metric_window -> ", a, " B")
+        Test.@test a == 0
+    end
+    for d in 1:length(I)
+        # `spacing` is the constant-spacing accessor and errors on an irregular axis, by design.
+        if FG.Grids.isuniform(g, d)
+            a = _alloc(q_spacing, g, d)
+            a == 0 || println("    ", label, " / spacing(d=", d, ") -> ", a, " B")
+            Test.@test a == 0
+        end
+        for (name, a) in (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
+                          ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
+                          ("isuniform", _alloc(q_isuni, g, d)), ("period", _alloc(q_period, g, d)))
+            a == 0 || println("    ", label, " / ", name, "(d=", d, ") -> ", a, " B")
+            Test.@test a == 0
+        end
+        # spacing bounds are a rectilinear notion; a curvilinear grid has no axes to gap
+        if g isa FG.Grids.StructuredGrid
+            for (name, a) in (("minimum_spacing", _alloc(q_minsp, g, d)),
+                              ("maximum_spacing", _alloc(q_maxsp, g, d)))
+                a == 0 || println("    ", label, " / ", name, "(d=", d, ") -> ", a, " B")
+                Test.@test a == 0
+            end
+        end
+    end
+    Test.@test (Test.@inferred q_coords(g, I)) isa NamedTuple
+    Test.@test (Test.@inferred q_dist(g, I, J)) isa Float64
+    Test.@test (Test.@inferred q_nwithin(g, r, I)) isa Int
+    Test.@test (Test.@inferred q_top(g)) isa FG.Connectivity.MetricTopology
+    return nothing
+end
 
 Test.@testset "FlowGeometries.jl" begin
 
@@ -4463,6 +4580,290 @@ Test.@testset "FlowGeometries.jl" begin
         bykw = FG.Grids.CurvilinearGrid(geo, xs, ys, trues(4, 4); measure = a)
         bypos = FG.Grids.CurvilinearGrid(geo, xs, ys, a, trues(4, 4))
         Test.@test FG.Grids.measure(bykw) == FG.Grids.measure(bypos) == a
+    end
+
+
+    Test.@testset "Index-parallel loops run as kernels and give the same answer" begin
+        D = FG.Discretization
+        C = FG.Connectivity
+        GD = FG.Grids
+        cpu = KernelAbstractions.CPU()
+
+        n, m = 48, 33
+        x = collect(range(0.0, 2π; length = n))
+        y = collect(range(0.0, 1.0; length = m))
+        f = [sin(xi) * cos(yj) for xi in x, yj in y]
+        ref = similar(f); dev = similar(f)
+        for (ax, dim, ord) in ((x, 1, 1), (y, 2, 2))
+            D.apply_stencil!(ref, f, ax, dim; order = ord, nodes = 5)
+            D.apply_stencil!(dev, f, ax, dim; order = ord, nodes = 5, backend = cpu)
+            Test.@test ref == dev
+        end
+        msk = trues(n, m); msk[10:14, :] .= false
+        D.apply_stencil!(ref, f, x, 1; order = 1, nodes = 5, mask = msk)
+        D.apply_stencil!(dev, f, x, 1; order = 1, nodes = 5, mask = msk, backend = cpu)
+        Test.@test ref == dev
+
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        for g in (GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0)),
+                  GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0);
+                                    periodic = (true, false), period = (32.0, 0.0)))
+            for sten in (FG.Stencils.Axial(1), FG.Stencils.Moore(2))
+                a = C.build_connectivity(g; stencil = sten)
+                b = C.build_connectivity(g; stencil = sten, backend = cpu)
+                Test.@test a.ptr == b.ptr
+                Test.@test a.nbrs == b.nbrs
+            end
+        end
+
+        acc = zeros(Int, 100)
+        FG.Execution.run_indices(i -> (acc[i] = i * i), 100, cpu)
+        Test.@test acc == [i * i for i in 1:100]
+
+        # A chunked body accumulates across its range, so a device backend refuses it rather than
+        # quietly running on the host.
+        Test.@test_throws ArgumentError FG.Execution.run_chunks(r -> nothing, 4, cpu)
+        Test.@test_throws ArgumentError FG.Execution.map_chunks(r -> 1, 4, cpu)
+
+        # An unindexed topology is device-safe; one holding a k-d tree is refused, not silently dropped.
+        gs = GD.StructuredGrid(cart, collect(0.0:7.0), collect(0.0:7.0))
+        Test.@test Adapt.adapt(Array, C.MetricTopology(gs)) === C.MetricTopology(gs)
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(2))
+        Test.@test_throws ArgumentError Adapt.adapt(Array, C.indexed(gu))
+    end
+
+    Test.@testset "k nearest is exact under the geometry's own metric" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        GE = FG.Geometry
+        cart = GE.CartesianGeometry{Float64}()
+        sph = GE.SphericalGeometry(6.371e6)
+
+        # Every candidate ranked by (distance, index), which is what the query promises.
+        function brute(grid, I, k)
+            sz = size(GD.mask(grid))
+            node = grid isa GD.UnstructuredGrid
+            p0 = node ? GD._raw_coords(grid, I[1]) : GD._raw_coords(grid, I...)
+            geo = GD.grid_geometry(grid)
+            prd = ntuple(d -> GD.isperiodic(grid, d) ? GD.period(grid, d) : 0.0, length(sz))
+            pairs = Tuple{Float64,Int}[]
+            for (lin, ci) in enumerate(CartesianIndices(sz))
+                J = Tuple(ci)
+                (node ? lin == I[1] : J == Tuple(I)) && continue
+                (node ? GD.isactive(grid, lin) : GD.isactive(grid, J...)) || continue
+                pt = node ? GD._raw_coords(grid, lin) : GD._raw_coords(grid, J...)
+                q = ntuple(length(pt)) do d
+                    p = d ≤ length(prd) ? prd[d] : 0.0
+                    p > 0 ? p0[d] + (pt[d] - p0[d] - p * round((pt[d] - p0[d]) / p)) : pt[d]
+                end
+                push!(pairs, (GE.distance(geo, p0, q), lin))
+            end
+            sort!(pairs)
+            m = min(k, length(pairs))
+            return [p[2] for p in pairs[1:m]], [p[1] for p in pairs[1:m]]
+        end
+
+        n = 16
+        v = collect(0.0:1.0:(n - 1.0)); rg = 0.0:1.0:(n - 1.0)
+        cx = [x for x in 0.0:1.0:(n - 1.0), _ in 1:n]
+        cy = [y for _ in 1:n, y in 0.0:1.0:(n - 1.0)]
+        cases = (
+            (GD.StructuredGrid(cart, rg, v), (8, 8)),
+            (GD.StructuredGrid(cart, v), (8,)),
+            (GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0)), (1, 8)),
+            (GD.StructuredGrid(sph, collect(range(0, 2π * (1 - 1 / n); length = n)),
+                               collect(range(-1.2, 1.2; length = n))), (4, 8)),
+            (GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)), (8, 8)),
+        )
+        for (g, I) in cases, k in (1, 5, 12)
+            gi, gd = C.k_nearest(g, I...; k = k)
+            wi, wd = brute(g, I, k)
+            Test.@test gi == wi
+            Test.@test gd ≈ wd
+            Test.@test issorted(gd)
+        end
+
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+        for k in (1, 6, 20)
+            gi, gd = C.k_nearest(gu, 1; k = k)
+            wi, wd = brute(gu, (1,), k)
+            Test.@test gi == wi
+            Test.@test gd ≈ wd
+        end
+        # An index changes the cost, never the ranking.
+        Test.@test C.k_nearest(gu, 100; k = 8) == C.k_nearest(gu, 100; k = 8, topology = C.indexed(gu))
+
+        # Equal distances resolve by linear index, so the answer does not depend on visit order.
+        gt = GD.StructuredGrid(cart, collect(0.0:6.0), collect(0.0:6.0))
+        ti, td = C.k_nearest(gt, 4, 4; k = 4)
+        Test.@test all(td .≈ 1.0)
+        Test.@test issorted(ti)
+        Test.@test ti == C.k_nearest(gt, 4, 4; k = 4, topology = C.MetricTopology(gt))[1]
+
+        # A Cartesian node set indexes by one integer while carrying two coordinate directions, so the
+        # radius the search may widen to has to come from the coordinates, not from the index space.
+        # Tall and narrow, where taking only the first direction would stop the search far too early.
+        nn = 200
+        gcn = GD.UnstructuredGrid(cart, (collect(range(0.0, 1.0; length = nn)),
+                                         collect(range(0.0, 500.0; length = nn))),
+                                  trues(nn); k = 4, areas = fill(1.0, nn))
+        p0 = GD._raw_coords(gcn, 1)
+        for k in (1, 5, 30)
+            _, dst = C.k_nearest(gcn, 1; k = k)
+            want = sort([GE.distance(cart, p0, GD._raw_coords(gcn, j)) for j in 2:nn])[1:k]
+            Test.@test dst ≈ want
+        end
+
+        # Asking for more than exists returns what exists, and k = 0 returns nothing.
+        Test.@test length(C.k_nearest(GD.StructuredGrid(cart, [0.0, 1.0, 2.0]), 2; k = 99)[1]) == 2
+        Test.@test isempty(C.k_nearest(gt, 4, 4; k = 0)[1])
+    end
+
+    Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begin
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        sph = FG.Geometry.SphericalGeometry(6.371e6)
+        n = 24
+        v = collect(0.0:1.0:(n - 1.0))
+        rg = 0.0:1.0:(n - 1.0)
+        cx = [x for x in 0.0:1.0:(n - 1.0), _ in 1:n]
+        cy = [y for _ in 1:n, y in 0.0:1.0:(n - 1.0)]
+
+        # A range in one direction and a vector in another makes the coordinate tuple heterogeneous. That
+        # shape was absent from the suite, and every coordinate read on it used to allocate.
+        check_shape("structured 1-D vector",  FG.Grids.StructuredGrid(cart, v), (12,))
+        check_shape("structured 1-D range",   FG.Grids.StructuredGrid(cart, rg), (12,))
+        check_shape("structured 2-D vectors", FG.Grids.StructuredGrid(cart, v, v), (12, 12))
+        check_shape("structured 2-D ranges",  FG.Grids.StructuredGrid(cart, rg, rg), (12, 12))
+        check_shape("structured 2-D MIXED",   FG.Grids.StructuredGrid(cart, rg, v), (12, 12))
+        check_shape("structured 2-D MIXED'",  FG.Grids.StructuredGrid(cart, v, rg), (12, 12))
+        check_shape("structured 3-D MIXED",   FG.Grids.StructuredGrid(cart, rg, v, rg), (12, 12, 12))
+        check_shape("spherical 2-D MIXED",    FG.Grids.StructuredGrid(sph,
+                        range(0, 2π * (1 - 1 / n); length = n),
+                        collect(range(-1.2, 1.2; length = n))), (12, 12))
+        check_shape("curvilinear 2-D", FG.Grids.CurvilinearGrid(cart, cx, cy, trues(n, n);
+                        measure = fill(1.0, n, n)), (12, 12))
+
+        # `apply_stencil!` drives the field loop through the same index-parallel entry point the device
+        # path uses, so it is gated here rather than trusted.
+        for (nx, ny, dim) in ((9, 5, 1), (9, 5, 2), (17, 3, 1))
+            ax = collect(0.0:1.0:((dim == 1 ? nx : ny) - 1.0))
+            fld = [xi + 2yj for xi in 0.0:1.0:(nx - 1.0), yj in 0.0:1.0:(ny - 1.0)]
+            o = similar(fld)
+            si, sw = FG.Discretization.axis_stencils(ax, 1, 3)
+            msk = trues(nx, ny); msk[2, :] .= false
+            a1 = _alloc(q_stencil!, o, fld, si, sw, dim)
+            a2 = _alloc(q_stencil_m!, o, fld, si, sw, dim, msk)
+            a1 == 0 || println("    apply_stencil!(dim=", dim, ") -> ", a1, " B")
+            a2 == 0 || println("    apply_stencil! masked(dim=", dim, ") -> ", a2, " B")
+            Test.@test a1 == 0
+            Test.@test a2 == 0
+        end
+
+        # Same answers, not merely the same speed.
+        gm = FG.Grids.StructuredGrid(cart, rg, v)
+        gh = FG.Grids.StructuredGrid(cart, v, v)
+        for I in ((1, 1), (12, 12), (24, 24), (1, 24))
+            Test.@test FG.Grids.coords(gm, I...) == FG.Grids.coords(gh, I...)
+            Test.@test FG.Connectivity.neighbors_within(gm, I...; ball = 2.5) ==
+                       FG.Connectivity.neighbors_within(gh, I...; ball = 2.5)
+        end
+    end
+
+    Test.@testset "A sweep's allocation does not grow with the grid, beyond the index's own" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        function curv(n)
+            x = [t for t in range(0.0, 1.0 * (n - 1); length = n), _ in 1:n]
+            y = [t for _ in 1:n, t in range(0.0, 1.0 * (n - 1); length = n)]
+            return GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
+        end
+        # Through the const global, not the testset-local alias: a captured `Module` makes the call a
+        # dynamic lookup and adds a fixed 144 bytes that has nothing to do with the sweep.
+        sweep(g, r, top) =
+            FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, g; ball = r, topology = top)
+        touch(g, r, top, out) =
+            FG.Connectivity.foreach_within(g; ball = r, topology = top) do I, J, d
+                @inbounds out[I[1], I[2]] += 1
+            end
+        one_query(buf, tree, v, r) =
+            NearestNeighbors.inrange!(empty!(buf), tree, v, r, false)
+
+        for n in (24, 48, 96)
+            g = curv(n)
+            scan = C.MetricTopology(g)
+            out = zeros(Int, n, n)
+            sweep(g, 2.5, scan); touch(g, 2.5, scan, out)
+            # Without an index the whole sweep touches no heap at all, whatever the cell count: the
+            # scratch and the topology are per-sweep, and the traversal itself is allocation-free.
+            Test.@test _alloc(sweep, g, 2.5, scan) == 0
+            Test.@test _alloc(touch, g, 2.5, scan, out) == 0
+        end
+
+        # With an index the only growth is one `NearestNeighbors.inrange!` per cell, which allocates
+        # inside its own setup. Asserted against that measured constant, so the sweep cannot start
+        # allocating anything of its own without this failing.
+        per_query = let g = curv(48), ix = C.indexed(g)
+            buf = Int[]
+            v = view(ix.index.pts, :, 100)
+            one_query(buf, ix.index.tree, v, 2.5)
+            _alloc(one_query, buf, ix.index.tree, v, 2.5)
+        end
+        for n in (24, 48)
+            g = curv(n)
+            ix = C.indexed(g)
+            sweep(g, 2.5, ix)
+            Test.@test _alloc(sweep, g, 2.5, ix) ≤ (per_query + 8) * n^2
+        end
+    end
+
+    Test.@testset "Every public name is allocation-checked or has a stated reason not to be" begin
+        public_of(m) = Set(s for s in (Symbol(b.var) for b in keys(Base.Docs.meta(m)))
+                           if !startswith(String(s), "_"))
+
+        ALLOCATION_CHECKED = Set([
+            :coords, :measure, :isactive, :displacement, :neighbors, :neighbors!, :nneighbors,
+            :nneighbors_within, :neighbors_within!, :fold_within, :metric_window, :k_nearest!,
+            :MetricTopology, :minimum_spacing, :maximum_spacing, :axis_stats, :AxisStats,
+            :area, :coords!, :axis, :spacing, :origin, :extent, :bounds, :isperiodic, :isuniform,
+            :period, :size_tuple, :mask, :coordinate_names, :periodic_flags, :topology, :coordinates,
+            :apply_stencil!, :foreach_within, :mapreduce_within,
+        ])
+
+        # Adding a public name without putting it in one of the two sets fails this test. That is the
+        # point: what is covered is derived from what the module documents, not from a list someone
+        # remembered to update.
+        NOT_CHECKED_BECAUSE = Set(Iterators.flatten((
+            # types and traits
+            [:AbstractGrid, :AbstractStructuredGrid, :AbstractCurvilinearGrid, :AbstractUnstructuredGrid,
+             :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :AbstractTopology, :Bounded, :Periodic,
+             :AllActive, :SeparableMeasure, :PoleRotation, :AbstractImageConvention, :AbstractReach,
+             :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
+             :StencilNeighbors],
+            # bulk or one-off operations, not per-cell hot paths
+            [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
+             :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
+             :sparse_adjacency_coo!, :sparse_adjacency_csc!, :sort_neighbors!, :is_symmetric_adjacency,
+             :connected_components, :count_holes, :interior, :boundary_cells, :csr_connectivity,
+             :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
+             :rotate, :measure_array, :measure_factors,
+             :corners, :corner_coords, :neighbor_nbrs, :distance],
+        # allocating forms, whose whole job is to return a fresh array
+        [:neighbors_within, :k_nearest],
+        # grid constructors
+        [:structured_grid, :unstructured_grid],
+            # extension hooks, which throw until their trigger package is loaded
+            [:spatial_index, :index_within!, :has_spatial_index],
+            # returns the axis itself, so its type varies by direction: a runtime `d` cannot be stable
+            [:axis],
+        )))
+
+        for m in (FG.Grids, FG.Connectivity)
+            unclassified = setdiff(public_of(m), ALLOCATION_CHECKED, NOT_CHECKED_BECAUSE)
+            isempty(unclassified) ||
+                println("  unclassified in ", nameof(m), ": ", join(sort!(collect(unclassified)), ", "))
+            Test.@test isempty(unclassified)
+        end
     end
 
 end

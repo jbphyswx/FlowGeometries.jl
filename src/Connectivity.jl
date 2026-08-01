@@ -403,12 +403,12 @@ end
 # ball 53.6× slower than a uniform one at N = 16384, growing without bound, for a window holding the same
 # number of cells either way.
 @inline function _min_step_scan(grid::Grids.StructuredGrid{G,T}, d::Int) where {G,T}
-    s = T(Grids.minimum_spacing(grid, d))
+    st = Grids.axis_stats(grid, d)
+    s = st.min_gap
     if Grids.isperiodic(grid, d)
-        x = Grids.coordinates(grid, d)
         p = T(Grids.period(grid, d))
-        if length(x) ≥ 2 && p > 0
-            seam = p - abs(T(last(x)) - T(first(x)))
+        if @inbounds(Grids.size_tuple(grid)[d]) ≥ 2 && p > 0
+            seam = p - (st.max_value - st.min_value)
             seam > 0 && (s = min(s, seam))
         end
     end
@@ -422,22 +422,18 @@ Everything a distance query reads that depends on the grid alone — the counter
 [`IndexTopology`](@ref) for the metric path.
 
 A stencil query reads `(size, periodic, mask)` and `IndexTopology` carries it. A ball query additionally
-needs the tightest per-direction step bound, which is an `O(N)` scan on a stretched axis, and it needs it
-only to size the search window. Recomputing that per query is the dominant cost of a ball query on any
-grid whose axes are not uniform — a Gaussian latitude axis, for instance.
+needs the tightest per-direction step bound, which sizes the search window, and — where there are no
+separable axes to bound with — a spatial index.
 
-Build one and pass it to reuse it across queries:
+Constructing one is `O(1)` and allocates nothing: the per-axis reductions live on the grid already, as
+[`Grids.AxisStats`](@ref), computed once when it was built. So the default `topology` on every query
+costs nothing and there is no hoisting to remember. What is still worth hoisting is the **index**, which
+is not built by default because a k-d tree inside a single query would cost more than the scan it
+replaces — [`foreach_within`](@ref) and [`mapreduce_within`](@ref) do that hoisting for a sweep, and
+[`indexed`](@ref) does it explicitly.
 
-    mt = Connectivity.MetricTopology(grid)
-    for I in CartesianIndices(size(grid))
-        n = Connectivity.nneighbors_within(grid, Tuple(I)...; ball = r, topology = mt)
-    end
-
-Omitting it constructs one per call — the same scan the window bound needs anyway — so a single query is
-no worse for leaving it out; the saving is in hoisting it out of a loop. It is not cached on the grid:
-grid types are immutable and the `Adapt`
-extension reconstructs them field-by-field for a device, so a mutable cache field would break both that
-and thread safety.
+It is not cached on the grid: grid types are immutable and the `Adapt` extension reconstructs them
+field-by-field for a device, so a mutable cache field would break both that and thread safety.
 
 `index` holds a spatial index when one is available, for the architectures with no separable axes to bound.
 """
@@ -449,7 +445,7 @@ end
 
 function MetricTopology(grid::Grids.StructuredGrid{G,T,N}; index = nothing) where {G,T,N}
     steps = ntuple(d -> _min_step_scan(grid, d), Val(N))
-    m3 = N ≥ 3 ? T(minimum(Grids.coordinates(grid, 3))) : zero(T)
+    m3 = N ≥ 3 ? Grids.axis_stats(grid, 3).min_value : zero(T)
     return MetricTopology{N,T,typeof(index)}(steps, m3, index)
 end
 
@@ -796,9 +792,10 @@ cells fall within a fixed distance varies from cell to cell on any non-uniform o
 
 Three arguments matter for anything beyond a single query:
 
-  * `topology` — a [`MetricTopology`](@ref), the grid invariants a ball query reads. Rebuilt per call by
-    default, which is what one query costs anyway; hoist it out of a loop, and on a curvilinear or node
-    grid use [`indexed`](@ref) so each query is `O(log n + m)` rather than a scan of every cell.
+  * `topology` — a [`MetricTopology`](@ref), the grid invariants a ball query reads. The default is `O(1)`
+    and allocation-free, so leaving it out costs nothing. On a curvilinear or node grid, pass
+    [`indexed`](@ref) to make each query `O(log n + m)` rather than a scan of every cell — or use
+    [`foreach_within`](@ref), which builds the index once for a whole sweep.
   * `scratch` — a candidate buffer from [`ball_scratch`](@ref), one per task. Accepted on every grid type
     and used where a query goes through a spatial index, i.e. on a curvilinear or node grid; a separable
     window has no candidate list to buffer. Without it an indexed query allocates its candidate list per
@@ -1295,6 +1292,276 @@ end
 @inline _route_fold(f::F, init, r::Connected, args...) where {F} = _connected_fold(f, init, args..., r)
 
 # ---------------------------------------------------------------------------
+# k nearest
+# ---------------------------------------------------------------------------
+
+# A bounded max-heap over (distance, index), held in the caller's two buffers. Keeping the k smallest
+# needs no sort of the candidate set and no allocation, and it is the same code for every architecture
+# because it consumes `fold_within`.
+# Ordered by (distance, index), so an equal-distance tie resolves the same way whatever order the
+# traversal happened to visit in — which is what makes an indexed query and a scan agree exactly.
+@inline _knn_after(d1, i1, d2, i2) = d1 > d2 || (d1 == d2 && i1 > i2)
+
+@inline function _heap_sift_down!(ds, is, n::Int, root::Int)
+    @inbounds while true
+        c = 2root
+        c > n && break
+        (c < n && _knn_after(ds[c + 1], is[c + 1], ds[c], is[c])) && (c += 1)
+        _knn_after(ds[c], is[c], ds[root], is[root]) || break
+        ds[root], ds[c] = ds[c], ds[root]
+        is[root], is[c] = is[c], is[root]
+        root = c
+    end
+    return nothing
+end
+
+@inline function _heap_offer!(ds, is, n::Int, k::Int, d, i)
+    @inbounds if n < k
+        n += 1
+        ds[n] = d
+        is[n] = i
+        c = n
+        while c > 1                       # sift up
+            p = c >> 1
+            _knn_after(ds[c], is[c], ds[p], is[p]) || break
+            ds[p], ds[c] = ds[c], ds[p]
+            is[p], is[c] = is[c], is[p]
+            c = p
+        end
+    elseif k > 0 && _knn_after(ds[1], is[1], d, i)
+        ds[1] = d
+        is[1] = i
+        _heap_sift_down!(ds, is, n, 1)
+    end
+    return n
+end
+
+# Nearest first, which a heap does not give on its own.
+@inline function _heap_sort!(ds, is, n::Int)
+    @inbounds for last in n:-1:2
+        ds[1], ds[last] = ds[last], ds[1]
+        is[1], is[last] = is[last], is[1]
+        _heap_sift_down!(ds, is, last - 1, 1)
+    end
+    return nothing
+end
+
+# A radius to start the search from: the cell's own size scaled to hold roughly `k` of them. Too small
+# only costs a doubling, and the doubling is what makes the result independent of the guess.
+@inline function _knn_seed_radius(grid::Grids.AbstractGrid{G,T}, I, k::Int) where {G,T}
+    N = length(Grids.size_tuple(grid))
+    m = T(Grids.measure(grid, I...))
+    cell = m > 0 ? m^(one(T) / N) : one(T)
+    return T(1.5) * cell * T(max(k, 1))^(one(T) / N)
+end
+
+"""
+    k_nearest!(idx, dist, grid, I...; k, active_only=true, …) -> n
+
+Write the `k` cells nearest to cell `I` into `idx`, and their distances into `dist`, nearest first.
+Returns how many were written, which is fewer than `k` only when the grid holds fewer candidates. The
+cell itself is excluded, as in [`neighbors_within!`](@ref).
+
+Exact under the geometry's own metric, on every architecture. It searches a ball, widens it until `k`
+cells have been seen, and keeps the `k` smallest in a bounded heap — so the answer never depends on the
+starting radius, and no candidate list is materialized. `topology`, `scratch` and `reach` behave as they
+do for [`neighbors_within!`](@ref); an [`indexed`](@ref) topology makes each round a range query.
+
+Ties at equal distance are broken by linear index, so the result is reproducible.
+"""
+function k_nearest! end
+
+"""
+    k_nearest(grid, I...; k, …) -> (idx, dist)
+
+Allocating form of [`k_nearest!`](@ref): returns the indices and their distances, nearest first.
+"""
+function k_nearest end
+
+function _k_nearest!(
+    idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::Grids.AbstractGrid, Ii, Iraw,
+    kk::Int, active_only::Bool, topology, scratch, reach::AbstractReach,
+)
+    kk ≥ 0 || throw(ArgumentError("k must be non-negative, got $kk"))
+    (kk == 0 || isempty(idx)) && return 0
+    (length(idx) ≥ kk && length(dist) ≥ kk) || throw(ArgumentError(
+        "idx and dist must hold at least k = $kk entries; got $(length(idx)) and $(length(dist))",
+    ))
+    r = _knn_seed_radius(grid, Iraw, kk)
+    rmax = _knn_radius_ceiling(grid)
+    n = 0
+    while true
+        n = _cell_fold(0, grid, Ii, r, NearestImage(), active_only, false, topology, scratch, reach) do m, J, d
+            return _heap_offer!(dist, idx, m, kk, d, _sweep_linear(grid, J))
+        end
+        (n ≥ kk || r ≥ rmax) && break
+        r = min(r * 2, rmax)
+    end
+    _heap_sort!(dist, idx, n)
+    return n
+end
+
+# One pair of methods per architecture, each with the arity in the signature: a `Vararg{Integer}` with
+# no length parameter is not specialized on arity and allocates on every call.
+for (GT, NP) in ((:(Grids.StructuredGrid{G,T,N}), true), (:(Grids.CurvilinearGrid{T,G,N}), true))
+    @eval begin
+        function k_nearest!(
+            idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::$GT, I::Vararg{Integer,N};
+            k::Integer, active_only::Bool = true, topology = MetricTopology(grid),
+            scratch = nothing, reach::AbstractReach = Unrestricted(),
+        ) where {G,T,N}
+            Ii = map(Int, I)
+            return _k_nearest!(idx, dist, grid, Ii, Ii, Int(k), active_only, topology, scratch, reach)
+        end
+        function k_nearest(grid::$GT, I::Vararg{Integer,N}; k::Integer, kwargs...) where {G,T,N}
+            kk = Int(k)
+            idx = Vector{Int}(undef, kk)
+            dist = Vector{T}(undef, kk)
+            n = k_nearest!(idx, dist, grid, I...; k = kk, kwargs...)
+            return resize!(idx, n), resize!(dist, n)
+        end
+    end
+end
+
+function k_nearest!(
+    idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::Grids.UnstructuredGrid, i::Integer;
+    k::Integer, active_only::Bool = true, topology = MetricTopology(grid),
+    scratch = nothing, reach::AbstractReach = Unrestricted(),
+)
+    ii = Int(i)
+    return _k_nearest!(idx, dist, grid, ii, (ii,), Int(k), active_only, topology, scratch, reach)
+end
+
+function k_nearest(grid::Grids.UnstructuredGrid{T}, i::Integer; k::Integer, kwargs...) where {T}
+    kk = Int(k)
+    idx = Vector{Int}(undef, kk)
+    dist = Vector{T}(undef, kk)
+    n = k_nearest!(idx, dist, grid, i; k = kk, kwargs...)
+    return resize!(idx, n), resize!(dist, n)
+end
+
+# Every cell is within this of every other, so the widening always terminates.
+@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
+    return T(π) * T(Geometry.radius(Grids.grid_geometry(grid)))
+end
+@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
+    return T(π) * T(Geometry.semimajor_axis(Grids.grid_geometry(grid)))
+end
+# Over the COORDINATE directions, which on a node set is not the index dimension: `size_tuple` there
+# counts nodes, so using it would leave every direction but the first out of the diagonal.
+@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G,T}
+    D = length(Grids.coordinates(grid))
+    s = zero(T)
+    for d in 1:D
+        e = T(Grids.extent(grid, d))
+        s += e * e
+    end
+    return sqrt(s) + one(T)
+end
+
+# A node set indexes by one integer; the others by a tuple, including in one dimension.
+@inline _sweep_linear(grid::Union{Grids.StructuredGrid,Grids.CurvilinearGrid}, J) =
+    _linidx(Grids.size_tuple(grid), J...)
+@inline _sweep_linear(::Grids.UnstructuredGrid, k::Integer) = Int(k)
+
+
+# ---------------------------------------------------------------------------
+# Sweeps — every cell's ball, with the per-grid work done once
+# ---------------------------------------------------------------------------
+
+@inline _sweep_cells(grid::Union{Grids.StructuredGrid,Grids.CurvilinearGrid}) =
+    CartesianIndices(Grids.size_tuple(grid))
+@inline _sweep_cells(grid::Grids.UnstructuredGrid) = Base.OneTo(length(Grids.mask(grid)))
+
+@inline _sweep_index(::Union{Grids.StructuredGrid,Grids.CurvilinearGrid}, ci::CartesianIndex) = Tuple(ci)
+@inline _sweep_index(::Grids.UnstructuredGrid, k::Integer) = Int(k)
+
+# The per-cell traversal, with each architecture's own argument order.
+@inline _cell_fold(f::F, init, grid::Grids.StructuredGrid, I, ball, images, active_only, self,
+                   mt, _scratch, reach) where {F} =
+    _route_fold(f, init, reach, grid, I, ball, images, active_only, self, mt)
+@inline _cell_fold(f::F, init, grid::Grids.CurvilinearGrid, I, ball, images, active_only, self,
+                   mt, scratch, reach) where {F} =
+    _route_fold(f, init, reach, grid, I, ball, active_only, self, mt, scratch)
+@inline _cell_fold(f::F, init, grid::Grids.UnstructuredGrid, I, ball, images, active_only, self,
+                   mt, scratch, reach) where {F} =
+    _route_fold(f, init, reach, grid, I, ball, active_only, self, mt, scratch)
+
+# Only the separable architectures carry an image convention; refused rather than ignored elsewhere.
+@inline _check_sweep_images(::Grids.StructuredGrid, ::AbstractImageConvention) = nothing
+@inline _check_sweep_images(grid, images::AbstractImageConvention) =
+    images isa NearestImage || throw(ArgumentError(
+        "`images = $(images)` is only meaningful on a `StructuredGrid`; $(typeof(grid)) visits each cell once",
+    ))
+
+"""
+    mapreduce_within(f, op, init, grid; ball, …) -> value
+
+Reduce `f(I, J, d)` with `op` over every cell `I` of `grid` and every cell `J` within `ball` of it, `d`
+being the distance. The bulk counterpart of [`fold_within`](@ref).
+
+Everything that depends on the grid rather than the query is built **once** and reused across all `n`
+cells — above all the spatial index, which is what makes the sweep `O(n log n)` instead of `O(n²)` on a
+curvilinear or node grid. Writing the loop by hand gets the topology for free, since that is `O(1)`, but
+not the index; measured at 9× on a 9 216-cell curvilinear grid.
+
+`op` must be associative; chunks are reduced in index order, so a threaded `backend` gives the same
+answer as the serial default rather than one that depends on scheduling.
+"""
+function mapreduce_within(
+    f::F, op::O, init, grid::Grids.AbstractGrid;
+    ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
+    self::Bool = false, topology = default_sweep_topology(grid),
+    reach::AbstractReach = Unrestricted(), backend = nothing,
+) where {F,O}
+    _check_sweep_images(grid, images)
+    cells = _sweep_cells(grid)
+    n = length(cells)
+    parts = Execution.map_chunks(n, backend) do rng
+        acc = init
+        s = ball_scratch()
+        @inbounds for t in rng
+            I = _sweep_index(grid, cells[t])
+            acc = _cell_fold(acc, grid, I, ball, images, active_only, self, topology, s, reach) do a, J, d
+                return op(a, f(I, J, d))
+            end
+        end
+        return acc
+    end
+    return length(parts) == 1 ? @inbounds(parts[1]) : reduce(op, parts)
+end
+
+"""
+    foreach_within(f, grid; ball, …) -> nothing
+
+Call `f(I, J, d)` for every cell `I` of `grid` and every cell `J` within `ball` of it. The same hoisting
+as [`mapreduce_within`](@ref); use this one when `f` writes rather than reduces.
+
+Under a threaded `backend`, `f` runs on disjoint spans of cells concurrently, so what it writes has to be
+determined by `I` — the same contract the connectivity builders keep.
+"""
+function foreach_within(
+    f::F, grid::Grids.AbstractGrid;
+    ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
+    self::Bool = false, topology = default_sweep_topology(grid),
+    reach::AbstractReach = Unrestricted(), backend = nothing,
+) where {F}
+    _check_sweep_images(grid, images)
+    cells = _sweep_cells(grid)
+    Execution.run_chunks(length(cells), backend) do rng
+        s = ball_scratch()
+        @inbounds for t in rng
+            I = _sweep_index(grid, cells[t])
+            _cell_fold(nothing, grid, I, ball, images, active_only, self, topology, s, reach) do _, J, d
+                f(I, J, d)
+                return nothing
+            end
+        end
+    end
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
 # build_connectivity
 # ---------------------------------------------------------------------------
 
@@ -1389,18 +1656,21 @@ function _build_connectivity_topology(
     # own `ptr` range), so they parallelize without coordination. The prefix scan between them is
     # inherently sequential, and O(n) against the O(n·stencil) passes it separates.
     deg = zeros(Int, n)
-    Execution.run_chunks(n, backend) do rng
-        @inbounds for k in rng
+    # Per index rather than per chunk: nothing here carries across cells, so the same body runs as a
+    # device kernel when the backend is one.
+    Execution.run_indices(n, backend) do k
+        @inbounds begin
             I = Tuple(ci[k])
-            active_only && !_active(t, I...) && continue
-            c = 0
-            for δ in offs
-                J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), Val(N))
-                any(==(0), J) && continue
-                active_only && !_active(t, J...) && continue
-                c += 1
+            if !(active_only && !_active(t, I...))
+                c = 0
+                for δ in offs
+                    J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), Val(N))
+                    any(==(0), J) && continue
+                    active_only && !_active(t, J...) && continue
+                    c += 1
+                end
+                deg[k] = c
             end
-            deg[k] = c
         end
     end
     ptr = Vector{Int}(undef, n + 1)
@@ -1409,17 +1679,18 @@ function _build_connectivity_topology(
         ptr[i + 1] = ptr[i] + deg[i]
     end
     nbrs = Vector{Int}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend) do rng
-        @inbounds for k in rng
+    Execution.run_indices(n, backend) do k
+        @inbounds begin
             I = Tuple(ci[k])
-            active_only && !_active(t, I...) && continue
-            slot = ptr[k]
-            for δ in offs
-                J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), Val(N))
-                any(==(0), J) && continue
-                active_only && !_active(t, J...) && continue
-                nbrs[slot] = _linidx(sz, J...)
-                slot += 1
+            if !(active_only && !_active(t, I...))
+                slot = ptr[k]
+                for δ in offs
+                    J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), Val(N))
+                    any(==(0), J) && continue
+                    active_only && !_active(t, J...) && continue
+                    nbrs[slot] = _linidx(sz, J...)
+                    slot += 1
+                end
             end
         end
     end

@@ -521,6 +521,36 @@ Base.show(io::IO, grid::AbstractGrid) =
 # ---------------------------------------------------------------------------
 
 """
+    AxisStats
+
+Everything about one axis that does not depend on the query, reduced once when the grid is built:
+gaps, span, and whether the axis type proves constant spacing. Each of these is otherwise an `O(N_d)`
+scan — or a dynamic lookup, since the coordinate tuple is heterogeneous — for an answer that cannot
+change over the grid's life.
+"""
+struct AxisStats{T<:AbstractFloat}
+    min_gap::T
+    max_gap::T
+    step::T          # signed constant spacing where `uniform`, `NaN` otherwise
+    first_value::T
+    min_value::T
+    max_value::T
+    uniform::Bool    # from the axis TYPE, captured at construction
+end
+
+"""
+    _axis_stats(x) -> AxisStats
+"""
+@inline function _axis_stats(x::AbstractVector{T}) where {T<:AbstractFloat}
+    uni = Axes.isuniform(x)
+    stp = uni ? T(Axes.spacing(x)) : T(NaN)
+    lo, hi = _min_gap(x), _max_gap(x)
+    isempty(x) && return AxisStats{T}(T(lo), T(hi), stp, T(NaN), T(Inf), T(-Inf), uni)
+    mn, mx = extrema(x)
+    return AxisStats{T}(T(lo), T(hi), stp, T(@inbounds first(x)), T(mn), T(mx), uni)
+end
+
+"""
     StructuredGrid{G, T, N, TP, C, AT, BT}
 
 Rectilinear `N`-dimensional grid, for any `N`: one coordinate vector per direction (`coordinates`),
@@ -553,6 +583,39 @@ struct StructuredGrid{
     mask::BT                  # N-D active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
+    stats::NTuple{N,AxisStats{T}}   # reduced once; see AxisStats
+end
+
+"""
+    axis_stats(grid) -> NTuple{N,AxisStats}
+    axis_stats(grid, d) -> AxisStats
+
+The cached per-axis reductions. Homogeneous whatever the axis types are, so reading one with a runtime
+direction index stays type-stable.
+"""
+@inline axis_stats(grid::StructuredGrid) = getfield(grid, :stats)
+@inline axis_stats(grid::StructuredGrid, d::Integer) = @inbounds axis_stats(grid)[d]
+
+# Reading the cache rather than the axis. Two things follow: the answer is `O(1)` where it was a scan,
+# and it is type-stable for a runtime `d`, which indexing the heterogeneous coordinate tuple is not.
+# The `AbstractGrid` fallbacks stay for subtypes and architectures without the field.
+@inline minimum_spacing(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).min_gap
+@inline maximum_spacing(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).max_gap
+@inline isuniform(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).uniform
+@inline origin(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).first_value
+@inline bounds(grid::StructuredGrid, d::Integer) =
+    (st = axis_stats(grid, d); (st.min_value, st.max_value))
+@inline function extent(grid::StructuredGrid, d::Integer)
+    st = axis_stats(grid, d)
+    return st.max_value - st.min_value
+end
+
+@inline function spacing(grid::StructuredGrid, d::Integer)
+    st = axis_stats(grid, d)
+    st.uniform || throw(ArgumentError(
+        "direction $d is not uniform; use `minimum_spacing`/`maximum_spacing` or `_cell_width`",
+    ))
+    return st.step
 end
 
 @inline topology(grid::StructuredGrid) = getfield(grid, :topology)
@@ -562,6 +625,14 @@ end
 # Point accessors: NamedTuple default; coords! / coords(S, ...) for other storage
 # ---------------------------------------------------------------------------
 
+# Tail-split, not `for d in 1:N`: the coordinate tuple is heterogeneous when the directions have
+# different axis types, and indexing it with a loop variable is a dynamic lookup.
+@inline _checkaxes(::Tuple{}, ::Tuple{}) = nothing
+@inline function _checkaxes(c::Tuple, I::Tuple)
+    checkbounds(first(c), first(I))
+    return _checkaxes(Base.tail(c), Base.tail(I))
+end
+
 """
     _raw_coords(grid, I...) -> NTuple
 
@@ -569,9 +640,7 @@ Positional coordinate values at indices `I`. Internal; prefer [`coords`](@ref).
 """
 @inline function _raw_coords(grid::StructuredGrid{G,T,N}, I::Vararg{Integer,N}) where {G,T,N}
     c = coordinates(grid)
-    @boundscheck for d in 1:N
-        checkbounds(c[d], I[d])
-    end
+    @boundscheck _checkaxes(c, I)
     return ntuple(d -> @inbounds(c[d][I[d]]), Val(N))
 end
 
@@ -1118,8 +1187,9 @@ function _structured_grid(
     ))
 
     measure = _cell_measure(geometry, ax, period_args)
+    stats = ntuple(d -> _axis_stats(ax[d]), Val(N))
     return StructuredGrid{G, T, N, typeof(tp), typeof(ax), typeof(measure), typeof(m)}(
-        geometry, ax, measure, m, tp, per,
+        geometry, ax, measure, m, tp, per, stats,
     )
 end
 

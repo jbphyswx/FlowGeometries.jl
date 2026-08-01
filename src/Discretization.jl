@@ -1,6 +1,7 @@
 module Discretization
 
 using ..Axes: Axes
+using ..Execution: Execution
 using ..Geometry: Geometry
 
 # The geometric inputs a numerical method needs from a grid: where a point falls, the weights that
@@ -461,20 +462,20 @@ inactive cell** — the derivative there is not determined by the active data, s
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
+    period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S), backend = nothing,
 ) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(field, dim) == length(x) || throw(DimensionMismatch(
         "axis has $(length(x)) samples but direction $dim of the field has $(size(field, dim))",
     ))
     idx, wts = axis_stencils(x, order, nodes; period = period)
-    return apply_stencil!(out, field, idx, wts, dim; mask = mask, masked = masked)
+    return apply_stencil!(out, field, idx, wts, dim; mask = mask, masked = masked, backend = backend)
 end
 
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    mask = nothing, masked = zero(S),
+    mask = nothing, masked = zero(S), backend = nothing,
 ) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(out) == size(field) || throw(DimensionMismatch(
@@ -489,28 +490,41 @@ function apply_stencil!(
     mask === nothing || size(mask) == size(field) || throw(DimensionMismatch(
         "mask $(size(mask)) and field $(size(field)) must have the same size",
     ))
+    sz = size(field)
+    ci = CartesianIndices(sz)
     k = size(indices, 2)
-    m = masked
-    @inbounds for ci in CartesianIndices(size(field))
-        I = Tuple(ci)
-        j = I[dim]
+    Execution.run_indices(length(ci), backend) do lin
+        _stencil_cell!(out, field, indices, weights, Int(dim), mask, masked, k,
+                       Tuple(@inbounds ci[lin]), @inbounds ci[lin])
+    end
+    return out
+end
+
+# One output cell, written from its own inputs only, so the loop above is index-parallel and the same
+# body serves a host loop and a device launch.
+@inline function _stencil_cell!(
+    out::AbstractArray{S,N}, field, indices, weights, dim::Int, mask, masked, k::Int,
+    I::NTuple{N,Int}, ci,
+) where {S,N}
+    @inbounds begin
         if mask !== nothing && !mask[ci]
-            out[ci] = m
-            continue
+            out[ci] = masked
+            return nothing
         end
+        j = I[dim]
         acc = zero(S)
         blocked = false
         for q in 1:k
-            J = ntuple(d -> d == dim ? indices[j, q] : I[d], Val(N))
+            J = ntuple(d -> d == dim ? Int(indices[j, q]) : I[d], Val(N))
             if mask !== nothing && !mask[J...]
                 blocked = true
                 break
             end
             acc += S(weights[j, q]) * S(field[J...])
         end
-        out[ci] = blocked ? m : acc
+        out[ci] = blocked ? masked : acc
     end
-    return out
+    return nothing
 end
 
 end # module Discretization

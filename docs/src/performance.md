@@ -40,24 +40,43 @@ for ~2M nodes, not overhead.
 
 ## Ball queries: nothing per query that belongs to the grid
 
-A ball query has two costs that are properties of the *grid*, not of the query: the smallest step per
-direction, which bounds the candidate window, and — where there are no separable axes to bound with — the
-spatial index that replaces a full scan. Both live in [`Connectivity.MetricTopology`](@ref), built once
-and passed in.
+A ball query has costs that are properties of the *grid*, not of the query: the smallest step per
+direction, which bounds the candidate window, the span of each axis, and — where there are no separable
+axes to bound with — a spatial index. The first two are reduced once when the grid is built and stored as
+[`Grids.AxisStats`](@ref); [`Connectivity.MetricTopology`](@ref) then reads them in `O(1)`.
 
-Hoisting the steps, on a stretched axis, with the radius and the number of cells in the window held
-fixed so any growth is overhead:
+The effect is that the per-query default costs nothing, so there is no hoisting to get right. On a
+stretched axis, with the radius and the window's cell count held fixed:
 
-| axis length | topology hoisted | rebuilt per query |
+| axis length | default `topology` | explicitly hoisted |
 |---|---|---|
-| 256 | 0.029 µs | 0.263 µs |
-| 1024 | 0.029 µs | 0.963 µs |
-| 4096 | 0.029 µs | 3.762 µs |
-| 16384 | 0.029 µs | **15.201 µs** |
+| 256 | 0.029 µs | 0.029 µs |
+| 1 024 | 0.030 µs | 0.030 µs |
+| 4 096 | 0.029 µs | 0.029 µs |
+| 16 384 | 0.030 µs | 0.029 µs |
 
-Flat against linear — and unbounded, not a constant factor, so the gap keeps widening with the axis. Any
-grid with a non-uniform axis pays it, which includes every Gaussian-latitude grid. The hoisted query
-allocates nothing.
+Both columns allocate nothing. Before the reductions were cached the default column was a per-query
+`O(N_d)` rescan — 15.2 µs at 16 384, growing without bound in the axis length — and every grid with a
+non-uniform axis paid it, which includes every Gaussian-latitude grid.
+
+### A heterogeneous coordinate tuple
+
+Each direction keeps whatever `AbstractVector` type it was built from, so a grid with a range for
+longitude and a vector for latitude has a *heterogeneous* coordinate tuple. Indexing that tuple with a
+loop variable is a dynamic lookup, and one such loop — a bounds check in `_raw_coords` — used to defeat
+inference for every coordinate read:
+
+| on a mixed-axis grid | before | after |
+|---|---|---|
+| `coords` | 192 B | **0 B** |
+| `distance(grid, I, J)` | 384 B | **0 B** |
+| `nneighbors_within` | 9 600 B, 5.3 µs | **0 B, 0.32 µs** |
+| `fold_within` | 9 600 B | **0 B** |
+
+Every per-cell entry point is now allocation-free on every grid shape, and the suite checks that against
+a matrix of shapes — including mixed-axis ones, which is the case it did not previously have.
+
+### Indexing the architectures with no axes
 
 Curvilinear and node grids have no window to bound, so a query without an index tests every cell. With
 [`Connectivity.indexed`](@ref) (needs `NearestNeighbors`), one query on a 2-D curvilinear grid, radius
@@ -65,26 +84,29 @@ fixed at 2.5 cells:
 
 | cells | indexed | scanning | speedup |
 |---|---|---|---|
-| 1 024 | 0.734 µs | 4.638 µs | 6.3× |
-| 4 096 | 0.918 µs | 19.496 µs | 21.2× |
-| 16 384 | 1.010 µs | 76.087 µs | 75.3× |
-| 65 536 | 1.426 µs | 304.427 µs | **213.5×** |
+| 1 024 | 0.741 µs | 4.892 µs | 6.6× |
+| 4 096 | 0.952 µs | 20.045 µs | 21.0× |
+| 16 384 | 0.946 µs | 77.308 µs | 81.7× |
+| 65 536 | 0.927 µs | 306.059 µs | **330×** |
 
 and the whole-grid build, which is `n` of those queries:
 
 | cells | indexed | scanning | speedup |
 |---|---|---|---|
-| 1 024 | 0.003 s | 0.010 s | 3.7× |
-| 4 096 | 0.012 s | 0.157 s | 12.8× |
-| 16 384 | 0.049 s | 2.445 s | 50.3× |
-| 65 536 | 0.203 s | 39.597 s | **194.6×** |
+| 1 024 | 0.002 s | 0.010 s | 4.2× |
+| 4 096 | 0.011 s | 0.165 s | 14.9× |
+| 16 384 | 0.048 s | 2.574 s | 53.6× |
+| 65 536 | 0.208 s | 41.519 s | **200×** |
 
 `O(n log n)` against `O(n²)`. The index returns a superset and the exact distance gate still decides
 membership, so both columns return byte-identical CSR — the index buys speed and changes nothing else.
 
-[`Connectivity.ball_scratch`](@ref) supplies the candidate buffer. It holds a query to 224 bytes whatever
-the grid size, against up to 6.5 KB of churn without it — the allocation is the point, since a threaded
-sweep gives every task its own buffer and the topology stays read-only.
+Because the index cannot be built per query, [`Connectivity.foreach_within`](@ref) and
+[`Connectivity.mapreduce_within`](@ref) exist to build it once for a whole sweep: **800.7 ms → 88.8 ms**
+(9.0×) against the same sweep written as a hand loop over the per-cell entry points, on 9 216 cells.
+
+[`Connectivity.ball_scratch`](@ref) supplies the candidate buffer, holding a query to 224 bytes whatever
+the grid size against up to 6.5 KB of churn without it.
 
 ## Quadrature
 
@@ -173,6 +195,6 @@ Recorded so they are not re-litigated:
   hoist `atan` out of loops.
 - **Vector-axis construction is not superlinear** — the gap against a uniform axis is a constant
   factor, not a growing one.
-- **The ball-query candidate buffer is an allocation win, not a speed win** — 1.03–1.06× in time across
+- **The ball-query candidate buffer is an allocation win, not a speed win** — 0.97–1.16× in time across
   20 and 316 candidates, i.e. within run-to-run noise, against 224 bytes per query rather than up to
   6.5 KB. Worth passing in a sweep for the memory, not worth restructuring a call site for the time.

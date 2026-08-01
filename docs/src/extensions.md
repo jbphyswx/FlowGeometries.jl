@@ -16,6 +16,7 @@ loads when — and only when — you load its trigger.
 | `StaticArrays` | `SVector`/`MVector` points and returns, in vector form end to end |
 | `AbstractFFTs` | O(n log n) equiangular quadrature weights |
 | `Adapt` | move a grid to another storage backend (GPU arrays, wrappers) |
+| `KernelAbstractions` | run the index-parallel loops as device kernels |
 | `ComputationalBackends` | opt-in threading through the execution tags |
 
 ## NearestNeighbors — spatial search
@@ -60,6 +61,32 @@ g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.ScatteredSphericalSam
 
 The spherical dual cell of a node is the polygon through the circumcentres of its incident
 triangles — the dual of the convex hull on the sphere.
+
+## KernelAbstractions — device execution
+
+Bulk loops here come in two shapes, and only one maps to a kernel. `run_indices` applies a body to one
+index at a time with nothing carried across indices; `run_chunks` hands a contiguous range to a body that
+accumulates across it. Loading `KernelAbstractions` makes the first launchable on any backend it
+supports, and makes the second raise on a device backend rather than quietly running on the host.
+
+```julia
+using KernelAbstractions
+backend = KernelAbstractions.CPU()          # or a vendor backend
+FG.Discretization.apply_stencil!(out, field, x, 1; order = 2, backend = backend)
+FG.Connectivity.build_connectivity(grid; stencil = FG.Stencils.Moore(1), backend = backend)
+```
+
+Both are bit-identical to the serial result, which the suite checks on `KernelAbstractions.CPU()` — no
+GPU needed to verify that the code is device-generic. There is no per-vendor code in the package: a
+backend arrives from the caller and the kernel is compiled for it.
+
+The precondition is that a kernel cannot allocate, which is why the allocation gate over every per-cell
+entry point is what makes this possible at all rather than an aspiration.
+
+Two things stay on the host, for reasons rather than pending work. A ball query's spatial index is a
+k-d tree — a host structure — so `Adapt` refuses to move a topology carrying one instead of silently
+dropping it and leaving the device scanning every cell. And the connectivity builders that need a
+per-task candidate buffer keep the chunked form, since a device launch has nowhere to put one.
 
 ## SparseArrays
 

@@ -212,21 +212,23 @@ separate implementation from a structured one: it is the `N = 2` case of the sam
 
 A ball query is the one thing that cannot work that way. It needs coordinates, and the smallest step per
 direction, which is what bounds the candidate window on a **stretched** axis. That is
-[`Connectivity.MetricTopology`](@ref), the same idea for the metric path: a grid invariant, so it should
-be built once and handed to every query rather than rebuilt per call:
+[`Connectivity.MetricTopology`](@ref), the same idea for the metric path — and it is `O(1)` to build,
+because the per-axis reductions it needs are computed once when the grid is and stored as
+[`Grids.AxisStats`](@ref):
 
 ```@example conn
 mt = FG.Connectivity.MetricTopology(g)
 FG.Connectivity.nneighbors_within(g, 5, 7; ball = ball, topology = mt)
 ```
 
-Omitting it costs what one query costs anyway. Hoisting it out of a loop is the saving, and on any grid
-with a non-uniform axis — every Gaussian-latitude grid, for instance — that saving is unbounded in the
-axis length rather than a constant factor.
+So passing it changes nothing and omitting it costs nothing — the default is already free. There is no
+hoisting to remember here.
 
-Curvilinear and node grids have no separable axes for a window to bound, so there is nothing to hoist
-and a query would have to test every cell. With `NearestNeighbors` loaded, [`Connectivity.indexed`](@ref)
-puts a k-d tree in the topology instead, turning each query into a range search:
+The spatial index is different: it *is* worth hoisting, and it is not built by default, because a k-d
+tree inside a single query would cost more than the scan it replaces. Curvilinear and node grids have no
+separable axes for a window to bound, so without one a query tests every cell. With `NearestNeighbors`
+loaded, [`Connectivity.indexed`](@ref) puts a tree in the topology, turning each query into a range
+search:
 
 ```@example conn
 using NearestNeighbors                                    # loads the extension
@@ -239,9 +241,41 @@ FG.Connectivity.nneighbors_within(gu, 1; ball = 2.0e6, topology = ixu, scratch =
 The index only ever returns a *superset* of the ball — the exact `distance ≤ r` gate still decides
 membership — so the indexed and scanning paths return the identical list, in the identical order, and
 loading the extension changes speed and nothing else. [`Connectivity.ball_scratch`](@ref) is the
-candidate buffer, one per task; without it each query allocates its own. `build_connectivity_within`
-uses an index by default when one is available, which is what makes a whole-grid build `O(n log n)`
-rather than `O(n²)`.
+candidate buffer, one per task; without it each query allocates its own.
+
+### Sweeping every cell
+
+Better still, do not write the loop. [`Connectivity.foreach_within`](@ref) and
+[`Connectivity.mapreduce_within`](@ref) walk every cell's ball and build the topology *and* the index
+once for the whole sweep, which is what makes them `O(n log n)` where the hand-written loop is `O(n²)` —
+9× on a 9 216-cell curvilinear grid here:
+
+```@example conn
+FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, g; ball = 1.0e6)   # total pairs within 1000 km
+```
+
+```@example conn
+FG.Connectivity.mapreduce_within((I, J, d) -> d, +, 0.0, g; ball = 1.0e6) # and the total distance
+```
+
+`foreach_within` is the same traversal for an `f` that writes rather than reduces; under a threaded
+`backend` it runs on disjoint spans of cells, so what `f` writes must be determined by `I`.
+`build_connectivity_within` does the same hoisting internally.
+
+### The k nearest
+
+A ball asks "everything within `r`". The other question is "the nearest `k`", and
+[`Connectivity.k_nearest`](@ref) answers it exactly under the same metric, on every architecture:
+
+```@example conn
+idx, dist = FG.Connectivity.k_nearest(g, 5, 7; k = 4)
+dist
+```
+
+It widens a ball until `k` cells have been seen and keeps the `k` smallest in a bounded heap, so the
+result never depends on the starting radius and nothing is materialized along the way. Equal distances
+resolve by linear index, which is what makes an indexed query and a scan agree exactly.
+[`Connectivity.k_nearest!`](@ref) writes into your own buffers and allocates nothing.
 
 ### The ball, and the part of it you can get to
 

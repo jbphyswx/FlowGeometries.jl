@@ -19,6 +19,15 @@ Adapt.adapt_structure(to, m::Grids.SeparableMeasure) =
     Grids.SeparableMeasure(_adapt_tuple(to, m.factors))
 Adapt.adapt_structure(::Any, m::Grids.AllActive) = m
 
+# An unindexed `MetricTopology` is isbits and travels as-is. One carrying a spatial index does not: a
+# k-d tree is a host structure, so it is refused rather than dropped, which would leave the device with
+# a topology that silently scans.
+Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology{N,T,Nothing}) where {N,T} = mt
+Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology) = throw(ArgumentError(
+    "a MetricTopology carrying a spatial index cannot be moved to another backend; adapt the grid and " *
+    "build the topology there, or use `MetricTopology(grid)` without an index",
+))
+
 # `isbits`: no heap reference to move.
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.UniformAxis) = a
 Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
@@ -30,6 +39,7 @@ function Adapt.adapt_structure(to, grid::Grids.StructuredGrid{G,T,N}) where {G,T
     tp = Grids.topology(grid)
     return Grids.StructuredGrid{G,T,N,typeof(tp),typeof(coords),typeof(measure),typeof(mask)}(
         Grids.grid_geometry(grid), coords, measure, mask, tp, getfield(grid, :period),
+        Grids.axis_stats(grid),
     )
 end
 
