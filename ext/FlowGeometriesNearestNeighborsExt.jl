@@ -47,13 +47,21 @@ end
 # `KDTree{V,Euclidean,Float64,V1} where {V<:SVector{_,Float64}, V1<:AbstractVector}`, so calling
 # `knn!` on it in the same function is a dynamic dispatch costing two allocations per query.
 # Passing the tree as an argument makes it concrete.
+#
+# Every query is made in the tree's OWN point type. NearestNeighbors converts anything else per call,
+# and that conversion is the whole per-query allocation: measured against this tree, a column view
+# costs 224 B and a plain `Vector` 176 B, where the static point costs nothing.
+@inline _qpoint(::NearestNeighbors.NNTree{V}, q::NTuple) where {V} = V(q)
+
+@inline _qcol(::NearestNeighbors.NNTree{V}, pts::AbstractMatrix, j::Integer) where {V} =
+    V(ntuple(d -> @inbounds(pts[d, j]), Val(length(V))))
 
 function _knn_loop!(nbrs::Vector{Int}, ptr::Vector{Int}, tree, pts::AbstractMatrix, N::Int, kq::Int, ask::Int)
     ibuf = Vector{Int}(undef, ask)
     dbuf = Vector{float(eltype(pts))}(undef, ask)   # knn! requires exactly the tree's distance type
     @inbounds ptr[1] = 1
     @inbounds for i in 1:N
-        NearestNeighbors.knn!(ibuf, dbuf, tree, view(pts, :, i), ask, true)
+        NearestNeighbors.knn!(ibuf, dbuf, tree, _qcol(tree, pts, i), ask, true)
         ptr[i + 1] = ptr[i] + _accept_candidates!(nbrs, (i - 1) * kq, 0, ibuf, i, N, kq)
     end
     # Compact the fixed-stride blocks down onto the exact CSR offsets.
@@ -88,17 +96,13 @@ end
 function _radius_loop!(ptr::Vector{Int}, tree, pts::AbstractMatrix, N::Int, r::Real)
     # A radius query has no fixed degree bound, so CSR is grown directly rather than sized from a
     # `maximum(length, lists)` pass over materialized lists.
-    #
-    # This does not reach O(1) allocations the way the knn path does: `inrange!` costs 3 per query
-    # inside `_inrange`'s own setup, not in the candidate buffer — `inrangecount` over the same
-    # views and tree allocates nothing.
     nbrs = Int[]
     sizehint!(nbrs, 8N)
     cands = Int[]                     # `inrange!` pushes into this; `empty!` keeps the capacity
     @inbounds ptr[1] = 1
     for i in 1:N
         empty!(cands)
-        NearestNeighbors.inrange!(cands, tree, view(pts, :, i), r, true)
+        NearestNeighbors.inrange!(cands, tree, _qcol(tree, pts, i), r, true)
         lo = length(nbrs)
         resize!(nbrs, lo + length(cands))
         m = _accept_candidates!(nbrs, lo, 0, cands, i, N, length(cands))
@@ -210,12 +214,37 @@ end
 
 @inline _query_radius(ix::BallIndex, r::Real) = Grids.embedded_radius(ix.embedding, r)
 
+# The point form of the tree query. A tree searches replicated points, so one cell can come back through
+# several images and the caller would visit it twice; folding the images back and dropping the repeats
+# keeps the contract that a candidate is offered once. Below half the shortest period no two images can
+# both be within `r`, so there is nothing to drop and that pass is skipped.
+function Grids.fold_candidates_at(f::F, acc, ix::BallIndex{TR,T}, q, r, scratch) where {F,TR,T}
+    cands = scratch === nothing ? Int[] : empty!(scratch)
+    # `inrange!` into a caller-owned buffer, for the same reason the cell form uses it: the batch
+    # `inrange` allocates a fresh vector per query, which dominates the cost of a small ball.
+    NearestNeighbors.inrange!(cands, ix.tree, _qpoint(ix.tree, map(T, q)), _query_radius(ix, r), false)
+    if ix.n == size(ix.pts, 2) || 2 * r < ix.min_period
+        @inbounds for t in cands
+            acc = f(acc, mod1(t, ix.n))
+        end
+        return acc
+    end
+    @inbounds for t in eachindex(cands)
+        cands[t] = mod1(cands[t], ix.n)
+    end
+    sort!(cands; alg = Base.Sort.QuickSort)
+    @inbounds for t in eachindex(_dedup_sorted!(cands))
+        acc = f(acc, cands[t])
+    end
+    return acc
+end
+
 function Grids.index_within!(buf::AbstractVector{<:Integer}, ix::BallIndex, grid, I, r)
     lin = I isa Integer ? Int(I) : LinearIndices(size(Grids.mask(grid)))[CartesianIndex(I)]
     empty!(buf)
     # `inrange!` pushes into a caller-owned buffer; the batch `inrange` allocates a fresh vector per
     # query, which dominates the cost of a small ball.
-    NearestNeighbors.inrange!(buf, ix.tree, view(ix.pts, :, lin), _query_radius(ix, r), false)
+    NearestNeighbors.inrange!(buf, ix.tree, _qcol(ix.tree, ix.pts, lin), _query_radius(ix, r), false)
     ix.n == size(ix.pts, 2) && return buf     # nothing replicated: no image can repeat a cell
     # Images collapse back onto their originals.
     @inbounds for t in eachindex(buf)

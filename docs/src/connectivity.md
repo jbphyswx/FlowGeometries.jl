@@ -295,6 +295,36 @@ result never depends on the starting radius and nothing is materialized along th
 resolve by linear index, which is what makes an indexed query and a scan agree exactly.
 [`Connectivity.k_nearest!`](@ref) writes into your own buffers and allocates nothing.
 
+### Seeding from a coordinate rather than a cell
+
+Every query above starts at a cell. Observational data does not arrive that way — a station, a ship
+track or a float has a coordinate, and the cell it belongs to is part of the question. Passing a
+coordinate where the cell indices would go asks the same questions about a point — written as a
+`Tuple`, `NamedTuple`, `AbstractVector` or `SVector`, as anywhere else a point is taken:
+
+```@example conn
+FG.Grids.locate(g, (0.4, 0.1))                    # the cell the point falls in
+```
+
+```@example conn
+length(FG.Connectivity.neighbors_within(g, (0.4, 0.1); ball = 1.0e6)),
+FG.Connectivity.k_nearest(g, (0.4, 0.1); k = 3)[2]
+```
+
+[`Connectivity.fold_at`](@ref) is the fold behind them, as [`Connectivity.fold_within`](@ref) is for a
+cell. There is no seed cell to skip, so unlike the cell-seeded form every cell within the ball is
+visited — including the point's own.
+
+`locate` is the containing cell on a rectilinear grid, per direction and wrapping a periodic one, and
+the nearest cell centre elsewhere. For a node set those are the same thing, its cells being the Voronoi
+regions of its nodes; on a strongly sheared curvilinear grid they can differ, so it is documented as
+nearest-centre rather than point-in-quadrilateral.
+
+The traversal is the cell-seeded one with the window widened by how far the point sits from its cell's
+centre, so it stays `O(1)` per direction rather than degenerating into a scan. Off the rectilinear
+grids the cost depends on the index: [`Grids.cell_list`](@ref) answers "which bins does this
+point's ball reach" directly, and is the reason a point query need not visit every cell.
+
 ### The ball, and the part of it you can get to
 
 A ball is not a connected patch. With a mask, or a concave domain, it can contain cells that are close to

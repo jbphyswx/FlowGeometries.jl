@@ -47,6 +47,10 @@ q_within!(b, g, r, I)    = FG.Connectivity.neighbors_within!(b, g, I...; ball = 
 q_fold(g, r, I)          = FG.Connectivity.fold_within((a, _, d) -> a + d, 0.0, g, I...; ball = r)
 q_knn!(ix, dt, g, k, I)  = FG.Connectivity.k_nearest!(ix, dt, g, I...; k = k)
 q_within_top(g, r, I, t) = FG.Connectivity.nneighbors_within(g, I...; ball = r, topology = t)
+q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
+                                                   ball = r, topology = t, scratch = s)
+q_locate(g, p)           = FG.Grids.locate(g, p)
+q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
 q_area(g, I)             = FG.Grids.area(g, I...)
@@ -3713,10 +3717,13 @@ Test.@testset "FlowGeometries.jl" begin
         # …and on a genuinely stretched axis, against a direct scan of the faces.
         xs = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
         fx = D.faces(xs)
-        for t in range(-1.0, 10.0; length = 121)
+        # The faces themselves are probed too: `f[i] ≤ v < f[i+1]` is a rule about exactly those
+        # coordinates, so a reference that never lands on one cannot tell whether it is honoured.
+        for t in vcat(collect(range(-1.0, 10.0; length = 121)), collect(fx))
             want = 0
             for i in eachindex(xs)
-                fx[i] ≤ t ≤ fx[i+1] && (want = i; break)
+                last_cell = i == length(xs)
+                fx[i] ≤ t && (t < fx[i+1] || (last_cell && t == fx[i+1])) && (want = i; break)
             end
             Test.@test D.locate(xs, t) == want
         end
@@ -3728,6 +3735,29 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test D.nearest_index(u, -5.0) == 1
         Test.@test D.nearest_index(u, 99.0) == length(u)
         Test.@test all(D.nearest_index(u, t) == D.nearest_index(v, t) for t in range(-1, 4; length = 61))
+        # The two paths index the same numbers, so they must not part company at a midpoint, where
+        # `(t - first)/Δ` can read as an exact tie while the two samples are not equidistant from `t`.
+        let w = range(0.0, 1.0; length = 64), wv = collect(w)
+            mids = [(wv[i] + wv[i+1]) / 2 for i in 1:(length(wv) - 1)]
+            Test.@test all(D.nearest_index(w, t) == D.nearest_index(wv, t) for t in mids)
+            Test.@test all(D.locate(w, t) == D.locate(wv, t) for t in mids)
+            Test.@test all(D.nearest_index(wv, t) == argmin(abs.(wv .- t)) for t in mids)
+        end
+
+        # Both are searches, not sweeps: a stretched axis must not be walked, or materialize its
+        # faces, on a query. Timed rather than only allocation-checked, since a scan need not allocate.
+        let small = collect(range(0.0, 1.0; length = 64)),
+            big = collect(range(0.0, 1.0; length = 1 << 18))
+            for (nm, g) in (("locate", D.locate), ("nearest_index", D.nearest_index))
+                g(small, 0.37); g(big, 0.37)
+                Test.@test (@allocated g(big, 0.37)) == 0
+                ts = minimum(@elapsed(g(small, 0.37 + 1e-9k)) for k in 1:200)
+                tb = minimum(@elapsed(g(big, 0.37 + 1e-9k)) for k in 1:200)
+                # 4096x the samples: a scan would be ~1000x slower, a bisection ~1.5x.
+                tb < 20 * ts || println("    ", nm, " grew ", round(tb / ts; digits = 1), "x over 4096x n")
+                Test.@test tb < 20 * ts
+            end
+        end
 
         # Linear weights sum to 1 and reproduce a linear function exactly.
         for t in range(0.0, 2.5; length = 37)
@@ -4336,15 +4366,22 @@ Test.@testset "FlowGeometries.jl" begin
         end
 
         # Cost: fixed radius, growing n. The scan is linear per query; the index must not be.
+        # Best of several blocks, not the mean of one: a single collection landing in the block would
+        # otherwise decide the comparison, and by this point in the suite the heap is big enough for
+        # that to happen. The query itself allocates nothing, so no block needs to collect.
         function percall(g, top, r, reps)
             I = (size(GD.mask(g), 1) ÷ 2, size(GD.mask(g), 2) ÷ 2)
             buf = Vector{Int}(undef, 4096)
             s = C.ball_scratch()
             C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
-            t = @elapsed for _ in 1:reps
-                C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
+            best = Inf
+            for _ in 1:5
+                t = @elapsed for _ in 1:reps
+                    C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
+                end
+                best = min(best, t / reps)
             end
-            return t / reps
+            return best
         end
         small, big = curv(24), curv(96)                      # 576 vs 9216 cells, 16× more
         # `curv` spans the same extent at every `n`, so the radius has to shrink with the spacing to
@@ -4546,8 +4583,8 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test nalloc_curv(g16, C.MetricTopology(g16)) == 0
         Test.@test nalloc_node(gu, C.MetricTopology(gu), 0.3R) == 0
 
-        # Indexed with a buffer, the index's own working set is all that is left, and it does not grow
-        # with the grid — which is the property that makes a sweep's memory flat in `n`.
+        # Indexed with a buffer, nothing is left to allocate: the tree is queried in its own point type,
+        # so it converts nothing per call, and the candidates land in the caller's buffer.
         function nalloc_ix(g, ix, s)
             FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = ix, scratch = s)
             return @allocated FG.Connectivity.nneighbors_within(
@@ -4557,7 +4594,25 @@ Test.@testset "FlowGeometries.jl" begin
         a16 = nalloc_ix(g16, C.indexed(g16), C.ball_scratch())
         a64 = nalloc_ix(curv(64), C.indexed(curv(64)), C.ball_scratch())
         Test.@test a16 == a64                  # 16× the cells, the same bytes per query
-        Test.@test a16 ≤ 256
+        Test.@test a16 == 0
+
+        # The point-seeded form goes through the same index and must be free too, on both index kinds
+        # and with images to deduplicate.
+        gp = curv(32)
+        pt = (15.5, 16.25)
+        Test.@test _alloc(q_fold_at, gp, pt, 3.0, C.indexed(gp), C.ball_scratch()) == 0
+        Test.@test _alloc(q_fold_at, gp, pt, 3.0,
+                          C.MetricTopology(gp; index = GD.cell_list(gp; ball = 3.0)),
+                          C.ball_scratch()) == 0
+        Test.@test _alloc(q_fold_at, gu, (0.4, 0.1), 0.3R, C.indexed(gu), C.ball_scratch()) == 0
+
+        # Locating a point is the same traversal, so it carries the same guarantee: per axis on a
+        # rectilinear grid, and through the index elsewhere.
+        Test.@test _alloc(q_locate, GD.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(),
+                                                      collect(0.0:31.0), collect(0.0:31.0)),
+                          (7.3, 4.2)) == 0
+        Test.@test _alloc(q_locate_top, gp, pt, C.indexed(gp), C.ball_scratch()) == 0
+        Test.@test _alloc(q_locate_top, gu, (0.4, 0.1), C.indexed(gu), C.ball_scratch()) == 0
     end
 
     Test.@testset "Adjacency symmetry is decided by comparison with the transpose" begin
@@ -4833,6 +4888,27 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Grids.embedded_radius(FG.Grids.ArcEmbedding(2.0), 2.0 * π) == 4.0
         Test.@test FG.Grids.embedded_radius(FG.Grids.CartesianEmbedding(), 3.0) == 3.0
 
+        # Axis- and geometry-level primitives that sit inside per-cell work. They take an axis or a
+        # geometry rather than a grid, so they are checked here rather than in the shape matrix.
+        let ax = collect(range(0.0, 1.0; length = 64)), rg = range(0.0, 1.0; length = 64),
+            nd = [0.0, 0.7, 1.9, 3.1, 4.0], wv = Vector{Float64}(undef, 5),
+            cv = Matrix{Float64}(undef, 5, 3),
+            sph = FG.Geometry.SphericalGeometry(6.371e6)
+            for (name, a) in (
+                ("fd_weights!",          _alloc(FG.Discretization.fd_weights!, wv, cv, nd, 2.0, 2)),
+                ("nearest_index/vector", _alloc(FG.Discretization.nearest_index, ax, 0.37)),
+                ("nearest_index/range",  _alloc(FG.Discretization.nearest_index, rg, 0.37)),
+                ("locate/vector",        _alloc(FG.Discretization.locate, ax, 0.37)),
+                ("locate/range",         _alloc(FG.Discretization.locate, rg, 0.37)),
+                ("interpolation_weights", _alloc(FG.Discretization.interpolation_weights, ax, 0.37)),
+                ("scale_factors",        _alloc(FG.Discretization.scale_factors, sph, (0.3, 0.4))),
+                ("jacobian",             _alloc(FG.Discretization.jacobian, sph, (0.3, 0.4))),
+            )
+                a == 0 || println("    ", name, " -> ", a, " B")
+                Test.@test a == 0
+            end
+        end
+
         # Same answers, not merely the same speed.
         gm = FG.Grids.StructuredGrid(cart, rg, v)
         gh = FG.Grids.StructuredGrid(cart, v, v)
@@ -4888,6 +4964,328 @@ Test.@testset "FlowGeometries.jl" begin
             ix = C.indexed(g)
             sweep(g, 2.5, ix)
             Test.@test _alloc(sweep, g, 2.5, ix) ≤ (per_query + 8) * n^2
+        end
+    end
+
+    Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
+        D = FG.Discretization
+        GD = FG.Grids
+        geo = FG.Geometry.CartesianGeometry()
+        x = collect(0.0:1.0:6.0)
+        msk = trues(7, 1); msk[4, 1] = false
+        grid = GD.StructuredGrid(geo, x, [0.0], msk)
+        nomask = GD.StructuredGrid(geo, x, [0.0])
+        f = reshape(collect(0.0:6.0), 7, 1)          # f = x, so df/dx == 1 wherever it is defined
+        active = [i for i in 1:7 if msk[i, 1]]
+
+        # Blanking loses every active cell within `nodes - 1` of the mask; at five nodes it loses the
+        # whole axis. That is what the other policies exist to avoid.
+        for nodes in (2, 3, 5)
+            o = zeros(7, 1)
+            D.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes)
+            Test.@test iszero(o[3, 1])               # active, blanked by its masked neighbour
+            nodes == 5 && Test.@test all(iszero, o)
+        end
+
+        # Runs here are [1,3] and [5,7], so five nodes do not fit and only ReduceInRun can fill them.
+        for nodes in (2, 3)
+            o = zeros(7, 1)
+            D.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes, policy = D.ShiftWithinRun())
+            Test.@test all(isapprox.(o[active, 1], 1.0))
+            Test.@test iszero(o[4, 1])
+        end
+        for nodes in (2, 3, 5)
+            o = zeros(7, 1)
+            D.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes, policy = D.ReduceInRun())
+            Test.@test all(isapprox.(o[active, 1], 1.0))
+            Test.@test iszero(o[4, 1])
+        end
+
+        # Nothing anyone gets today changes: no mask, or the default policy, is bit-identical.
+        for nodes in (2, 3, 5), pol in (D.BlankMasked(), D.ShiftWithinRun(), D.ReduceInRun())
+            a = zeros(7, 1); b = zeros(7, 1)
+            D.apply_stencil!(a, f, nomask, 1; order = 1, nodes = nodes)
+            D.apply_stencil!(b, f, nomask, 1; order = 1, nodes = nodes, policy = pol)
+            Test.@test a == b
+        end
+        for nodes in (2, 3, 5)
+            a = zeros(7, 1); b = zeros(7, 1)
+            D.apply_stencil!(a, f, grid, 1; order = 1, nodes = nodes)
+            D.apply_stencil!(b, f, grid, 1; order = 1, nodes = nodes, policy = D.BlankMasked())
+            Test.@test a == b
+        end
+
+        # In the interior of a run the weights are the unmasked ones, so the result is bit-for-bit.
+        n = 60
+        xl = collect(range(0.0, 1.0; length = n))
+        m2 = trues(n, 1); m2[30, 1] = false
+        gl = GD.StructuredGrid(geo, xl, [0.0], m2)
+        gn = GD.StructuredGrid(geo, xl, [0.0])
+        fl = reshape([sin(3xi) for xi in xl], n, 1)
+        a = zeros(n, 1); b = zeros(n, 1)
+        D.apply_stencil!(a, fl, gn, 1; order = 1, nodes = 5)
+        D.apply_stencil!(b, fl, gl, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+        for i in 1:n
+            abs(i - 30) > 4 && 2 < i < n - 1 && Test.@test a[i, 1] === b[i, 1]
+        end
+        Test.@test any(a[i, 1] != b[i, 1] for i in 26:34 if i != 30)
+
+        # And the accuracy order survives, which is the reason to shift rather than clip.
+        errs = Float64[]
+        for m in (80, 160, 320)
+            xx = collect(range(0.0, 1.0; length = m))
+            mm = trues(m, 1); mm[m ÷ 2, 1] = false
+            gg = GD.StructuredGrid(geo, xx, [0.0], mm)
+            ff = reshape([sin(3xi) for xi in xx], m, 1)
+            oo = zeros(m, 1)
+            D.apply_stencil!(oo, ff, gg, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+            j = m ÷ 2 - 1                            # the cell against the mask edge
+            push!(errs, abs(oo[j, 1] - 3cos(3xx[j])))
+        end
+        Test.@test all(log2(errs[i] / errs[i + 1]) > 3.5 for i in 1:2)
+
+        # A run that wraps the seam. With no hole every policy is the centred periodic stencil exactly;
+        # with one, the wrapped run still converges at the scheme's rate.
+        np = 16; L = 16.0
+        xp = collect(range(0.0, 15.0; length = np))
+        fp = reshape([sin(2π * xi / L) for xi in xp], np, 1)
+        gfull = GD.StructuredGrid(geo, xp, [0.0]; periodic = (true, false), period = (L, 0.0))
+        pa = zeros(np, 1); pb = zeros(np, 1)
+        D.apply_stencil!(pa, fp, gfull, 1; order = 1, nodes = 5)
+        D.apply_stencil!(pb, fp, gfull, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+        Test.@test pa == pb
+        seam = Float64[]
+        for m in (64, 128, 256)
+            xx = collect(range(0.0, m - 1.0; length = m)); Lm = Float64(m)
+            mm = trues(m, 1); mm[m ÷ 2, 1] = false
+            gg = GD.StructuredGrid(geo, xx, [0.0], mm; periodic = (true, false), period = (Lm, 0.0))
+            ff = reshape([sin(2π * xi / Lm) for xi in xx], m, 1)
+            oo = zeros(m, 1)
+            D.apply_stencil!(oo, ff, gg, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+            Test.@test oo[1, 1] != 0                 # the seam cell is reached through the wrap
+            push!(seam, abs(oo[1, 1] - 2π / Lm * cos(2π * xx[1] / Lm)))
+        end
+        Test.@test all(log2(seam[i] / seam[i + 1]) > 3.5 for i in 1:2)
+
+        # Convergence fixes the order but not the node set, and the wrapped window is where the
+        # `mod1`/`fld` unwrapping could be subtly wrong. So the weights themselves are checked against
+        # first-derivative weights obtained by differentiating the Lagrange basis — a different
+        # derivation from the Fornberg recursion under test.
+        function lagrange_dw(nodes, z)
+            m = length(nodes)
+            return [sum(b == a ? 0.0 :
+                        prod((c == a || c == b) ? 1.0 : (z - nodes[c]) / (nodes[a] - nodes[c])
+                             for c in 1:m) / (nodes[a] - nodes[b]) for b in 1:m) for a in 1:m]
+        end
+        let np2 = 16, L2 = 16.0, k2 = 5
+            x2 = collect(range(0.0, 15.0; length = np2))
+            m2 = trues(np2, 1); m2[8, 1] = false
+            g2 = GD.StructuredGrid(geo, x2, [0.0], m2; periodic = (true, false), period = (L2, 0.0))
+            f2 = reshape([sin(2π * xi / L2) for xi in x2], np2, 1)
+            o2 = zeros(np2, 1)
+            D.apply_stencil!(o2, f2, g2, 1; order = 1, nodes = k2, policy = D.ShiftWithinRun())
+            for i in 1:np2
+                m2[i, 1] || continue
+                back = 0
+                while back < k2 && m2[mod1(i - back - 1, np2), 1]
+                    back += 1
+                end
+                fwd = 0
+                while fwd < k2 && m2[mod1(i + fwd + 1, np2), 1] && back + fwd + 1 < np2
+                    fwd += 1
+                end
+                s = clamp(back - (k2 - 1) ÷ 2, 0, back + fwd + 1 - k2)
+                raws = [(i - back) + s + q - 1 for q in 1:k2]
+                # Unwrapped across the seam, so the spacing the weights see is the true one.
+                nds = [x2[mod1(r, np2)] + fld(r - 1, np2) * L2 for r in raws]
+                vals = [f2[mod1(r, np2), 1] for r in raws]
+                Test.@test o2[i, 1] ≈ sum(lagrange_dw(nds, x2[i]) .* vals) rtol = 1e-12
+                Test.@test length(unique(map(r -> mod1(r, np2), raws))) == k2   # no sample reused
+                Test.@test all(m2[mod1(r, np2), 1] for r in raws)               # and all active
+            end
+        end
+
+        # A run too short for the nodes: blanked by one policy, reduced by the other.
+        ms = trues(9, 1); ms[4, 1] = false; ms[8, 1] = false        # runs of 3, 3 and 1
+        gs = GD.StructuredGrid(geo, collect(0.0:8.0), [0.0], ms)
+        fs = reshape(collect(0.0:8.0), 9, 1)
+        os = zeros(9, 1); orr = zeros(9, 1)
+        D.apply_stencil!(os, fs, gs, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+        D.apply_stencil!(orr, fs, gs, 1; order = 1, nodes = 5, policy = D.ReduceInRun())
+        Test.@test all(iszero, os)
+        Test.@test all(isapprox.(orr[[1, 2, 3, 5, 6, 7], 1], 1.0))
+        Test.@test iszero(orr[9, 1])                 # a run of one holds no first derivative
+
+        # The matrix form has no axis to rebuild from, and says so rather than ignoring the policy.
+        idx, w = D.axis_stencils(x, 1, 3)
+        Test.@test_throws ArgumentError D.apply_stencil!(zeros(7, 1), f, idx, w, 1;
+                                                         mask = msk, policy = D.ShiftWithinRun())
+
+        # In-place weights match the allocating form and carry no state between calls.
+        nd = [0.0, 0.7, 1.9, 3.1, 4.0]
+        for ord in (0, 1, 2, 3)
+            want = D.fd_weights(nd, 2.0, ord)
+            wv = similar(want); cv = Matrix{Float64}(undef, length(nd), ord + 1)
+            D.fd_weights!(wv, cv, nd, 2.0, ord)
+            Test.@test wv == want
+            D.fd_weights!(wv, cv, [0.0, 1.0, 2.0, 3.0, 4.0], 2.0, ord)
+            D.fd_weights!(wv, cv, nd, 2.0, ord)
+            Test.@test wv == want
+        end
+    end
+
+    Test.@testset "Queries can be seeded by a point, not just a cell" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        GE = FG.Geometry
+        cart = GE.CartesianGeometry{Float64}()
+        sph = GE.SphericalGeometry(6.371e6)
+
+        function brute(grid, p, r)
+            sz = size(GD.mask(grid)); node = grid isa GD.UnstructuredGrid
+            geo = GD.grid_geometry(grid); D = length(GD.coordinates(grid))
+            prd = ntuple(d -> GD.isperiodic(grid, d) ? GD.period(grid, d) : 0.0, D)
+            out = Int[]
+            for (lin, ci) in enumerate(CartesianIndices(sz))
+                J = Tuple(ci)
+                (node ? GD.isactive(grid, lin) : GD.isactive(grid, J...)) || continue
+                pt = node ? GD._raw_coords(grid, lin) : GD._raw_coords(grid, J...)
+                q = ntuple(D) do d
+                    L = prd[d]
+                    L > 0 ? p[d] + (pt[d] - p[d] - L * round((pt[d] - p[d]) / L)) : pt[d]
+                end
+                GE.distance(geo, p, q) ≤ r && push!(out, lin)
+            end
+            return sort(out)
+        end
+
+        n = 16
+        v = collect(0.0:1.0:(n - 1.0))
+        cx = [xx for xx in v, _ in 1:n]; cy = [yy for _ in 1:n, yy in v]
+        λ = [l for l in range(0.0, 2π * (1 - 1 / n); length = n), _ in 1:n]
+        φ = [fp for _ in 1:n, fp in range(-1.2, 1.2; length = n)]
+        R = 6.371e6
+        cases = (
+            (GD.StructuredGrid(cart, v, v), ((7.3, 4.2), (0.0, 0.0), (15.0, 15.0)), 3.0),
+            (GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0)),
+             ((0.3, 4.2), (15.7, 8.0)), 3.0),
+            (GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)),
+             ((7.3, 4.2), (1.5, 13.5)), 3.0),
+            (GD.CurvilinearGrid(sph, λ, φ, trues(n, n)), ((0.4, 0.1), (6.0, -1.0)), 0.25R),
+        )
+        for (g, pts, r) in cases, p in pts
+            want = brute(g, p, r)
+            for top in (C.MetricTopology(g), C.MetricTopology(g; index = GD.cell_list(g; ball = r)))
+                Test.@test sort(C.neighbors_within(g, p; ball = r, topology = top)) == want
+            end
+            Test.@test C.nneighbors_within(g, p; ball = r) == length(want)
+        end
+
+        gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+        for i in (1, 100)
+            base = GD._raw_coords(gu, i)
+            p = (base[1] + 0.01, base[2] + 0.01)
+            want = brute(gu, p, 0.3R)
+            for top in (C.MetricTopology(gu), C.indexed(gu),
+                        C.MetricTopology(gu; index = GD.cell_list(gu; ball = 0.3R)))
+                Test.@test sort(C.neighbors_within(gu, p; ball = 0.3R, topology = top)) == want
+            end
+        end
+
+        # A point AT a cell centre is the cell query plus the cell itself, which the cell form excludes.
+        for g in (GD.StructuredGrid(cart, v, v),
+                  GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)))
+            I = (7, 5)
+            p = GD._raw_coords(g, I...)
+            cell = sort(C.neighbors_within(g, I...; ball = 3.0))
+            Test.@test sort(C.neighbors_within(g, p; ball = 3.0)) ==
+                       sort(vcat(cell, C._linidx(GD.size_tuple(g), I...)))
+        end
+
+        gs = GD.StructuredGrid(cart, v, v)
+        gp = GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0))
+        Test.@test GD.locate(gs, (7.3, 4.2)) == (8, 5)
+        Test.@test GD.locate(gs, (0.0, 0.0)) == (1, 1)
+        Test.@test GD.locate(gp, (16.4, 3.0)) == GD.locate(gp, (0.4, 3.0))   # wraps
+        Test.@test GD.locate(gp, (15.7, 3.0)) == (1, 4)                      # the seam cell
+        Test.@test GD.locate(gs, (-5.0, 3.0))[1] == 0                        # outside is 0
+
+        # k nearest to a point, against a full ranking
+        for g in (gs, GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)))
+            p = (7.3, 4.2)
+            idx, dst = C.k_nearest(g, p; k = 6)
+            all_cells = brute(g, p, 1000.0)
+            ranked = sort([(GE.distance(cart, p, GD._raw_coords(g,
+                            Tuple(CartesianIndices(size(GD.mask(g)))[l])...)), l) for l in all_cells])
+            Test.@test dst ≈ [d for (d, _) in ranked[1:6]]
+            Test.@test issorted(dst)
+        end
+
+        # Off a rectilinear grid there is no axis to bracket along, so `locate` is the nearest centre.
+        # Every route to it — scan, tree, cell list — must name the same cell as an exhaustive search.
+        function nearest_centre(g, p)
+            sz = g isa GD.UnstructuredGrid ? nothing : GD.size_tuple(g)
+            geo = GD.grid_geometry(g)
+            best, bd = 0, Inf
+            for l in 1:length(GD.mask(g))
+                J = sz === nothing ? l : Tuple(CartesianIndices(sz)[l])
+                d = GE.distance(geo, p, sz === nothing ? GD.coords(g, l) : GD.coords(g, J...))
+                (d < bd || (d == bd && l < best)) && (bd = d; best = l)
+            end
+            return sz === nothing ? best : Tuple(CartesianIndices(sz)[best])
+        end
+        cgl = GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n))
+        sph = FG.Geometry.SphericalGeometry(6.371e6)
+        nu = 200
+        ugl = GD.UnstructuredGrid(sph, (range(0.0, 6.0; length = nu) |> collect,
+                                        range(-1.2, 1.2; length = nu) |> collect),
+                                  trues(nu); k = 6, areas = ones(nu))
+        for (g, ps, bin) in ((cgl, ((7.3, 4.2), (0.0, 0.0), (-3.0, 20.0)), 3.0),
+                             (ugl, ((0.4, 0.1), (3.0, -1.0), (6.2, 1.3)), 0.1 * 6.371e6))
+            tops = (C.MetricTopology(g), C.indexed(g),
+                    C.MetricTopology(g; index = GD.cell_list(g; ball = bin)))
+            for p in ps
+                want = nearest_centre(g, p)
+                for top in tops
+                    Test.@test GD.locate(g, p; topology = top, scratch = C.ball_scratch()) == want
+                end
+            end
+        end
+        # A masked cell still has a location; `active_only` is what excludes it.
+        mk = trues(n, n); mk[6, 6] = false
+        cgm = GD.CurvilinearGrid(cart, cx, cy, mk; measure = fill(1.0, n, n))
+        Test.@test GD.locate(cgm, GD._raw_coords(cgm, 6, 6)) == (6, 6)
+        Test.@test GD.locate(cgm, GD._raw_coords(cgm, 6, 6); active_only = true) != (6, 6)
+
+        # A point is a point however it is written, here as everywhere else.
+        let pt = (7.3, 4.2),
+            reps = ((x = 7.3, y = 4.2), [7.3, 4.2], StaticArrays.SVector(7.3, 4.2))
+            for q in reps
+                Test.@test GD.locate(gs, q) == GD.locate(gs, pt)
+                Test.@test C.nneighbors_within(gs, q; ball = 3.0) ==
+                           C.nneighbors_within(gs, pt; ball = 3.0)
+                Test.@test sort(C.neighbors_within(gs, q; ball = 3.0)) ==
+                           sort(C.neighbors_within(gs, pt; ball = 3.0))
+                Test.@test C.k_nearest(gs, q; k = 4)[1] == C.k_nearest(gs, pt; k = 4)[1]
+                Test.@test C.fold_at(0, gs, q; ball = 3.0) do a, _J, _d
+                    a + 1
+                end == C.nneighbors_within(gs, pt; ball = 3.0)
+            end
+        end
+
+        # A cell list is binned at one radius and may be queried at another. Past the point where the
+        # window covers more bins than the lattice has buckets, walking the bins costs more than
+        # offering every cell — and grows as `(r/h)^D` while the answer does not.
+        let fine = C.MetricTopology(cgl; index = GD.cell_list(cgl; ball = 0.25)),
+            plain = C.MetricTopology(cgl)
+            for rq in (0.25, 2.5, 25.0, 250.0)
+                t0 = time()
+                got = sort(C.neighbors_within(cgl, (7.3, 4.2); ball = rq, topology = fine,
+                                              scratch = C.ball_scratch()))
+                el = time() - t0
+                Test.@test got == sort(C.neighbors_within(cgl, (7.3, 4.2); ball = rq, topology = plain))
+                Test.@test el < 1.0        # a `(r/h)^D` walk at r/h = 1000 would not return at all
+            end
         end
     end
 
@@ -4987,6 +5385,8 @@ Test.@testset "FlowGeometries.jl" begin
             :area, :coords!, :axis, :spacing, :origin, :extent, :bounds, :isperiodic, :isuniform,
             :period, :size_tuple, :mask, :coordinate_names, :periodic_flags, :topology, :coordinates,
             :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
+            :fold_candidates_at, :locate, :embed_point, :fold_at,
+            :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
@@ -4999,7 +5399,8 @@ Test.@testset "FlowGeometries.jl" begin
              :AllActive, :SeparableMeasure, :PoleRotation, :AbstractImageConvention, :AbstractReach,
              :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
              :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
-             :ArcEmbedding, :CellListIndex],
+             :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
+             :ReduceInRun, :AbstractLocation, :Center, :Face],
             # bulk or one-off operations, not per-cell hot paths
             [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
              :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
@@ -5009,7 +5410,8 @@ Test.@testset "FlowGeometries.jl" begin
              :rotate, :measure_array, :measure_factors,
              :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
         # allocating forms, whose whole job is to return a fresh array
-        [:neighbors_within, :k_nearest],
+        [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,
+         :centers, :faces, :nodes],
         # grid constructors
         [:structured_grid, :unstructured_grid],
             # extension hooks, which throw until their trigger package is loaded
@@ -5018,7 +5420,7 @@ Test.@testset "FlowGeometries.jl" begin
             [:axis],
         )))
 
-        for m in (FG.Grids, FG.Connectivity)
+        for m in (FG.Grids, FG.Connectivity, FG.Discretization)
             unclassified = setdiff(public_of(m), ALLOCATION_CHECKED, NOT_CHECKED_BECAUSE)
             isempty(unclassified) ||
                 println("  unclassified in ", nameof(m), ": ", join(sort!(collect(unclassified)), ", "))

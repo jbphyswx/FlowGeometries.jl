@@ -126,8 +126,38 @@ form; `O(log n)` on a stretched one, by bisection. Both storage orders work.
 function locate(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     n = length(x)
     n == 0 && return 0
-    f = faces(x)
-    return _locate_in_faces(f, T(v), n)
+    vT = T(v)
+    @inbounds ascending = n == 1 || x[n] ≥ x[1]
+    f1 = _face_at(x, 1, n)
+    fe = _face_at(x, n + 1, n)
+    if ascending
+        (vT < f1 || vT > fe) && return 0
+    else
+        (vT > f1 || vT < fe) && return 0
+    end
+    lo, hi = 1, n + 1
+    while hi - lo > 1
+        mid = (lo + hi) ÷ 2
+        fm = _face_at(x, mid, n)
+        if ascending ? (fm ≤ vT) : (fm ≥ vT)
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return lo
+end
+
+# The bisection above needs `log₂ n` of the `n + 1` faces, so they are evaluated one at a time from
+# the centres rather than materialized — `faces(x)` would allocate the whole axis on every query.
+# Same rule as `faces`, so the two never disagree about where a boundary is.
+@inline function _face_at(x::AbstractVector{T}, j::Int, n::Int) where {T}
+    @inbounds begin
+        n == 1 && return j == 1 ? x[1] - one(T) / 2 : x[1] + one(T) / 2
+        j == 1 && return x[1] - (x[2] - x[1]) / T(2)
+        j == n + 1 && return x[n] + (x[n] - x[n-1]) / T(2)
+        return (x[j-1] + x[j]) / T(2)
+    end
 end
 
 function locate(a::AbstractRange{T}, v::Real) where {T<:AbstractFloat}
@@ -135,32 +165,27 @@ function locate(a::AbstractRange{T}, v::Real) where {T<:AbstractFloat}
     n == 0 && return 0
     Δ = T(step(a))
     iszero(Δ) && return 1
+    vT = T(v)
     # Faces start half a cell before the first centre, so the cell index is the number of whole cells
     # from that first face — no search, and no faces materialized.
-    t = (T(v) - (T(first(a)) - Δ / T(2))) / Δ
-    i = Int(floor(t)) + 1
-    return 1 ≤ i ≤ n ? i : 0
-end
-
-function _locate_in_faces(f::AbstractVector{T}, v::T, n::Int) where {T}
-    @inbounds ascending = f[n+1] ≥ f[1]
+    f0 = T(first(a)) - Δ / T(2)
+    fe = f0 + T(n) * Δ
+    ascending = Δ > 0
     if ascending
-        @inbounds (v < f[1] || v > f[n+1]) && return 0
-        lo, hi = 1, n + 1
-        @inbounds while hi - lo > 1
-            mid = (lo + hi) ÷ 2
-            f[mid] ≤ v ? (lo = mid) : (hi = mid)
-        end
-        return lo
+        (vT < f0 || vT > fe) && return 0
     else
-        @inbounds (v > f[1] || v < f[n+1]) && return 0
-        lo, hi = 1, n + 1
-        @inbounds while hi - lo > 1
-            mid = (lo + hi) ÷ 2
-            f[mid] ≥ v ? (lo = mid) : (hi = mid)
-        end
-        return lo
+        (vT > f0 || vT < fe) && return 0
     end
+    i = clamp(Int(floor((vT - f0) / Δ)) + 1, 1, n)
+    # That division is not exact, so it can land an ulp the wrong side of a face — and `f[i] ≤ v <
+    # f[i+1]` is decided exactly there. One step against the face values themselves settles it; the
+    # seed is never off by more than a cell, so this is still O(1).
+    @inbounds if i > 1 && (ascending ? vT < f0 + T(i - 1) * Δ : vT > f0 + T(i - 1) * Δ)
+        i -= 1
+    elseif i < n && (ascending ? vT ≥ f0 + T(i) * Δ : vT ≤ f0 + T(i) * Δ)
+        i += 1
+    end
+    return i
 end
 
 """
@@ -169,32 +194,31 @@ end
 The index of the axis sample closest to `v`, clamped into range. Unlike [`locate`](@ref) this always
 returns a valid index, since a nearest sample exists for any `v`.
 
-Exact ties go to the LOWER index, and the uniform closed form and the general scan agree on that, so
-the two paths never disagree.
+Exact ties go to the LOWER index, and the uniform closed form and the general bisection agree on
+that, so the two paths never disagree. `O(1)` on a uniform axis, `O(log n)` on a stretched one.
 """
 function nearest_index(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     n = length(x)
     n == 0 && throw(ArgumentError("an empty axis has no nearest sample"))
+    n == 1 && return 1
     vT = T(v)
-    best = 1
-    @inbounds bd = abs(x[1] - vT)
-    @inbounds for i in 2:n
-        d = abs(x[i] - vT)
-        d < bd && (bd = d; best = i)      # strict `<` keeps a tie on the lower index
-    end
-    return best
+    # The nearest sample is one of the two that bracket `v`, so the same bisection that
+    # `interpolation_weights` uses answers this in `O(log n)` rather than by scanning the axis.
+    i = _bracket(x, vT, n)
+    @inbounds return abs(x[i+1] - vT) < abs(x[i] - vT) ? i + 1 : i   # strict `<` keeps a tie low
 end
 
 function nearest_index(a::AbstractRange{T}, v::Real) where {T<:AbstractFloat}
     n = length(a)
     n == 0 && throw(ArgumentError("an empty axis has no nearest sample"))
-    Δ = T(step(a))
-    iszero(Δ) && return 1
-    t = (T(v) - T(first(a))) / Δ
-    # `ceil(t - 1/2)` rounds to nearest and sends an exact tie DOWN in index for either sign of Δ,
-    # matching the scan above; `round` would send ties to even and disagree.
-    i = Int(ceil(t - one(T) / 2)) + 1
-    return clamp(i, 1, n)
+    n == 1 && return 1
+    vT = T(v)
+    # Deliberately the same bracket-then-compare as the general path, rather than a closed-form
+    # round-to-nearest: the samples of a stretched and a uniform axis are the same numbers, so the
+    # answers must match, and `(v - first)/Δ` can read as an exact tie where the two representable
+    # samples are not in fact equidistant from `v`.
+    i = _bracket(a, vT, n)
+    @inbounds return abs(a[i+1] - vT) < abs(a[i] - vT) ? i + 1 : i   # strict `<` keeps a tie low
 end
 
 # ---------------------------------------------------------------------------
@@ -298,15 +322,42 @@ to a field is the caller's.
     fd_weights([0.0, 1.0, 2.0], 1.0, 1)   # ≈ [-0.5, 0.0, 0.5], the centred first difference
 """
 function fd_weights(nodes::AbstractVector{T}, x₀::Real, order::Integer) where {T<:AbstractFloat}
+    n = length(nodes)
+    w = Vector{T}(undef, n)
+    # `max(…, 0)` so a negative `order` reaches `fd_weights!`'s own message rather than an
+    # array-dimension error from sizing the table.
+    c = Matrix{T}(undef, n, max(Int(order) + 1, 0))
+    fd_weights!(w, c, nodes, x₀, order)
+    return w
+end
+
+"""
+    fd_weights!(w, c, nodes, x₀, order) -> w
+
+[`fd_weights`](@ref) into caller buffers: `w` holds the `length(nodes)` weights and `c` is the
+`length(nodes) × (order+1)` recursion table. Both are overwritten.
+
+The allocating form is one of these per call, and a stencil is built once per sample of an axis, so a
+4096-sample axis costs ~8000 allocations without this. The degrade path in [`apply_stencil!`](@ref) needs
+one per cell near a mask edge, which is the reason it exists.
+"""
+function fd_weights!(
+    w::AbstractVector{T}, c::AbstractMatrix{T}, nodes::AbstractVector{T}, x₀::Real, order::Integer,
+) where {T<:AbstractFloat}
     m = Int(order)
     m ≥ 0 || throw(ArgumentError("derivative order must be ≥ 0, got $m"))
     n = length(nodes)
     n ≥ m + 1 || throw(ArgumentError(
         "a degree-$m derivative needs at least $(m + 1) nodes, got $n",
     ))
+    (length(w) ≥ n && size(c, 1) ≥ n && size(c, 2) ≥ m + 1) || throw(DimensionMismatch(
+        "fd_weights! needs w of length ≥ $n and c of size ≥ ($n, $(m + 1))",
+    ))
     z = T(x₀)
     # c[i, k+1] holds the weight of node i for the k-th derivative, built up over the nodes.
-    c = zeros(T, n, m + 1)
+    @inbounds for k in 1:(m + 1), i in 1:n
+        c[i, k] = zero(T)
+    end
     c1 = one(T)
     c4 = @inbounds(nodes[1]) - z
     @inbounds c[1, 1] = one(T)
@@ -332,7 +383,10 @@ function fd_weights(nodes::AbstractVector{T}, x₀::Real, order::Integer) where 
         end
         c1 = c2
     end
-    return c[:, m + 1]
+    @inbounds for i in 1:n
+        w[i] = c[i, m + 1]
+    end
+    return w
 end
 
 """
@@ -388,6 +442,63 @@ choose a staggering or a boundary condition.
 # ---------------------------------------------------------------------------
 
 """
+    AbstractMaskPolicy
+
+What [`apply_stencil!`](@ref) does at the edge of the active region: [`BlankMasked`](@ref),
+[`ShiftWithinRun`](@ref) or [`ReduceInRun`](@ref).
+
+A **type**, like the image and reach conventions in `Connectivity`: which cells carry a number and which
+carry `masked` is a property of the result, so it belongs in the call rather than in a runtime tag.
+"""
+abstract type AbstractMaskPolicy end
+
+"""
+    BlankMasked()
+
+Write `masked` at a cell that is inactive **or** whose stencil reads an inactive cell. The default, and
+the only policy that never invents a value: where the stencil cannot be formed from active data, there
+is no derivative.
+
+Its cost is a dead band. Every active cell within `nodes - 1` of a masked cell is blanked, so a
+five-point derivative loses two cells either side of every coastline.
+"""
+struct BlankMasked <: AbstractMaskPolicy end
+
+"""
+    ShiftWithinRun()
+
+Shift the stencil to fit inside the run of active samples containing the cell, keeping the full node
+count — the same thing the stencil already does at the end of a bounded axis, with the end of the active
+run as the boundary. `masked` only where the run is shorter than `nodes`.
+
+The accuracy order is therefore the same everywhere a value is written, which is the property
+[`fd_weights`](@ref) exists to preserve. On a run of at least `nodes` active samples the weights are
+**identical** to the unmasked ones, so the interior of an active region is bit-for-bit unchanged.
+"""
+struct ShiftWithinRun <: AbstractMaskPolicy end
+
+"""
+    ReduceInRun()
+
+[`ShiftWithinRun`](@ref), and where the run cannot hold `nodes`, use the largest window it can, down to
+`order + 1` samples. `masked` below that, where no derivative of that order exists.
+
+This trades accuracy order for coverage — a five-point scheme becomes three-point in a strait three
+cells wide — so it is named rather than reached by fallback. Ask for it when a value everywhere matters
+more than a uniform order.
+"""
+struct ReduceInRun <: AbstractMaskPolicy end
+
+"""
+    _window_start(i, k, lo, hi) -> Int
+
+First index of a `k`-node window centred on `i` and shifted to fit inside `[lo, hi]`. The whole-axis
+case is `lo = 1, hi = n`; the masked case is the same expression with the bounds of the active run,
+which is why both share this.
+"""
+@inline _window_start(i::Int, k::Int, lo::Int, hi::Int) = clamp(i - (k - 1) ÷ 2, lo, hi - k + 1)
+
+"""
     axis_stencils(x, order, nodes; period=nothing) -> (indices, weights)
 
 The `order`-th derivative's [`fd_weights`](@ref) at **every** sample of axis `x`, as two `n × nodes`
@@ -414,10 +525,14 @@ function axis_stencils(
     wts = Matrix{T}(undef, n, k)
     half = (k - 1) ÷ 2
     buf = Vector{T}(undef, k)
+    # Reused across every sample: the allocating `fd_weights` would be two per sample, ~8000 on a
+    # 4096-sample axis, for a table whose size never changes.
+    wbuf = Vector{T}(undef, k)
+    cbuf = Matrix{T}(undef, k, ord + 1)
     P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
     @inbounds for i in 1:n
         if period === nothing
-            i0 = clamp(i - half, 1, n - k + 1)
+            i0 = _window_start(i, k, 1, n)
             for q in 1:k
                 idx[i, q] = i0 + q - 1
                 buf[q] = x[i0 + q - 1]
@@ -429,9 +544,9 @@ function axis_stencils(
                 buf[q] = x[mod1(raw, n)] + T(fld(raw - 1, n)) * P
             end
         end
-        w = fd_weights(buf, x[i], ord)
+        fd_weights!(wbuf, cbuf, buf, x[i], ord)
         for q in 1:k
-            wts[i, q] = w[q]
+            wts[i, q] = wbuf[q]
         end
     end
     return idx, wts
@@ -464,21 +579,145 @@ function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S), backend = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(field, dim) == length(x) || throw(DimensionMismatch(
         "axis has $(length(x)) samples but direction $dim of the field has $(size(field, dim))",
     ))
     idx, wts = axis_stencils(x, order, nodes; period = period)
-    return apply_stencil!(out, field, idx, wts, dim; mask = mask, masked = masked, backend = backend)
+    # The precomputed rows are the whole answer under `BlankMasked`, and they stay the answer in the
+    # interior of every active run under the others — a degraded row is only built where one is needed.
+    if policy isa BlankMasked || mask === nothing
+        return apply_stencil!(out, field, idx, wts, dim; mask = mask, masked = masked,
+                              backend = backend)
+    end
+    return _apply_stencil_degrade!(out, field, x, idx, wts, Int(dim), mask, masked,
+                                   Int(order), Int(nodes), period, policy, backend)
+end
+
+# Rebuilding a stencil needs the axis and a scratch table, so it is a chunked host loop: a launch has
+# nowhere to put the per-cell Fornberg table. `BlankMasked` above keeps the index-parallel path.
+function _apply_stencil_degrade!(
+    out::AbstractArray{S,N}, field, x::AbstractVector{T}, idx, wts, dim::Int, mask, masked,
+    ord::Int, k::Int, period, policy::AbstractMaskPolicy, backend,
+) where {S,N,T}
+    size(out) == size(field) || throw(DimensionMismatch(
+        "out $(size(out)) and field $(size(field)) must have the same size",
+    ))
+    size(mask) == size(field) || throw(DimensionMismatch(
+        "mask $(size(mask)) and field $(size(field)) must have the same size",
+    ))
+    sz = size(field)
+    ci = CartesianIndices(sz)
+    n = sz[dim]
+    P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
+    wrap = period !== nothing
+    Execution.run_chunks(length(ci), backend) do rng
+        wbuf = Vector{T}(undef, k)
+        cbuf = Matrix{T}(undef, k, ord + 1)
+        nbuf = Vector{T}(undef, k)
+        @inbounds for lin in rng
+            c = ci[lin]
+            _stencil_cell_degrade!(out, field, x, idx, wts, dim, mask, masked, k, ord, n, P, wrap,
+                                   Tuple(c), c, policy, wbuf, cbuf, nbuf)
+        end
+    end
+    return out
+end
+
+# How far the active run containing `i` reaches, walked at most `k` steps: past that the run is longer
+# than any window, which is all the clamp needs to know. Bounding the walk is what keeps this `O(k)`
+# rather than `O(run length)`.
+@inline function _run_reach(mask, I::NTuple{N,Int}, dim::Int, i::Int, n::Int, k::Int, wrap::Bool) where {N}
+    back = 0
+    @inbounds while back < k
+        j = i - back - 1
+        j < 1 && (wrap ? (j = n) : break)
+        mask[ntuple(d -> d == dim ? j : I[d], Val(N))...] || break
+        back += 1
+        back ≥ n && break
+    end
+    fwd = 0
+    @inbounds while fwd < k
+        j = i + fwd + 1
+        j > n && (wrap ? (j = 1) : break)
+        mask[ntuple(d -> d == dim ? j : I[d], Val(N))...] || break
+        fwd += 1
+        back + fwd + 1 ≥ n && break
+    end
+    return back, fwd
+end
+
+@inline function _stencil_cell_degrade!(
+    out::AbstractArray{S,N}, field, x::AbstractVector{T}, idx, wts, dim::Int, mask, masked,
+    k::Int, ord::Int, n::Int, P::T, wrap::Bool, I::NTuple{N,Int}, ci, policy, wbuf, cbuf, nbuf,
+) where {S,N,T}
+    @inbounds begin
+        if !mask[ci]
+            out[ci] = masked
+            return nothing
+        end
+        i = I[dim]
+        # The precomputed window, if every node it reads is active. Contiguous and all-active means it
+        # lies in this cell's run, and the run-clamped window is then the same window — so this branch
+        # is bit-for-bit the unmasked result, and it is the one the interior of a region takes.
+        # Accumulated while checking, in the same order: a window that turns out to be intact has then
+        # been walked once rather than twice, and this is the branch every cell away from a mask takes.
+        intact = true
+        acc = zero(S)
+        for q in 1:k
+            J = ntuple(d -> d == dim ? Int(idx[i, q]) : I[d], Val(N))
+            if !mask[J...]
+                intact = false
+                break
+            end
+            acc += S(wts[i, q]) * S(field[J...])
+        end
+        if intact
+            out[ci] = acc
+            return nothing
+        end
+
+        back, fwd = _run_reach(mask, I, dim, i, n, k, wrap)
+        len = back + fwd + 1
+        kk = policy isa ReduceInRun ? min(k, len) : k
+        if len < kk || kk < ord + 1
+            out[ci] = masked
+            return nothing
+        end
+        # Run-local coordinates, so one expression covers a wrapping run and a bounded one.
+        pos = back                        # 0-based offset of `i` from the run's first sample
+        s = clamp(pos - (kk - 1) ÷ 2, 0, len - kk)
+        base = i - back                   # may be ≤ 0 when the run wraps; `mod1` puts it back
+        for q in 1:kk
+            raw = base + s + q - 1
+            j = mod1(raw, n)
+            nbuf[q] = x[j] + T(fld(raw - 1, n)) * P
+        end
+        fd_weights!(wbuf, cbuf, view(nbuf, 1:kk), x[i], ord)
+        acc = zero(S)
+        for q in 1:kk
+            raw = base + s + q - 1
+            J = ntuple(d -> d == dim ? mod1(raw, n) : I[d], Val(N))
+            acc += S(wbuf[q]) * S(field[J...])
+        end
+        out[ci] = acc
+    end
+    return nothing
 end
 
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     mask = nothing, masked = zero(S), backend = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    # Degrading means rebuilding a stencil, which needs the axis this form was not given.
+    policy isa BlankMasked || throw(ArgumentError(
+        "$(policy) needs the axis to rebuild a stencil from; call the `(out, field, x, dim)` form",
+    ))
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
     ))

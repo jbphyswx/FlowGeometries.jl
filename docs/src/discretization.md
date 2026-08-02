@@ -55,7 +55,9 @@ D.locate(xs, 2.0), D.nearest_index(xs, 2.0)
 ```
 
 `nearest_index` always returns a valid index, clamping rather than reporting "outside"; exact ties go
-to the lower index, and the uniform closed form and the general scan agree on that.
+to the lower index. It brackets and compares rather than scanning, so it is `O(log n)` on a stretched
+axis and `O(1)` on a uniform one, and both paths compare the same two samples — a uniform axis and its
+`collect` hold the same numbers, so they must not disagree about which is nearest.
 
 ## Interpolation weights
 
@@ -157,6 +159,45 @@ Om = similar(F)
 D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = NaN)
 Om[3:7, 3]                               # the masked cell and the two that read it
 ```
+
+### What a mask edge does to the stencil
+
+Blanking is the default, and it is not free: a cell is blanked when *any* sample its window reads is
+inactive, so a single masked cell takes out up to `nodes - 1` cells either side of it. A five-point
+derivative on a short axis can be annihilated outright by one hole.
+
+The window already shifts inward at the end of an axis, precisely so the node count — and the accuracy
+order — survives a boundary. The end of an active *run* is the same situation, and
+[`ShiftWithinRun`](@ref) treats it that way:
+
+```@example disc
+xr = collect(0.0:1.0:6.0)
+mr = trues(7, 1); mr[4, 1] = false
+gr = FG.Grids.StructuredGrid(geo, xr, [0.0], mr)
+fr = reshape(collect(0.0:6.0), 7, 1)         # f = x, so df/dx is exactly 1
+
+blanked  = zeros(7, 1); shifted = zeros(7, 1)
+D.apply_stencil!(blanked, fr, gr, 1; order = 1, nodes = 5, masked = NaN)
+D.apply_stencil!(shifted, fr, gr, 1; order = 1, nodes = 5, masked = NaN,
+                 policy = D.ShiftWithinRun())
+vec(blanked), vec(shifted)
+```
+
+Every cell is blanked in the first, and every active cell is exact in the second. The policies are:
+
+| policy | at a run edge |
+|---|---|
+| [`BlankMasked`](@ref) | the default — write `masked` wherever the window reads an inactive sample |
+| [`ShiftWithinRun`](@ref) | shift the window to fit inside the run, keeping `nodes` and the accuracy order; `masked` only where the run is shorter than `nodes` |
+| [`ReduceInRun`](@ref) | as above, and where the run cannot hold `nodes`, use the largest window it can, down to `order + 1` |
+
+`ReduceInRun` is the only one that will silently lower the accuracy order, which is why it is a
+separate policy rather than a fallback inside `ShiftWithinRun`: a narrow strait genuinely wants an
+answer at reduced order, and everywhere else wants to be told the run is too short.
+
+A cell whose window already lies inside its run reuses the precomputed row, so a run's interior is
+bit-for-bit what `BlankMasked` gives, and only the cells within `nodes - 1` of an edge cost anything
+extra. A run that wraps a periodic seam is one run, not two.
 
 Build the weights once with [`axis_stencils`](@ref) to reuse them across many fields; applying a
 precomputed set allocates nothing.

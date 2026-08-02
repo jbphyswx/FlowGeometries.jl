@@ -1251,7 +1251,8 @@ Only a rectilinear direction has a 1-D axis to difference along, so this is a `S
 function Discretization.apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    active_only::Bool = true, masked = zero(S),
+    active_only::Bool = true, masked = zero(S), backend = nothing,
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
 ) where {S,G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
@@ -1259,7 +1260,7 @@ function Discretization.apply_stencil!(
         out, field, coordinates(grid, dim), dim;
         order = order, nodes = nodes,
         period = isperiodic(grid, dim) ? period(grid, dim) : nothing,
-        mask = msk, masked = masked,
+        mask = msk, masked = masked, backend = backend, policy = policy,
     )
 end
 
@@ -1867,6 +1868,27 @@ struct ArcEmbedding{T<:AbstractFloat} <: AbstractEmbedding
 end
 
 """
+    embed_point(grid, p) -> NTuple
+
+One coordinate tuple through the same transform [`embedded_points`](@ref) applies to the cell centres,
+so a query seeded by a point searches the space the index was built in.
+"""
+function embed_point end
+
+@inline embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G<:Geometry.AbstractCartesianGeometry,T,D} =
+    ntuple(d -> T(p[d]), Val(D))
+
+@inline function embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G<:Geometry.AbstractSphericalGeometry,T,D}
+    c = Geometry.spherical_to_cartesian(grid_geometry(grid), p)
+    return (T(c.x), T(c.y), T(c.z))
+end
+
+@inline function embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G<:Geometry.AbstractEllipsoidalGeometry,T,D}
+    c = Geometry.geodetic_to_cartesian(grid_geometry(grid), p)
+    return (T(c.x), T(c.y), T(c.z))
+end
+
+"""
     embedded_radius(embedding, r) -> T
 
 A physical radius as a radius in the embedding.
@@ -2023,6 +2045,19 @@ end
 
 @inline _nbuckets(ix::CellListIndex) = length(ix.starts) - 1
 
+# Bins in a query window, saturating: a radius far wider than the bin side gives a per-direction reach
+# whose plain product overflows `Int` and would wrap to a small — or negative — number.
+@inline function _window_bins(reach::NTuple{D,Int}) where {D}
+    m = 1
+    @inbounds for d in 1:D
+        v = reach[d]
+        v ≤ 0 && return 0
+        v > typemax(Int) ÷ m && return typemax(Int)
+        m *= v
+    end
+    return m
+end
+
 # Bin coordinate of a point, wrapped where the direction does. A wrapping direction's width divides the
 # period exactly, so `mod` lands on a real lattice rather than aliasing a partial bin onto bin zero.
 @inline function _bin_of(ix::CellListIndex{D,T}, x::NTuple{D,T}) where {D,T}
@@ -2133,7 +2168,25 @@ function fold_candidates end
 
 function fold_candidates(f::F, acc, ix::CellListIndex{D,T}, grid, I, r) where {F,D,T}
     lin = I isa Integer ? Int(I) : LinearIndices(size(mask(grid)))[CartesianIndex(I)]
-    q = ntuple(d -> @inbounds(ix.pts[d, lin]), Val(D))
+    return fold_candidates_at(f, acc, ix, ntuple(d -> @inbounds(ix.pts[d, lin]), Val(D)), r, nothing)
+end
+
+"""
+    fold_candidates_at(f, acc, index, q, r, scratch) -> acc
+
+[`fold_candidates`](@ref) around an arbitrary point `q`, already in the index's embedding, rather than
+around a cell. A cell query is this one at the cell's own centre, so there is one traversal.
+
+`scratch` is a candidate buffer for an index that has to materialize one — a tree does, since it must
+deduplicate the periodic images it searches over. A cell list folds directly and ignores it.
+"""
+function fold_candidates_at(f, acc, index, q, r, scratch)
+    throw(ArgumentError(
+        "$(typeof(index)) cannot be queried at a point; build a `cell_list` for point-seeded queries",
+    ))
+end
+
+function fold_candidates_at(f::F, acc, ix::CellListIndex{D,T}, q::NTuple{D,T}, r, _scratch) where {F,D,T}
     remb = T(embedded_radius(ix.embedding, r))
     # Per direction, since a wrapping direction's bins are the period divided evenly and so are not
     # exactly `h` wide.
@@ -2143,6 +2196,16 @@ function fold_candidates(f::F, acc, ix::CellListIndex{D,T}, grid, I, r) where {F
     # A wrapping direction is capped at the lattice width, since beyond that the offsets revisit bins
     # already covered.
     reach = ntuple(d -> @inbounds(ix.wrap[d]) ? min(2 * span[d] + 1, ix.nbins[d]) : 2 * span[d] + 1, Val(D))
+    # A ball much wider than the bin side walks more bins than the lattice holds cells, and most of them
+    # are empty — at which point every cell is a candidate anyway and enumerating them directly is both
+    # cheaper and bounded. Without this a query at 10× the bin side costs `10^D` times its own answer,
+    # and an index built for one radius and queried at a far larger one degenerates without limit.
+    if _window_bins(reach) > nbucket
+        @inbounds for k in Base.OneTo(size(ix.pts, 2))
+            acc = f(acc, k)
+        end
+        return acc
+    end
     @inbounds for off in CartesianIndices(map(m -> 0:(m - 1), reach))
         b = ntuple(Val(D)) do d
             j = b0[d] - span[d] + off[d]
@@ -2167,6 +2230,53 @@ function index_within!(buf::AbstractVector{<:Integer}, ix::CellListIndex, grid, 
         return nothing
     end
     return buf
+end
+
+"""
+    locate(grid, p) -> cell index
+    locate(grid, p; active_only=false, topology, scratch) -> cell index
+
+The cell of `grid` that `p` belongs to, as an `NTuple` of indices on a rectilinear or curvilinear grid
+and a node number on an `UnstructuredGrid`. `p` is a coordinate tuple in the grid's own coordinates.
+
+On a `StructuredGrid` this is [`Discretization.locate`](@ref) per direction, so the answer is the cell
+whose faces bracket `p` — an `O(1)` lookup on a uniform axis and a bisection otherwise, with a periodic
+direction wrapped first. A direction `p` lies outside reports `0` for that direction.
+
+Elsewhere there are no axes to bracket along and it is the **nearest cell centre**, which is exactly the
+containing cell for a node set, whose cells are the Voronoi regions of its nodes. On a curvilinear grid
+the two can differ where cells are strongly sheared, so read it as nearest-centre rather than
+point-in-quadrilateral. That form takes the keywords: `topology` carrying an index — [`cell_list`](@ref)
+— makes it a bin lookup rather than a scan, `scratch` is a `Connectivity.ball_scratch` buffer,
+and `active_only` restricts the answer to unmasked cells (`false` here, unlike the ball queries, since
+the cell a point falls in is a question about the grid rather than about the active region).
+"""
+function locate end
+
+function locate(grid::StructuredGrid{G,T,N}, p::NTuple{N,Real}) where {G,T,N}
+    return ntuple(Val(N)) do d
+        x = coordinates(grid, d)
+        v = T(p[d])
+        per = isperiodic(grid, d)
+        if per
+            L = T(period(grid, d))
+            lo = axis_stats(grid, d).min_value
+            L > 0 && (v = lo + mod(v - lo, L))
+        end
+        i = Discretization.locate(x, v)
+        # The cell straddling the seam has half its extent on each side, so after wrapping into one
+        # period part of it lies beyond the outermost face and `locate` reports "outside". It is
+        # whichever end cell is nearer across the seam — the comparison, not `1`, so a descending axis
+        # is right too.
+        if i == 0 && per
+            n = length(x)
+            L = T(period(grid, d))
+            df = abs(rem(v - T(@inbounds x[1]), L, RoundNearest))
+            dl = abs(rem(v - T(@inbounds x[n]), L, RoundNearest))
+            i = df ≤ dl ? 1 : n
+        end
+        i
+    end
 end
 
 """
@@ -2203,8 +2313,8 @@ the cells within `r`; the caller applies the exact distance gate, so over-return
 under-returning is not.
 
 `index_within!` overwrites and returns `buffer`, which is how a sweep over many cells avoids one heap
-allocation per query — 224 bytes against up to 6.5 KB, measured on a 316-candidate ball. `index_within`
-is the same query into a fresh vector.
+allocation per query — nothing at all, against 480 bytes on a small ball and 6.1 KB on a 310-candidate
+one. `index_within` is the same query into a fresh vector.
 """
 function index_within!(buffer::AbstractVector{<:Integer}, index, grid, I, r)
     throw(ArgumentError("no `index_within!` method for $(typeof(index)); build one with `spatial_index`"))

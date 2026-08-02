@@ -126,8 +126,9 @@ Because the index cannot be built per query, [`Connectivity.foreach_within`](@re
 [`Connectivity.mapreduce_within`](@ref) exist to build it once for a whole sweep: **800.7 ms → 88.8 ms**
 (9.0×) against the same sweep written as a hand loop over the per-cell entry points, on 9 216 cells.
 
-[`Connectivity.ball_scratch`](@ref) supplies the candidate buffer, holding a query to 224 bytes whatever
-the grid size against up to 6.5 KB of churn without it.
+[`Connectivity.ball_scratch`](@ref) supplies the candidate buffer, which takes an indexed query to zero
+allocation whatever the grid size, against 480 bytes on a small ball and 6.1 KB on a 310-candidate one
+without it.
 
 ## Quadrature
 
@@ -216,6 +217,7 @@ Recorded so they are not re-litigated:
   hoist `atan` out of loops.
 - **Vector-axis construction is not superlinear** — the gap against a uniform axis is a constant
   factor, not a growing one.
-- **The ball-query candidate buffer is an allocation win, not a speed win** — 0.97–1.16× in time across
-  20 and 316 candidates, i.e. within run-to-run noise, against 224 bytes per query rather than up to
-  6.5 KB. Worth passing in a sweep for the memory, not worth restructuring a call site for the time.
+- **The ball-query candidate buffer is mostly an allocation win** — 1.43× in time on a 20-candidate ball
+  and 1.06× on a 310-candidate one, against zero bytes per query rather than 480 B and 6.1 KB. Worth
+  passing in a sweep; the time it saves is only visible where the ball is small enough that the
+  allocation is most of the query.
