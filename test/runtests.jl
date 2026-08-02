@@ -71,6 +71,7 @@ q_locate(g, p)           = FG.Grids.locate(g, p)
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
 q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
+q_gradient!(a, b, f, plan) = FG.Discretization.gradient!(a, b, f, plan)
 q_width(g, d, i)         = FG.Grids.cell_width(g, d, i)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
@@ -3629,6 +3630,98 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test @allocated(nnw(g, Nx)) == 0
     end
 
+    Test.@testset "A least-squares gradient where there is no separable axis" begin
+        C = FG.Connectivity
+        D = FG.Discretization
+        GD = FG.Grids
+        GE = FG.Geometry
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+
+        # Deliberately SHEARED. Exactness for a linear field on a skewed stencil is the property that
+        # distinguishes this from inverting an index-space Jacobian, which does not have it.
+        n = 14
+        x = [t + 0.35u for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
+        y = [u - 0.2t for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
+        cg = GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
+        plan = C.gradient_plan(cg)
+        Test.@test length(plan) == n * n
+        for (a, b) in ((2.0, -3.0), (0.0, 1.0), (-1.5, 0.0))
+            f = a .* x .+ b .* y .+ 7.0
+            g1 = zeros(n, n); g2 = zeros(n, n)
+            D.gradient!(g1, g2, f, plan)
+            # Every cell, boundaries and corners included — a one-sided stencil is still exact for a
+            # linear field as long as it spans both tangent directions.
+            Test.@test maximum(abs.(g1 .- a)) < 1e-10
+            Test.@test maximum(abs.(g2 .- b)) < 1e-10
+        end
+
+        # Where the stencil is separable and orthogonal, `A` is diagonal and this must reduce to the
+        # centred difference — so it agrees with `apply_stencil!` wherever both apply.
+        let m = 12
+            xs = collect(range(0.0, 1.0; length = m)); ys = collect(range(0.0, 2.0; length = m))
+            og = GD.CurvilinearGrid(cart, [xi for xi in xs, _ in ys], [yj for _ in xs, yj in ys],
+                                    trues(m, m); measure = fill(1.0, m, m))
+            sg = GD.StructuredGrid(cart, xs, ys)
+            ff = [sin(3xi) * cos(2yj) for xi in xs, yj in ys]
+            q1 = zeros(m, m); q2 = zeros(m, m)
+            D.gradient!(q1, q2, ff, C.gradient_plan(og))
+            s1 = zeros(m, m); s2 = zeros(m, m)
+            D.apply_stencil!(s1, ff, sg, 1; order = 1, nodes = 3)
+            D.apply_stencil!(s2, ff, sg, 2; order = 1, nodes = 3)
+            int = 2:(m - 1)
+            Test.@test maximum(abs.(q1[int, int] .- s1[int, int])) < 1e-12
+            Test.@test maximum(abs.(q2[int, int] .- s2[int, int])) < 1e-12
+        end
+
+        # A node set, where neighbours come from connectivity rather than an index offset.
+        let gu = C.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(8)),
+            R = FG.Geometry.radius(GD.grid_geometry(C.unstructured_grid(
+                FG.SphericalSampling.IcosahedralSampling(8))))
+            φu = GD.coordinates(gu, 2)
+            fu = [sin(φ) for φ in φu]                    # ∂/∂north = cos φ / R, ∂/∂east = 0
+            h1 = zeros(length(fu)); h2 = zeros(length(fu))
+            D.gradient!(h1, h2, fu, C.gradient_plan(gu))
+            want = [cos(φ) / R for φ in φu]
+            Test.@test maximum(abs.(h2 .- want)) < 0.05 * maximum(abs.(want))
+            Test.@test maximum(abs.(h1)) < 0.05 * maximum(abs.(want))
+        end
+
+        # Rank deficiency: every neighbour on one line leaves the across-line component undetermined
+        # by the data, so it is zeroed rather than produced by inverting a nudged matrix.
+        let xl = collect(range(0.0, 5.0; length = 6)), yl = zeros(6)
+            lg = GD.UnstructuredGrid(cart, (xl, yl), trues(6); k = 2, areas = ones(6))
+            l1 = zeros(6); l2 = zeros(6)
+            D.gradient!(l1, l2, 3.0 .* xl, C.gradient_plan(lg))
+            Test.@test all(isapprox.(l1, 3.0; atol = 1e-10))     # the resolved direction is exact
+            Test.@test all(iszero, l2)                           # the other is zero, not enormous
+        end
+
+        # A mask: the hole has no coefficients and reads zero, and its neighbours are still exact,
+        # having simply not been offered it.
+        let mk = trues(n, n)
+            mk[5, 5] = false; mk[6, 5] = false
+            mg = GD.CurvilinearGrid(cart, x, y, mk; measure = fill(1.0, n, n))
+            mf = 2.0 .* x .- 3.0 .* y
+            m1 = zeros(n, n); m2 = zeros(n, n)
+            D.gradient!(m1, m2, mf, C.gradient_plan(mg))
+            Test.@test iszero(m1[5, 5]) && iszero(m2[5, 5])
+            Test.@test all(abs(m1[i, j] - 2.0) < 1e-10 && abs(m2[i, j] + 3.0) < 1e-10
+                           for i in 1:n, j in 1:n if mk[i, j])
+        end
+
+        # Applying is one dot product per cell and must allocate nothing.
+        let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
+            Test.@test _alloc(q_gradient!, g1, g2, f, plan) == 0
+        end
+        Test.@test plan.names == (:x, :y)
+        Test.@test_throws DimensionMismatch D.gradient!(zeros(3), zeros(3), zeros(3), plan)
+        # The tangent plane is two-dimensional, so a 3-coordinate grid is refused rather than guessed.
+        let g3 = GD.UnstructuredGrid(cart, (rand(6), rand(6), rand(6)), trues(6); k = 3,
+                                     areas = ones(6))
+            Test.@test_throws ArgumentError C.gradient_plan(g3)
+        end
+    end
+
     Test.@testset "A window for the whole grid, and an exact extent for one row" begin
         C = FG.Connectivity
         GD = FG.Grids
@@ -5831,7 +5924,7 @@ Test.@testset "FlowGeometries.jl" begin
             :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
             :fold_candidates_at, :locate, :embed_point, :fold_at,
             :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
-            :local_spacing, :cell_width, :metric_floor, :metric_band,
+            :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
@@ -5845,14 +5938,14 @@ Test.@testset "FlowGeometries.jl" begin
              :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
              :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
              :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
-             :ReduceInRun, :AbstractLocation, :Center, :Face],
+             :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan],
             # bulk or one-off operations, not per-cell hot paths
             [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
              :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
              :sparse_adjacency_coo!, :sparse_adjacency_csc!, :sort_neighbors!, :is_symmetric_adjacency,
              :connected_components, :count_holes, :interior, :boundary_cells, :csr_connectivity,
              :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
-             :rotate, :measure_array, :measure_factors, :derivative!,
+             :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
              :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
         # allocating forms, whose whole job is to return a fresh array
         [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,

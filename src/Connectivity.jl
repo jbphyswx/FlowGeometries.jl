@@ -3,6 +3,7 @@ module Connectivity
 using ..Execution: Execution
 using ..Geometry: Geometry
 using ..Stencils: Stencils
+using ..Discretization: Discretization
 using ..Grids: Grids
 
 # Connectivity is a property of the *grid architecture* or of a *spherical sampling*
@@ -623,6 +624,90 @@ end
     st = Grids.axis_stats(grid, 2)
     return min(abs(cos(T(st.min_value))), abs(cos(T(st.max_value))))
 end
+
+"""
+    gradient_plan(grid; stencil=Stencils.Axial(1), active_only=true, conn=nothing) -> GradientPlan
+
+Build the least-squares gradient of `grid` — the geometry of it, with no field involved. See
+[`Discretization.GradientPlan`](@ref) for what it is and why it is that; apply it with
+[`Discretization.gradient!`](@ref).
+
+This is the counterpart of `apply_stencil!` for the two architectures that have no separable axis to
+difference along: a `CurvilinearGrid`, whose neighbours come from its index topology, and an
+`UnstructuredGrid`, whose come from its stored adjacency. `conn` overrides the neighbour set; otherwise
+one is built, from `stencil` where the architecture takes one.
+
+Surface fields only — the tangent plane is two-dimensional, so the grid's coordinates must be a
+`(λ, φ)` or `(x, y)` pair.
+
+A masked cell gets no coefficients at all and reads zero gradient, and an inactive neighbour is not
+offered to the fit, on the same rule as everywhere else: not determined by the active data, so not
+invented.
+"""
+function gradient_plan end
+
+function gradient_plan(
+    grid::Grids.AbstractGrid{G,T}; stencil = Stencils.Axial(1), active_only::Bool = true,
+    conn = nothing,
+) where {G,T}
+    length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
+        "a least-squares gradient is built in the tangent plane, so it needs a 2-coordinate grid; " *
+        "got $(length(Grids.coordinates(grid)))",
+    ))
+    # `build_connectivity` already resolves this per architecture: an index-space stencil on a
+    # curvilinear grid, the stored adjacency on a node set, which ignores the stencil.
+    c = conn === nothing ?
+        build_connectivity(grid; stencil = stencil, active_only = active_only) : conn
+    geo = Grids.grid_geometry(grid)
+    msk = Grids.mask(grid)
+    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
+    n = length(msk)
+    ptr = Vector{Int}(undef, n + 1)
+    nbr = Int[]
+    c1 = T[]
+    c2 = T[]
+    sizehint!(nbr, length(c.nbrs)); sizehint!(c1, length(c.nbrs)); sizehint!(c2, length(c.nbrs))
+    # Scratch for one cell's neighbours: the displacements are needed twice, once to accumulate `A`
+    # and once to weight it by `A⁺`, and re-projecting them would double the trigonometry.
+    d1 = T[]; d2 = T[]; wk = T[]
+    @inbounds ptr[1] = 1
+    @inbounds for i in 1:n
+        empty!(d1); empty!(d2); empty!(wk)
+        if !(active_only && !msk[i])
+            p0 = _grad_coords(grid, sz, i)
+            for t in c.ptr[i]:(c.ptr[i + 1] - 1)
+                j = Int(c.nbrs[t])
+                active_only && !msk[j] && continue
+                Δ = Geometry.project_to_tangent_plane(geo, p0, _grad_coords(grid, sz, j))
+                δ1, δ2 = T(Δ[1]), T(Δ[2])
+                q = δ1 * δ1 + δ2 * δ2
+                q > 0 || continue                     # a coincident neighbour carries no direction
+                push!(d1, δ1); push!(d2, δ2); push!(wk, inv(q)); push!(nbr, j)
+            end
+            a = zero(T); b = zero(T); cc = zero(T)
+            for t in eachindex(wk)
+                a += wk[t] * d1[t] * d1[t]
+                b += wk[t] * d1[t] * d2[t]
+                cc += wk[t] * d2[t] * d2[t]
+            end
+            # Relative tolerance: `A` scales with the weights, and `wₖ = 1/|Δrₖ|²` makes it O(number
+            # of neighbours), so the cut has to be against its own size rather than an absolute number.
+            tol = max(a + cc, one(T)) * sqrt(eps(T))
+            p11, p12, p22 = Discretization._sympinv2(a, b, cc, tol)
+            for t in eachindex(wk)
+                push!(c1, wk[t] * (p11 * d1[t] + p12 * d2[t]))
+                push!(c2, wk[t] * (p12 * d1[t] + p22 * d2[t]))
+            end
+        end
+        ptr[i + 1] = ptr[i] + length(wk)
+    end
+    names = Geometry.point_names(geo, Val(2))
+    return Discretization.GradientPlan(ptr, nbr, c1, c2, names)
+end
+
+@inline _grad_coords(grid, ::Nothing, i::Int) = Grids._raw_coords(grid, i)
+@inline _grad_coords(grid, sz::Tuple, i::Int) =
+    Grids._raw_coords(grid, Tuple(@inbounds CartesianIndices(sz)[i])...)
 
 """
     metric_band(grid, dim, coord_t, coord_n, ball) -> T
