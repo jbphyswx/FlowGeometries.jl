@@ -3028,6 +3028,97 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Connectivity.nneighbors(gr, 1, 5) == 4     # wraps, like the original
     end
 
+    Test.@testset "The host sweep is a different loop shape, and the same answer" begin
+        D = FG.Discretization
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+
+        # The host reshapes the loop — Cartesian rather than linear, split at `dim`, node count in the
+        # type, address arithmetic where the layout allows it — while the index-parallel form stays for
+        # a device launch. Different shape, identical arithmetic in identical order, so the two must
+        # agree BIT for bit, not merely to a tolerance. Masks, node counts and both dimensions.
+        bad = 0
+        for n in (7, 16, 23), dim in 1:2, k in (2, 3, 4, 5, 6, 8), msk in (false, true)
+            xs = cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n)))
+            ys = collect(range(0.0, 2.0; length = n + 1))
+            ax = dim == 1 ? xs : ys
+            k > length(ax) && continue
+            f = [sin(xi) * cos(yi) for xi in xs, yi in ys]
+            m = trues(n, n + 1)
+            msk && (m[3, 4] = false; m[n, 2] = false)
+            idx, w = D.axis_stencils(ax, 1, k)
+            a = zeros(n, n + 1); b = zeros(n, n + 1)
+            mm = msk ? m : nothing
+            D.apply_stencil!(a, f, idx, w, dim; mask = mm, masked = NaN)
+            D.apply_stencil!(b, f, idx, w, dim; mask = mm, masked = NaN, backend = KernelAbstractions.CPU())
+            all(isequal(a[i], b[i]) for i in eachindex(a)) || (bad += 1)
+        end
+        Test.@test bad == 0
+
+        # Every direction of a 3-D field, including the last, where the split leaves a contiguous span.
+        let n = 9
+            xs = collect(range(0.0, 1.0; length = n))
+            ys = collect(range(0.0, 2.0; length = n))
+            zs = collect(range(0.0, 3.0; length = n))
+            f3 = [xi + 2yi + 4zi for xi in xs, yi in ys, zi in zs]
+            for (dim, ax, want) in ((1, xs, 1.0), (2, ys, 2.0), (3, zs, 4.0))
+                idx, w = D.axis_stencils(ax, 1, 3)
+                o = zeros(n, n, n); ob = zeros(n, n, n)
+                D.apply_stencil!(o, f3, idx, w, dim)
+                D.apply_stencil!(ob, f3, idx, w, dim; backend = KernelAbstractions.CPU())
+                Test.@test maximum(abs.(o .- want)) < 1e-10
+                Test.@test o == ob
+            end
+        end
+
+        # The address-arithmetic path assumes a linear, one-based layout. An offset array has neither,
+        # so it must take the Cartesian nest and still get the same answer.
+        let n = 12
+            xs = collect(range(0.0, 1.0; length = n))
+            f = [xi^2 + yi for xi in xs, yi in xs]
+            idx, w = D.axis_stencils(xs, 1, 3)
+            o = zeros(n, n)
+            D.apply_stencil!(o, f, idx, w, 1)
+            v = view(f, :, :)                                  # a view is still linear here
+            ov = zeros(n, n)
+            D.apply_stencil!(ov, v, idx, w, 1)
+            Test.@test o == ov
+        end
+
+        # A stencil wider than the specialization cap keeps the runtime-node-count path, and agrees.
+        let n = 32
+            xs = collect(range(0.0, 1.0; length = n))
+            f = [sin(4xi) * yi for xi in xs, yi in xs]
+            for k in (10, 12)
+                idx, w = D.axis_stencils(xs, 1, k)
+                a = zeros(n, n); b = zeros(n, n)
+                D.apply_stencil!(a, f, idx, w, 1)
+                D.apply_stencil!(b, f, idx, w, 1; backend = KernelAbstractions.CPU())
+                Test.@test a == b
+            end
+        end
+
+        # A table built from the grid carries the grid's period, and applying it is the same answer as
+        # letting the grid form build one per call — which is the point of having the entry point.
+        let n = 24
+            xs = collect(range(0.0, 1.0; length = n))
+            ys = collect(range(0.0, 2π * (1 - 1 / n); length = n))
+            mk = trues(n, n); mk[5, 6] = false
+            g = GD.StructuredGrid(cart, xs, ys, mk; periodic = (false, true), period = (0.0, 2π))
+            f = [sin(3xi) * cos(yi) for xi in xs, yi in ys]
+            for dim in 1:2
+                a = zeros(n, n); b = zeros(n, n)
+                D.apply_stencil!(a, f, g, dim; order = 1, nodes = 5, masked = NaN)
+                idx, w = D.axis_stencils(g, dim; order = 1, nodes = 5)
+                D.apply_stencil!(b, f, g, idx, w, dim; masked = NaN)
+                Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
+            end
+            # The periodic direction's table is genuinely the wrapped one.
+            Test.@test D.axis_stencils(g, 2; order = 1, nodes = 5)[1] !=
+                       D.axis_stencils(ys, 1, 5)[1]
+        end
+    end
+
     Test.@testset "apply_stencil! differentiates a field along one direction" begin
         D = FG.Discretization
         geo = FG.Geometry.CartesianGeometry()

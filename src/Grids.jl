@@ -1185,6 +1185,47 @@ function Discretization.apply_stencil!(
     )
 end
 
+"""
+    axis_stencils(grid, dim; order=1, nodes=order+1) -> (indices, weights)
+
+[`Discretization.axis_stencils`](@ref) for direction `dim` of `grid`, taking that direction's axis and
+wrap period from the grid.
+
+The table depends only on the grid, not on any field, so a caller differencing many fields along the
+same direction should build it once and hand it to the `(out, field, grid, indices, weights, dim)`
+form — the `(out, field, grid, dim)` form above rebuilds it on every call.
+"""
+function Discretization.axis_stencils(
+    grid::StructuredGrid{G,T,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
+) where {G,T,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    return Discretization.axis_stencils(
+        coordinates(grid, dim), order, nodes;
+        period = isperiodic(grid, dim) ? period(grid, dim) : nothing,
+    )
+end
+
+"""
+    apply_stencil!(out, field, grid, indices, weights, dim; active_only=true, masked=zero) -> out
+
+Apply a stencil table built by [`axis_stencils(grid, dim)`](@ref) — the mask still comes from `grid`,
+which is what the bare `(indices, weights)` form cannot do.
+
+This is the form to use in a loop over fields: the table is the same for all of them, and building it
+is the one part of the work that does not depend on the field.
+"""
+function Discretization.apply_stencil!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
+    indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
+    active_only::Bool = true, masked = zero(S), backend = nothing,
+) where {S,G,T,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
+    return Discretization.apply_stencil!(
+        out, field, indices, weights, dim; mask = msk, masked = masked, backend = backend,
+    )
+end
+
 # ---------------------------------------------------------------------------
 # Curvilinear Grid
 # ---------------------------------------------------------------------------

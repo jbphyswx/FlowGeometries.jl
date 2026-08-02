@@ -891,14 +891,276 @@ function apply_stencil!(
     mask === nothing || size(mask) == size(field) || throw(DimensionMismatch(
         "mask $(size(mask)) and field $(size(field)) must have the same size",
     ))
+    k = size(indices, 2)
+    if backend === nothing
+        # On the host the loop shape is ours to choose, and the index-parallel one is the wrong shape:
+        # see `_stencil_sweep_host!`. Both paths are the same arithmetic in the same order, so they
+        # agree bit for bit.
+        return _dispatch_dim(Int(dim), Val(N)) do vdim
+            _dispatch_nodes(k) do vk
+                _stencil_sweep_host!(out, field, indices, weights, mask, masked, vdim, vk, Val(N))
+            end
+        end
+    end
     sz = size(field)
     ci = CartesianIndices(sz)
-    k = size(indices, 2)
     Execution.run_indices(length(ci), backend) do lin
         _stencil_cell!(out, field, indices, weights, Int(dim), mask, masked, k,
                        Tuple(@inbounds ci[lin]), @inbounds ci[lin])
     end
     return out
+end
+
+# Two runtime values are wanted in the type: the differenced direction, so the loop nest can be split
+# around it, and the node count, so the innermost loop has a known trip count. Both are resolved ONCE
+# per sweep, here, rather than per cell — a `Val` built deeper costs more than it saves. Specialization
+# stays bounded: directions by `N`, node counts by the cap below, above which the runtime loop stands.
+@inline _dispatch_dim(f::F, dim::Int, ::Val{N}) where {F,N} = _dim_switch(f, dim, Val(N))
+# `dim` is validated into `1:N` by the caller, so walking down from `N` always lands.
+@inline _dim_switch(f::F, ::Int, ::Val{1}) where {F} = f(Val(1))
+@inline _dim_switch(f::F, dim::Int, ::Val{M}) where {F,M} =
+    dim == M ? f(Val(M)) : _dim_switch(f, dim, Val(M - 1))
+
+@inline function _dispatch_nodes(f::F, k::Int) where {F}
+    k == 2 && return f(Val(2))
+    k == 3 && return f(Val(3))
+    k == 4 && return f(Val(4))
+    k == 5 && return f(Val(5))
+    k == 6 && return f(Val(6))
+    k == 7 && return f(Val(7))
+    k == 9 && return f(Val(9))
+    return f(k)
+end
+
+"""
+    _stencil_sweep_host!(out, field, indices, weights, mask, masked, Val(dim), nodes, Val(N)) -> out
+
+The host sweep. The index-parallel form exists so one body serves a device launch; on the host it is
+the wrong shape, and three things it cannot express are worth ~6.6× together:
+
+- iterate the Cartesian range **directly**, rather than recovering an index per cell from a linear one;
+- **split the nest at `dim`**, so the stencil row — which depends only on the index along `dim` — is
+  hoisted out of the contiguous inner loop whenever the differenced direction is not the fastest
+  varying one;
+- carry the **node count in the type**, so the innermost loop has a known trip count, unrolls, and the
+  weights reach registers instead of being re-loaded per node.
+
+The arithmetic and its order are identical to `_stencil_cell!`, so the two paths agree bit for bit.
+"""
+function _stencil_sweep_host!(
+    out::AbstractArray{S,N}, field, indices, weights, mask, masked, ::Val{dim}, nodes, ::Val{N},
+) where {S,N,dim}
+    sz = size(field)
+    if _linear_layout(out, field, mask)
+        # Column-major and one-based, so the whole nest is address arithmetic: cells that differ only
+        # before `dim` are `1` apart, and a node is a fixed offset of `stride` per index step along
+        # `dim`. The innermost span is then contiguous and vectorizes.
+        stride = prod(ntuple(d -> sz[d], Val(dim - 1)))
+        npost = prod(ntuple(d -> sz[dim + d], Val(N - dim)))
+        outer = stride * sz[dim]
+        if dim == 1
+            # The differenced direction is itself the contiguous one, so there is no span to hoist a
+            # row out of — every cell has its own row, used once. Hoisting it into a tuple would be
+            # pure overhead; the loop over `j` is the contiguous one instead.
+            for p in 0:(npost - 1)
+                _stencil_first_linear!(out, field, indices, weights, mask, masked, p * outer,
+                                       sz[1], nodes)
+            end
+            return out
+        end
+        for p in 0:(npost - 1), j in 1:sz[dim]
+            _stencil_row_linear!(out, field, indices, weights, mask, masked, j, p * outer, stride,
+                                 nodes)
+        end
+        return out
+    end
+    pre = CartesianIndices(ntuple(d -> sz[d], Val(dim - 1)))
+    post = CartesianIndices(ntuple(d -> sz[dim + d], Val(N - dim)))
+    @inbounds for Ipost in post, j in 1:sz[dim]
+        _stencil_row!(out, field, indices, weights, mask, masked, j, Tuple(Ipost), pre, nodes,
+                      Val(dim), Val(N))
+    end
+    return out
+end
+
+# The address arithmetic above assumes linear indexing over one-based axes. Anything else — an offset
+# array, a view with a non-trivial stride — takes the Cartesian nest, which asks the array for its own
+# indexing and is correct for any of them.
+@inline _linear_layout(out, field, mask) =
+    IndexStyle(out) === IndexLinear() && IndexStyle(field) === IndexLinear() &&
+    (mask === nothing || IndexStyle(mask) === IndexLinear()) &&
+    !Base.has_offset_axes(out, field) && (mask === nothing || !Base.has_offset_axes(mask))
+
+# `dim == 1`: the slab is one contiguous run along the differenced direction, so the stencil row
+# changes every step and is read straight out of the table rather than hoisted.
+@inline function _stencil_first_linear!(
+    out::AbstractArray{S}, field, indices, weights, mask, masked, off::Int, n::Int, ::Val{k},
+) where {S,k}
+    @inbounds for j in 1:n
+        if mask !== nothing && !mask[off + j]
+            out[off + j] = masked
+            continue
+        end
+        acc = zero(S)
+        blocked = false
+        for q in 1:k
+            m = off + Int(indices[j, q])
+            if mask !== nothing && !mask[m]
+                blocked = true
+                break
+            end
+            acc += S(weights[j, q]) * S(field[m])
+        end
+        out[off + j] = blocked ? masked : acc
+    end
+    return nothing
+end
+
+@inline function _stencil_first_linear!(
+    out::AbstractArray{S}, field, indices, weights, mask, masked, off::Int, n::Int, k::Int,
+) where {S}
+    @inbounds for j in 1:n
+        if mask !== nothing && !mask[off + j]
+            out[off + j] = masked
+            continue
+        end
+        acc = zero(S)
+        blocked = false
+        for q in 1:k
+            m = off + Int(indices[j, q])
+            if mask !== nothing && !mask[m]
+                blocked = true
+                break
+            end
+            acc += S(weights[j, q]) * S(field[m])
+        end
+        out[off + j] = blocked ? masked : acc
+    end
+    return nothing
+end
+
+# One row, as offsets. `off` is the start of this slab, `stride` the distance between consecutive
+# indices along `dim`, so `base + t` walks the contiguous span and `js[q] + t` reads node `q` of it.
+@inline function _stencil_row_linear!(
+    out::AbstractArray{S}, field, indices, weights, mask, masked, j::Int, off::Int, stride::Int,
+    ::Val{k},
+) where {S,k}
+    @inbounds js = ntuple(q -> off + (Int(indices[j, q]) - 1) * stride, Val(k))
+    @inbounds ws = ntuple(q -> S(weights[j, q]), Val(k))
+    base = off + (j - 1) * stride
+    if mask === nothing
+        @inbounds for t in 1:stride
+            acc = zero(S)
+            for q in 1:k
+                acc += ws[q] * S(field[js[q] + t])
+            end
+            out[base + t] = acc
+        end
+    else
+        @inbounds for t in 1:stride
+            if !mask[base + t]
+                out[base + t] = masked
+                continue
+            end
+            acc = zero(S)
+            blocked = false
+            for q in 1:k
+                m = js[q] + t
+                if !mask[m]
+                    blocked = true
+                    break
+                end
+                acc += ws[q] * S(field[m])
+            end
+            out[base + t] = blocked ? masked : acc
+        end
+    end
+    return nothing
+end
+
+# Above the specialization cap the row cannot become a tuple, so it is read per cell.
+@inline function _stencil_row_linear!(
+    out::AbstractArray{S}, field, indices, weights, mask, masked, j::Int, off::Int, stride::Int,
+    k::Int,
+) where {S}
+    base = off + (j - 1) * stride
+    @inbounds for t in 1:stride
+        if mask !== nothing && !mask[base + t]
+            out[base + t] = masked
+            continue
+        end
+        acc = zero(S)
+        blocked = false
+        for q in 1:k
+            m = off + (Int(indices[j, q]) - 1) * stride + t
+            if mask !== nothing && !mask[m]
+                blocked = true
+                break
+            end
+            acc += S(weights[j, q]) * S(field[m])
+        end
+        out[base + t] = blocked ? masked : acc
+    end
+    return nothing
+end
+
+# One row: every cell whose index along `dim` is `j`. The stencil is the same for all of them, so it is
+# read once here rather than once per cell.
+@inline function _stencil_row!(
+    out::AbstractArray{S,N}, field, indices, weights, mask, masked, j::Int, Ipost::Tuple, pre,
+    ::Val{k}, ::Val{dim}, ::Val{N},
+) where {S,N,dim,k}
+    # The row, read once. With `k` in the type these are stack tuples, so the inner loop unrolls over
+    # registers instead of re-reading two matrix columns per cell.
+    @inbounds js = ntuple(q -> Int(indices[j, q]), Val(k))
+    @inbounds ws = ntuple(q -> S(weights[j, q]), Val(k))
+    @inbounds for Ipre in pre
+        I = (Tuple(Ipre)..., j, Ipost...)
+        if mask !== nothing && !mask[I...]
+            out[I...] = masked
+            continue
+        end
+        acc = zero(S)
+        blocked = false
+        for q in 1:k
+            J = ntuple(d -> d == dim ? js[q] : I[d], Val(N))
+            if mask !== nothing && !mask[J...]
+                blocked = true
+                break
+            end
+            acc += ws[q] * S(field[J...])
+        end
+        out[I...] = blocked ? masked : acc
+    end
+    return nothing
+end
+
+# Above the specialization cap the node count stays a runtime value: the row cannot become a tuple, so
+# it is read per cell as before. Correct, and the shape a very wide stencil would not benefit from
+# unrolling anyway.
+@inline function _stencil_row!(
+    out::AbstractArray{S,N}, field, indices, weights, mask, masked, j::Int, Ipost::Tuple, pre,
+    k::Int, ::Val{dim}, ::Val{N},
+) where {S,N,dim}
+    @inbounds for Ipre in pre
+        I = (Tuple(Ipre)..., j, Ipost...)
+        if mask !== nothing && !mask[I...]
+            out[I...] = masked
+            continue
+        end
+        acc = zero(S)
+        blocked = false
+        for q in 1:k
+            J = ntuple(d -> d == dim ? Int(indices[j, q]) : I[d], Val(N))
+            if mask !== nothing && !mask[J...]
+                blocked = true
+                break
+            end
+            acc += S(weights[j, q]) * S(field[J...])
+        end
+        out[I...] = blocked ? masked : acc
+    end
+    return nothing
 end
 
 # One output cell, written from its own inputs only, so the loop above is index-parallel and the same
