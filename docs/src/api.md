@@ -11,74 +11,16 @@ the submodule that defines it.
 using FlowGeometries: FlowGeometries as FG
 ```
 
-```@contents
-Pages = ["api.md"]
-Depth = 2
-```
-
-## Package
+One page per module — the reference is large enough that a single page is slow to load, and the split
+keeps each module's surface readable on its own. The index below spans all of them.
 
 ```@docs
 FlowGeometries
 ```
 
-## Axes
-
-```@autodocs
-Modules = [FlowGeometries.Axes]
-Order = [:type, :function]
-```
-
-## Geometry
-
-```@autodocs
-Modules = [FlowGeometries.Geometry]
-Order = [:type, :function]
-```
-
-## Spherical sampling
-
-```@autodocs
-Modules = [FlowGeometries.SphericalSampling]
-Order = [:type, :function]
-```
-
-## Stencils
-
-```@autodocs
-Modules = [FlowGeometries.Stencils]
-Order = [:type, :function]
-```
-
-## Discretization
-
-```@autodocs
-Modules = [FlowGeometries.Discretization]
-Order = [:type, :function]
-```
-
-## Grids
-
-```@autodocs
-Modules = [FlowGeometries.Grids]
-Order = [:type, :function]
-```
-
-## Connectivity
-
-```@autodocs
-Modules = [FlowGeometries.Connectivity]
-Order = [:type, :function]
-```
-
-## Execution
-
-```@autodocs
-Modules = [FlowGeometries.Execution]
-Order = [:type, :function]
-```
-
 ## Index
 
 ```@index
+Pages = ["api/axes.md", "api/geometry.md", "api/sampling.md", "api/stencils.md",
+         "api/discretization.md", "api/grids.md", "api/connectivity.md", "api/execution.md"]
 ```

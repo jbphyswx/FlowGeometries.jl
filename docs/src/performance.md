@@ -76,6 +76,25 @@ inference for every coordinate read:
 Every per-cell entry point is now allocation-free on every grid shape, and the suite checks that against
 a matrix of shapes — including mixed-axis ones, which is the case it did not previously have.
 
+### Which index
+
+Two are available. [`Grids.cell_list`](@ref) needs no package, and on a 65 536-cell curvilinear grid it
+builds faster, queries faster and allocates less than the k-d tree, so it is what the sweeps build by
+default:
+
+| | build | per query | bytes per query |
+|---|---|---|---|
+| cell list | **2.75 ms** | **1.08 µs** | **256** |
+| k-d tree (`NearestNeighbors`) | 8.95 ms | 1.25 µs | 672 |
+| no index (scan) | — | 646 µs | 0 |
+
+The cell list also enumerates through a fold rather than a returned list, so a query holds no buffer and
+runs inside a kernel; a tree cannot, because it searches replicated points and has to deduplicate.
+
+Its build is `O(n)`, but only once the dimension reaches the type: taking it from `size(pts, 1)` — a
+runtime value — left the construction loop dynamically dispatched at **196 ms and 34 MiB** for those
+65 536 points, against 2.75 ms and 3 MiB behind a function barrier.
+
 ### Indexing the architectures with no axes
 
 Curvilinear and node grids have no window to bound, so a query without an index tests every cell. With
@@ -99,7 +118,9 @@ and the whole-grid build, which is `n` of those queries:
 | 65 536 | 0.208 s | 41.519 s | **200×** |
 
 `O(n log n)` against `O(n²)`. The index returns a superset and the exact distance gate still decides
-membership, so both columns return byte-identical CSR — the index buys speed and changes nothing else.
+membership, so both columns give the same graph — the index buys speed and changes nothing else. Rows
+come out in whatever order enumerated them, as everywhere else here; `sort_neighbors!` if you need them
+ordered.
 
 Because the index cannot be built per query, [`Connectivity.foreach_within`](@ref) and
 [`Connectivity.mapreduce_within`](@ref) exist to build it once for a whole sweep: **800.7 ms → 88.8 ms**

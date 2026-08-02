@@ -51,6 +51,7 @@ function Adapt.adapt_structure(to, grid::Grids.CurvilinearGrid{T,G,N}) where {T,
     tp = Grids.topology(grid)
     return Grids.CurvilinearGrid{T,G,N,typeof(tp),typeof(coords),typeof(measure),typeof(mask)}(
         Grids.grid_geometry(grid), coords, corners, measure, mask, tp, getfield(grid, :period),
+        Grids.axis_stats(grid),
     )
 end
 
@@ -65,7 +66,7 @@ function Adapt.adapt_structure(to, grid::Grids.UnstructuredGrid{T,G,N}) where {T
         T,G,N,typeof(coords),typeof(measure),typeof(mask),typeof(tp),typeof(nbrs),typeof(ptr),
     }(
         Grids.grid_geometry(grid), coords, measure, mask, nbrs, ptr,
-        tp, getfield(grid, :period),
+        tp, getfield(grid, :period), Grids.axis_stats(grid),
     )
 end
 

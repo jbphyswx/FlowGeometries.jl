@@ -224,11 +224,24 @@ FG.Connectivity.nneighbors_within(g, 5, 7; ball = ball, topology = mt)
 So passing it changes nothing and omitting it costs nothing — the default is already free. There is no
 hoisting to remember here.
 
-The spatial index is different: it *is* worth hoisting, and it is not built by default, because a k-d
-tree inside a single query would cost more than the scan it replaces. Curvilinear and node grids have no
-separable axes for a window to bound, so without one a query tests every cell. With `NearestNeighbors`
-loaded, [`Connectivity.indexed`](@ref) puts a tree in the topology, turning each query into a range
-search:
+The spatial index is different: it *is* worth hoisting, and it is not built for a single query, because
+building one costs more than the one scan it would replace. Curvilinear and node grids have no separable
+axes for a window to bound, so without an index a query tests every cell.
+
+[`Grids.cell_list`](@ref) is the one to reach for, and it needs no package at all. It bins the cell
+centres at the radius you mean to query at, and a query visits the bins its ball can reach:
+
+```@example conn
+gc = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(8))
+top = FG.Connectivity.MetricTopology(gc; index = FG.Grids.cell_list(gc; ball = 2.0e6))
+FG.Connectivity.nneighbors_within(gc, 1; ball = 2.0e6, topology = top)
+```
+
+Every cell lands in exactly one bin — periodicity wraps the bin coordinate rather than replicating the
+point — so a query emits each cell once and needs no buffer to deduplicate into. That is what lets it
+run inside a kernel, and it is why the sweeps build one by default.
+
+[`Connectivity.indexed`](@ref) is the alternative, a k-d tree, and needs `NearestNeighbors`:
 
 ```@example conn
 using NearestNeighbors                                    # loads the extension
@@ -239,9 +252,14 @@ FG.Connectivity.nneighbors_within(gu, 1; ball = 2.0e6, topology = ixu, scratch =
 ```
 
 The index only ever returns a *superset* of the ball — the exact `distance ≤ r` gate still decides
-membership — so the indexed and scanning paths return the identical list, in the identical order, and
-loading the extension changes speed and nothing else. [`Connectivity.ball_scratch`](@ref) is the
-candidate buffer, one per task; without it each query allocates its own.
+membership — so an indexed query and a scan return the same cells, and loading the extension changes
+speed and nothing else.
+
+A neighbour list is a **set**: which order the cells come back in is whatever enumerated them, and no
+query sorts, since that would put an `O(m log m)` pass on top of an `O(m)` query for something nothing
+needs. [`Connectivity.sort_neighbors!`](@ref) is there when you do want it.
+[`Connectivity.ball_scratch`](@ref) is the candidate buffer, one per task; without it each query
+allocates its own.
 
 ### Sweeping every cell
 

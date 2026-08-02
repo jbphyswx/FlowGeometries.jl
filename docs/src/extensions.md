@@ -45,9 +45,9 @@ FG.Connectivity.neighbors_within(grid, i, j; ball = r, topology = top, scratch =
 ```
 
 The same embedding serves construction and queries, and the index only ever returns a superset of the
-ball — the exact distance gate still decides membership — so the result is identical to the scan's,
-element for element. On a spheroid that superset is genuine: the ECEF chord the tree searches is a lower
-bound on the Vincenty geodesic, so the query over-returns and the gate trims.
+ball — the exact distance gate still decides membership — so the result is the same set of cells the
+scan gives. On a spheroid that superset is genuine: the ECEF chord the tree searches is a lower bound on
+the Vincenty geodesic, so the query over-returns and the gate trims.
 
 ## Quickhull / DelaunayTriangulation — Voronoi areas
 
@@ -83,10 +83,22 @@ backend arrives from the caller and the kernel is compiled for it.
 The precondition is that a kernel cannot allocate, which is why the allocation gate over every per-cell
 entry point is what makes this possible at all rather than an aspiration.
 
-Two things stay on the host, for reasons rather than pending work. A ball query's spatial index is a
-k-d tree — a host structure — so `Adapt` refuses to move a topology carrying one instead of silently
-dropping it and leaving the device scanning every cell. And the connectivity builders that need a
-per-task candidate buffer keep the chunked form, since a device launch has nowhere to put one.
+Ball queries follow from the same rule. Without an index a query reads only coordinates and the mask and
+allocates nothing, so it runs inside a launch — including through `foreach_within`, which becomes one
+body per cell:
+
+```julia
+FG.Connectivity.foreach_within(grid; ball = r,
+                               topology = FG.Connectivity.MetricTopology(grid),
+                               backend = backend) do I, J, d
+    ...
+end
+```
+
+What stays on the host is the *indexed* form, for a reason rather than as pending work: the index is a
+k-d tree, a host structure, so `Adapt` refuses to move a topology carrying one instead of dropping it
+silently and leaving the device scanning every cell. That is no loss — the tree exists to spare a single
+thread an `O(n)` scan, and a device has a thread per cell instead.
 
 ## SparseArrays
 

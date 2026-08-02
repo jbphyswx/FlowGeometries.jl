@@ -46,6 +46,7 @@ q_nwithin(g, r, I)       = FG.Connectivity.nneighbors_within(g, I...; ball = r)
 q_within!(b, g, r, I)    = FG.Connectivity.neighbors_within!(b, g, I...; ball = r)
 q_fold(g, r, I)          = FG.Connectivity.fold_within((a, _, d) -> a + d, 0.0, g, I...; ball = r)
 q_knn!(ix, dt, g, k, I)  = FG.Connectivity.k_nearest!(ix, dt, g, I...; k = k)
+q_within_top(g, r, I, t) = FG.Connectivity.nneighbors_within(g, I...; ball = r, topology = t)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
 q_area(g, I)             = FG.Grids.area(g, I...)
@@ -127,6 +128,15 @@ function check_shape(label, g, I)
             end
         end
     end
+    # A cell-list query enumerates through a fold, so it holds no candidate buffer at all — the property
+    # the device path depends on.
+    let cl = FG.Connectivity.MetricTopology(g; index = FG.Grids.cell_list(g; ball = r))
+        a = _alloc(q_within_top, g, r, I, cl)
+        a == 0 || println("    ", label, " / cell-list query -> ", a, " B")
+        Test.@test a == 0
+        Test.@test q_within_top(g, r, I, cl) == q_nwithin(g, r, I)
+    end
+
     Test.@test (Test.@inferred q_coords(g, I)) isa NamedTuple
     Test.@test (Test.@inferred q_dist(g, I, J)) isa Float64
     Test.@test (Test.@inferred q_nwithin(g, r, I)) isa Int
@@ -4288,23 +4298,30 @@ Test.@testset "FlowGeometries.jl" begin
         for (g, seeds, r) in cases
             ix = C.indexed(g)
             s = C.ball_scratch()
+            cl = C.MetricTopology(g; index = GD.cell_list(g; ball = r))
             for I in seeds
-                scan = C.neighbors_within(g, I...; ball = r)
-                # Identical lists, not merely identical sets: the two paths must be interchangeable.
-                Test.@test C.neighbors_within(g, I...; ball = r, topology = ix) == scan
-                Test.@test C.neighbors_within(g, I...; ball = r, topology = ix, scratch = s) == scan
-                Test.@test C.nneighbors_within(g, I...; ball = r, topology = ix) == length(scan)
-                buf = Vector{Int}(undef, length(scan))
-                C.neighbors_within!(buf, g, I...; ball = r, topology = ix, scratch = s)
-                Test.@test buf == scan
-                # The fold visits the same cells with the same distances, in the same order.
-                visit(top; sc = nothing) = C.fold_within(
+                # The same SET of cells. Order is whatever enumerated them — a window, a tree and a cell
+                # list each walk their own way — and no entry point sorts.
+                scan = sort(C.neighbors_within(g, I...; ball = r))
+                for top in (ix, cl)
+                    Test.@test sort(C.neighbors_within(g, I...; ball = r, topology = top)) == scan
+                    Test.@test sort(C.neighbors_within(g, I...; ball = r, topology = top,
+                                                       scratch = s)) == scan
+                    Test.@test C.nneighbors_within(g, I...; ball = r, topology = top) == length(scan)
+                    buf = Vector{Int}(undef, length(scan))
+                    n = C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
+                    Test.@test sort(buf[1:n]) == scan
+                    Test.@test allunique(buf[1:n])          # no cell reported twice
+                end
+                # The fold visits the same cells with the same distances, whatever found them.
+                visit(top; sc = nothing) = sort!(C.fold_within(
                     Tuple{Int,Float64}[], g, I...; ball = r, topology = top, scratch = sc,
                 ) do acc, J, d
                     push!(acc, (C._linidx(size(GD.mask(g)), J...), d))
                     return acc
-                end
+                end)
                 Test.@test visit(ix; sc = s) == visit(C.MetricTopology(g))
+                Test.@test visit(cl; sc = s) == visit(C.MetricTopology(g))
             end
         end
 
@@ -4313,8 +4330,8 @@ Test.@testset "FlowGeometries.jl" begin
         ixu = C.indexed(gu)
         su = C.ball_scratch()
         for (idx, r) in ((1, 0.3R), (100, 0.3R), (192, 0.3R), (1, 3.1R))
-            scan = C.neighbors_within(gu, idx; ball = r)
-            Test.@test C.neighbors_within(gu, idx; ball = r, topology = ixu, scratch = su) == scan
+            scan = sort(C.neighbors_within(gu, idx; ball = r))
+            Test.@test sort(C.neighbors_within(gu, idx; ball = r, topology = ixu, scratch = su)) == scan
             Test.@test C.nneighbors_within(gu, idx; ball = r, topology = ixu) == length(scan)
         end
 
@@ -4470,10 +4487,14 @@ Test.@testset "FlowGeometries.jl" begin
                 Test.@test sort(collect(GD.neighbors(conn, C._linidx(size(idxs), I...)))) ==
                            sort(C.neighbors_within(grid, I...; ball = r))
             end
-            # Byte-identical whether an index was used, so a build is reproducible either way.
+            # The same graph whether an index was used. Row order follows whatever enumerated the
+            # candidates, so the rows are compared as the sets they are.
             scanned = C.build_connectivity_within(grid; ball = r, topology = C.MetricTopology(grid))
             Test.@test scanned.ptr == conn.ptr
-            Test.@test scanned.nbrs == conn.nbrs
+            for k in 1:(length(conn.ptr) - 1)
+                Test.@test sort(conn.nbrs[conn.ptr[k]:(conn.ptr[k + 1] - 1)]) ==
+                           sort(scanned.nbrs[scanned.ptr[k]:(scanned.ptr[k + 1] - 1)])
+            end
         end
     end
 
@@ -4620,6 +4641,38 @@ Test.@testset "FlowGeometries.jl" begin
         FG.Execution.run_indices(i -> (acc[i] = i * i), 100, cpu)
         Test.@test acc == [i * i for i in 1:100]
 
+        # A ball query is device-shaped once the topology carries no index: it reads coordinates and the
+        # mask, and allocates nothing, so it runs inside the launch.
+        gball = GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0))
+        function counts(g, r, backend)
+            sz = GD.size_tuple(g)
+            out = zeros(Int, sz)
+            mt = C.MetricTopology(g)
+            ci = CartesianIndices(sz)
+            FG.Execution.run_indices(length(ci), backend) do lin
+                I = Tuple(@inbounds ci[lin])
+                @inbounds out[lin] = C.nneighbors_within(g, I...; ball = r, topology = mt)
+            end
+            return out
+        end
+        Test.@test counts(gball, 3.0, cpu) == counts(gball, 3.0, nothing)
+        Test.@test counts(gball, 3.0, cpu) ==
+                   [C.nneighbors_within(gball, Tuple(ci)...; ball = 3.0)
+                    for ci in CartesianIndices(size(GD.mask(gball)))]
+        Test.@test isbits(C.MetricTopology(gball))
+
+        # The sweep follows the same rule: unindexed it is one body per cell, so it launches.
+        function sweep_counts(g, r, backend)
+            out = zeros(Int, GD.size_tuple(g))
+            C.foreach_within(g; ball = r, topology = C.MetricTopology(g), backend = backend) do I, J, d
+                @inbounds out[I[1], I[2]] += 1
+            end
+            return out
+        end
+        Test.@test sweep_counts(gball, 3.0, cpu) == sweep_counts(gball, 3.0, nothing)
+        Test.@test sum(sweep_counts(gball, 3.0, cpu)) ==
+                   C.mapreduce_within((I, J, d) -> 1, +, 0, gball; ball = 3.0)
+
         # A chunked body accumulates across its range, so a device backend refuses it rather than
         # quietly running on the host.
         Test.@test_throws ArgumentError FG.Execution.run_chunks(r -> nothing, 4, cpu)
@@ -4630,6 +4683,13 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test Adapt.adapt(Array, C.MetricTopology(gs)) === C.MetricTopology(gs)
         gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(2))
         Test.@test_throws ArgumentError Adapt.adapt(Array, C.indexed(gu))
+        Test.@test !isbits(C.indexed(gu))
+
+        # An indexed sweep does stay on the host: each task needs its own candidate buffer, which a
+        # launch has nowhere to put.
+        Test.@test_throws ArgumentError C.foreach_within(
+            (I, J, d) -> nothing, gu; ball = 2.0e6, topology = C.indexed(gu), backend = cpu,
+        )
     end
 
     Test.@testset "k nearest is exact under the geometry's own metric" begin
@@ -4759,6 +4819,20 @@ Test.@testset "FlowGeometries.jl" begin
             Test.@test a2 == 0
         end
 
+        # The radius conversion sits on the per-query path, and dispatches on the embedding type rather
+        # than branching on a stored tag, so it must be free.
+        for emb in (FG.Grids.CartesianEmbedding(), FG.Grids.ChordEmbedding(),
+                    FG.Grids.ArcEmbedding(6.371e6))
+            a = _alloc(FG.Grids.embedded_radius, emb, 1.0e6)
+            a == 0 || println("    embedded_radius(", typeof(emb), ") -> ", a, " B")
+            Test.@test a == 0
+            Test.@test (Test.@inferred FG.Grids.embedded_radius(emb, 1.0e6)) isa Float64
+        end
+        # An arc past the antipode saturates at the diameter instead of turning back down.
+        Test.@test FG.Grids.embedded_radius(FG.Grids.ArcEmbedding(2.0), 100.0) == 4.0
+        Test.@test FG.Grids.embedded_radius(FG.Grids.ArcEmbedding(2.0), 2.0 * π) == 4.0
+        Test.@test FG.Grids.embedded_radius(FG.Grids.CartesianEmbedding(), 3.0) == 3.0
+
         # Same answers, not merely the same speed.
         gm = FG.Grids.StructuredGrid(cart, rg, v)
         gh = FG.Grids.StructuredGrid(cart, v, v)
@@ -4817,6 +4891,91 @@ Test.@testset "FlowGeometries.jl" begin
         end
     end
 
+    Test.@testset "A wide ball on a wrapping domain reports each cell once" begin
+        # A tree searches replicated points, so one cell can come back through several images — but only
+        # when two of them fit inside the ball, which needs `2r` to reach the period. Below that the
+        # dedup is skipped as unnecessary, so this sweeps `r` across the threshold to exercise both sides.
+        C = FG.Connectivity
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        n, L = 12, 12.0
+        cx = [x for x in range(0.0, 11.0; length = n), _ in 1:n]
+        cy = [y for _ in 1:n, y in range(0.0, 11.0; length = n)]
+        g = GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n),
+                               periodic = (true, true), period = (L, L))
+        for r in (2.0, 5.9, 6.0, 8.0, 15.0)          # 2r crosses the period at r = 6
+            scan = sort(C.neighbors_within(g, 6, 6; ball = r))
+            for top in (C.indexed(g), C.MetricTopology(g; index = GD.cell_list(g; ball = r)))
+                got = C.neighbors_within(g, 6, 6; ball = r, topology = top)
+                Test.@test allunique(got)
+                Test.@test sort(got) == scan
+                Test.@test C.nneighbors_within(g, 6, 6; ball = r, topology = top) == length(scan)
+            end
+        end
+    end
+
+    Test.@testset "Per-query cost does not grow with the grid" begin
+        # The allocation gate cannot see this class: work that scans the grid but allocates nothing
+        # passes it and is still linear per query. Every defect of that kind found here — a rescanned
+        # minimum spacing, an `extrema` under a search radius — was allocation-free.
+        #
+        # Fixed work per query, growing grid, and the cost must stay flat. Bounds are loose because this
+        # is wall clock on a shared machine; a linear regression would blow through them by 16×.
+        C = FG.Connectivity
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+
+        function curv(n)
+            x = [t for t in range(0.0, 1.0 * (n - 1); length = n), _ in 1:n]
+            y = [t for _ in 1:n, t in range(0.0, 1.0 * (n - 1); length = n)]
+            return GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
+        end
+        stretched(n) = GD.StructuredGrid(cart, cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n))),
+                                         collect(0.0:3.0))
+
+        function percall(f, g, state)
+            f(g, state)
+            best = Inf
+            for _ in 1:3
+                t = @elapsed for _ in 1:200
+                    f(g, state)
+                end
+                best = min(best, t / 200)
+            end
+            return best
+        end
+
+        # `setup` is everything built once per grid — an index, a buffer — and is deliberately outside
+        # the timed call. Timing it too would measure construction, which is `O(n)` by right.
+        function ratio(build, setup, op, small, big)
+            gs, gb = build(small), build(big)
+            ss, sb = setup(gs), setup(gb)
+            return percall(op, gb, sb) / max(percall(op, gs, ss), eps())
+        end
+
+        indexed_setup(g) = (C.MetricTopology(g; index = GD.cell_list(g; ball = 2.5)),
+                            Vector{Int}(undef, 8), Vector{Float64}(undef, 8))
+        knn_op(g, s) = C.k_nearest!(s[2], s[3], g, 8, 8; k = 8, topology = s[1])
+        ball_op(g, s) = C.nneighbors_within(g, 8, 8; ball = 2.5, topology = s[1])
+        nothing_setup(_g) = nothing
+        top_op(g, _s) = C.MetricTopology(g)
+        span_op(g, _s) = (GD.extent(g, 1), GD.bounds(g, 2), GD.origin(g, 1))
+        for (name, setup, op) in (("k_nearest!", indexed_setup, knn_op),
+                                  ("indexed ball query", indexed_setup, ball_op),
+                                  ("MetricTopology", nothing_setup, top_op),
+                                  ("extent/bounds/origin", nothing_setup, span_op))
+            r = ratio(curv, setup, op, 24, 96)          # 16× the cells
+            r < 4 || println("    curvilinear ", name, " grew ", round(r; digits = 1), "× over 16× cells")
+            Test.@test r < 4
+        end
+
+        # The separable architecture, where the window bound is what must stay O(1) per direction.
+        win_op(g, _s) = C.nneighbors_within(g, 128, 2; ball = 3.0)
+        r = ratio(stretched, nothing_setup, win_op, 256, 4096)
+        r < 4 || println("    stretched-axis window grew ", round(r; digits = 1), "× over 16× samples")
+        Test.@test r < 4
+    end
+
     Test.@testset "Every public name is allocation-checked or has a stated reason not to be" begin
         public_of(m) = Set(s for s in (Symbol(b.var) for b in keys(Base.Docs.meta(m)))
                            if !startswith(String(s), "_"))
@@ -4827,7 +4986,7 @@ Test.@testset "FlowGeometries.jl" begin
             :MetricTopology, :minimum_spacing, :maximum_spacing, :axis_stats, :AxisStats,
             :area, :coords!, :axis, :spacing, :origin, :extent, :bounds, :isperiodic, :isuniform,
             :period, :size_tuple, :mask, :coordinate_names, :periodic_flags, :topology, :coordinates,
-            :apply_stencil!, :foreach_within, :mapreduce_within,
+            :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
@@ -4839,7 +4998,8 @@ Test.@testset "FlowGeometries.jl" begin
              :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :AbstractTopology, :Bounded, :Periodic,
              :AllActive, :SeparableMeasure, :PoleRotation, :AbstractImageConvention, :AbstractReach,
              :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
-             :StencilNeighbors],
+             :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
+             :ArcEmbedding, :CellListIndex],
             # bulk or one-off operations, not per-cell hot paths
             [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
              :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
@@ -4847,7 +5007,7 @@ Test.@testset "FlowGeometries.jl" begin
              :connected_components, :count_holes, :interior, :boundary_cells, :csr_connectivity,
              :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
              :rotate, :measure_array, :measure_factors,
-             :corners, :corner_coords, :neighbor_nbrs, :distance],
+             :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
         # allocating forms, whose whole job is to return a fresh array
         [:neighbors_within, :k_nearest],
         # grid constructors

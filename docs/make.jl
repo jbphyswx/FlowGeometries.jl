@@ -40,7 +40,19 @@ makedocs(;
         "Discretization" => "discretization.md",
         "Extensions" => "extensions.md",
         "Performance" => "performance.md",
-        "API Reference" => "api.md",
+        # One page per module: the full reference renders past 400 KiB on a single page, which is slow
+        # to load and hard to navigate. The index on the landing page still spans all of them.
+        "API Reference" => [
+            "Overview" => "api.md",
+            "Axes" => "api/axes.md",
+            "Geometry" => "api/geometry.md",
+            "Spherical sampling" => "api/sampling.md",
+            "Stencils" => "api/stencils.md",
+            "Discretization" => "api/discretization.md",
+            "Grids" => "api/grids.md",
+            "Connectivity" => "api/connectivity.md",
+            "Execution" => "api/execution.md",
+        ],
     ],
     # Every example in the docs is executed, and a docstring that names a signature the code does not
     # have is an error. Without this, documented examples drift from the code silently.

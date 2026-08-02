@@ -9,42 +9,9 @@ using FlowGeometries.Grids: Grids
 # exactly nearest-by-great-circle — which also makes longitude wrap for free, since λ and λ+2π embed
 # to the same point.
 
-"""
-    _shift_set(periodic, period)
-
-Offsets to replicate a point set by: `(0,)` in a non-wrapping direction, `(0, -L, +L)` in a wrapping
-one. Zero comes first so the originals occupy the first block of the replicated set.
-"""
-@inline _shift_set(p::Bool, L::T) where {T} = p ? (zero(T), -L, L) : (zero(T),)
-
-"""
-    _ghost_points(pts, periodic, period) -> (all_pts, nghost)
-
-Replicate the `D × N` point matrix once per combination of periodic image offsets, originals in the
-first `N` columns. A wrapping domain is searched by placing the images and running an ordinary
-Euclidean query over them: a node near one face then finds the nodes across the opposite face at
-their true wrapped separation.
-"""
-function _ghost_points(
-    pts::AbstractMatrix{T}, periodic::NTuple{D,Bool}, period::NTuple{D,T},
-) where {D,T}
-    shifts = ntuple(d -> _shift_set(periodic[d], period[d]), Val(D))
-    N = size(pts, 2)
-    ng = prod(map(length, shifts))
-    out = similar(pts, D, N * ng)
-    g = 0
-    # Column-major over the per-direction shift sets, so the all-zero combination comes first and the
-    # originals occupy columns `1:N`.
-    for ci in CartesianIndices(map(eachindex, shifts))
-        cols = (g * N + 1):((g + 1) * N)
-        for d in 1:D
-            δ = shifts[d][ci[d]]
-            @views out[d, cols] .= pts[d, :] .+ δ
-        end
-        g += 1
-    end
-    return out, ng
-end
+# Point replication and the per-geometry embedding live in `Grids`, so this extension and the in-package
+# index search the same space by construction rather than by two implementations agreeing.
+using FlowGeometries.Grids: _ghost_points
 
 """
     _accept_candidates!(nbrs, base, cands, i, N, kmax) -> Int
@@ -182,30 +149,23 @@ function Grids._build_kdtree_neighbors(
     λ, φ = coords[1], coords[2]
     n = length(λ)
     pts = similar(λ, T, 3, n)
-    if D == 2
-        @views pts[1, :] .= cos.(φ) .* cos.(λ)
-        @views pts[2, :] .= cos.(φ) .* sin.(λ)
-        @views pts[3, :] .= sin.(φ)
+    # At the reference radius, not the unit sphere, so this is the same space `Grids.embedded_points`
+    # produces and the one radius conversion below serves both. Scaling leaves the knn ordering alone.
+    R = T(Geometry.radius(geo))
+    emb = if D == 2
+        @views pts[1, :] .= R .* cos.(φ) .* cos.(λ)
+        @views pts[2, :] .= R .* cos.(φ) .* sin.(λ)
+        @views pts[3, :] .= R .* sin.(φ)
+        Grids.ArcEmbedding(R)
     else
         r = coords[3]
         @views pts[1, :] .= r .* cos.(φ) .* cos.(λ)
         @views pts[2, :] .= r .* cos.(φ) .* sin.(λ)
         @views pts[3, :] .= r .* sin.(φ)
+        Grids.ChordEmbedding()
     end
     radius === nothing && return _csr_from_knn(pts, k)
-    # In 2-D the embedding is the UNIT sphere, so a physical arc has to become a unit chord; in 3-D the
-    # embedding carries true lengths and the radius is already a chord.
-    #
-    # `2sin(σ/2)` is only monotone in `σ` up to `σ = π`, and turns back down after: past an antipodal
-    # radius it would shrink, reaching zero at a full circumference and excluding everything. An arc of
-    # `πR` or more already spans the sphere, so the chord saturates at the diameter.
-    rq = if D == 2
-        σ = T(radius) / Geometry.radius(geo)
-        σ ≥ T(π) ? T(2) : T(2) * sin(σ / T(2))
-    else
-        T(radius)
-    end
-    return _csr_from_radius(pts, rq)
+    return _csr_from_radius(pts, Grids.embedded_radius(emb, T(radius)))
 end
 
 # ---------------------------------------------------------------------------
@@ -220,80 +180,17 @@ end
 # which matters for the ellipsoid: the ECEF chord is ≤ the geodesic, so a chord query over-returns and the
 # caller's gate trims it.
 
-struct BallIndex{TR,T}
+# The embedding is a type parameter, so the radius conversion below resolves at compile time instead of
+# branching on a stored tag once per query.
+struct BallIndex{TR,T,E<:Grids.AbstractEmbedding}
     tree::TR
     pts::Matrix{T}   # the embedded points, reused as query vectors
     n::Int           # originals; a ghosted tree holds `n * ng` columns
-    embed::Symbol    # :cartesian, or :arc / :chord for what the embedded distance means
-    R::T             # sphere radius, for the arc→chord transform; zero where there is none
-end
-
-# One embedding routine for every architecture: cell centres come out of `Grids._raw_coords`, which every
-# grid type provides, so nothing here needs to know how coordinates are stored.
-function _grid_points(grid::Grids.AbstractGrid{G,T}) where {G,T}
-    msk = Grids.mask(grid)
-    n = length(msk)
-    lin = LinearIndices(size(msk))
-    first_pt = Grids._raw_coords(grid, Tuple(first(CartesianIndices(size(msk))))...)
-    D = length(first_pt)
-    raw = Matrix{T}(undef, D, n)
-    @inbounds for ci in CartesianIndices(size(msk))
-        p = Grids._raw_coords(grid, Tuple(ci)...)
-        for d in 1:D
-            raw[d, lin[ci]] = p[d]
-        end
-    end
-    return raw, D
-end
-
-function _grid_points(grid::Grids.UnstructuredGrid{T,G,N}) where {T,G,N}
-    n = length(Grids.mask(grid))
-    raw = Matrix{T}(undef, N, n)
-    @inbounds for k in 1:n
-        p = Grids._raw_coords(grid, k)
-        for d in 1:N
-            raw[d, k] = p[d]
-        end
-    end
-    return raw, N
-end
-
-function _embed(geo::Geometry.AbstractCartesianGeometry{T}, raw::Matrix{T}, grid) where {T}
-    D = size(raw, 1)
-    per = ntuple(d -> Grids.isperiodic(grid, d), D)
-    prd = ntuple(d -> T(Grids.period(grid, d)), D)
-    pts, ng = any(per) ? _ghost_points(raw, per, prd) : (raw, 1)
-    return pts, ng, :cartesian, zero(T)
-end
-
-# `spherical_to_cartesian` rather than the same formula written again here: at `(λ, φ, r)` the metric IS
-# the Euclidean chord of this embedding, so sharing the transform is what makes the bound below exact
-# rather than merely close. Longitude needs no ghost images either way — `λ` and `λ+2π` embed to the same
-# point.
-function _embed(geo::Geometry.AbstractSphericalGeometry{T}, raw::Matrix{T}, _grid) where {T}
-    D = size(raw, 1)
-    n = size(raw, 2)
-    pts = Matrix{T}(undef, 3, n)
-    @inbounds for k in 1:n
-        c = Geometry.spherical_to_cartesian(geo, ntuple(d -> raw[d, k], D))
-        pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
-    end
-    # At two coordinates the embedding sits on the reference sphere and the metric is the ARC, so a
-    # radius has to be converted; at three it is the chord already, and passes through.
-    return pts, 1, D ≥ 3 ? :chord : :arc, T(Geometry.radius(geo))
-end
-
-# The ECEF chord is a lower bound on the geodesic, so a chord query over-returns — which is exactly what
-# an index is allowed to do, the caller's Vincenty gate deciding membership.
-function _embed(geo::Geometry.AbstractEllipsoidalGeometry{T}, raw::Matrix{T}, _grid) where {T}
-    n = size(raw, 2)
-    D = size(raw, 1)
-    pts = Matrix{T}(undef, 3, n)
-    @inbounds for k in 1:n
-        c = Geometry.geodetic_to_cartesian(geo, ntuple(d -> raw[d, k], D))
-        pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
-    end
-    return pts, 1, :chord, zero(T)
+    embedding::E
+    # Shortest nonzero period among the replicated directions, `Inf` where nothing is replicated. Two
+    # images of one cell are a whole lattice vector apart, so both can be within `r` of a query only if
+    # `2r` reaches this — below it a query cannot return a duplicate and needs no dedup at all.
+    min_period::T
 end
 
 const _IndexableGrid = Union{Grids.StructuredGrid,Grids.CurvilinearGrid,Grids.UnstructuredGrid}
@@ -302,23 +199,16 @@ Grids.has_spatial_index(::_IndexableGrid) = true
 
 # Dispatched on the concrete architectures, so this ADDS a method rather than overwriting the
 # `AbstractGrid` fallback in `Grids` — overwriting is an error during precompilation.
-function Grids.spatial_index(
-    grid::_IndexableGrid,
-)
-    raw, _D = _grid_points(grid)
-    geo = Grids.grid_geometry(grid)
-    pts, ng, embed, R = _embed(geo, raw, grid)
-    n = size(pts, 2) ÷ ng
-    return BallIndex(NearestNeighbors.KDTree(pts), pts, n, embed, R)
+function Grids.spatial_index(grid::_IndexableGrid)
+    pts, ng, embedding = Grids.embedded_points(grid)
+    T = eltype(pts)
+    D = length(Grids.coordinates(grid))
+    minper = ng == 1 ? T(Inf) :
+        minimum(T(Grids.isperiodic(grid, d) ? Grids.period(grid, d) : Inf) for d in 1:D)
+    return BallIndex(NearestNeighbors.KDTree(pts), pts, size(pts, 2) ÷ ng, embedding, minper)
 end
 
-# A physical radius as a radius in the embedding. `2sin(σ/2)` is monotone only to `σ = π`, so an arc of an
-# antipodal distance or more saturates at the diameter instead of turning back down.
-@inline function _query_radius(ix::BallIndex{TR,T}, r::Real) where {TR,T}
-    ix.embed === :arc || return T(r)
-    σ = T(r) / ix.R
-    return σ ≥ T(π) ? T(2) * ix.R : T(2) * ix.R * sin(σ / T(2))
-end
+@inline _query_radius(ix::BallIndex, r::Real) = Grids.embedded_radius(ix.embedding, r)
 
 function Grids.index_within!(buf::AbstractVector{<:Integer}, ix::BallIndex, grid, I, r)
     lin = I isa Integer ? Int(I) : LinearIndices(size(Grids.mask(grid)))[CartesianIndex(I)]
@@ -326,18 +216,17 @@ function Grids.index_within!(buf::AbstractVector{<:Integer}, ix::BallIndex, grid
     # `inrange!` pushes into a caller-owned buffer; the batch `inrange` allocates a fresh vector per
     # query, which dominates the cost of a small ball.
     NearestNeighbors.inrange!(buf, ix.tree, view(ix.pts, :, lin), _query_radius(ix, r), false)
-    # Ghost images collapse back onto their originals. The caller's distance gate and its own
-    # minimum-image reduction decide membership, so a duplicate is harmless — but it would make the
-    # fold visit one cell twice, which a counting or summing `f` would get wrong.
-    if ix.n != size(ix.pts, 2)
-        @inbounds for t in eachindex(buf)
-            buf[t] = mod1(buf[t], ix.n)
-        end
+    ix.n == size(ix.pts, 2) && return buf     # nothing replicated: no image can repeat a cell
+    # Images collapse back onto their originals.
+    @inbounds for t in eachindex(buf)
+        buf[t] = mod1(buf[t], ix.n)
     end
-    # Ascending, so an indexed query returns exactly what the unindexed scan returns — same list, same
-    # fold order, same CSR bytes — and loading this extension changes speed and nothing else. It also
-    # makes the dedup above a linear pass instead of `unique!`'s hash set. `QuickSort` because the
-    # default stable algorithm allocates a scratch buffer, which is the cost this path exists to avoid.
+    # Two images of one cell are a whole lattice vector apart, so a query narrower than half the shortest
+    # period cannot have found both, and there is nothing to remove. Skipping the sort matters: it is
+    # `O(m log m)` on an `O(m)` query, and the wide radius that needs it is the rare case.
+    2 * r < ix.min_period && return buf
+    # Sorted only so the dedup below is a linear pass rather than `unique!`'s hash set. `QuickSort`
+    # because the default algorithm allocates a scratch buffer, which this path exists to avoid.
     sort!(buf; alg = Base.Sort.QuickSort)
     return _dedup_sorted!(buf)
 end

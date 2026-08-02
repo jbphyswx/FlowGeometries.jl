@@ -485,6 +485,30 @@ indexed(grid::Grids.AbstractGrid) = MetricTopology(grid; index = Grids.spatial_i
     scratch === nothing ? Grids.index_within(index, grid, I, r) :
                           Grids.index_within!(scratch, index, grid, I, r)
 
+# Threading the accumulator over the candidates rather than over a list of them. An index that can
+# enumerate without materializing says so by defining `Grids.fold_candidates`, and then the whole
+# traversal holds no buffer — which is what makes it runnable inside a kernel.
+@inline _fold_candidates(f::F, acc, mt::MetricTopology, grid, I, r, scratch) where {F} =
+    _fold_over_index(f, acc, mt.index, grid, I, r, scratch)
+
+@inline function _fold_over_index(f::F, acc, ::Nothing, grid, _I, _r, _scratch) where {F}
+    @inbounds for k in Base.OneTo(length(Grids.mask(grid)))
+        acc = f(acc, k)
+    end
+    return acc
+end
+
+@inline _fold_over_index(f::F, acc, ix::Grids.CellListIndex, grid, I, r, _scratch) where {F} =
+    Grids.fold_candidates(f, acc, ix, grid, I, r)
+
+# Anything else hands back a list, which then has to exist somewhere.
+@inline function _fold_over_index(f::F, acc, index, grid, I, r, scratch) where {F}
+    @inbounds for k in _index_candidates(index, grid, I, r, scratch)
+        acc = f(acc, k)
+    end
+    return acc
+end
+
 """
     ball_scratch() -> Vector{Int}
 
@@ -961,6 +985,11 @@ end
     return nothing
 end
 
+# A neighbour list is a SET of cells. Which order they come out in is whatever enumerated them — a window
+# walks index order, a tree walks tree order, a cell list walks bin order — and no entry point sorts,
+# because that would put an `O(m log m)` pass on top of an `O(m)` query for a property nothing needs.
+# `sort_neighbors!` is there for callers who do want it.
+
 @inline function _fold_within(
     f::F, init, grid::Grids.CurvilinearGrid{T,G,N}, I::NTuple{N,Int}, ball,
     active_only::Bool, self::Bool, mt::MetricTopology, scratch = nothing,
@@ -977,16 +1006,16 @@ end
     msk = Grids.mask(grid)
     acc = init
     self && (acc = f(acc, I, zero(eltype(p0))))
-    for lin in _candidates(mt, grid, I, r, scratch)
-        J = Tuple(@inbounds CartesianIndices(sz)[lin])
-        J == I && continue
-        @inbounds active_only && !msk[J...] && continue
+    ci = CartesianIndices(sz)
+    return _fold_candidates(acc, mt, grid, I, r, scratch) do a, lin
+        J = Tuple(@inbounds ci[lin])
+        J == I && return a
+        @inbounds active_only && !msk[J...] && return a
         q = _min_image(p0, Grids._raw_coords(grid, J...), prd)
         dist = Geometry.distance(geo, p0, q)
-        dist ≤ r || continue
-        acc = f(acc, J, dist)
+        dist ≤ r || return a
+        return f(a, J, dist)
     end
-    return acc
 end
 
 fold_within(
@@ -1036,15 +1065,14 @@ end
     prd = map(x -> oftype(first(p0), x), _wrap_lengths(grid, Val(N)))
     acc = init
     self && (acc = f(acc, idx, zero(eltype(p0))))
-    for k in _candidates(mt, grid, idx, r, scratch)
-        k == idx && continue
-        @inbounds active_only && !msk[k] && continue
+    return _fold_candidates(acc, mt, grid, idx, r, scratch) do a, k
+        k == idx && return a
+        @inbounds active_only && !msk[k] && return a
         q = _min_image(p0, Grids._raw_coords(grid, k), prd)
         dist = Geometry.distance(geo, p0, q)
-        dist ≤ r || continue
-        acc = f(acc, k, dist)
+        dist ≤ r || return a
+        return f(a, k, dist)
     end
-    return acc
 end
 
 fold_within(
@@ -1511,7 +1539,7 @@ answer as the serial default rather than one that depends on scheduling.
 function mapreduce_within(
     f::F, op::O, init, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
-    self::Bool = false, topology = default_sweep_topology(grid),
+    self::Bool = false, topology = default_sweep_topology(grid, ball),
     reach::AbstractReach = Unrestricted(), backend = nothing,
 ) where {F,O}
     _check_sweep_images(grid, images)
@@ -1543,11 +1571,35 @@ determined by `I` — the same contract the connectivity builders keep.
 function foreach_within(
     f::F, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
-    self::Bool = false, topology = default_sweep_topology(grid),
+    self::Bool = false, topology = default_sweep_topology(grid, ball),
     reach::AbstractReach = Unrestricted(), backend = nothing,
 ) where {F}
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
+    _sweep_cells_with(f, grid, cells, ball, images, active_only, self, topology, reach, backend)
+    return nothing
+end
+
+# Without an index there is no candidate buffer to own, so the sweep is one body per cell and runs
+# wherever `run_indices` runs — a device included. With one, each task needs its own buffer, which only
+# the chunked form can give it.
+function _sweep_cells_with(
+    f::F, grid, cells, ball, images, active_only, self,
+    topology::MetricTopology{N,T,Nothing}, reach, backend,
+) where {F,N,T}
+    Execution.run_indices(length(cells), backend) do t
+        I = _sweep_index(grid, @inbounds cells[t])
+        _cell_fold(nothing, grid, I, ball, images, active_only, self, topology, nothing, reach) do _, J, d
+            f(I, J, d)
+            return nothing
+        end
+    end
+    return nothing
+end
+
+function _sweep_cells_with(
+    f::F, grid, cells, ball, images, active_only, self, topology::MetricTopology, reach, backend,
+) where {F}
     Execution.run_chunks(length(cells), backend) do rng
         s = ball_scratch()
         @inbounds for t in rng
@@ -1714,12 +1766,17 @@ end
 #
 # `default_sweep_topology` is not a silent fallback: with no extension loaded there is no index to
 # have, and the unindexed topology computes the same rows.
-default_sweep_topology(grid::Grids.AbstractGrid) =
-    Grids.has_spatial_index(grid) ? indexed(grid) : MetricTopology(grid)
+default_sweep_topology(grid::Grids.StructuredGrid, _ball) = MetricTopology(grid)
+
+# A cell list, not a tree: it needs no package, it builds and queries faster here (2.75 ms and 1.08 µs
+# at 65k cells, against 8.95 ms and 1.25 µs), and it enumerates through a fold, so the sweep holds no
+# candidate buffer. `indexed(grid)` is still there for the tree.
+default_sweep_topology(grid::Grids.AbstractGrid, ball) =
+    MetricTopology(grid; index = Grids.cell_list(grid; ball = _ball_radius(ball)))
 
 function build_connectivity_within(
     grid::Grids.CurvilinearGrid; ball, active_only::Bool = true, backend = nothing,
-    topology = default_sweep_topology(grid),
+    topology = default_sweep_topology(grid, ball),
 )
     sz = Grids.size_tuple(grid)
     n = prod(sz)
@@ -1751,7 +1808,7 @@ end
 
 function build_connectivity_within(
     grid::Grids.UnstructuredGrid; ball, active_only::Bool = true, backend = nothing,
-    topology = default_sweep_topology(grid),
+    topology = default_sweep_topology(grid, ball),
 )
     n = length(Grids.mask(grid))
     deg = zeros(Int, n)

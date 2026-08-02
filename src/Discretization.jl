@@ -353,7 +353,8 @@ function fd_weights(
     1 ≤ i ≤ n || throw(BoundsError(x, i))
     i0 = clamp(Int(i) - (k - 1) ÷ 2, 1, n - k + 1)
     idx = i0:(i0 + k - 1)
-    return (idx, fd_weights(collect(@view x[idx]), @inbounds(x[i]), order))
+    # A view, not a copy: `fd_weights` only reads its nodes, and this runs once per sample of the axis.
+    return (idx, fd_weights(@view(x[idx]), @inbounds(x[i]), order))
 end
 
 # ---------------------------------------------------------------------------

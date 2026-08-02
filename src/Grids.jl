@@ -550,6 +550,14 @@ end
     return AxisStats{T}(T(lo), T(hi), stp, T(@inbounds first(x)), T(mn), T(mx), uni)
 end
 
+# A coordinate FIELD has no axis, so no gap and no spacing — but its span is still an invariant, and one
+# that a search radius has to be bounded against. Reduced once, like the rest.
+function _axis_stats(x::AbstractArray{T}) where {T<:AbstractFloat}
+    isempty(x) && return AxisStats{T}(T(Inf), zero(T), T(NaN), T(NaN), T(Inf), T(-Inf), false)
+    mn, mx = extrema(x)
+    return AxisStats{T}(T(Inf), zero(T), T(NaN), T(@inbounds first(x)), T(mn), T(mx), false)
+end
+
 """
     StructuredGrid{G, T, N, TP, C, AT, BT}
 
@@ -602,13 +610,6 @@ direction index stays type-stable.
 @inline minimum_spacing(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).min_gap
 @inline maximum_spacing(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).max_gap
 @inline isuniform(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).uniform
-@inline origin(grid::StructuredGrid, d::Integer) = axis_stats(grid, d).first_value
-@inline bounds(grid::StructuredGrid, d::Integer) =
-    (st = axis_stats(grid, d); (st.min_value, st.max_value))
-@inline function extent(grid::StructuredGrid, d::Integer)
-    st = axis_stats(grid, d)
-    return st.max_value - st.min_value
-end
 
 @inline function spacing(grid::StructuredGrid, d::Integer)
     st = axis_stats(grid, d)
@@ -1304,6 +1305,7 @@ struct CurvilinearGrid{
     mask::B                   # active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
+    stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined without axes
 end
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
@@ -1584,6 +1586,7 @@ function _curvilinear_grid(
     prd = _curvilinear_periods(geometry, centers, tp, period)
     return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(meas), typeof(mask)}(
         geometry, centers, kc, meas, mask, tp, prd,
+        ntuple(d -> _axis_stats(centers[d]), Val(N)),
     )
 end
 
@@ -1622,6 +1625,7 @@ function _reframe(
     return CurvilinearGrid{T, G, 2, typeof(tp), typeof(centers), Matrix{T}, typeof(msk)}(
         grid_geometry(grid), centers, corners, measure_array(grid), msk, tp,
         (period(grid, 1), period(grid, 2)),
+        ntuple(d -> _axis_stats(centers[d]), Val(2)),
     )
 end
 
@@ -1673,6 +1677,7 @@ struct UnstructuredGrid{
     neighbor_ptr::VP   # CSR offsets, length Nnodes+1
     topology::TP       # per-direction closure of the enclosing domain (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
+    stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined for scattered nodes
 end
 
 @inline topology(grid::UnstructuredGrid) = getfield(grid, :topology)
@@ -1716,7 +1721,7 @@ function UnstructuredGrid(
     m = _to_axis(T, measure)
     return UnstructuredGrid{
         T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p),
-    }(geometry, c, m, mask, nb, p, per, prd)
+    }(geometry, c, m, mask, nb, p, per, prd, ntuple(d -> _axis_stats(c[d]), Val(N)))
 end
 
 # Two-direction convenience forms. Node coordinates are all `AbstractVector`s, so — unlike a
@@ -1802,12 +1807,377 @@ function _build_kdtree_neighbors(
     ))
 end
 
+# Every architecture caches its per-direction reductions, so the span accessors are reads rather than
+# `extrema` over the coordinates. They sit under the search-radius bound a query evaluates, which is why
+# it matters that they are `O(1)` and not merely correct.
+const _StatGrid = Union{StructuredGrid,CurvilinearGrid,UnstructuredGrid}
+
+@inline axis_stats(grid::Union{CurvilinearGrid,UnstructuredGrid}) = getfield(grid, :stats)
+@inline axis_stats(grid::Union{CurvilinearGrid,UnstructuredGrid}, d::Integer) =
+    @inbounds axis_stats(grid)[d]
+
+@inline bounds(grid::_StatGrid, d::Integer) =
+    (st = axis_stats(grid, d); (st.min_value, st.max_value))
+@inline function extent(grid::_StatGrid, d::Integer)
+    st = axis_stats(grid, d)
+    return st.max_value - st.min_value
+end
+@inline origin(grid::_StatGrid, d::Integer) = axis_stats(grid, d).first_value
+
+# ---------------------------------------------------------------------------
+# The Euclidean space a spatial index searches in
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractEmbedding
+
+How a grid's cell centres sit in the Euclidean space an index searches, and therefore what a physical
+radius means there. A **type**, for the reason stencils are: the conversion is applied once per query,
+so a runtime tag would leave it unresolved and put a branch — and a boxed radius — in the hot path.
+
+[`CartesianEmbedding`](@ref), [`ChordEmbedding`](@ref), [`ArcEmbedding`](@ref).
+"""
+abstract type AbstractEmbedding end
+
+"""
+    CartesianEmbedding()
+
+The coordinates themselves, replicated at the periodic images. A radius passes through unchanged.
+"""
+struct CartesianEmbedding <: AbstractEmbedding end
+
+"""
+    ChordEmbedding()
+
+The embedded distance already is the metric, or a lower bound on it: `(λ, φ, r)` on a sphere, where the
+metric is the 3-D chord, and geodetic coordinates on a spheroid, where the ECEF chord is at most the
+geodesic. A radius passes through unchanged; under-approximating means the query over-returns, which is
+what an index is allowed to do.
+"""
+struct ChordEmbedding <: AbstractEmbedding end
+
+"""
+    ArcEmbedding(R)
+
+Points on the reference sphere of radius `R`, where the metric is the great-circle arc. A radius has to
+be converted to the chord it subtends.
+"""
+struct ArcEmbedding{T<:AbstractFloat} <: AbstractEmbedding
+    radius::T
+end
+
+"""
+    embedded_radius(embedding, r) -> T
+
+A physical radius as a radius in the embedding.
+"""
+@inline embedded_radius(::CartesianEmbedding, r::T) where {T} = r
+@inline embedded_radius(::ChordEmbedding, r::T) where {T} = r
+
+# `2R·sin(σ/2)` is monotone only to `σ = π`, so an arc of an antipodal distance or more saturates at the
+# diameter rather than turning back down.
+@inline function embedded_radius(e::ArcEmbedding{T}, r::Real) where {T}
+    σ = T(r) / e.radius
+    return σ ≥ T(π) ? T(2) * e.radius : T(2) * e.radius * sin(σ / T(2))
+end
+
+"""
+    _shift_set(periodic, period)
+
+Offsets to replicate a point set by: `(0,)` in a non-wrapping direction, `(0, -L, +L)` in a wrapping
+one. Zero first, so the originals occupy the first block of the replicated set.
+"""
+@inline _shift_set(p::Bool, L::T) where {T} = p ? (zero(T), -L, L) : (zero(T),)
+
+"""
+    _ghost_points(pts, periodic, period) -> (all_pts, nghost)
+
+Replicate the `D × N` point matrix once per combination of periodic image offsets, originals in the
+first `N` columns. A wrapping domain is then searched by an ordinary Euclidean query over the images.
+"""
+function _ghost_points(
+    pts::AbstractMatrix{T}, periodic::NTuple{D,Bool}, period::NTuple{D,T},
+) where {D,T}
+    shifts = ntuple(d -> _shift_set(periodic[d], period[d]), Val(D))
+    N = size(pts, 2)
+    ng = prod(map(length, shifts))
+    out = similar(pts, D, N * ng)
+    g = 0
+    for ci in CartesianIndices(map(eachindex, shifts))
+        cols = (g * N + 1):((g + 1) * N)
+        for d in 1:D
+            δ = shifts[d][ci[d]]
+            @views out[d, cols] .= pts[d, :] .+ δ
+        end
+        g += 1
+    end
+    return out, ng
+end
+
+"""
+    _grid_points(grid) -> (raw, D)
+
+Cell centres as a `D × n` matrix, in the grid's own coordinates.
+"""
+function _grid_points(grid::AbstractGrid{G,T}) where {G,T}
+    msk = mask(grid)
+    lin = LinearIndices(size(msk))
+    D = length(_raw_coords(grid, Tuple(first(CartesianIndices(size(msk))))...))
+    raw = Matrix{T}(undef, D, length(msk))
+    @inbounds for ci in CartesianIndices(size(msk))
+        p = _raw_coords(grid, Tuple(ci)...)
+        for d in 1:D
+            raw[d, lin[ci]] = p[d]
+        end
+    end
+    return raw, D
+end
+
+function _grid_points(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
+    n = length(mask(grid))
+    raw = Matrix{T}(undef, N, n)
+    @inbounds for k in 1:n
+        p = _raw_coords(grid, k)
+        for d in 1:N
+            raw[d, k] = p[d]
+        end
+    end
+    return raw, N
+end
+
+"""
+    embedded_points(grid) -> (pts, nghost, embedding)
+
+The cell centres in the space an index searches, the number of periodic replications they carry, and
+the [`AbstractEmbedding`](@ref) saying what a radius means there.
+
+One definition, so every index searches the same space as every other and as the k-d-tree construction
+path — the guarantee that an indexed query and a scan return the same cells rests on it.
+"""
+function embedded_points end
+
+function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractCartesianGeometry,T}
+    raw, D = _grid_points(grid)
+    per = ntuple(d -> isperiodic(grid, d), D)
+    prd = ntuple(d -> T(period(grid, d)), D)
+    pts, ng = any(per) ? _ghost_points(raw, per, prd) : (raw, 1)
+    return pts, ng, CartesianEmbedding()
+end
+
+# `spherical_to_cartesian` rather than the formula written again: at `(λ, φ, r)` the metric IS the
+# Euclidean chord of this embedding. Longitude needs no ghost images — `λ` and `λ+2π` embed together.
+function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
+    geo = grid_geometry(grid)
+    raw, D = _grid_points(grid)
+    pts = Matrix{T}(undef, 3, size(raw, 2))
+    @inbounds for k in axes(raw, 2)
+        c = Geometry.spherical_to_cartesian(geo, ntuple(d -> raw[d, k], D))
+        pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
+    end
+    return pts, 1, D ≥ 3 ? ChordEmbedding() : ArcEmbedding(T(Geometry.radius(geo)))
+end
+
+function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
+    geo = grid_geometry(grid)
+    raw, D = _grid_points(grid)
+    pts = Matrix{T}(undef, 3, size(raw, 2))
+    @inbounds for k in axes(raw, 2)
+        c = Geometry.geodetic_to_cartesian(geo, ntuple(d -> raw[d, k], D))
+        pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
+    end
+    return pts, 1, ChordEmbedding()
+end
+
+# ---------------------------------------------------------------------------
+# Cell-list index
+# ---------------------------------------------------------------------------
+
+"""
+    CellListIndex
+
+A uniform-bin spatial index over the embedded cell centres: points are bucketed by which bin of side `h`
+they fall in, and a query visits the bins its ball can reach.
+
+Three properties distinguish it from a tree, and all three are why it is the one that runs on a device:
+
+  * it is **arrays only** — bin offsets and point ids — so `Adapt` moves it like any other field;
+  * every point lands in **exactly one** bin, because periodicity wraps the bin coordinate rather than
+    replicating the point, so a query emits each cell once and needs no candidate buffer to deduplicate
+    into. That is what lets [`fold_candidates`](@ref) be a fold rather than a list;
+  * bins are hashed into `O(n)` buckets, so the memory does not depend on `h`. A sphere binned at
+    100 km would otherwise need `(2R/h)³ ≈ 2×10⁶` mostly empty cells, and far more as `h` shrinks.
+
+Build it for the radius you intend to query at: `h` is that radius, so a query touches `3ᴰ` bins. A much
+larger radius still works and costs `(2⌈r/h⌉+1)ᴰ` bins.
+"""
+struct CellListIndex{D,T<:AbstractFloat,E<:AbstractEmbedding,MT<:AbstractMatrix{T},VI<:AbstractVector{Int}}
+    pts::MT                 # D × n embedded centres, one entry per cell, never replicated
+    lo::NTuple{D,T}         # bin-lattice origin
+    h::NTuple{D,T}          # bin width per direction
+    nbins::NTuple{D,Int}    # per-direction bin count where the direction wraps; 0 otherwise
+    wrap::NTuple{D,Bool}
+    starts::VI              # nbucket + 1, CSR over buckets
+    items::VI               # point ids, grouped by bucket
+    embedding::E
+end
+
+@inline _nbuckets(ix::CellListIndex) = length(ix.starts) - 1
+
+# Bin coordinate of a point, wrapped where the direction does. A wrapping direction's width divides the
+# period exactly, so `mod` lands on a real lattice rather than aliasing a partial bin onto bin zero.
+@inline function _bin_of(ix::CellListIndex{D,T}, x::NTuple{D,T}) where {D,T}
+    return ntuple(Val(D)) do d
+        @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - ix.lo[d]) / ix.h[d]))
+        @inbounds ix.wrap[d] ? mod(b, ix.nbins[d]) : b
+    end
+end
+
+# A cheap integer mix. Only the bucket assignment depends on it: a collision costs a few extra items to
+# skip, never a wrong answer, because the bin coordinate is compared before a point is emitted.
+@inline function _bin_hash(b::NTuple{D,Int}, nbucket::Int) where {D}
+    h = UInt(0x9e3779b97f4a7c15)
+    @inbounds for d in 1:D
+        h = (h ⊻ (reinterpret(UInt, b[d] * 0x27220a95) + 0x165667b19e3779f9 + (h << 6) + (h >> 2)))
+    end
+    return Int(h % UInt(nbucket)) + 1
+end
+
+@inline function _bin_at(ix::CellListIndex{D,T}, k::Integer) where {D,T}
+    return _bin_of(ix, ntuple(d -> @inbounds(ix.pts[d, k]), Val(D)))
+end
+
+"""
+    cell_list(grid; ball) -> CellListIndex
+
+Build a [`CellListIndex`](@ref) over `grid`'s cell centres, binned at side `ball` — the radius you mean
+to query at. Needs no external package.
+"""
+function cell_list(grid::AbstractGrid{G,T}; ball::Real) where {G,T}
+    h = T(ball)
+    h > 0 || throw(ArgumentError("the bin side must be positive, got $ball"))
+    all_pts, ng, embedding = embedded_points(grid)
+    hemb = T(embedded_radius(embedding, h))
+    hemb > 0 || throw(ArgumentError("radius $ball is degenerate in this embedding"))
+    n = size(all_pts, 2) ÷ ng
+    # Originals only. The periodic images `embedded_points` adds are for a tree, which has no way to wrap;
+    # a lattice wraps its own bin coordinate, and one entry per cell is what lets a query emit each cell
+    # exactly once and so need no buffer.
+    pts = ng == 1 ? all_pts : all_pts[:, 1:n]
+    # A function barrier on the dimension. `size(pts, 1)` is a runtime value, so building the index type
+    # from it inline leaves the whole construction loop dynamically dispatched — measured at 34 MiB and
+    # 196 ms for 65k points, against 3 ms once the dimension is a type.
+    return _build_cell_list(grid, pts, embedding, hemb, Val(size(pts, 1)))
+end
+
+function _build_cell_list(
+    grid, pts::AbstractMatrix{T}, embedding::E, hemb::T, ::Val{D},
+) where {T,E<:AbstractEmbedding,D}
+    n = size(pts, 2)
+    # Wrapping is a property of the grid's own directions, and only survives into the embedding when the
+    # embedding is the coordinates themselves. A sphere's seam is already closed by the transform.
+    wrap, nbins, lo, hd = _cell_lattice(grid, pts, embedding, hemb, Val(D))
+    IX = CellListIndex{D,T,E,typeof(pts),Vector{Int}}
+    ixp = IX(pts, lo, hd, nbins, wrap, Int[], Int[], embedding)
+
+    nbucket = max(1, nextpow(2, max(n, 1)))
+    counts = zeros(Int, nbucket + 1)
+    @inbounds for k in 1:n
+        counts[_bin_hash(_bin_at(ixp, k), nbucket) + 1] += 1
+    end
+    starts = Vector{Int}(undef, nbucket + 1)
+    starts[1] = 1
+    @inbounds for b in 1:nbucket
+        starts[b + 1] = starts[b] + counts[b + 1]
+    end
+    cursor = copy(starts)
+    items = Vector{Int}(undef, n)
+    @inbounds for k in 1:n
+        b = _bin_hash(_bin_at(ixp, k), nbucket)
+        items[cursor[b]] = k
+        cursor[b] += 1
+    end
+    return IX(pts, lo, hd, nbins, wrap, starts, items, embedding)
+end
+
+# Cartesian directions wrap with the grid; every other embedding is closed by its own transform.
+#
+# A wrapping direction's width is the period divided by a whole number of bins, not `h` itself: binning
+# by `h` and then reducing mod `nbins` would fold a partial bin onto bin zero, and the span a query walks
+# would no longer be a lattice neighbourhood.
+function _cell_lattice(grid, pts::AbstractMatrix{T}, ::CartesianEmbedding, h::T, ::Val{D}) where {T,D}
+    wrap = ntuple(d -> isperiodic(grid, d), Val(D))
+    nbins = ntuple(Val(D)) do d
+        wrap[d] ? max(1, Base.unsafe_trunc(Int, floor(T(period(grid, d)) / h))) : 0
+    end
+    hd = ntuple(d -> wrap[d] ? T(period(grid, d)) / nbins[d] : h, Val(D))
+    lo = ntuple(d -> wrap[d] ? T(origin(grid, d)) : T(minimum(view(pts, d, :))) - h, Val(D))
+    return wrap, nbins, lo, hd
+end
+
+function _cell_lattice(_grid, pts::AbstractMatrix{T}, ::AbstractEmbedding, h::T, ::Val{D}) where {T,D}
+    lo = ntuple(d -> T(minimum(view(pts, d, :))) - h, Val(D))
+    return ntuple(_ -> false, Val(D)), ntuple(_ -> 0, Val(D)), lo, ntuple(_ -> h, Val(D))
+end
+
+"""
+    fold_candidates(f, acc, index, grid, I, r) -> acc
+
+Thread `acc = f(acc, k)` over every cell `k` the index reports near cell `I`, without building a list. A
+**superset** of the ball, each cell exactly once; the caller's exact distance gate decides membership.
+
+A fold rather than a returned list is the whole point: it allocates nothing and needs no per-query
+buffer, which is what a kernel requires and what a tree cannot offer, since a tree walk has to
+deduplicate the periodic images it searches over.
+"""
+function fold_candidates end
+
+function fold_candidates(f::F, acc, ix::CellListIndex{D,T}, grid, I, r) where {F,D,T}
+    lin = I isa Integer ? Int(I) : LinearIndices(size(mask(grid)))[CartesianIndex(I)]
+    q = ntuple(d -> @inbounds(ix.pts[d, lin]), Val(D))
+    remb = T(embedded_radius(ix.embedding, r))
+    # Per direction, since a wrapping direction's bins are the period divided evenly and so are not
+    # exactly `h` wide.
+    span = ntuple(d -> max(0, Base.unsafe_trunc(Int, ceil(remb / @inbounds(ix.h[d])))), Val(D))
+    b0 = _bin_of(ix, q)
+    nbucket = _nbuckets(ix)
+    # A wrapping direction is capped at the lattice width, since beyond that the offsets revisit bins
+    # already covered.
+    reach = ntuple(d -> @inbounds(ix.wrap[d]) ? min(2 * span[d] + 1, ix.nbins[d]) : 2 * span[d] + 1, Val(D))
+    @inbounds for off in CartesianIndices(map(m -> 0:(m - 1), reach))
+        b = ntuple(Val(D)) do d
+            j = b0[d] - span[d] + off[d]
+            ix.wrap[d] ? mod(j, ix.nbins[d]) : j
+        end
+        bucket = _bin_hash(b, nbucket)
+        for t in ix.starts[bucket]:(ix.starts[bucket + 1] - 1)
+            k = ix.items[t]
+            _bin_at(ix, k) == b || continue     # a hash collision, not a member of this bin
+            acc = f(acc, k)
+        end
+    end
+    return acc
+end
+
+# The buffered hook, for callers that want a list. No sort and no dedup: every cell sits in exactly one
+# bin, so the walk already emits each at most once.
+function index_within!(buf::AbstractVector{<:Integer}, ix::CellListIndex, grid, I, r)
+    empty!(buf)
+    fold_candidates(nothing, ix, grid, I, r) do _, k
+        push!(buf, k)
+        return nothing
+    end
+    return buf
+end
+
 """
     has_spatial_index(grid) -> Bool
 
-Whether [`spatial_index`](@ref) can be built for this grid — `false` until the NearestNeighbors
-extension is loaded. Lets a bulk operation choose the indexed path when it is available without
-calling `spatial_index` speculatively and catching its error.
+Whether the k-d tree behind [`spatial_index`](@ref) can be built for this grid — `false` until the
+NearestNeighbors extension is loaded. Answers "is the tree available?" without calling `spatial_index`
+speculatively and catching its error.
+
+This is not a test for whether a grid can be indexed at all: [`cell_list`](@ref) needs no extension and
+is what the sweeps build.
 """
 has_spatial_index(::AbstractGrid) = false
 
