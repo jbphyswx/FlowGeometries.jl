@@ -647,6 +647,13 @@ struct ShiftWithinRun <: AbstractMaskPolicy end
 This trades accuracy order for coverage — a five-point scheme becomes three-point in a strait three
 cells wide — so it is named rather than reached by fallback. Ask for it when a value everywhere matters
 more than a uniform order.
+
+Under this policy `nodes` is a **ceiling**, not a demand, and that applies to the end of the axis as
+well as the end of a run: an axis with fewer than `nodes` samples uses as many as it has instead of
+raising, and one with fewer than `order + 1` is `masked` throughout. A single-latitude strip, a
+two-level column and a one-cell-wide channel are ordinary grids, and asking for "second order where the
+axis allows it" should not require the caller to clamp `nodes` themselves. The other two policies keep
+the error, since neither claims to degrade.
 """
 struct ReduceInRun <: AbstractMaskPolicy end
 
@@ -746,7 +753,21 @@ function apply_stencil!(
     size(field, dim) == length(x) || throw(DimensionMismatch(
         "axis has $(length(x)) samples but direction $dim of the field has $(size(field, dim))",
     ))
-    idx, wts = axis_stencils(x, order, nodes; period = period)
+    ord = Int(order)
+    k = Int(nodes)
+    if policy isa ReduceInRun
+        # Under this policy `nodes` is a CEILING, not a demand. The end of the axis bounds a window
+        # exactly as the end of an active run does — the policy already says a run too short for
+        # `nodes` uses the largest window it can hold — so the two are made to behave the same way
+        # rather than one degrading and the other erroring. A single-latitude strip, a two-level
+        # column and a one-cell channel are ordinary grids, not mistakes.
+        if length(x) < ord + 1
+            fill!(out, masked)      # no derivative of this order exists anywhere on such an axis
+            return out
+        end
+        k = min(k, length(x))
+    end
+    idx, wts = axis_stencils(x, ord, k; period = period)
     # The precomputed rows are the whole answer under `BlankMasked`, and they stay the answer in the
     # interior of every active run under the others — a degraded row is only built where one is needed.
     if policy isa BlankMasked || mask === nothing
@@ -754,7 +775,7 @@ function apply_stencil!(
                               backend = backend)
     end
     return _apply_stencil_degrade!(out, field, x, idx, wts, Int(dim), mask, masked,
-                                   Int(order), Int(nodes), period, policy, backend)
+                                   ord, k, period, policy, backend)
 end
 
 # Rebuilding a stencil needs the axis and a scratch table, so it is a chunked host loop: a launch has

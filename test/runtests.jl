@@ -5328,6 +5328,41 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test_throws ArgumentError D.apply_stencil!(zeros(7, 1), f, idx, w, 1;
                                                          mask = msk, policy = D.ShiftWithinRun())
 
+        # The END OF THE AXIS bounds a window exactly as the end of a run does, so under `ReduceInRun`
+        # `nodes` is a ceiling there too. These are ordinary degenerate grids — a single-latitude
+        # strip, a two-level column, a one-cell channel — not caller mistakes.
+        let xa = collect(0.0:5.0)
+            # An axis with fewer samples than `nodes`: use what there is, and stay exact for the
+            # degree the reduced window still supports.
+            for (ny, want) in ((2, 5.0), (3, 5.0))
+                ys = collect(range(0.0, 1.0; length = ny))
+                g2 = GD.StructuredGrid(geo, xa, ys)
+                f2 = [xi + 5yi for xi in xa, yi in ys]
+                o2 = zeros(length(xa), ny)
+                D.apply_stencil!(o2, f2, g2, 2; order = 1, nodes = 5, policy = D.ReduceInRun(),
+                                 masked = NaN)
+                Test.@test all(isapprox.(o2, want))
+            end
+            # Fewer than `order + 1` samples: no derivative of that order exists anywhere on the axis.
+            g1 = GD.StructuredGrid(geo, xa, [3.0])
+            f1 = reshape([2xi for xi in xa], length(xa), 1)
+            o1 = zeros(length(xa), 1)
+            D.apply_stencil!(o1, f1, g1, 2; order = 1, nodes = 3, policy = D.ReduceInRun(),
+                             masked = NaN)
+            Test.@test all(isnan, o1)
+            # …while the other direction of the very same grid is untouched by any of it.
+            od = zeros(length(xa), 1)
+            D.apply_stencil!(od, f1, g1, 1; order = 1, nodes = 3, policy = D.ReduceInRun())
+            Test.@test all(isapprox.(od, 2.0))
+            # The policies that do not claim to degrade keep the error.
+            for pol in (D.BlankMasked(), D.ShiftWithinRun())
+                Test.@test_throws ArgumentError D.apply_stencil!(zeros(length(xa), 1), f1, g1, 2;
+                                                                 order = 1, nodes = 3, policy = pol)
+            end
+            # And `axis_stencils` itself still means exactly `nodes`: it is handed no policy.
+            Test.@test_throws ArgumentError D.axis_stencils([0.0, 1.0], 1, 3)
+        end
+
         # In-place weights match the allocating form and carry no state between calls.
         nd = [0.0, 0.7, 1.9, 3.1, 4.0]
         for ord in (0, 1, 2, 3)
