@@ -553,6 +553,10 @@ function metric_window end
 metric_window(grid::Grids.StructuredGrid, I::NTuple, ball) =
     metric_window(grid, I, ball, MetricTopology(grid))
 
+# A radius, however it is spelled. The grid-level forms below take this rather than an untyped `ball`
+# so they cannot be confused with the per-cell forms, whose second argument is the cell index.
+const _BallLike = Union{Real,Stencils.MetricBall}
+
 """
     metric_window(grid, ball) -> NTuple{N,Int}
     metric_window(grid, ball, topology) -> NTuple{N,Int}
@@ -567,10 +571,11 @@ the middle. No `cos` per row, and no scan.
 
 Conservative by construction — it is the per-cell window at the worst cell — so it never under-covers.
 """
-metric_window(grid::Grids.StructuredGrid, ball) = metric_window(grid, ball, MetricTopology(grid))
+metric_window(grid::Grids.StructuredGrid, ball::_BallLike) =
+    metric_window(grid, ball, MetricTopology(grid))
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{G,T,N}, ball::_BallLike, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry,T,N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -578,7 +583,7 @@ function metric_window(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{G,T,N}, ball::_BallLike, mt::MetricTopology,
 ) where {G<:Geometry.AbstractSphericalGeometry,T,N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -596,7 +601,7 @@ function metric_window(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{G,T,N}, ball::_BallLike, mt::MetricTopology,
 ) where {G<:Geometry.AbstractEllipsoidalGeometry,T,N}
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))

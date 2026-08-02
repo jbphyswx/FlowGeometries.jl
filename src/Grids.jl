@@ -1314,7 +1314,7 @@ end
 """
     apply_stencil!(out, field, grid, indices, weights, dim; active_only=true, masked=zero) -> out
 
-Apply a stencil table built by [`axis_stencils(grid, dim)`](@ref) — the mask still comes from `grid`,
+Apply a stencil table built by [`Discretization.axis_stencils`](@ref) — the mask still comes from `grid`,
 which is what the bare `(indices, weights)` form cannot do.
 
 This is the form to use in a loop over fields: the table is the same for all of them, and building it

@@ -316,6 +316,58 @@ boundary-condition policy this does not choose. When you do, note the **flux for
 so the second term differentiates `u_φ·cos φ`, not `u_φ`. Adding two physical derivatives is a
 different expression, and a wrong one.
 
+## Off a rectilinear grid: the least-squares gradient
+
+`apply_stencil!` needs a separable axis to difference along. A `CurvilinearGrid` has none, and a node
+set's neighbours come from connectivity rather than an index offset, so neither has a stencil.
+`Connectivity.gradient_plan` builds a least-squares gradient for them instead, and
+[`gradient!`](@ref) applies it:
+
+```@example disc
+cart = FG.Geometry.CartesianGeometry{Float64}()
+nn   = 14
+xg   = [t + 0.35u for t in range(0, 10; length = nn), u in range(0, 6; length = nn)]   # sheared
+yg   = [u - 0.2t  for t in range(0, 10; length = nn), u in range(0, 6; length = nn)]
+cgrid = FG.Grids.CurvilinearGrid(cart, xg, yg, trues(nn, nn); measure = fill(1.0, nn, nn))
+plan  = FG.Connectivity.gradient_plan(cgrid)
+
+fld = 2.0 .* xg .- 3.0 .* yg .+ 7        # ∇ = (2, -3) everywhere
+g1, g2 = zeros(nn, nn), zeros(nn, nn)
+D.gradient!(g1, g2, fld, plan)
+maximum(abs, g1 .- 2), maximum(abs, g2 .+ 3)
+```
+
+Exact for a linear field on **any** stencil, however skewed — the least-squares combination cancels the
+leading truncation term, which inverting a 2×2 index-space Jacobian does not. It is second order on
+locally symmetric stencils and degrades toward first on strongly skewed cells, and where the stencil is
+separable and orthogonal it *is* the centred difference, so it agrees with `apply_stencil!` where both
+apply.
+
+`A` depends only on the geometry, so the plan holds the per-neighbour coefficients and each apply is
+one dot product per cell, allocating nothing. Where `A` is rank deficient — every neighbour on one
+line, at a boundary or beside a mask — that component is **zeroed rather than invented**, the same rule
+`apply_stencil!` states for a mask.
+
+## Evaluating a field at a coordinate
+
+Observational data has a coordinate, not a cell index. [`interpolate`](@ref) answers for one:
+
+```@example disc
+xa = collect(range(0, 2; length = 11)); ya = collect(range(-1, 3; length = 9))
+ga = FG.Grids.StructuredGrid(cart, xa, ya)
+fa = [2xi - 3yj + 0.5xi * yj + 7 for xi in xa, yj in ya]
+D.interpolate(fa, ga, (0.7, 1.1)), 2*0.7 - 3*1.1 + 0.5*0.7*1.1 + 7
+```
+
+Multilinear on a rectilinear grid; a weighted least-squares plane on a curvilinear grid or a node set,
+which is exact for a linear field and reproduces a cell's own value at its centre. A **periodic
+direction interpolates across its seam** rather than clamping at the last sample — composing the
+per-axis weights by hand gets that wrong by half a cell everywhere on the seam.
+
+The mask policies mean here what they mean for a stencil: [`BlankMasked`](@ref) returns `masked` when a
+contributor is inactive, [`ReduceInRun`](@ref) renormalizes over the active ones, and
+[`ShiftWithinRun`](@ref) is refused, there being no window to shift.
+
 Anything that *does* need a convention the package has not chosen — a staggered difference, or a
 multi-direction operator like a divergence or a curl, which also need a result location and a
 boundary-condition policy — is assembled at the call site from these weights and the metric factors
