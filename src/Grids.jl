@@ -1173,7 +1173,7 @@ function Discretization.apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
 ) where {S,G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
@@ -1181,7 +1181,7 @@ function Discretization.apply_stencil!(
         out, field, coordinates(grid, dim), dim;
         order = order, nodes = nodes,
         period = isperiodic(grid, dim) ? period(grid, dim) : nothing,
-        mask = msk, masked = masked, backend = backend, policy = policy,
+        mask = msk, masked = masked, backend = backend, policy = policy, scratch = scratch,
     )
 end
 
@@ -1248,11 +1248,11 @@ function Discretization.derivative!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
 ) where {S,G,T,N}
     Discretization.apply_stencil!(out, field, grid, dim; order = order, nodes = nodes,
                                   active_only = active_only, masked = masked, backend = backend,
-                                  policy = policy)
+                                  policy = policy, scratch = scratch)
     return _scale_by_metric!(out, grid, Int(dim), masked)
 end
 
@@ -1329,7 +1329,7 @@ function Discretization.apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
 ) where {S,G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     # Both the mask and the period are `Union{Nothing, …}` if resolved with a ternary, and a small
@@ -1338,24 +1338,24 @@ function Discretization.apply_stencil!(
     msk = mask(grid)
     if active_only && !(msk isa AllActive)
         return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), msk, masked,
-                           backend, policy)
+                           backend, policy, scratch)
     end
     return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), nothing, masked,
-                       backend, policy)
+                       backend, policy, scratch)
 end
 
 @inline function _apply_tbl!(
     out, field, grid::StructuredGrid, indices, weights, dim::Int, order::Int, msk, masked, backend,
-    policy,
+    policy, scratch,
 )
     x = coordinates(grid, dim)
     return isperiodic(grid, dim) ?
         Discretization.apply_stencil!(out, field, x, indices, weights, dim; order = order,
                                       period = period(grid, dim), mask = msk, masked = masked,
-                                      backend = backend, policy = policy) :
+                                      backend = backend, policy = policy, scratch = scratch) :
         Discretization.apply_stencil!(out, field, x, indices, weights, dim; order = order,
                                       period = nothing, mask = msk, masked = masked,
-                                      backend = backend, policy = policy)
+                                      backend = backend, policy = policy, scratch = scratch)
 end
 
 """
@@ -1369,11 +1369,11 @@ function Discretization.derivative!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
 ) where {S,G,T,N}
     Discretization.apply_stencil!(out, field, grid, indices, weights, dim; order = order,
                                   active_only = active_only, masked = masked, backend = backend,
-                                  policy = policy)
+                                  policy = policy, scratch = scratch)
     return _scale_by_metric!(out, grid, Int(dim), masked)
 end
 

@@ -68,12 +68,16 @@ q_within_top(g, r, I, t) = FG.Connectivity.nneighbors_within(g, I...; ball = r, 
 q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
                                                    ball = r, topology = t, scratch = s)
 q_locate(g, p)           = FG.Grids.locate(g, p)
+q_runreach(m, I, d, i, n, k) = FG.Discretization._run_reach(m, I, d, i, n, k, false)
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
 q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
 q_gradient!(a, b, f, plan) = FG.Discretization.gradient!(a, b, f, plan)
 q_tbl!(o, f, g, iw, d, pol) = FG.Discretization.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
+q_tbl_sc!(o, f, g, iw, d, sc) = FG.Discretization.apply_stencil!(
+    o, f, g, iw[1], iw[2], d; order = 1, masked = NaN,
+    policy = FG.Discretization.ReduceInRun(), scratch = sc)
 q_width(g, d, i)         = FG.Grids.cell_width(g, d, i)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
@@ -3280,6 +3284,47 @@ Test.@testset "FlowGeometries.jl" begin
         end
     end
 
+    Test.@testset "A degrading sweep can be made to allocate nothing" begin
+        D = FG.Discretization
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        n = 32
+        x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n))))
+        mk = trues(n, n); mk[7, 9] = false; mk[8, 9] = false; mk[20, 3] = false
+        g = GD.StructuredGrid(cart, x, x, mk)
+        f = [sin(xi) * cos(yj) for xi in x, yj in x]
+        idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
+        sc = D.stencil_scratch(1, 3)
+
+        # Same answer, and the buffers carry nothing between calls.
+        a = zeros(n, n); b = zeros(n, n)
+        D.apply_stencil!(a, f, g, idx, w, 1; order = 1, masked = NaN, policy = D.ReduceInRun())
+        for _ in 1:3
+            D.apply_stencil!(b, f, g, idx, w, 1; order = 1, masked = NaN,
+                             policy = D.ReduceInRun(), scratch = sc)
+        end
+        Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
+
+        # The scratch is the difference between a per-call cost and none.
+        Test.@test _alloc(q_tbl_sc!, zeros(n, n), f, g, (idx, w), 1, sc) == 0
+        Test.@test _alloc(q_tbl_sc!, zeros(n, n), f, g, (idx, w), 1, nothing) > 0
+
+        # A run walk must not allocate at all: `_run_reach` closed over a loop variable it also
+        # reassigned, which Julia boxes — 288 bytes per call, once per cell adjacent to a mask, so it
+        # grew with the length of a coastline rather than being a fixed cost.
+        Test.@test _alloc(q_runreach, mk, (6, 9), 1, 6, n, 3) == 0
+        # …and every cell away from a mask was already free, which is why this hid.
+        Test.@test _alloc(q_tbl!, zeros(n, n), f, GD.StructuredGrid(cart, x, x), (idx, w), 1,
+                          D.ReduceInRun()) == 0
+
+        # A scratch too small for the stencil is refused rather than overrun.
+        let small = D.stencil_scratch(1, 2), i5w5 = D.axis_stencils(g, 1; order = 1, nodes = 5)
+            Test.@test_throws DimensionMismatch D.apply_stencil!(
+                zeros(n, n), f, g, i5w5[1], i5w5[2], 1; order = 1, masked = NaN,
+                policy = D.ReduceInRun(), scratch = small)
+        end
+    end
+
     Test.@testset "The host sweep is a different loop shape, and the same answer" begin
         D = FG.Discretization
         GD = FG.Grids
@@ -6135,6 +6180,7 @@ Test.@testset "FlowGeometries.jl" begin
             :fold_candidates_at, :locate, :embed_point, :fold_at,
             :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
             :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
+            :stencil_scratch,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
@@ -6148,7 +6194,7 @@ Test.@testset "FlowGeometries.jl" begin
              :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
              :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
              :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
-             :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan],
+             :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan, :StencilScratch],
             # bulk or one-off operations, not per-cell hot paths
             [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
              :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,

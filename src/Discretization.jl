@@ -502,12 +502,20 @@ The allocating form is one of these per call, and a stencil is built once per sa
 4096-sample axis costs ~8000 allocations without this. The degrade path in [`apply_stencil!`](@ref) needs
 one per cell near a mask edge, which is the reason it exists.
 """
-function fd_weights!(
+@inline fd_weights!(
     w::AbstractVector{T}, c::AbstractMatrix{T}, nodes::AbstractVector{T}, x₀::Real, order::Integer,
+) where {T<:AbstractFloat} = _fd_weights!(w, c, nodes, length(nodes), x₀, order)
+
+# The node count is separate from `length(nodes)` so a caller holding an oversized buffer can use its
+# first `n` entries without a `view` — which allocates 48 bytes per call, and the degrade path calls
+# this once per cell it rebuilds.
+function _fd_weights!(
+    w::AbstractVector{T}, c::AbstractMatrix{T}, nodes::AbstractVector{T}, n::Int, x₀::Real,
+    order::Integer,
 ) where {T<:AbstractFloat}
     m = Int(order)
     m ≥ 0 || throw(ArgumentError("derivative order must be ≥ 0, got $m"))
-    n = length(nodes)
+    length(nodes) ≥ n || throw(DimensionMismatch("asked for $n nodes from a buffer of $(length(nodes))"))
     n ≥ m + 1 || throw(ArgumentError(
         "a degree-$m derivative needs at least $(m + 1) nodes, got $n",
     ))
@@ -747,7 +755,7 @@ function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S), backend = nothing,
-    policy::AbstractMaskPolicy = BlankMasked(),
+    policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(field, dim) == length(x) || throw(DimensionMismatch(
@@ -769,7 +777,7 @@ function apply_stencil!(
     end
     idx, wts = axis_stencils(x, ord, k; period = period)
     return apply_stencil!(out, field, x, idx, wts, dim; order = ord, period = period, mask = mask,
-                          masked = masked, backend = backend, policy = policy)
+                          masked = masked, backend = backend, policy = policy, scratch = scratch)
 end
 
 """
@@ -795,7 +803,7 @@ function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
-    backend = nothing, policy::AbstractMaskPolicy = BlankMasked(),
+    backend = nothing, policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(field, dim) == length(x) || throw(DimensionMismatch(
@@ -811,14 +819,52 @@ function apply_stencil!(
                               backend = backend)
     end
     return _apply_stencil_degrade!(out, field, x, indices, weights, Int(dim), mask, masked,
-                                   Int(order), size(indices, 2), period, policy, backend)
+                                   Int(order), size(indices, 2), period, policy, backend, scratch)
 end
 
 # Rebuilding a stencil needs the axis and a scratch table, so it is a chunked host loop: a launch has
 # nowhere to put the per-cell Fornberg table. `BlankMasked` above keeps the index-parallel path.
+"""
+    StencilScratch{T}
+
+The working buffers a degrading [`apply_stencil!`](@ref) needs to rebuild a window at a mask edge:
+the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
+
+**One per task**, exactly as [`Connectivity.ball_scratch`](@ref) is — the buffers are written per cell,
+so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
+one passed here.
+"""
+struct StencilScratch{T<:AbstractFloat}
+    w::Vector{T}      # the weights of one rebuilt row
+    c::Matrix{T}      # the Fornberg recursion table
+    n::Vector{T}      # the row's node coordinates, unwrapped across a seam
+end
+
+"""
+    stencil_scratch(order, nodes; T = Float64) -> StencilScratch
+
+Buffers for the degrade path, so a caller taking many derivatives on a masked grid does not allocate
+them per call. Without one a degrading call allocates a few hundred bytes each time — `O(1)` in the
+grid, but per *call*, so a flux computation taking nine derivatives pays it nine times.
+
+Only the degrading policies need it. An unmasked grid, and any grid under [`BlankMasked`](@ref), never
+rebuilds a window and allocates nothing regardless.
+"""
+function stencil_scratch(order::Integer, nodes::Integer; T::Type{<:AbstractFloat} = Float64)
+    k = Int(nodes)
+    m = Int(order)
+    k ≥ 1 || throw(ArgumentError("stencil_scratch needs nodes ≥ 1, got $k"))
+    m ≥ 0 || throw(ArgumentError("stencil_scratch needs order ≥ 0, got $m"))
+    return StencilScratch{T}(Vector{T}(undef, k), Matrix{T}(undef, k, m + 1), Vector{T}(undef, k))
+end
+
+@inline function _fits(s::StencilScratch, k::Int, ord::Int)
+    return length(s.w) ≥ k && length(s.n) ≥ k && size(s.c, 1) ≥ k && size(s.c, 2) ≥ ord + 1
+end
+
 function _apply_stencil_degrade!(
     out::AbstractArray{S,N}, field, x::AbstractVector{T}, idx, wts, dim::Int, mask, masked,
-    ord::Int, k::Int, period, policy::AbstractMaskPolicy, backend,
+    ord::Int, k::Int, period, policy::AbstractMaskPolicy, backend, scratch,
 ) where {S,N,T}
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
@@ -831,6 +877,20 @@ function _apply_stencil_degrade!(
     n = sz[dim]
     P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
     wrap = period !== nothing
+    # A caller's buffers are usable only where there is one chunk: they are written per cell, so
+    # concurrent chunks would race on them. The threaded path allocates its own set per chunk.
+    if backend === nothing && scratch isa StencilScratch{T}
+        _fits(scratch, k, ord) || throw(DimensionMismatch(
+            "scratch holds $(length(scratch.w)) nodes × $(size(scratch.c, 2)) orders; this call " *
+            "needs $k × $(ord + 1) — build it with `stencil_scratch($ord, $k)`",
+        ))
+        @inbounds for lin in Base.OneTo(length(ci))
+            c = ci[lin]
+            _stencil_cell_degrade!(out, field, x, idx, wts, dim, mask, masked, k, ord, n, P, wrap,
+                                   Tuple(c), c, policy, scratch.w, scratch.c, scratch.n)
+        end
+        return out
+    end
     Execution.run_chunks(length(ci), backend) do rng
         wbuf = Vector{T}(undef, k)
         cbuf = Matrix{T}(undef, k, ord + 1)
@@ -844,6 +904,12 @@ function _apply_stencil_degrade!(
     return out
 end
 
+# The cell index with direction `dim` replaced. `j` arrives as an ARGUMENT rather than being captured:
+# a local that is both reassigned and closed over is boxed by Julia, and the loops below reassign
+# theirs every iteration — measured at 288 bytes per `_run_reach` call before this was split out.
+@inline _at_dim(I::NTuple{N,Int}, dim::Int, j::Int) where {N} =
+    ntuple(d -> d == dim ? j : I[d], Val(N))
+
 # How far the active run containing `i` reaches, walked at most `k` steps: past that the run is longer
 # than any window, which is all the clamp needs to know. Bounding the walk is what keeps this `O(k)`
 # rather than `O(run length)`.
@@ -852,7 +918,7 @@ end
     @inbounds while back < k
         j = i - back - 1
         j < 1 && (wrap ? (j = n) : break)
-        mask[ntuple(d -> d == dim ? j : I[d], Val(N))...] || break
+        mask[_at_dim(I, dim, j)...] || break
         back += 1
         back ≥ n && break
     end
@@ -860,7 +926,7 @@ end
     @inbounds while fwd < k
         j = i + fwd + 1
         j > n && (wrap ? (j = 1) : break)
-        mask[ntuple(d -> d == dim ? j : I[d], Val(N))...] || break
+        mask[_at_dim(I, dim, j)...] || break
         fwd += 1
         back + fwd + 1 ≥ n && break
     end
@@ -913,11 +979,11 @@ end
             j = mod1(raw, n)
             nbuf[q] = x[j] + T(fld(raw - 1, n)) * P
         end
-        fd_weights!(wbuf, cbuf, view(nbuf, 1:kk), x[i], ord)
+        _fd_weights!(wbuf, cbuf, nbuf, kk, x[i], ord)
         acc = zero(S)
         for q in 1:kk
             raw = base + s + q - 1
-            J = ntuple(d -> d == dim ? mod1(raw, n) : I[d], Val(N))
+            J = _at_dim(I, dim, mod1(raw, n))
             acc += S(wbuf[q]) * S(field[J...])
         end
         out[ci] = acc
