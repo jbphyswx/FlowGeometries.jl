@@ -19,6 +19,24 @@ Upwind(r::Integer) = Upwind{Int(r)}()
 FG.Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
     ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
 
+# An axis that records how many elements were read from it. Several claims here are about how much of
+# an axis a query touches — "bisects rather than scans", "reads a bounded window" — and a wall-clock
+# threshold is a poor way to assert that: it is decided by a GC pause as much as by the algorithm, and
+# it encodes machine constants that rot. Counting reads states the claim exactly and is deterministic.
+# Wall-clock numbers live in `benchmark/`.
+mutable struct CountingAxis{T,V<:AbstractVector{T}} <: AbstractVector{T}
+    data::V
+    reads::Int
+end
+CountingAxis(v::AbstractVector) = CountingAxis(v, 0)
+Base.size(c::CountingAxis) = size(c.data)
+Base.IndexStyle(::Type{<:CountingAxis}) = IndexLinear()
+Base.@propagate_inbounds function Base.getindex(c::CountingAxis, i::Int)
+    c.reads += 1
+    return c.data[i]
+end
+reads(f::F, c::CountingAxis) where {F} = (c.reads = 0; f(); c.reads)
+
 # Fixed arity, and the cell index travels as a tuple that is splatted inside the callee: forwarding
 # through `args...` allocates 240 bytes on its own, so a vararg harness would measure itself.
 for n in 1:6
@@ -672,12 +690,12 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test cos.(a) ≈ cos.(v)
         Test.@test_throws DimensionMismatch A.UniformAxis(0.0, 1.0, 3) .+ A.UniformAxis(0.0, 1.0, 4)
 
-        # The reason for the subtyping: Base solves `searchsorted` on a range in closed form, so the
-        # cost does not grow with the axis length the way bisection does.
-        best(f) = (f(); minimum(@elapsed(f()) for _ in 1:2000))
-        t_small = best(() -> searchsortedfirst(A.UniformAxis(0.0, 1e-1, 10), 0.5))
-        t_large = best(() -> searchsortedfirst(A.UniformAxis(0.0, 1e-7, 10^7), 0.5))
-        Test.@test t_large < 2 * t_small
+        # The reason for the subtyping: being an `AbstractRange` is what gets Base's closed-form
+        # `searchsorted` instead of a bisection. Asserted as the dispatch itself — the property that
+        # causes the speed — rather than as a duration; the duration is in `benchmark/`.
+        Test.@test A.UniformAxis(0.0, 1e-1, 10) isa AbstractRange
+        Test.@test which(searchsortedfirst, Tuple{A.UniformAxis{Float64},Float64}) ===
+                   which(searchsortedfirst, Tuple{StepRangeLen{Float64},Float64})
         # …and it still gives the right index.
         for n in (10, 1000)
             u = A.UniformAxis(0.0, 1 / n, n)
@@ -1891,12 +1909,14 @@ Test.@testset "FlowGeometries.jl" begin
             Test.@test sum(dh) ≈ 2 atol = 1e-13
             Test.@test sum(cc) ≈ 2 atol = 1e-13
         end
-        # The transform is O(n log n), so the cost ratio over a 4× size step must be far below the
-        # 16× a quadratic rule would show.
-        best(f) = (f(); minimum(@elapsed f() for _ in 1:3))
-        t1 = best(() -> FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), 1024))
-        t2 = best(() -> FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), 4096))
-        Test.@test t2 / t1 < 8
+        # The FFT path is what makes this O(n log n) rather than O(n²). What the suite can assert
+        # deterministically is that the path exists — the extension is loaded, so `_equiangular_sums!`
+        # resolves to its transform rather than the recurrence. That the two AGREE is asserted just
+        # below, in a subprocess with no FFT loaded; how much faster it is belongs in `benchmark/`.
+        Test.@test Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt) !== nothing
+        Test.@test parentmodule(which(FG.SphericalSampling._equiangular_sums!,
+                                      Tuple{Vector{Float64},FG.SphericalSampling.ClosedNodes,Int,Int})) ===
+                   Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt)
 
         # Without an FFT implementation loaded the recurrence must still produce the same weights.
         script = """
@@ -3746,19 +3766,21 @@ Test.@testset "FlowGeometries.jl" begin
             Test.@test all(D.nearest_index(wv, t) == argmin(abs.(wv .- t)) for t in mids)
         end
 
-        # Both are searches, not sweeps: a stretched axis must not be walked, or materialize its
-        # faces, on a query. Timed rather than only allocation-checked, since a scan need not allocate.
-        let small = collect(range(0.0, 1.0; length = 64)),
-            big = collect(range(0.0, 1.0; length = 1 << 18))
-            for (nm, g) in (("locate", D.locate), ("nearest_index", D.nearest_index))
-                g(small, 0.37); g(big, 0.37)
-                Test.@test (@allocated g(big, 0.37)) == 0
-                ts = minimum(@elapsed(g(small, 0.37 + 1e-9k)) for k in 1:50)
-                tb = minimum(@elapsed(g(big, 0.37 + 1e-9k)) for k in 1:50)
-                # 4096x the samples: a scan would be ~1000x slower, a bisection ~1.5x.
-                tb < 20 * ts || println("    ", nm, " grew ", round(tb / ts; digits = 1), "x over 4096x n")
-                Test.@test tb < 20 * ts
-            end
+        # Both are searches, not sweeps: a stretched axis must not be walked, nor materialize its
+        # faces, on a query. Asserted by COUNTING the elements read — the claim itself — rather than
+        # by a clock, which a collection can decide. `locate` reads two faces per bisection step plus
+        # the two end faces, so the bound is generous but still far below `n`.
+        for pow in (6, 18)
+            n = 1 << pow
+            c = CountingAxis(collect(range(0.0, 1.0; length = n)))
+            D.locate(c, 0.37); D.nearest_index(c, 0.37)          # warm, then count
+            Test.@test reads(() -> D.locate(c, 0.37), c) ≤ 8 * pow + 16
+            Test.@test reads(() -> D.nearest_index(c, 0.37), c) ≤ 8 * pow + 16
+        end
+        # …and the bound really does discriminate: a scan of the larger axis would read `n` of them.
+        let c = CountingAxis(collect(range(0.0, 1.0; length = 1 << 18)))
+            Test.@test reads(() -> D.locate(c, 0.37), c) < 1000     # against n = 262144
+            Test.@test reads(() -> sum(c), c) == 1 << 18            # the wrapper does count reads
         end
 
         # Linear weights sum to 1 and reproduce a linear function exactly.
@@ -4327,27 +4349,23 @@ Test.@testset "FlowGeometries.jl" begin
             FG.Connectivity.nneighbors_within(g, 32; ball = 3.0, topology = mt)
             return @allocated FG.Connectivity.nneighbors_within(g, 32; ball = 3.0, topology = mt)
         end
-        percall(g, mt, r, reps) = begin
-            I = (length(FG.Grids.mask(g)) ÷ 2,)
-            C.nneighbors_within(g, I...; ball = r, topology = mt)
-            t = @elapsed for _ in 1:reps
-                C.nneighbors_within(g, I...; ball = r, topology = mt)
-            end
-            return t / reps
-        end
-        ts = map((256, 4096)) do n
+        # What "O(1) per direction rather than a scan" means is that the candidate WINDOW does not
+        # grow with the axis, so that is what is asserted — the window itself, not how long it took
+        # to bound. `metric_window` returns the half-width the traversal will walk.
+        wins = map((256, 4096)) do n
             g = stretched(n)
             mt = C.MetricTopology(g)
             Test.@test mt isa C.MetricTopology
             Test.@test isbits(mt)                              # nothing heap-allocated to carry
             Test.@test nalloc(g, mt) == 0
-            (percall(g, mt, 3.0, 3000), g, mt)
+            I = (length(FG.Grids.mask(g)) ÷ 2,)
+            (C.metric_window(g, I, 3.0, mt), g, mt)
         end
-        # A 16× longer axis holding the window size fixed: cost must be flat, not 16× worse. The bound
-        # is loose enough for a noisy machine and far tighter than the linear growth it replaces.
-        Test.@test ts[2][1] < 4 * ts[1][1]
+        # A 16× longer axis at a fixed radius: the window is the same handful of cells, not 16× wider.
+        Test.@test wins[1][1] == wins[2][1]
+        Test.@test only(wins[1][1]) ≤ 8
         # And the count is the truth, whichever topology computed it.
-        for (_, g, mt) in ts
+        for (_, g, mt) in wins
             I = (length(FG.Grids.mask(g)) ÷ 2,)
             Test.@test C.nneighbors_within(g, I...; ball = 3.0, topology = mt) ==
                        C.nneighbors_within(g, I...; ball = 3.0)
@@ -4463,37 +4481,33 @@ Test.@testset "FlowGeometries.jl" begin
             Test.@test C.nneighbors_within(gu, idx; ball = r, topology = ixu) == length(scan)
         end
 
-        # Cost: fixed radius, growing n. The scan is linear per query; the index must not be.
-        # Best of several blocks, not the mean of one: a single collection landing in the block would
-        # otherwise decide the comparison, and by this point in the suite the heap is big enough for
-        # that to happen. The query itself allocates nothing, so no block needs to collect.
-        function percall(g, top, r, reps)
-            I = (size(GD.mask(g), 1) ÷ 2, size(GD.mask(g), 2) ÷ 2)
-            buf = Vector{Int}(undef, 4096)
-            s = C.ball_scratch()
-            C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
-            best = Inf
-            for _ in 1:3
-                t = @elapsed for _ in 1:reps
-                    C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
-                end
-                best = min(best, t / reps)
-            end
-            return best
+        # Cost: fixed radius, growing n. The scan offers every cell as a candidate; the index must
+        # offer a bounded set. That is the claim, and it is a COUNT — countable exactly through the
+        # public fold, which hands the caller each candidate. A clock would answer the same question
+        # nondeterministically and be decided by whether a collection landed in the sample.
+        # Each index enumerates its candidates its own way — a cell list folds, a tree fills a buffer,
+        # because it has to deduplicate the periodic images it searched. Count through whichever it is.
+        candidates(g, ix::GD.CellListIndex, r, I) = GD.fold_candidates(0, ix, g, I, r) do acc, _k
+            return acc + 1
         end
+        candidates(g, ix, r, I) = length(GD.index_within!(Int[], ix, g, I, r))
         small, big = curv(24), curv(96)                      # 576 vs 9216 cells, 16× more
         # `curv` spans the same extent at every `n`, so the radius has to shrink with the spacing to
-        # hold the ball at a fixed cell count — otherwise the growth measured is more candidates rather
-        # than more overhead, which is not the claim.
+        # hold the ball at a fixed cell count — otherwise what grows is the answer, not the overhead.
         cells = 2.5
         r_small, r_big = cells * 10.0 / 23, cells * 10.0 / 95
         Test.@test C.nneighbors_within(small, 12, 12; ball = r_small) ==
                    C.nneighbors_within(big, 48, 48; ball = r_big)
-        ix_small = percall(small, C.indexed(small), r_small, 500)
-        ix_big = percall(big, C.indexed(big), r_big, 500)
-        sc_big = percall(big, C.MetricTopology(big), r_big, 50)
-        Test.@test ix_big < 3 * ix_small                     # flat in `n`, loosely bounded
-        Test.@test ix_big < sc_big                           # and cheaper than the scan it replaces
+        # A cell list is binned at the radius it will be queried at — bin it wider and each bin holds
+        # more cells as the grid refines, which is a property of the caller's choice, not the index.
+        for mk in ((g, r) -> GD.spatial_index(g), (g, r) -> GD.cell_list(g; ball = r))
+            cs = candidates(small, mk(small, r_small), r_small, (12, 12))
+            cb = candidates(big, mk(big, r_big), r_big, (48, 48))
+            # 16× the cells, the same ball: the candidate set must not grow with the grid.
+            cb ≤ 3 * cs || println("    candidates grew ", cs, " → ", cb, " over 16× cells")
+            Test.@test cb ≤ 3 * cs
+            Test.@test cb < length(GD.mask(big)) ÷ 4         # and is nothing like the scan's every-cell
+        end
     end
 
     Test.@testset "Connected is the reachable part of the ball, not the ball" begin
@@ -5433,47 +5447,41 @@ Test.@testset "FlowGeometries.jl" begin
         stretched(n) = GD.StructuredGrid(cart, cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n))),
                                          collect(0.0:3.0))
 
-        function percall(f, g, state)
-            f(g, state)
-            best = Inf
-            for _ in 1:3
-                t = @elapsed for _ in 1:200
-                    f(g, state)
+        # "Recomputes no grid invariant" is a statement about how much of the grid a call READS, so it
+        # is asserted by counting reads. A `CountingAxis` is kept by `_to_axis` unchanged, so a grid
+        # can be built on one and then asked what each entry point touches. Every one of these must be
+        # flat in `n`; the earlier defects — a rescanned minimum spacing, an `extrema` under a search
+        # radius — would each show up here as `n` reads.
+        for n in (256, 4096)
+            cx = CountingAxis(cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n))))
+            g = GD.StructuredGrid(cart, cx, collect(0.0:3.0))
+            Test.@test reads(() -> C.MetricTopology(g), cx) == 0
+            Test.@test reads(() -> (GD.extent(g, 1), GD.bounds(g, 1), GD.origin(g, 1)), cx) == 0
+            Test.@test reads(() -> GD.minimum_spacing(g, 1), cx) == 0
+            Test.@test reads(() -> GD.maximum_spacing(g, 1), cx) == 0
+            # A ball query reads only its own window, not the axis: bounded, and the same bound at
+            # both sizes rather than growing with the axis.
+            mt = C.MetricTopology(g)
+            Test.@test reads(() -> C.nneighbors_within(g, n ÷ 2, 2; ball = 3.0, topology = mt), cx) ≤ 64
+        end
+
+        # The window itself is what must stay O(1) per direction, at both sizes.
+        w256 = C.metric_window(stretched(256), (128, 2), 3.0, C.MetricTopology(stretched(256)))
+        w4096 = C.metric_window(stretched(4096), (2048, 2), 3.0, C.MetricTopology(stretched(4096)))
+        Test.@test w256 == w4096
+
+        # On the architectures with an index, the bounded quantity is the candidate set. `k_nearest!`
+        # and the ball query both walk it, and neither may grow with the grid.
+        for (name, small, big) in (("curvilinear", curv(24), curv(96)),)
+            for (g, I) in ((small, (12, 12)), (big, (48, 48)))
+                ix = GD.cell_list(g; ball = 2.5)
+                c = FG.Grids.fold_candidates(0, ix, g, I, 2.5) do acc, _k
+                    return acc + 1
                 end
-                best = min(best, t / 200)
+                c ≤ 64 || println("    ", name, " candidates at n=", length(GD.mask(g)), ": ", c)
+                Test.@test c ≤ 64
             end
-            return best
         end
-
-        # `setup` is everything built once per grid — an index, a buffer — and is deliberately outside
-        # the timed call. Timing it too would measure construction, which is `O(n)` by right.
-        function ratio(build, setup, op, small, big)
-            gs, gb = build(small), build(big)
-            ss, sb = setup(gs), setup(gb)
-            return percall(op, gb, sb) / max(percall(op, gs, ss), eps())
-        end
-
-        indexed_setup(g) = (C.MetricTopology(g; index = GD.cell_list(g; ball = 2.5)),
-                            Vector{Int}(undef, 8), Vector{Float64}(undef, 8))
-        knn_op(g, s) = C.k_nearest!(s[2], s[3], g, 8, 8; k = 8, topology = s[1])
-        ball_op(g, s) = C.nneighbors_within(g, 8, 8; ball = 2.5, topology = s[1])
-        nothing_setup(_g) = nothing
-        top_op(g, _s) = C.MetricTopology(g)
-        span_op(g, _s) = (GD.extent(g, 1), GD.bounds(g, 2), GD.origin(g, 1))
-        for (name, setup, op) in (("k_nearest!", indexed_setup, knn_op),
-                                  ("indexed ball query", indexed_setup, ball_op),
-                                  ("MetricTopology", nothing_setup, top_op),
-                                  ("extent/bounds/origin", nothing_setup, span_op))
-            r = ratio(curv, setup, op, 24, 96)          # 16× the cells
-            r < 4 || println("    curvilinear ", name, " grew ", round(r; digits = 1), "× over 16× cells")
-            Test.@test r < 4
-        end
-
-        # The separable architecture, where the window bound is what must stay O(1) per direction.
-        win_op(g, _s) = C.nneighbors_within(g, 128, 2; ball = 3.0)
-        r = ratio(stretched, nothing_setup, win_op, 256, 4096)
-        r < 4 || println("    stretched-axis window grew ", round(r; digits = 1), "× over 16× samples")
-        Test.@test r < 4
     end
 
     Test.@testset "Every public name is allocation-checked or has a stated reason not to be" begin

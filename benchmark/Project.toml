@@ -1,0 +1,7 @@
+[deps]
+FlowGeometries = "0ccd6995-f618-4175-b01e-f437d0cb4974"
+NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[sources]
+FlowGeometries = {path = ".."}
