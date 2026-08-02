@@ -126,6 +126,11 @@ Build the geometry-appropriate named point from positional values (axis order).
 
 Normalize a point (`Tuple`, `NamedTuple`, or `AbstractVector` of length 1–3) to a plain `Tuple`.
 """
+# The point spellings that are NOT a `Tuple`. An entry point takes a tuple method plus one forwarding
+# method over this union: writing the forwarder for `Any` instead makes it ambiguous with the tuple
+# method, since a `Tuple` matches both.
+const PointLike = Union{NamedTuple,AbstractVector{<:Real}}
+
 @inline as_ntuple(p::NamedTuple) = Tuple(p)
 @inline as_ntuple(p::Tuple) = p
 @inline function as_ntuple(p::AbstractVector)

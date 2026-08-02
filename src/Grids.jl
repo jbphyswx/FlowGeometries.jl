@@ -1185,6 +1185,65 @@ function Discretization.apply_stencil!(
     )
 end
 
+# The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
+# past the last sample the pair is `(n, 1)` across the seam, where `interpolation_weights` alone would
+# clamp and return the endpoint value.
+@inline function _interp_pair(grid::StructuredGrid{G,T,N}, d::Int, v::T) where {G,T,N}
+    x = coordinates(grid, d)
+    n = length(x)
+    n == 1 && return (1, 1, one(T), zero(T))
+    if isperiodic(grid, d)
+        L = T(period(grid, d))
+        if L > 0
+            lo = T(axis_stats(grid, d).min_value)
+            v = lo + mod(v - lo, L)
+            @inbounds x1, xn = T(x[1]), T(x[n])
+            asc = xn ≥ x1
+            beyond = asc ? v > xn : v < xn
+            if beyond
+                h = asc ? (x1 + L) - xn : (x1 - L) - xn
+                t = iszero(h) ? zero(T) : (v - xn) / h
+                return (n, 1, one(T) - t, t)
+            end
+        end
+    end
+    i, w = Discretization.interpolation_weights(x, v)
+    return (Int(i), Int(i) + 1, w[1], w[2])
+end
+
+function Discretization.interpolate(
+    field::AbstractArray{S,N}, grid::StructuredGrid{G,T,N}, p::NTuple{N,Real};
+    active_only::Bool = true, masked = S(NaN),
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+) where {S,G,T,N}
+    policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
+    size(field) == size_tuple(grid) || throw(DimensionMismatch(
+        "field $(size(field)) does not match the grid $(size_tuple(grid))",
+    ))
+    prs = ntuple(d -> _interp_pair(grid, d, T(p[d])), Val(N))
+    msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
+    acc = zero(S)
+    wsum = zero(T)
+    # The `2^N` corners of the bracketing cell, each weighted by the product of its per-axis weights.
+    @inbounds for c in CartesianIndices(ntuple(_ -> 2, Val(N)))
+        w = prod(ntuple(d -> c[d] == 1 ? prs[d][3] : prs[d][4], Val(N)))
+        iszero(w) && continue
+        I = ntuple(d -> c[d] == 1 ? prs[d][1] : prs[d][2], Val(N))
+        if msk !== nothing && !msk[I...]
+            policy isa Discretization.BlankMasked && return masked
+            continue                                   # `ReduceInRun`: drop it and renormalize
+        end
+        acc += S(w) * S(field[I...])
+        wsum += w
+    end
+    return wsum > 0 ? acc / S(wsum) : masked
+end
+
+@inline Discretization.interpolate(
+    field::AbstractArray, grid::StructuredGrid, p::Geometry.PointLike; kwargs...,
+) =
+    Discretization.interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
+
 function Discretization.derivative!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,

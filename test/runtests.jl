@@ -3630,6 +3630,77 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test @allocated(nnw(g, Nx)) == 0
     end
 
+    Test.@testset "A field can be evaluated at a coordinate, on every architecture" begin
+        C = FG.Connectivity
+        D = FG.Discretization
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+
+        # Structured: the tensor product of the per-axis weights, so a bilinear field is exact.
+        nx, ny = 11, 9
+        x = collect(range(0.0, 2.0; length = nx))
+        y = collect(range(-1.0, 3.0; length = ny))
+        g = GD.StructuredGrid(cart, x, y)
+        f = [2xi - 3yj + 0.5 * xi * yj + 7 for xi in x, yj in y]
+        exact(px, py) = 2px - 3py + 0.5 * px * py + 7
+        for px in range(0.05, 1.95; length = 9), py in range(-0.95, 2.95; length = 7)
+            Test.@test D.interpolate(f, g, (px, py)) ≈ exact(px, py) atol = 1e-10
+        end
+        # And a cell's own value at its centre, which multilinear interpolation must reproduce.
+        Test.@test all(D.interpolate(f, g, (x[i], y[j])) ≈ f[i, j] for i in 1:nx, j in 1:ny)
+
+        # A periodic direction interpolates ACROSS its seam rather than clamping at the last sample,
+        # which is the case a caller composing per-axis weights by hand gets wrong.
+        let nλ = 24, λ = collect(range(0.0, 2π * (1 - 1 / 24); length = 24)), z = [0.0, 1.0]
+            gp = GD.StructuredGrid(cart, λ, z; periodic = (true, false), period = (2π, 0.0))
+            fp = [sin(l) for l in λ, _ in z]
+            mid = λ[end] + (2π - λ[end]) / 2         # strictly between the last sample and the first
+            Test.@test D.interpolate(fp, gp, (mid, 0.0)) ≈ (sin(λ[end]) + sin(λ[1])) / 2
+            Test.@test D.interpolate(fp, gp, (2π + 0.3, 0.0)) ≈ D.interpolate(fp, gp, (0.3, 0.0))
+        end
+
+        # Scattered and curvilinear: a least-squares plane, so a linear field is exact — a plain
+        # inverse-distance average would not be.
+        let npt = 400, xs = 10.0 .* rand(npt), ys = 6.0 .* rand(npt)
+            gu = GD.UnstructuredGrid(cart, (xs, ys), trues(npt); k = 8, areas = ones(npt))
+            fu = 2.0 .* xs .- 3.0 .* ys .+ 5.0
+            for _ in 1:20
+                px, py = 1.0 + 8.0 * rand(), 1.0 + 4.0 * rand()
+                Test.@test D.interpolate(fu, gu, (px, py); k = 8) ≈ 2px - 3py + 5 atol = 1e-8
+            end
+            Test.@test all(D.interpolate(fu, gu, (xs[i], ys[i]); k = 8) ≈ fu[i] for i in 1:20)
+        end
+        let n = 14
+            xc = [t + 0.35u for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
+            yc = [u - 0.2t for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
+            cg = GD.CurvilinearGrid(cart, xc, yc, trues(n, n); measure = fill(1.0, n, n))
+            fc = 2.0 .* xc .- 3.0 .* yc .+ 5.0
+            for _ in 1:15
+                px, py = 2.0 + 5.0 * rand(), 0.0 + 3.0 * rand()
+                Test.@test D.interpolate(fc, cg, (px, py); k = 8) ≈ 2px - 3py + 5 atol = 1e-8
+            end
+        end
+
+        # The mask policies mean here what they mean for a stencil.
+        let mk = trues(nx, ny)
+            mk[5, 4] = false
+            gm = GD.StructuredGrid(cart, x, y, mk)
+            pin = ((x[5] + x[6]) / 2, (y[4] + y[5]) / 2)      # its corners include the hole
+            Test.@test isnan(D.interpolate(f, gm, pin; masked = NaN))
+            Test.@test !isnan(D.interpolate(f, gm, pin; masked = NaN, policy = D.ReduceInRun()))
+            Test.@test !isnan(D.interpolate(f, gm, (x[1], y[1]); masked = NaN))
+            Test.@test_throws ArgumentError D.interpolate(f, gm, pin; policy = D.ShiftWithinRun())
+        end
+
+        # A point is a point however it is written.
+        let a = D.interpolate(f, g, (0.7, 1.1))
+            Test.@test a == D.interpolate(f, g, [0.7, 1.1])
+            Test.@test a == D.interpolate(f, g, (x = 0.7, y = 1.1))
+            Test.@test a == D.interpolate(f, g, StaticArrays.SVector(0.7, 1.1))
+        end
+        Test.@test_throws DimensionMismatch D.interpolate(zeros(3, 3), g, (0.5, 0.5))
+    end
+
     Test.@testset "A least-squares gradient where there is no separable axis" begin
         C = FG.Connectivity
         D = FG.Discretization
@@ -5946,6 +6017,7 @@ Test.@testset "FlowGeometries.jl" begin
              :connected_components, :count_holes, :interior, :boundary_cells, :csr_connectivity,
              :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
              :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
+             :interpolate,
              :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
         # allocating forms, whose whole job is to return a fresh array
         [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,

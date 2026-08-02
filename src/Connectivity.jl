@@ -705,6 +705,71 @@ function gradient_plan(
     return Discretization.GradientPlan(ptr, nbr, c1, c2, names)
 end
 
+function Discretization.interpolate(
+    field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}},
+    p::NTuple{D,Real}; k::Integer = 8, active_only::Bool = true, masked = T(NaN),
+    topology = MetricTopology(grid), scratch = nothing,
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+) where {T,D}
+    policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
+    length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
+        "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
+        "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
+    ))
+    length(field) == length(Grids.mask(grid)) || throw(DimensionMismatch(
+        "field has $(length(field)) values for a grid of $(length(Grids.mask(grid))) cells",
+    ))
+    geo = Grids.grid_geometry(grid)
+    p0 = ntuple(d -> T(p[d]), Val(D))
+    idx, dist = k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
+                          scratch = scratch)
+    isempty(idx) && return masked
+    # `BlankMasked` refuses where the neighbourhood is not wholly active, on the same rule a stencil
+    # uses; `k_nearest` with `active_only` has already dropped those, so the test is whether doing so
+    # left a hole — a cell nearer than the farthest one kept, that was skipped.
+    if policy isa Discretization.BlankMasked && active_only
+        msk = Grids.mask(grid)
+        rmax = dist[end]
+        n_in = nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
+                                 scratch = scratch)
+        n_in > length(idx) && return masked
+    end
+    # Weighted least squares for `f ≈ a + g·Δr` in the tangent plane at `p`. `a` is the value there,
+    # and including `g` is what makes it exact for a linear field rather than a smoothed average.
+    m11 = zero(T); m12 = zero(T); m13 = zero(T)
+    m22 = zero(T); m23 = zero(T); m33 = zero(T)
+    b1 = zero(T); b2 = zero(T); b3 = zero(T)
+    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
+    fsum = zero(T); wsum = zero(T)
+    @inbounds for t in eachindex(idx)
+        j = Int(idx[t])
+        Δ = Geometry.project_to_tangent_plane(geo, p0, _grad_coords(grid, sz, j))
+        δ1, δ2 = T(Δ[1]), T(Δ[2])
+        # Inverse-square distance, floored so a query exactly on a cell centre stays finite.
+        q = δ1 * δ1 + δ2 * δ2
+        w = inv(max(q, eps(T)))
+        fv = T(field[j])
+        m11 += w;            m12 += w * δ1;      m13 += w * δ2
+        m22 += w * δ1 * δ1;  m23 += w * δ1 * δ2; m33 += w * δ2 * δ2
+        b1 += w * fv;        b2 += w * δ1 * fv;  b3 += w * δ2 * fv
+        fsum += w * fv;      wsum += w
+    end
+    # A symmetric 3×3 by its adjugate. Where it is singular — collinear neighbours, or a single one —
+    # the plane is not determined and only its constant is, which is the weighted mean.
+    a11 = m22 * m33 - m23 * m23
+    a12 = m13 * m23 - m12 * m33
+    a13 = m12 * m23 - m13 * m22
+    det = m11 * a11 + m12 * a12 + m13 * a13
+    scale = max(m11 * m22 * m33, one(T))
+    abs(det) ≤ scale * sqrt(eps(T)) && return wsum > 0 ? fsum / wsum : masked
+    return (a11 * b1 + a12 * b2 + a13 * b3) / det        # the constant term: the value at `p`
+end
+
+@inline Discretization.interpolate(
+    field::AbstractArray, grid::Union{Grids.CurvilinearGrid,Grids.UnstructuredGrid},
+    p::Geometry.PointLike; kwargs...,
+) = Discretization.interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
+
 @inline _grad_coords(grid, ::Nothing, i::Int) = Grids._raw_coords(grid, i)
 @inline _grad_coords(grid, sz::Tuple, i::Int) =
     Grids._raw_coords(grid, Tuple(@inbounds CartesianIndices(sz)[i])...)
@@ -1744,22 +1809,21 @@ end
 
 # A point may be written any of the ways the rest of the package accepts one. Normalizing at these entry
 # points keeps one tuple method per kernel, and the cell-seeded forms take integers, so nothing accepted
-# here can be mistaken for one.
-const _PointLike = Union{NamedTuple,AbstractVector{<:Real}}
+# here can be mistaken for one. `Geometry.PointLike` excludes `Tuple`, which the tuple methods take.
 
 for fn in (:neighbors_within, :nneighbors_within, :k_nearest)
-    @eval @inline $fn(grid::Grids.AbstractGrid, p::_PointLike; kwargs...) =
+    @eval @inline $fn(grid::Grids.AbstractGrid, p::Geometry.PointLike; kwargs...) =
         $fn(grid, Geometry.as_ntuple(p); kwargs...)
 end
 
 @inline k_nearest!(idx::AbstractVector{<:Integer}, dist::AbstractVector,
-                   grid::Grids.AbstractGrid, p::_PointLike; kwargs...) =
+                   grid::Grids.AbstractGrid, p::Geometry.PointLike; kwargs...) =
     k_nearest!(idx, dist, grid, Geometry.as_ntuple(p); kwargs...)
 
-@inline fold_at(f::F, init, grid::Grids.AbstractGrid, p::_PointLike; kwargs...) where {F} =
+@inline fold_at(f::F, init, grid::Grids.AbstractGrid, p::Geometry.PointLike; kwargs...) where {F} =
     fold_at(f, init, grid, Geometry.as_ntuple(p); kwargs...)
 
-@inline Grids.locate(grid::Grids.AbstractGrid, p::_PointLike; kwargs...) =
+@inline Grids.locate(grid::Grids.AbstractGrid, p::Geometry.PointLike; kwargs...) =
     Grids.locate(grid, Geometry.as_ntuple(p); kwargs...)
 
 # The cell the point falls in gives the local cell size to start from, exactly as the cell-seeded form
