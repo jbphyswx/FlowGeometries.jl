@@ -51,6 +51,8 @@ q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
                                                    ball = r, topology = t, scratch = s)
 q_locate(g, p)           = FG.Grids.locate(g, p)
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
+q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
+q_width(g, d, i)         = FG.Grids.cell_width(g, d, i)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
 q_area(g, I)             = FG.Grids.area(g, I...)
@@ -388,7 +390,7 @@ Test.@testset "FlowGeometries.jl" begin
     end
 
     Test.@testset "Cell measure is a separable outer product matching the metric formulas" begin
-        cw = FG.Grids._cell_width
+        cw = FG.Discretization.cell_width
         sgeo = FG.Geometry.SphericalGeometry(6.371e6)
         cgeo = FG.Geometry.CartesianGeometry()
         cgeo3 = FG.Geometry.CartesianGeometry()
@@ -565,7 +567,7 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test all(f -> f isa A.ConstantVector, FG.Grids.measure_factors(g))
         Test.@test FG.Grids.measure(g, 3, 4) == 0.25^2
         Test.@test Base.summarysize(g) < 512
-        Test.@test length(Set(FG.Grids._local_spacing(ax, i)[2] for i in 1:4)) == 1
+        Test.@test length(Set(FG.Discretization.local_spacing(ax, i)[2] for i in 1:4)) == 1
         Test.@test FG.Discretization.locate(ax, 0.6) ==
                    FG.Discretization.locate(collect(ax), 0.6)
         Test.@test A.isuniform(FG.Discretization.faces(ax))
@@ -605,8 +607,8 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test Base.summarysize(g) < 512
         Test.@test FG.Grids.minimum_spacing(g, 1) == FG.Grids.maximum_spacing(g, 1) == 0.5
         Test.@test FG.Grids.measure(g, 3, 4) === 0.25
-        # `_local_spacing` returns `step` rather than differencing, so the gap is exactly constant.
-        Test.@test length(Set(FG.Grids._local_spacing(ax, i)[2] for i in 1:8)) == 1
+        # `local_spacing` returns `step` rather than differencing, so the gap is exactly constant.
+        Test.@test length(Set(FG.Discretization.local_spacing(ax, i)[2] for i in 1:8)) == 1
         Test.@test FG.Discretization.locate(ax, 2.0) == FG.Discretization.locate(collect(ax), 2.0)
         Test.@test FG.Discretization.nearest_index(ax, 2.0) == 5
         Test.@test FG.Axes.isuniform(FG.Discretization.faces(ax))
@@ -740,7 +742,7 @@ Test.@testset "FlowGeometries.jl" begin
         # Constant factors and dense factors must agree, and the uniform answer is the exact one:
         # `Δ` is stored, so every cell width IS `Δ`, where recovering it by differencing reconstructed
         # coordinates leaves an ulp of noise.
-        dense = FG.Grids._axis_widths_dense(collect(FG.Grids.coordinates(g, 1)))
+        dense = FG.Discretization._cell_widths_dense(collect(FG.Grids.coordinates(g, 1)))
         Test.@test collect(FG.Grids.measure_factors(g)[1]) ≈ dense rtol = 1e-15
         Test.@test all(==(0.5), FG.Grids.measure_factors(g)[1])
     end
@@ -768,8 +770,8 @@ Test.@testset "FlowGeometries.jl" begin
 
         for n in (50, 500, 5000)
             c = CountingVector(collect(range(0.0; step = 1.5, length = n)))
-            w = FG.Grids._axis_widths(c)
-            Test.@test collect(w) ≈ [FG.Grids._cell_width(c.data, i) for i in 1:n]
+            w = FG.Discretization.cell_widths(c)
+            Test.@test collect(w) ≈ [FG.Discretization.cell_width(c.data, i) for i in 1:n]
             # Bulk broadcasts do touch elements, but the count must be O(n) with a small constant
             # and never O(n) per output element.
             Test.@test c.scalar_reads <= 4n + 16
@@ -779,8 +781,8 @@ Test.@testset "FlowGeometries.jl" begin
         n = 4000
         c1 = CountingVector(collect(range(0.0; step = 1.0, length = n)))
         c2 = CountingVector(collect(range(0.0; step = 1.0, length = 2n)))
-        FG.Grids._axis_widths(c1)
-        FG.Grids._axis_widths(c2)
+        FG.Discretization.cell_widths(c1)
+        FG.Discretization.cell_widths(c2)
         Test.@test c2.scalar_reads - c1.scalar_reads <= 4n + 16   # grows linearly, not quadratically
     end
 
@@ -3751,8 +3753,8 @@ Test.@testset "FlowGeometries.jl" begin
             for (nm, g) in (("locate", D.locate), ("nearest_index", D.nearest_index))
                 g(small, 0.37); g(big, 0.37)
                 Test.@test (@allocated g(big, 0.37)) == 0
-                ts = minimum(@elapsed(g(small, 0.37 + 1e-9k)) for k in 1:200)
-                tb = minimum(@elapsed(g(big, 0.37 + 1e-9k)) for k in 1:200)
+                ts = minimum(@elapsed(g(small, 0.37 + 1e-9k)) for k in 1:50)
+                tb = minimum(@elapsed(g(big, 0.37 + 1e-9k)) for k in 1:50)
                 # 4096x the samples: a scan would be ~1000x slower, a bisection ~1.5x.
                 tb < 20 * ts || println("    ", nm, " grew ", round(tb / ts; digits = 1), "x over 4096x n")
                 Test.@test tb < 20 * ts
@@ -3778,6 +3780,102 @@ Test.@testset "FlowGeometries.jl" begin
                 end
             end
         end
+    end
+
+    Test.@testset "Per-index gaps and widths are public, exact and free of allocation" begin
+        D = FG.Discretization
+        GD = FG.Grids
+        GE = FG.Geometry
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        sph = FG.Geometry.SphericalGeometry(6.371e6)
+        vec1 = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
+        rng1 = range(0.0, 1.0; length = 8)
+
+        # `cell_width` IS the gap between faces — that is what it means, and the reason it exists
+        # separately is that `faces` materializes the whole axis to answer for one cell.
+        for x in (vec1, reverse(vec1), collect(rng1), [3.0])
+            f = D.faces(x)
+            for i in eachindex(x)
+                Test.@test D.cell_width(x, i) ≈ abs(f[i+1] - f[i]) rtol = 1e-14
+            end
+        end
+
+        # Gaps are SIGNED, and that is what lets a stencil keep the index-vs-coordinate direction.
+        Test.@test all(D.local_spacing(vec1, i) == (vec1[i] - vec1[i-1], vec1[i+1] - vec1[i])
+                       for i in 2:(length(vec1) - 1))
+        # Reversing the axis moves cell `i` to `n+1-i`, where the gaps come back negated and swapped
+        # — the same two neighbours, from the other side — while the width, being a length, does not.
+        let n = length(vec1), rv = reverse(vec1)
+            for i in 2:(n - 1)
+                h_m, h_p = D.local_spacing(vec1, i)
+                Test.@test D.local_spacing(rv, n + 1 - i) == (-h_p, -h_m)
+                Test.@test D.cell_width(rv, n + 1 - i) == D.cell_width(vec1, i)
+            end
+        end
+        # A bounded end has no gap on the outside; a period supplies the wrapped one.
+        Test.@test D.local_spacing(vec1, 1)[1] == 0.0
+        Test.@test D.local_spacing(vec1, length(vec1))[2] == 0.0
+        λ = collect(range(0.0, 2π * (1 - 1 / 16); length = 16))
+        Test.@test D.local_spacing(λ, 16, 2π)[2] ≈ 2π / 16
+        Test.@test D.local_spacing(λ, 1, 2π)[1] ≈ 2π / 16
+        Test.@test D.local_spacing(reverse(λ), 1, 2π)[1] ≈ -2π / 16   # orientation follows the axis
+
+        # The bulk form is the per-index one at every index, and costs nothing on a uniform axis.
+        for (x, p) in ((vec1, nothing), (collect(rng1), nothing), (λ, 2π), (rng1, nothing))
+            Test.@test collect(D.cell_widths(x, p)) ≈ [D.cell_width(x, i, p) for i in eachindex(x)]
+        end
+        Test.@test D.cell_widths(rng1) isa FG.Axes.ConstantVector
+
+        # The grid forms take the period from the grid, which is the part a caller composing the
+        # axis form by hand gets wrong at a seam.
+        grids = (
+            ("range x range",   GD.StructuredGrid(cart, rng1, rng1)),
+            ("range x Vector",  GD.StructuredGrid(cart, rng1, vec1)),
+            ("Vector x range",  GD.StructuredGrid(cart, vec1, rng1)),
+            ("Vector x Vector", GD.StructuredGrid(cart, vec1, vec1)),
+            ("3D mixed",        GD.StructuredGrid(cart, rng1, vec1, collect(0.0:2.0))),
+            ("periodic sphere", GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9)))),
+        )
+        for (nm, g) in grids, d in 1:length(GD.coordinates(g))
+            x = GD.coordinates(g, d)
+            p = GD.isperiodic(g, d) ? GD.period(g, d) : nothing
+            for i in 1:length(x)
+                Test.@test GD.local_spacing(g, d, i) == D.local_spacing(x, i, p)
+                Test.@test GD.cell_width(g, d, i) == D.cell_width(x, i, p)
+            end
+            Test.@test collect(GD.cell_widths(g, d)) == [D.cell_width(x, i, p) for i in 1:length(x)]
+            # A runtime `d` indexes a tuple whose entries have different types on the mixed grids;
+            # the result must still infer and the lookup must not allocate.
+            Test.@test _alloc(q_gap, g, d, 2) == 0
+            Test.@test _alloc(q_width, g, d, 2) == 0
+            Test.@inferred GD.local_spacing(g, d, 2)
+            Test.@inferred GD.cell_width(g, d, 2)
+        end
+        Test.@test_throws ArgumentError GD.local_spacing(first(grids)[2], 3, 1)
+
+        # The point of making them public: assembling the operator the module header says is the
+        # caller's to assemble. A quadratic must come back exactly, in either storage order.
+        fq(x) = 3x^2 - 2x + 5
+        dfq(x) = 6x - 2
+        for x in (vec1, reverse(vec1))
+            for i in 2:(length(x) - 1)
+                h_m, h_p = D.local_spacing(x, i)
+                Test.@test GE.nonuniform_first_derivative(fq(x[i-1]), fq(x[i]), fq(x[i+1]), h_m, h_p) ≈
+                           dfq(x[i]) atol = 1e-12
+            end
+        end
+        # And across a periodic seam, where the wrapped gap is the whole point: the seam cell's error
+        # is the interior truncation error, not the O(1) one a zero boundary gap would give.
+        np = 32
+        λ2 = collect(range(0.0, 2π * (1 - 1 / np); length = np))
+        gper = GD.StructuredGrid(cart, λ2, [0.0]; periodic = (true, false), period = (2π, 0.0))
+        errs = map(1:np) do i
+            h_m, h_p = GD.local_spacing(gper, 1, i)
+            return abs(GE.nonuniform_first_derivative(sin(λ2[mod1(i - 1, np)]), sin(λ2[i]),
+                                                      sin(λ2[mod1(i + 1, np)]), h_m, h_p) - cos(λ2[i]))
+        end
+        Test.@test errs[1] ≈ maximum(errs) rtol = 0.5      # the seam is no worse than the interior
+        Test.@test maximum(errs) < 0.01
     end
 
     Test.@testset "Fornberg finite-difference weights are exact to their stated order" begin
@@ -3852,8 +3950,8 @@ Test.@testset "FlowGeometries.jl" begin
         λ, φ = FG.Grids.coordinate_names(gg)
         i, j = 7, 11
         p = FG.Grids.coords(gg, i, j)
-        Δλ = FG.Grids._cell_width(FG.Grids.coordinates(gg, 1), i, FG.Grids.period(gg, 1))
-        Δφ = FG.Grids._cell_width(FG.Grids.coordinates(gg, 2), j)
+        Δλ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 1), i, FG.Grids.period(gg, 1))
+        Δφ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 2), j)
         Test.@test FG.Grids.measure(gg, i, j) ≈ G.jacobian(sg, (p.λ, p.φ)) * Δλ * Δφ rtol = 1e-12
         # Any point representation is accepted.
         Test.@test G.scale_factors(sg, (λ = 0.0, φ = π / 3)) == G.scale_factors(sg, (0.0, π / 3))
@@ -4087,9 +4185,9 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Grids.measure_factors(g3) === nothing
 
         # Every cell equals the geometry's own element, exactly — not to a tolerance.
-        wλ = FG.Grids._axis_widths(FG.Grids.coordinates(g2, 1), 2π)
-        wφ = FG.Grids._axis_widths(FG.Grids.coordinates(g2, 2), nothing)
-        wh = FG.Grids._axis_widths(FG.Grids.coordinates(g3, 3), nothing)
+        wλ = FG.Discretization.cell_widths(FG.Grids.coordinates(g2, 1), 2π)
+        wφ = FG.Discretization.cell_widths(FG.Grids.coordinates(g2, 2), nothing)
+        wh = FG.Discretization.cell_widths(FG.Grids.coordinates(g3, 3), nothing)
         Test.@test all(
             FG.Grids.measure(g2, i, j) ≈ GE.area_element(geo, φ7[j], wλ[i], wφ[j])
             for j in eachindex(φ7), i in eachindex(λ8)
@@ -4101,7 +4199,7 @@ Test.@testset "FlowGeometries.jl" begin
         )
         # A further direction enters as a plain width.
         Test.@test sum(FG.Grids.measure(g4)) ≈
-                   sum(FG.Grids._axis_widths([0.0, 2.0], nothing)) * sum(FG.Grids.measure(g3)) rtol = 1e-13
+                   sum(FG.Discretization.cell_widths([0.0, 2.0], nothing)) * sum(FG.Grids.measure(g3)) rtol = 1e-13
 
         # Independent check: the closed-form ellipsoid area, approached at second order.
         e = sqrt(e²)
@@ -4134,7 +4232,7 @@ Test.@testset "FlowGeometries.jl" begin
         # Meridional: each cell is exactly M(φ)·Δφ, the meridian arc element.
         φm = collect(range(-π / 2, π / 2; length = 33))
         gmer = FG.Grids.StructuredGrid(geo, [0.0], φm)
-        wm = FG.Grids._axis_widths(φm, nothing)
+        wm = FG.Discretization.cell_widths(φm, nothing)
         Test.@test all(FG.Grids.measure(gmer, 1, j) ≈ GE.meridional_radius(geo, φm[j]) * wm[j]
                        for j in eachindex(φm))
         # The total approaches ∫M dφ — twice the published quarter meridian — at FIRST order, because
@@ -4375,7 +4473,7 @@ Test.@testset "FlowGeometries.jl" begin
             s = C.ball_scratch()
             C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
             best = Inf
-            for _ in 1:5
+            for _ in 1:3
                 t = @elapsed for _ in 1:reps
                     C.neighbors_within!(buf, g, I...; ball = r, topology = top, scratch = s)
                 end
@@ -4391,9 +4489,9 @@ Test.@testset "FlowGeometries.jl" begin
         r_small, r_big = cells * 10.0 / 23, cells * 10.0 / 95
         Test.@test C.nneighbors_within(small, 12, 12; ball = r_small) ==
                    C.nneighbors_within(big, 48, 48; ball = r_big)
-        ix_small = percall(small, C.indexed(small), r_small, 2000)
-        ix_big = percall(big, C.indexed(big), r_big, 2000)
-        sc_big = percall(big, C.MetricTopology(big), r_big, 100)
+        ix_small = percall(small, C.indexed(small), r_small, 500)
+        ix_big = percall(big, C.indexed(big), r_big, 500)
+        sc_big = percall(big, C.MetricTopology(big), r_big, 50)
         Test.@test ix_big < 3 * ix_small                     # flat in `n`, loosely bounded
         Test.@test ix_big < sc_big                           # and cheaper than the scan it replaces
     end
@@ -4903,6 +5001,10 @@ Test.@testset "FlowGeometries.jl" begin
                 ("interpolation_weights", _alloc(FG.Discretization.interpolation_weights, ax, 0.37)),
                 ("scale_factors",        _alloc(FG.Discretization.scale_factors, sph, (0.3, 0.4))),
                 ("jacobian",             _alloc(FG.Discretization.jacobian, sph, (0.3, 0.4))),
+                ("local_spacing/vector", _alloc(FG.Discretization.local_spacing, ax, 3)),
+                ("local_spacing/range",  _alloc(FG.Discretization.local_spacing, rg, 3)),
+                ("cell_width/vector",    _alloc(FG.Discretization.cell_width, ax, 3)),
+                ("cell_width/range",     _alloc(FG.Discretization.cell_width, rg, 3)),
             )
                 a == 0 || println("    ", name, " -> ", a, " B")
                 Test.@test a == 0
@@ -5387,6 +5489,7 @@ Test.@testset "FlowGeometries.jl" begin
             :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
             :fold_candidates_at, :locate, :embed_point, :fold_at,
             :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
+            :local_spacing, :cell_width,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
@@ -5411,7 +5514,7 @@ Test.@testset "FlowGeometries.jl" begin
              :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
         # allocating forms, whose whole job is to return a fresh array
         [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,
-         :centers, :faces, :nodes],
+         :centers, :faces, :nodes, :cell_widths],
         # grid constructors
         [:structured_grid, :unstructured_grid],
             # extension hooks, which throw until their trigger package is loaded

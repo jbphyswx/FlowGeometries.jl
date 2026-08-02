@@ -92,8 +92,9 @@ A curvilinear or unstructured grid is never uniform: its coordinates are per-cel
 
 The constant spacing of coordinate direction `d`, available without reading any coordinate. Signed,
 so a descending axis reports a negative spacing. Raises for a direction that is not
-[`isuniform`](@ref) — use [`minimum_spacing`](@ref) / [`maximum_spacing`](@ref), or
-[`Grids._cell_width`](@ref) per cell, for a nonuniform one.
+[`isuniform`](@ref) — for a nonuniform one use [`minimum_spacing`](@ref) / [`maximum_spacing`](@ref)
+for its range of gaps, [`local_spacing`](@ref) for the gaps at one index, or [`cell_width`](@ref) /
+[`cell_widths`](@ref) for the width of a cell.
 """
 @inline spacing(grid::AbstractGrid, d::Integer) = Axes.spacing(coordinates(grid, d))
 
@@ -144,6 +145,64 @@ Largest gap between consecutive samples along direction `d`, the counterpart of
 [`minimum_spacing`](@ref). A direction of fewer than two samples reports `0`, the identity for `max`.
 """
 @inline maximum_spacing(grid::AbstractStructuredGrid, d::Integer) = _max_gap(coordinates(grid, d))
+
+# Selecting ONE axis by a runtime direction out of the coordinate tuple, whose entries may be different
+# types. `ntuple(…, Val(N))` unrolls where every direction is wanted; only one is here, so the tuple is
+# walked by a recursive tail-split instead — the same shape as `_checkaxes`. Each branch sees a
+# concretely typed axis and every branch returns the same concrete type, so the result infers and
+# nothing allocates, where `coordinates(grid, d)` alone would be a dynamic lookup.
+@inline _at_axis(::F, ::Tuple{}, d::Integer) where {F} =
+    throw(ArgumentError("direction $d is outside this grid's directions"))
+@inline _at_axis(f::F, c::Tuple, d::Integer) where {F} =
+    d == 1 ? f(first(c)) : _at_axis(f, Base.tail(c), d - 1)
+
+"""
+    local_spacing(grid, d, i) -> (h_m, h_p)
+
+The one-sided coordinate gaps around index `i` along direction `d`:
+[`Discretization.local_spacing`](@ref) on that direction's axis, with the wrap period taken from the
+grid, so a periodic seam is right without the caller supplying it.
+
+Signed, so a descending axis reports negative gaps — see the axis-level form for why, and
+[`cell_width`](@ref) for the non-negative width built from them. Allocation-free, so this is the
+per-point form to call inside a loop assembling a finite-difference operator.
+"""
+@inline function local_spacing(grid::AbstractStructuredGrid, d::Integer, i::Integer)
+    # Branching here rather than passing a `Union{Nothing,T}` period: both arms return the same
+    # concrete tuple type, where the union would have to be split inside the callee on every call.
+    return isperiodic(grid, d) ?
+        _at_axis(x -> Discretization.local_spacing(x, i, period(grid, d)), coordinates(grid), d) :
+        _at_axis(x -> Discretization.local_spacing(x, i, nothing), coordinates(grid), d)
+end
+
+"""
+    cell_width(grid, d, i) -> T
+
+The coordinate width of cell `i` along direction `d`: [`Discretization.cell_width`](@ref) on that
+direction's axis, with the grid's own wrap period. Non-negative whichever way the axis is stored.
+
+This is the coordinate width, not the cell measure — on a sphere [`measure`](@ref) is `R²cosφ·Δλ·Δφ`
+and this is the `Δλ` or `Δφ` in it, which [`measure_factors`](@ref) does not expose separately
+because it folds the metric into the factor it multiplies.
+"""
+@inline function cell_width(grid::AbstractStructuredGrid, d::Integer, i::Integer)
+    return isperiodic(grid, d) ?
+        _at_axis(x -> Discretization.cell_width(x, i, period(grid, d)), coordinates(grid), d) :
+        _at_axis(x -> Discretization.cell_width(x, i, nothing), coordinates(grid), d)
+end
+
+"""
+    cell_widths(grid, d) -> AbstractVector
+
+[`cell_width`](@ref) along the whole of direction `d`, as
+[`Discretization.cell_widths`](@ref) on its axis with the grid's own wrap period. A uniform direction
+gets an [`Axes.ConstantVector`](@ref), so nothing is materialized.
+"""
+@inline function cell_widths(grid::AbstractStructuredGrid, d::Integer)
+    return isperiodic(grid, d) ?
+        Discretization.cell_widths(coordinates(grid, d), period(grid, d)) :
+        Discretization.cell_widths(coordinates(grid, d), nothing)
+end
 
 """
     coordinate_names(grid) -> NTuple{N,Symbol}
@@ -614,7 +673,8 @@ direction index stays type-stable.
 @inline function spacing(grid::StructuredGrid, d::Integer)
     st = axis_stats(grid, d)
     st.uniform || throw(ArgumentError(
-        "direction $d is not uniform; use `minimum_spacing`/`maximum_spacing` or `_cell_width`",
+        "direction $d is not uniform; use `minimum_spacing`/`maximum_spacing`, `local_spacing` at " *
+        "one index, or `cell_width`/`cell_widths`",
     ))
     return st.step
 end
@@ -707,39 +767,6 @@ function _closes_circle(x::AbstractVector{T}) where {T<:AbstractFloat}
 end
 
 """
-    _local_spacing(x, i, period=nothing) -> (h_m, h_p)
-
-Zero-allocation one-sided coordinate gaps around index `i` of a 1D axis `x`: `h_m = x[i]-x[i-1]`
-and `h_p = x[i+1]-x[i]`. This is the single primitive that the per-cell width below and every
-nonuniform finite-difference stencil are built on — always a scalar subtraction of two already-stored
-array elements, never a heap allocation, so it is safe to call per grid point in a hot loop. On an
-axis whose spacing is known from its type there is not even a subtraction; see the
-[`Axes.UniformAxis`](@ref) method below.
-
-`period`, if given (e.g. `2π` for a periodic longitude axis), makes the boundary gaps *wrap*
-instead of vanishing: at `i==1`, `h_m` is the gap to the unwrapped previous point `x[n]-period`;
-at `i==n`, `h_p` is the gap to the unwrapped next point `x[1]+period`. Pass `nothing` (default) for
-a non-periodic axis, where boundary gaps are simply zero (the caller then falls back to a one-sided
-stencil).
-"""
-@inline function _local_spacing(
-    x::AbstractVector{T}, i::Integer, period::Union{Nothing,Real} = nothing,
-) where {T<:AbstractFloat}
-    n = length(x)
-    if period === nothing
-        h_m = i > 1 ? @inbounds(x[i] - x[i-1]) : zero(T)
-        h_p = i < n ? @inbounds(x[i+1] - x[i]) : zero(T)
-    else
-        # The wrapped neighbour is one period away along the INDEX direction, which is not the
-        # coordinate direction on a descending axis, so the offset carries the orientation.
-        p = _wrap_sign(x) * T(period)
-        h_m = i > 1 ? @inbounds(x[i] - x[i-1]) : @inbounds(x[1] - (x[n] - p))
-        h_p = i < n ? @inbounds(x[i+1] - x[i]) : @inbounds((x[1] + p) - x[n])
-    end
-    return h_m, h_p
-end
-
-"""
     _wrap_sign(x) -> ±1
 
 `+1` for an ascending axis and `-1` for a descending one: the sign that turns a period magnitude into
@@ -747,25 +774,6 @@ the wrapped neighbour's offset in index order. Defined in [`Axes`](@ref) — it 
 alone, and the discretization layer needs the same answer.
 """
 @inline _wrap_sign(x::AbstractVector) = Axes.wrap_sign(x)
-
-# On ANY range the interior gap is `step`, so it is returned rather than recovered by differencing two
-# coordinates — which makes it exactly constant, where differencing varies by an ulp. This is why a
-# caller's own range does not need converting to get the fast path.
-@inline function _local_spacing(
-    x::AbstractRange{T}, i::Integer, period::Union{Nothing,Real} = nothing,
-) where {T<:AbstractFloat}
-    n = length(x)
-    Δ = T(step(x))
-    if period === nothing
-        h_m = i > 1 ? Δ : zero(T)
-        h_p = i < n ? Δ : zero(T)
-    else
-        p = _wrap_sign(x) * T(period)
-        h_m = i > 1 ? Δ : first(x) - (last(x) - p)
-        h_p = i < n ? Δ : (first(x) + p) - last(x)
-    end
-    return h_m, h_p
-end
 
 """
     _to_axis(T, x) -> AbstractVector{T}
@@ -838,40 +846,6 @@ _min_gap(x::AbstractRange{T}) where {T<:AbstractFloat} =
 _max_gap(x::AbstractRange{T}) where {T<:AbstractFloat} =
     length(x) < 2 ? zero(T) : abs(T(step(x)))
 
-"""
-    _cell_width(x, i, period=nothing) -> width
-
-Per-cell coordinate width at index `i` of a 1D axis of cell-centered samples `x`: the centered
-width `(|h_m|+|h_p|)/2` at interior cells (and, when `period` is given, at the wrapped boundary too —
-see [`_local_spacing`](@ref)); for a genuinely non-periodic boundary, the one-sided gap to the
-single neighbour; zero for a length-1 axis. For a *uniform* axis every width equals the constant
-step. Zero-allocation: built on [`_local_spacing`](@ref), materializing no array.
-
-A "width" is a physical measure and so must be non-negative regardless of whether the axis happens
-to be stored increasing or decreasing (e.g. `lat = π/2 .- θ`, or any dataset storing
-latitude/depth/pressure levels top-down) — [`_local_spacing`](@ref) itself returns SIGNED gaps,
-since a derivative stencil needs the sign to encode index-vs-coordinate direction, so the `abs` is
-applied here, at the one place that turns a spacing into an area/volume/length contribution.
-"""
-@inline function _cell_width(
-    x::AbstractVector{T}, i::Integer, period::Union{Nothing,Real} = nothing,
-) where {T<:AbstractFloat}
-    n = length(x)
-    # A singleton axis contributes a multiplicative IDENTITY (one), not zero, to a measure that's a
-    # plain product of per-axis widths (e.g. Cartesian area = Δx·Δy) — this correctly degenerates
-    # area -> length when one axis has no real extent, instead of forcing the whole product to zero.
-    # (This convention is wrong for the spherical R²cosφ·Δλ·Δφ area formula, which has its own
-    # explicit singleton-axis handling in the spherical `StructuredGrid` constructor below, using the
-    # correct lower-dimensional arc-length formula rather than substituting a placeholder here.)
-    n == 1 && return one(T)
-    h_m, h_p = _local_spacing(x, i, period)
-    if period === nothing
-        i == 1 && return abs(h_p)
-        i == n && return abs(h_m)
-    end
-    return (abs(h_m) + abs(h_p)) / T(2)
-end
-
 # A period is a LENGTH, so this is a magnitude and does not change sign with the axis's storage
 # order. On a uniform axis it is exactly `n·|Δ|`, the axis's own closure.
 @inline _cartesian_period(x::AbstractVector{T}) where {T} =
@@ -925,62 +899,6 @@ function _curvilinear_periods(
 end
 
 """
-    _axis_widths(x, period=nothing) -> AbstractVector
-
-Per-cell coordinate width along a whole axis ([`_cell_width`](@ref) at every index).
-
-A uniform axis gets a [`Axes.ConstantVector`](@ref) — one number and a length, since every cell of
-such an axis has the same width. Anything else is materialized densely into the same kind of storage
-as `x`.
-"""
-function _axis_widths(x::AbstractVector, period::Union{Nothing,Real} = nothing)
-    return _axis_widths_dense(x, period)
-end
-
-# Every cell is `|Δ|` wide, boundaries included, whenever the period is the axis's own closure. A
-# regional axis declared periodic against a larger period has a genuinely wider seam, so it falls
-# through to the dense path.
-function _axis_widths(
-    x::AbstractRange{T}, period::Union{Nothing,Real} = nothing,
-) where {T<:AbstractFloat}
-    n = length(x)
-    # A singleton axis contributes a multiplicative identity (see `_cell_width`).
-    n == 1 && return Axes.ConstantVector(one(T), 1)
-    n == 0 && return Axes.ConstantVector(zero(T), 0)
-    w = abs(T(step(x)))
-    period === nothing && return Axes.ConstantVector(w, n)
-    _, h_seam = _local_spacing(x, n, period)
-    isapprox(abs(h_seam), w; rtol = 8 * eps(T)) && return Axes.ConstantVector(w, n)
-    return _axis_widths_dense(x, period)
-end
-
-function _axis_widths_dense(x::AbstractVector{T}, period::Union{Nothing,Real} = nothing) where {T<:AbstractFloat}
-    n = length(x)
-    w = similar(x, T, n)
-    if n == 1
-        # A singleton axis contributes a multiplicative identity, so a measure that is a product of
-        # per-axis widths degenerates (area → length) instead of collapsing to zero.
-        fill!(w, one(T))
-        return w
-    end
-    # Broadcasts over views, never a scalar loop, so a device-resident axis is widened in place.
-    d = abs.(@view(x[2:n]) .- @view(x[1:(n - 1)]))
-    @views w[2:(n - 1)] .= (d[1:(n - 2)] .+ d[2:(n - 1)]) ./ T(2)
-    if period === nothing
-        # A genuine boundary sees only the one gap it has.
-        @views w[1:1] .= d[1:1]
-        @views w[n:n] .= d[(n - 1):(n - 1)]
-    else
-        # Both ends additionally see the seam gap, written from magnitudes so it is the same seam in
-        # either storage order.
-        g = abs(T(period) - abs(@inbounds(x[n]) - @inbounds(x[1])))
-        @views w[1:1] .= (g .+ d[1:1]) ./ T(2)
-        @views w[n:n] .= (d[(n - 1):(n - 1)] .+ g) ./ T(2)
-    end
-    return w
-end
-
-"""
     _measure_factors(geometry, axes, periods) -> NTuple{N,AbstractVector}
 
 Per-axis factors whose outer product is the cell measure: `measure[I...] == prod(w[d][I[d]])`.
@@ -998,14 +916,14 @@ one measures `R·Δφ` — not an area formula with a placeholder substituted in
 function _measure_factors(
     ::G, axes::NTuple{N,AbstractVector{T}}, periods::NTuple{N,Union{Nothing,Real}},
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractCartesianGeometry{T}}
-    return ntuple(d -> _axis_widths(axes[d], periods[d]), Val(N))
+    return ntuple(d -> Discretization.cell_widths(axes[d], periods[d]), Val(N))
 end
 
 # A lone longitude axis measures arc length; with no latitude direction there is no `cosφ` factor.
 function _measure_factors(
     geometry::G, axes::NTuple{1,AbstractVector{T}}, periods::NTuple{1,Union{Nothing,Real}},
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
-    return (Geometry.radius(geometry) .* _axis_widths(axes[1], periods[1]),)
+    return (Geometry.radius(geometry) .* Discretization.cell_widths(axes[1], periods[1]),)
 end
 
 function _measure_factors(
@@ -1017,11 +935,13 @@ function _measure_factors(
     if Nλ == 1 && Nφ == 1
         return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))  # a point has no extent
     elseif Nφ == 1
-        return (_axis_widths(λ, periods[1]), Axes.ConstantVector(R * cos(@inbounds φ[1]), 1))
+        return (Discretization.cell_widths(λ, periods[1]),
+                Axes.ConstantVector(R * cos(@inbounds φ[1]), 1))
     elseif Nλ == 1
-        return (Axes.ConstantVector(one(T), 1), R .* _axis_widths(φ, periods[2]))
+        return (Axes.ConstantVector(one(T), 1), R .* Discretization.cell_widths(φ, periods[2]))
     end
-    return (_axis_widths(λ, periods[1]), (R^2) .* cos.(φ) .* _axis_widths(φ, periods[2]))
+    return (Discretization.cell_widths(λ, periods[1]),
+            (R^2) .* cos.(φ) .* Discretization.cell_widths(φ, periods[2]))
 end
 
 # 3-D and above: `(Δλ)·(cosφ·Δφ)·(r²·Δr)`, further directions entering as plain widths.
@@ -1030,10 +950,10 @@ function _measure_factors(
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     λ, φ, r = axes[1], axes[2], axes[3]
     return (
-        _axis_widths(λ, periods[1]),
-        cos.(φ) .* _axis_widths(φ, periods[2]),
-        (r .^ 2) .* _axis_widths(r, periods[3]),
-        ntuple(d -> _axis_widths(axes[d + 3], periods[d + 3]), Val(N - 3))...,
+        Discretization.cell_widths(λ, periods[1]),
+        cos.(φ) .* Discretization.cell_widths(φ, periods[2]),
+        (r .^ 2) .* Discretization.cell_widths(r, periods[3]),
+        ntuple(d -> Discretization.cell_widths(axes[d + 3], periods[d + 3]), Val(N - 3))...,
     )
 end
 
@@ -1042,7 +962,7 @@ end
 function _measure_factors(
     geometry::G, axes::NTuple{1,AbstractVector{T}}, periods::NTuple{1,Union{Nothing,Real}},
 ) where {T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
-    return (Geometry.semimajor_axis(geometry) .* _axis_widths(axes[1], periods[1]),)
+    return (Geometry.semimajor_axis(geometry) .* Discretization.cell_widths(axes[1], periods[1]),)
 end
 
 function _measure_factors(
@@ -1058,13 +978,14 @@ function _measure_factors(
         return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))
     elseif Nφ == 1
         φ1 = @inbounds φ[1]
-        return (_axis_widths(λ, periods[1]),
+        return (Discretization.cell_widths(λ, periods[1]),
                 Axes.ConstantVector(Geometry.prime_vertical_radius(geometry, φ1) * cos(φ1), 1))
     elseif Nλ == 1
         return (Axes.ConstantVector(one(T), 1),
-                _mer_factor.(φ) .* _axis_widths(φ, periods[2]))
+                _mer_factor.(φ) .* Discretization.cell_widths(φ, periods[2]))
     end
-    return (_axis_widths(λ, periods[1]), _area_factor.(φ) .* _axis_widths(φ, periods[2]))
+    return (Discretization.cell_widths(λ, periods[1]),
+            _area_factor.(φ) .* Discretization.cell_widths(φ, periods[2]))
 end
 
 """
@@ -1083,10 +1004,10 @@ function _cell_measure(
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
     N ≥ 3 || return SeparableMeasure(_measure_factors(geometry, ax, per))
     λ, φ, h = ax[1], ax[2], ax[3]
-    wλ = _axis_widths(λ, per[1])
-    wφ = _axis_widths(φ, per[2])
-    wh = _axis_widths(h, per[3])
-    rest = ntuple(d -> _axis_widths(ax[d + 3], per[d + 3]), Val(N - 3))
+    wλ = Discretization.cell_widths(λ, per[1])
+    wφ = Discretization.cell_widths(φ, per[2])
+    wh = Discretization.cell_widths(h, per[3])
+    rest = ntuple(d -> Discretization.cell_widths(ax[d + 3], per[d + 3]), Val(N - 3))
     dims = ntuple(d -> length(ax[d]), Val(N))
     out = similar(wλ, T, dims)
     @inbounds for I in CartesianIndices(dims)

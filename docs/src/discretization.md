@@ -39,6 +39,53 @@ A.isuniform(D.faces(u)), A.spacing(D.faces(u)), length(D.faces(u))
 D.nodes(u, D.Center()) === u, length(D.nodes(u, D.Face()))
 ```
 
+## Gaps and cell widths
+
+[`local_spacing`](@ref) is the gap either side of one sample, and [`cell_width`](@ref) the width of one
+cell. Both are a scalar subtraction of two stored numbers — no array is built — so they are the forms
+to call per grid point, where `faces` would materialize the whole axis to answer about one cell.
+
+```@example disc
+xs = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
+D.local_spacing(xs, 3), D.cell_width(xs, 3)
+```
+
+`cell_width` is exactly the distance between the cell's two faces — that is what it means:
+
+```@example disc
+f = D.faces(xs)
+[D.cell_width(xs, i) for i in eachindex(xs)] ≈ abs.(diff(f))
+```
+
+The gaps are **signed** and the width is not. A derivative needs the sign, since it distinguishes an
+axis stored increasing from one stored decreasing; a width is a length and cannot be negative. Reverse
+the axis and cell `i` moves to `n+1-i`, where the gaps come back negated and swapped — the same two
+neighbours, now on the other side — while the width is unchanged:
+
+```@example disc
+xr = reverse(xs)                              # cell 3 of xs is cell 4 of xr
+D.local_spacing(xr, 4), D.cell_width(xr, 4)
+```
+
+At a bounded end the outward gap is `0` and the caller falls back to a one-sided stencil. Given a
+`period` it wraps instead, which is what makes a seam no different from the interior:
+
+```@example disc
+λ = collect(range(0, 2π * (1 - 1/8); length = 8))
+D.local_spacing(λ, 8), D.local_spacing(λ, 8, 2π)
+```
+
+[`cell_widths`](@ref) is the whole axis at once. A uniform axis returns an
+[`Axes.ConstantVector`](@ref) — one number and a length — so nothing is materialized for it either:
+
+```@example disc
+D.cell_widths(u), D.cell_widths(xs)
+```
+
+On a grid, `Grids.local_spacing`, `Grids.cell_width` and `Grids.cell_widths` take the direction's axis
+and its wrap period from the grid, so a periodic seam is right without being asked for — see the
+[Grids](@ref grids-page) page.
+
 ## Point location
 
 ```@example disc
@@ -50,7 +97,6 @@ faces, so cell 1 of `u` spans `[-0.25, 0.25)`. It is `O(1)` on a uniform axis �
 spacing living in the type — and `O(log n)` by bisection on a stretched one. Both storage orders work.
 
 ```@example disc
-xs = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
 D.locate(xs, 2.0), D.nearest_index(xs, 2.0)
 ```
 
@@ -110,6 +156,25 @@ idx1, idxm
 ```
 
 `FG.Geometry.nonuniform_first_derivative` is the three-node, first-derivative case of the same thing.
+Fed the gaps above it is a complete derivative at a point, which is the shape an operator assembled at
+the call site takes — a divergence, a curl, a staggered difference are each this plus the metric
+factors and whatever boundary policy the caller chose:
+
+```@example disc
+g(x) = 3x^2 - 2x + 5                        # exact for a quadratic, on any spacing
+maximum(abs(FG.Geometry.nonuniform_first_derivative(
+                g(xs[i-1]), g(xs[i]), g(xs[i+1]), D.local_spacing(xs, i)...) - (6xs[i] - 2))
+        for i in 2:length(xs)-1)
+```
+
+The gaps are signed for exactly this reason: the same expression on a descending axis differentiates
+with respect to the coordinate, not the index, without the caller correcting anything:
+
+```@example disc
+maximum(abs(FG.Geometry.nonuniform_first_derivative(
+                g(xr[i-1]), g(xr[i]), g(xr[i+1]), D.local_spacing(xr, i)...) - (6xr[i] - 2))
+        for i in 2:length(xr)-1)
+```
 
 ## Applying a weight set
 

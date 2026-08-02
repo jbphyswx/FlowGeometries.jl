@@ -49,7 +49,8 @@ negative spacing. Raises for an axis that is not [`isuniform`](@ref).
 @inline spacing(r::AbstractRange) = step(r)
 spacing(x) = throw(ArgumentError(
     "$(typeof(x)) has no single spacing (it is not `isuniform`); use `minimum_spacing` / " *
-    "`maximum_spacing` for its range of gaps, or `Grids._cell_width` for one cell's width.",
+    "`maximum_spacing` for its range of gaps, `Discretization.local_spacing` for the gaps at one " *
+    "index, or `Discretization.cell_width` for one cell's width.",
 ))
 
 # ---------------------------------------------------------------------------
