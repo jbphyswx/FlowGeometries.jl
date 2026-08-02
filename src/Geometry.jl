@@ -378,6 +378,113 @@ end
 @inline vector_from_cartesian(::Type{S}, geo::AbstractSphericalGeometry, args...) where {S} =
     build_point(S, (:λ, :φ, :r), Tuple(vector_from_cartesian(geo, args...)))
 
+# `vᵀ τ w` for a symmetric `τ` given by its six independent components. Written out rather than looped
+# over an indexed basis: the loop form measured about 5× slower, which is the reason callers hand-roll
+# this instead of calling it, so the flat form belongs here and not in each of them.
+@inline _quad(
+    τxx::T, τyy::T, τzz::T, τxy::T, τxz::T, τyz::T,
+    v1::T, v2::T, v3::T, w1::T, w2::T, w3::T,
+) where {T} =
+    v1 * w1 * τxx + v2 * w2 * τyy + v3 * w3 * τzz +
+    (v1 * w2 + v2 * w1) * τxy + (v1 * w3 + v3 * w1) * τxz + (v2 * w3 + v3 * w2) * τyz
+
+"""
+    tensor_to_local(geo, τxx, τyy, τzz, τxy, τxz, τyz, λ, φ) -> NamedTuple
+    tensor_to_local(geo, τ, λ, φ) -> NamedTuple
+    tensor_to_local(S, geo, args...) -> S
+
+Rotate a **symmetric rank-2 tensor** from the ambient Cartesian frame into the local
+`(ê_λ, ê_φ, ê_r)` frame at `(λ, φ)`: `τ' = R τ Rᵀ`, returning
+`(; λλ, φφ, rr, λφ, λr, φr)`.
+
+The rank-1 counterpart is [`vector_from_cartesian`](@ref); between them they cover essentially every
+field anyone rotates — a stress, a strain rate, a covariance, a subfilter flux. `τ` may be given as the
+six independent components or as any 6-component representation, in the order above.
+
+`R` is the same basis [`local_tangent_basis`](@ref) defines, so the two cannot drift apart.
+"""
+@inline function tensor_to_local(
+    ::AbstractSphericalGeometry{T},
+    τxx::Real, τyy::Real, τzz::Real, τxy::Real, τxz::Real, τyz::Real, λ::Real, φ::Real,
+) where {T<:AbstractFloat}
+    xx, yy, zz = convert(T, τxx), convert(T, τyy), convert(T, τzz)
+    xy, xz, yz = convert(T, τxy), convert(T, τxz), convert(T, τyz)
+    sinλ, cosλ = sincos(convert(T, λ))
+    sinφ, cosφ = sincos(convert(T, φ))
+    a1, a2, a3 = -sinλ, cosλ, zero(T)                       # ê_λ
+    b1, b2, b3 = -sinφ * cosλ, -sinφ * sinλ, cosφ           # ê_φ
+    c1, c2, c3 = cosφ * cosλ, cosφ * sinλ, sinφ             # ê_r
+    return (;
+        λλ = _quad(xx, yy, zz, xy, xz, yz, a1, a2, a3, a1, a2, a3),
+        φφ = _quad(xx, yy, zz, xy, xz, yz, b1, b2, b3, b1, b2, b3),
+        rr = _quad(xx, yy, zz, xy, xz, yz, c1, c2, c3, c1, c2, c3),
+        λφ = _quad(xx, yy, zz, xy, xz, yz, a1, a2, a3, b1, b2, b3),
+        λr = _quad(xx, yy, zz, xy, xz, yz, a1, a2, a3, c1, c2, c3),
+        φr = _quad(xx, yy, zz, xy, xz, yz, b1, b2, b3, c1, c2, c3),
+    )
+end
+
+@inline function tensor_to_local(geo::AbstractSphericalGeometry, τ, λ::Real, φ::Real)
+    xx, yy, zz, xy, xz, yz = as_tensor6(τ)
+    return tensor_to_local(geo, xx, yy, zz, xy, xz, yz, λ, φ)
+end
+
+@inline tensor_to_local(::Type{S}, geo::AbstractSphericalGeometry, args...) where {S} =
+    build_point(S, (:λλ, :φφ, :rr, :λφ, :λr, :φr), Tuple(tensor_to_local(geo, args...)))
+
+"""
+    tensor_from_local(geo, τλλ, τφφ, τrr, τλφ, τλr, τφr, λ, φ) -> NamedTuple
+    tensor_from_local(geo, τ, λ, φ) -> NamedTuple
+    tensor_from_local(S, geo, args...) -> S
+
+The inverse of [`tensor_to_local`](@ref): `τ = Rᵀ τ' R`, returning the ambient Cartesian components
+`(; xx, yy, zz, xy, xz, yz)`. Composing the two in either order is the identity.
+"""
+@inline function tensor_from_local(
+    ::AbstractSphericalGeometry{T},
+    τλλ::Real, τφφ::Real, τrr::Real, τλφ::Real, τλr::Real, τφr::Real, λ::Real, φ::Real,
+) where {T<:AbstractFloat}
+    ll, ff, rr = convert(T, τλλ), convert(T, τφφ), convert(T, τrr)
+    lf, lr, fr = convert(T, τλφ), convert(T, τλr), convert(T, τφr)
+    sinλ, cosλ = sincos(convert(T, λ))
+    sinφ, cosφ = sincos(convert(T, φ))
+    # The COLUMNS of `R`, which are the rows of `Rᵀ`, so the same contraction serves both directions.
+    u1, u2, u3 = -sinλ, -sinφ * cosλ, cosφ * cosλ
+    v1, v2, v3 = cosλ, -sinφ * sinλ, cosφ * sinλ
+    w1, w2, w3 = zero(T), cosφ, sinφ
+    return (;
+        xx = _quad(ll, ff, rr, lf, lr, fr, u1, u2, u3, u1, u2, u3),
+        yy = _quad(ll, ff, rr, lf, lr, fr, v1, v2, v3, v1, v2, v3),
+        zz = _quad(ll, ff, rr, lf, lr, fr, w1, w2, w3, w1, w2, w3),
+        xy = _quad(ll, ff, rr, lf, lr, fr, u1, u2, u3, v1, v2, v3),
+        xz = _quad(ll, ff, rr, lf, lr, fr, u1, u2, u3, w1, w2, w3),
+        yz = _quad(ll, ff, rr, lf, lr, fr, v1, v2, v3, w1, w2, w3),
+    )
+end
+
+@inline function tensor_from_local(geo::AbstractSphericalGeometry, τ, λ::Real, φ::Real)
+    ll, ff, rr, lf, lr, fr = as_tensor6(τ)
+    return tensor_from_local(geo, ll, ff, rr, lf, lr, fr, λ, φ)
+end
+
+@inline tensor_from_local(::Type{S}, geo::AbstractSphericalGeometry, args...) where {S} =
+    build_point(S, (:xx, :yy, :zz, :xy, :xz, :yz), Tuple(tensor_from_local(geo, args...)))
+
+"""
+    as_tensor6(τ) -> NTuple{6}
+
+Normalize a symmetric rank-2 tensor to a plain 6-tuple of its independent components, from a `Tuple`,
+`NamedTuple` or `AbstractVector` — the rank-2 counterpart of [`as_ntuple`](@ref).
+"""
+@inline as_tensor6(τ::NTuple{6,Any}) = τ
+@inline as_tensor6(τ::NamedTuple) = Tuple(τ)
+@inline function as_tensor6(τ::AbstractVector)
+    length(τ) == 6 || throw(ArgumentError(
+        "a symmetric rank-2 tensor needs its 6 independent components, got $(length(τ))",
+    ))
+    @inbounds return (τ[1], τ[2], τ[3], τ[4], τ[5], τ[6])
+end
+
 # ---------------------------------------------------------------------------
 # Local tangent-plane geometry (curvilinear / unstructured gradient reconstruction)
 # ---------------------------------------------------------------------------

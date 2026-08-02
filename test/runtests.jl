@@ -70,6 +70,7 @@ q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
 q_locate(g, p)           = FG.Grids.locate(g, p)
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
+q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
 q_width(g, d, i)         = FG.Grids.cell_width(g, d, i)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
@@ -875,6 +876,66 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test all(1 ≤ length(FG.Grids.neighbors(g, i)) ≤ 4 for i in 1:n)
         Test.@test all(>(0), FG.Grids.measure(g))          # Voronoi areas, via DelaunayTriangulation
         Test.@test all(isfinite, FG.Grids.measure(g))
+    end
+
+    Test.@testset "Rank-2 tensors rotate between the ambient and local frames" begin
+        GE = FG.Geometry
+        geo = GE.SphericalGeometry(6.371e6)
+        τ = (1.3, -0.7, 2.1, 0.4, -1.1, 0.9)              # xx yy zz xy xz yz
+        pts = ((0.0, 0.0), (0.7, -0.4), (3.1, 1.2), (5.0, -1.5))
+        sym6(t) = [t[1] t[4] t[5]; t[4] t[2] t[6]; t[5] t[6] t[3]]
+        # `R` formed explicitly from the basis the package already defines, so the contraction under
+        # test — which never forms `R` — is checked against the thing it is supposed to be.
+        function rmat(λ, φ)
+            b = GE.local_tangent_basis(geo, (λ, φ))
+            return vcat(collect(b.λ)', collect(b.φ)', collect(GE.unit_vector(Float64, (λ, φ)))')
+        end
+
+        for (λ, φ) in pts
+            R = rmat(λ, φ)
+            got = GE.tensor_to_local(geo, τ..., λ, φ)
+            Test.@test maximum(abs.(sym6(Tuple(got)) .- R * sym6(τ) * R')) < 1e-12
+            back = GE.tensor_from_local(geo, got, λ, φ)
+            Test.@test maximum(abs.(collect(Tuple(back)) .- collect(τ))) < 1e-12
+            # Consistent with the rank-1 rotation: u⊗u must rotate to (Ru)⊗(Ru).
+            u = (0.3, -1.2, 0.8)
+            t = (u[1]^2, u[2]^2, u[3]^2, u[1] * u[2], u[1] * u[3], u[2] * u[3])
+            v = GE.vector_from_cartesian(geo, u..., λ, φ)
+            w = (v.λ^2, v.φ^2, v.r^2, v.λ * v.φ, v.λ * v.r, v.φ * v.r)
+            Test.@test maximum(abs.(collect(Tuple(GE.tensor_to_local(geo, t..., λ, φ))) .-
+                                    collect(w))) < 1e-12
+        end
+
+        # Invariants a rotation cannot change. The determinant is written out rather than pulling in
+        # LinearAlgebra for one 3×3.
+        det3(m) = m[1, 1] * (m[2, 2] * m[3, 3] - m[2, 3] * m[3, 2]) -
+                  m[1, 2] * (m[2, 1] * m[3, 3] - m[2, 3] * m[3, 1]) +
+                  m[1, 3] * (m[2, 1] * m[3, 2] - m[2, 2] * m[3, 1])
+        let l = Tuple(GE.tensor_to_local(geo, τ..., 1.1, 0.3))
+            Test.@test l[1] + l[2] + l[3] ≈ τ[1] + τ[2] + τ[3]
+            Test.@test det3(sym6(l)) ≈ det3(sym6(τ))
+        end
+
+        # Every representation, as elsewhere, and a requested one on the way out.
+        let nt = (xx = τ[1], yy = τ[2], zz = τ[3], xy = τ[4], xz = τ[5], yz = τ[6])
+            a = Tuple(GE.tensor_to_local(geo, τ, 0.7, -0.4))
+            Test.@test a == Tuple(GE.tensor_to_local(geo, collect(τ), 0.7, -0.4))
+            Test.@test a == Tuple(GE.tensor_to_local(geo, nt, 0.7, -0.4))
+            s = GE.tensor_to_local(StaticArrays.SVector{6,Float64}, geo, τ..., 0.7, -0.4)
+            Test.@test s isa StaticArrays.SVector{6,Float64} && all(s .≈ collect(a))
+        end
+        Test.@test_throws ArgumentError GE.as_tensor6([1.0, 2.0, 3.0])
+
+        # Meant for a hot loop, so it must not allocate — the reason a caller would hand-roll it.
+        # Through `_alloc`, not a local closure: a closure over a testset local boxes what it captures
+        # and would measure the harness rather than the function.
+        Test.@test _alloc(q_tensor_local, geo, τ, (0.7, -0.4)) == 0
+
+        # Float32 in, Float32 out.
+        let g32 = GE.SphericalGeometry(Float32(6.371e6))
+            t32 = GE.tensor_to_local(g32, 1.3f0, -0.7f0, 2.1f0, 0.4f0, -1.1f0, 0.9f0, 0.7f0, -0.4f0)
+            Test.@test all(x -> x isa Float32, Tuple(t32))
+        end
     end
 
     Test.@testset "local_tangent_basis / project_to_tangent_plane" begin
