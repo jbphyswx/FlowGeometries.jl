@@ -3028,6 +3028,88 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test FG.Connectivity.nneighbors(gr, 1, 5) == 4     # wraps, like the original
     end
 
+    Test.@testset "derivative! is with respect to distance, and masks where the metric dies" begin
+        D = FG.Discretization
+        GD = FG.Grids
+        GE = FG.Geometry
+        R = 6.371e6
+        sph = GE.SphericalGeometry(R)
+        nλ, nφ = 48, 25
+        λ = collect(range(0.0, 2π * (1 - 1 / nλ); length = nλ))
+        φ = collect(range(-π / 2, π / 2; length = nφ))         # both poles are grid rows
+        g = GD.StructuredGrid(sph, λ, φ)
+
+        # ∂/∂north of sin φ is cos φ / R — the physical derivative, not the coordinate one.
+        f = [sin(fj) for _ in λ, fj in φ]
+        o = zeros(nλ, nφ)
+        D.derivative!(o, f, g, 2; order = 1, nodes = 5, masked = NaN)
+        want = [cos(fj) / R for _ in λ, fj in φ]
+        int = 4:(nφ - 3)
+        Test.@test maximum(abs.(o[:, int] .- want[:, int])) < 1e-3 * maximum(abs.(want[:, int]))
+        # …and it is exactly the coordinate derivative divided by the metric, cell by cell.
+        co = zeros(nλ, nφ)
+        D.apply_stencil!(co, f, g, 2; order = 1, nodes = 5)
+        Test.@test all(o[i, j] ≈ co[i, j] / GE.scale_factors(sph, (λ[i], φ[j]))[2]
+                       for i in 1:nλ, j in int)
+
+        # ∂/∂east of sin λ cos φ is cos λ / R, and the poles have no east at all.
+        f2 = [sin(l) * cos(fj) for l in λ, fj in φ]
+        o2 = zeros(nλ, nφ)
+        D.derivative!(o2, f2, g, 1; order = 1, nodes = 5, masked = NaN)
+        j0 = nφ ÷ 2 + 1
+        Test.@test maximum(abs.(o2[:, j0] .- [cos(l) / R for l in λ])) < 1e-3 / R
+        Test.@test all(isnan, o2[:, 1]) && all(isnan, o2[:, nφ])
+        Test.@test !any(isnan, o2[:, 2:(nφ - 1)])
+
+        # The guard is relative to the element type, which is the whole point: at a Float32 pole
+        # `|h_λ|` is about 0.28, so an absolute `1e-12` never fires and a large finite number would be
+        # written on the pole rows instead of `masked`.
+        let R32 = Float32(R), n1 = 16, n2 = 9
+            s32 = GE.SphericalGeometry(R32)
+            λ32 = collect(range(0.0f0, Float32(2π) * (1 - 1.0f0 / n1); length = n1))
+            φ32 = collect(range(-Float32(π) / 2, Float32(π) / 2; length = n2))
+            g32 = GD.StructuredGrid(s32, λ32, φ32)
+            f32 = [sin(l) * cos(fj) for l in λ32, fj in φ32]
+            o32 = zeros(Float32, n1, n2)
+            D.derivative!(o32, f32, g32, 1; order = 1, nodes = 3, masked = Float32(NaN))
+            Test.@test abs(GE.scale_factors(s32, (0.0f0, φ32[1]))[1]) > 1.0f-12   # the trap
+            Test.@test all(isnan, o32[:, 1]) && all(isnan, o32[:, n2])
+            Test.@test eltype(o32) === Float32
+            Test.@test D.metric_floor(s32) > abs(GE.scale_factors(s32, (0.0f0, φ32[1]))[1])
+        end
+
+        # A Cartesian metric is the identity, so this must be `apply_stencil!` untouched.
+        let cart = FG.Geometry.CartesianGeometry{Float64}(), x = collect(range(0.0, 1.0; length = 12))
+            gc = GD.StructuredGrid(cart, x, x)
+            fc = [xi^2 + yi for xi in x, yi in x]
+            a = zeros(12, 12); b = zeros(12, 12)
+            D.apply_stencil!(a, fc, gc, 1; order = 1, nodes = 3)
+            D.derivative!(b, fc, gc, 1; order = 1, nodes = 3)
+            Test.@test a == b
+            Test.@test D.metric_floor(cart) == 0.0
+        end
+
+        # On a spheroid `h_φ = M(φ)` varies with φ, so the factor is NOT constant along the direction
+        # being differenced and must not be hoisted that way.
+        let spd = GE.SpheroidGeometry(), n1 = 12, n2 = 21
+            λs = collect(range(0.0, 2π * (1 - 1 / n1); length = n1))
+            φs = collect(range(-1.2, 1.2; length = n2))
+            gs = GD.StructuredGrid(spd, λs, φs)
+            fs = [sin(2fj) for _ in λs, fj in φs]
+            os = zeros(n1, n2); cs = zeros(n1, n2)
+            D.derivative!(os, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
+            D.apply_stencil!(cs, fs, gs, 2; order = 1, nodes = 5)
+            Test.@test all(os[i, j] ≈ cs[i, j] / GE.scale_factors(spd, (λs[i], φs[j]))[2]
+                           for i in 1:n1, j in 1:n2)
+            Test.@test GE.scale_factors(spd, (0.0, 0.0))[2] != GE.scale_factors(spd, (0.0, 1.2))[2]
+        end
+
+        # The structural fact the scaling sweep hoists on: no scale factor depends on longitude.
+        for geo in (sph, GE.SpheroidGeometry()), fj in (-1.0, 0.0, 0.7)
+            Test.@test all(GE.scale_factors(geo, (0.0, fj)) .== GE.scale_factors(geo, (2.5, fj)))
+        end
+    end
+
     Test.@testset "The host sweep is a different loop shape, and the same answer" begin
         D = FG.Discretization
         GD = FG.Grids
@@ -5623,7 +5705,7 @@ Test.@testset "FlowGeometries.jl" begin
             :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
             :fold_candidates_at, :locate, :embed_point, :fold_at,
             :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
-            :local_spacing, :cell_width,
+            :local_spacing, :cell_width, :metric_floor,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
@@ -5644,7 +5726,7 @@ Test.@testset "FlowGeometries.jl" begin
              :sparse_adjacency_coo!, :sparse_adjacency_csc!, :sort_neighbors!, :is_symmetric_adjacency,
              :connected_components, :count_holes, :interior, :boundary_cells, :csr_connectivity,
              :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
-             :rotate, :measure_array, :measure_factors,
+             :rotate, :measure_array, :measure_factors, :derivative!,
              :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
         # allocating forms, whose whole job is to return a fresh array
         [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,

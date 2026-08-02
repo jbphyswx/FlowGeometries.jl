@@ -272,6 +272,50 @@ idx, w = D.axis_stencils(X, 1, 3)
 size(idx), size(w)
 ```
 
+## The physical derivative
+
+`apply_stencil!` differentiates with respect to a **coordinate**. On any curved geometry that is not
+the derivative a physical law is written in — that one is per unit *distance*, `∂f/∂sᵈ = (1/hᵈ)·∂f/∂ξᵈ`.
+[`derivative!`](@ref) is the two together:
+
+```@example disc
+R   = 6.371e6
+sph = FG.Geometry.SphericalGeometry(R)
+lon = collect(range(0, 2π * (1 - 1/48); length = 48))
+lat = collect(range(-π/2, π/2; length = 25))          # both poles are rows of this grid
+gs  = FG.Grids.StructuredGrid(sph, lon, lat)
+fs  = [sin(φ) for _ in lon, φ in lat]                 # ∂/∂north should be cos(φ)/R
+dn  = zeros(48, 25)
+D.derivative!(dn, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
+dn[1, 12], cos(lat[12]) / R
+```
+
+Where the metric degenerates the derivative does not exist, and `masked` is written rather than a
+number invented. Longitude at a pole is that case — `h_λ = R cos φ → 0`:
+
+```@example disc
+de = zeros(48, 25)
+D.derivative!(de, [sin(λ) * cos(φ) for λ in lon, φ in lat], gs, 1;
+              order = 1, nodes = 5, masked = NaN)
+all(isnan, de[:, 1]), all(isnan, de[:, 25]), any(isnan, de[:, 2:24])
+```
+
+The threshold is [`metric_floor`](@ref), `L·√eps(T)` — relative to the geometry's size *and* to the
+element type. An absolute constant cannot serve both: `1e-12` is below `eps(Float32)`, and in `Float32`
+`cos(Float32(π/2)) ≈ -4.4e-8`, so `h_λ` at the pole is around `0.28` metres and a fixed small threshold
+never fires.
+
+A divergence or a curl remains the caller's to assemble, needing a result location and a
+boundary-condition policy this does not choose. When you do, note the **flux form** — on a sphere
+
+```math
+\nabla\cdot\mathbf{u} = \frac{1}{R\cos\varphi}\left[\frac{\partial u_\lambda}{\partial\lambda}
+                        + \frac{\partial (u_\varphi\cos\varphi)}{\partial\varphi}\right]
+```
+
+so the second term differentiates `u_φ·cos φ`, not `u_φ`. Adding two physical derivatives is a
+different expression, and a wrong one.
+
 Anything that *does* need a convention the package has not chosen — a staggered difference, or a
 multi-direction operator like a divergence or a curl, which also need a result location and a
 boundary-condition policy — is assembled at the call site from these weights and the metric factors

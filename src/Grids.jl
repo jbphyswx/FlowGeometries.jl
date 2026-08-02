@@ -1185,6 +1185,53 @@ function Discretization.apply_stencil!(
     )
 end
 
+function Discretization.derivative!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
+    dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
+    active_only::Bool = true, masked = zero(S), backend = nothing,
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+) where {S,G,T,N}
+    Discretization.apply_stencil!(out, field, grid, dim; order = order, nodes = nodes,
+                                  active_only = active_only, masked = masked, backend = backend,
+                                  policy = policy)
+    return _scale_by_metric!(out, grid, Int(dim), masked)
+end
+
+# A Cartesian metric is the identity, so the derivative with respect to distance is already the one
+# `apply_stencil!` wrote and there is nothing to divide by.
+@inline _scale_by_metric!(
+    out::AbstractArray{S,N}, ::StructuredGrid{G,T,N}, ::Int, _masked,
+) where {S,G<:Geometry.AbstractCartesianGeometry,T,N} = out
+
+function _scale_by_metric!(
+    out::AbstractArray{S,N}, grid::StructuredGrid{G,T,N}, dim::Int, masked,
+) where {S,G,T,N}
+    geo = grid_geometry(grid)
+    floor_ = Discretization.metric_floor(geo)
+    sz = size_tuple(grid)
+    # No scale factor depends on longitude, so it is constant along axis 1 whichever direction is
+    # differenced: computed once per remaining index, then swept along the contiguous axis. Any axis-1
+    # coordinate serves for the point it is evaluated at, so the first one is used.
+    @inbounds x1 = first(coordinates(grid, 1))
+    rest = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
+    @inbounds for Ir in rest
+        p = (x1, ntuple(d -> T(coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
+        h = Geometry.scale_factors(geo, p)[dim]
+        tr = Tuple(Ir)
+        if abs(h) ≤ floor_
+            for i in 1:sz[1]
+                out[i, tr...] = masked
+            end
+        else
+            inv_h = inv(h)
+            for i in 1:sz[1]
+                out[i, tr...] *= inv_h
+            end
+        end
+    end
+    return out
+end
+
 """
     axis_stencils(grid, dim; order=1, nodes=order+1) -> (indices, weights)
 
