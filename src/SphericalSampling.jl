@@ -362,8 +362,14 @@ icosahedral_nvertices(frequency::Integer) = 10 * Int(frequency)^2 + 2
 
 """
     nlon_per_ring(sampling) -> Vector{Int}
+    nlon_per_ring(sampling, nlat; nlon=nothing) -> Vector{Int}
 
 Longitudes on each iso-latitude ring, north to south.
+
+Defined for **every** sampling laid out in rings, so a caller walking a map ring by ring — a per-ring
+longitude transform, a zonal reduction, a row-wise sweep — writes one loop rather than a branch per
+sampling. A sampling that carries its own size (`HEALPixSampling`, the reduced Gaussians) answers from
+itself; a tensor-product one takes the `nlat` that fixes its shape, as [`npoints`](@ref) does.
 """
 function nlon_per_ring(s::OctahedralGaussianSampling)
     N = s.nlat_half
@@ -371,13 +377,28 @@ function nlon_per_ring(s::OctahedralGaussianSampling)
 end
 nlon_per_ring(s::ReducedGaussianSampling) = copy(s.nlon_per_ring)
 
+# HEALPix rings widen 4, 8, … through the polar cap, hold 4·nside across the belt and shrink back.
+# The counts are the same ones `ring_info` reports, taken here without decoding a pixel.
+function nlon_per_ring(s::HEALPixSampling)
+    ns = s.nside
+    return [_hp_get_ring_info_small(ns, r).ringpix for r in 1:(4 * ns - 1)]
+end
+
+# A tensor-product sampling is a rectangle: every ring is the same width.
+nlon_per_ring(s::AbstractTensorProductSphericalSampling, nlat::Integer; kwargs...) =
+    fill(axes_lengths(s, nlat; kwargs...).nlon, Int(nlat))
+
 """
     nrings(sampling) -> Int
+    nrings(sampling, nlat) -> Int
 
-Number of iso-latitude rings.
+Number of iso-latitude rings, for any sampling laid out in them — the loop bound that goes with
+[`nlon_per_ring`](@ref).
 """
 nrings(s::OctahedralGaussianSampling) = 2 * s.nlat_half
 nrings(s::ReducedGaussianSampling) = length(s.nlon_per_ring)
+nrings(s::HEALPixSampling) = 4 * s.nside - 1
+nrings(::AbstractTensorProductSphericalSampling, nlat::Integer) = Int(nlat)
 
 npoints(s::OctahedralGaussianSampling) = 4 * s.nlat_half * (s.nlat_half + 9)
 npoints(s::ReducedGaussianSampling) = sum(s.nlon_per_ring)

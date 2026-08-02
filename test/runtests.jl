@@ -4489,6 +4489,37 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test G.scale_factors(sg, [0.0, π / 3]) == G.scale_factors(sg, (0.0, π / 3))
     end
 
+    Test.@testset "Every ring-laid-out sampling answers the ring API" begin
+        S = FG.SphericalSampling
+        # `nrings`/`nlon_per_ring` are what a caller walking a map ring by ring loops over — a
+        # per-ring longitude transform, a zonal reduction. They existed for two samplings, so that
+        # caller had to branch on sampling type, which is what these accessors exist to prevent.
+        cases = (("HEALPix", S.HEALPixSampling(4), ()),
+                 ("Octahedral", S.OctahedralGaussianSampling(8), ()),
+                 ("Reduced", S.ReducedGaussianSampling([8, 12, 16, 12, 8]), ()),
+                 ("GaussLegendre", S.GaussLegendreSampling(), (16,)),
+                 ("ClenshawCurtis", S.ClenshawCurtisSampling(), (16,)),
+                 ("DriscollHealy", S.DriscollHealySampling(), (16,)))
+        for (_, s, args) in cases
+            r = S.nrings(s, args...)
+            v = S.nlon_per_ring(s, args...)
+            Test.@test r ≥ 1
+            Test.@test length(v) == r                 # one entry per ring
+            Test.@test all(>(0), v)
+            # The independent cross-check: the rings must account for every point.
+            Test.@test sum(v) == S.npoints(s, args...)
+        end
+        # HEALPix ring widths are the ones `ring_info` reports, and they are symmetric about the
+        # equator, widening 4, 8, … through the cap and flat across the belt.
+        let ns = 4, v = S.nlon_per_ring(S.HEALPixSampling(ns))
+            Test.@test v == [S.ring_info(ns, r).ringpix for r in 1:(4ns - 1)]
+            Test.@test v == reverse(v)
+            Test.@test v[1] == 4 && v[ns] == 4ns && v[2ns] == 4ns
+        end
+        # A tensor-product sampling is a rectangle, and honours an explicit `nlon`.
+        Test.@test S.nlon_per_ring(S.GaussLegendreSampling(), 8; nlon = 20) == fill(20, 8)
+    end
+
     Test.@testset "Octahedral and reduced Gaussian grids" begin
         SS = FG.SphericalSampling
         # The defining rule: 20 longitudes on the ring nearest the pole, +4 per ring, 4N(N+9) in all.
