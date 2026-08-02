@@ -1312,10 +1312,15 @@ function Discretization.axis_stencils(
 end
 
 """
-    apply_stencil!(out, field, grid, indices, weights, dim; active_only=true, masked=zero) -> out
+    apply_stencil!(out, field, grid, indices, weights, dim; order=1, active_only=true,
+                   masked=zero, policy=BlankMasked(), backend=nothing) -> out
 
-Apply a stencil table built by [`Discretization.axis_stencils`](@ref) — the mask still comes from `grid`,
-which is what the bare `(indices, weights)` form cannot do.
+Apply a stencil table built by [`Discretization.axis_stencils`](@ref) — the mask, the wrap period and
+the axis all come from `grid`, which is what the bare `(indices, weights)` form cannot do.
+
+Because the axis comes too, **any mask policy works here**. The bare form has no axis to rebuild a
+window from at a mask edge, so it accepts only `BlankMasked`; a caller wanting `ReduceInRun` on a
+masked grid would otherwise have to give up the table and pay its rebuild on every call.
 
 This is the form to use in a loop over fields: the table is the same for all of them, and building it
 is the one part of the work that does not depend on the field.
@@ -1323,13 +1328,53 @@ is the one part of the work that does not depend on the field.
 function Discretization.apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    active_only::Bool = true, masked = zero(S), backend = nothing,
+    order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
 ) where {S,G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
-    msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
-    return Discretization.apply_stencil!(
-        out, field, indices, weights, dim; mask = msk, masked = masked, backend = backend,
-    )
+    # Both the mask and the period are `Union{Nothing, …}` if resolved with a ternary, and a small
+    # union crossing a keyword boundary boxes — 96 bytes per call on a path whose whole purpose is to
+    # allocate nothing. Branching instead leaves every leaf concretely typed.
+    msk = mask(grid)
+    if active_only && !(msk isa AllActive)
+        return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), msk, masked,
+                           backend, policy)
+    end
+    return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), nothing, masked,
+                       backend, policy)
+end
+
+@inline function _apply_tbl!(
+    out, field, grid::StructuredGrid, indices, weights, dim::Int, order::Int, msk, masked, backend,
+    policy,
+)
+    x = coordinates(grid, dim)
+    return isperiodic(grid, dim) ?
+        Discretization.apply_stencil!(out, field, x, indices, weights, dim; order = order,
+                                      period = period(grid, dim), mask = msk, masked = masked,
+                                      backend = backend, policy = policy) :
+        Discretization.apply_stencil!(out, field, x, indices, weights, dim; order = order,
+                                      period = nothing, mask = msk, masked = masked,
+                                      backend = backend, policy = policy)
+end
+
+"""
+    derivative!(out, field, grid, indices, weights, dim; order=1, active_only=true, masked=zero,
+                policy=BlankMasked(), backend=nothing) -> out
+
+[`derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
+above, for the entry point a geometry-aware caller actually uses.
+"""
+function Discretization.derivative!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, grid::StructuredGrid{G,T,N},
+    indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
+    order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+) where {S,G,T,N}
+    Discretization.apply_stencil!(out, field, grid, indices, weights, dim; order = order,
+                                  active_only = active_only, masked = masked, backend = backend,
+                                  policy = policy)
+    return _scale_by_metric!(out, grid, Int(dim), masked)
 end
 
 # ---------------------------------------------------------------------------

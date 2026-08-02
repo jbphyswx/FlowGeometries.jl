@@ -72,6 +72,8 @@ q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
 q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
 q_gradient!(a, b, f, plan) = FG.Discretization.gradient!(a, b, f, plan)
+q_tbl!(o, f, g, iw, d, pol) = FG.Discretization.apply_stencil!(o, f, g, iw[1], iw[2], d;
+                                                              order = 1, masked = NaN, policy = pol)
 q_width(g, d, i)         = FG.Grids.cell_width(g, d, i)
 q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
@@ -3215,6 +3217,66 @@ Test.@testset "FlowGeometries.jl" begin
         # The structural fact the scaling sweep hoists on: no scale factor depends on longitude.
         for geo in (sph, GE.SpheroidGeometry()), fj in (-1.0, 0.0, 0.7)
             Test.@test all(GE.scale_factors(geo, (0.0, fj)) .== GE.scale_factors(geo, (2.5, fj)))
+        end
+    end
+
+    Test.@testset "A held stencil table serves every mask policy" begin
+        D = FG.Discretization
+        GD = FG.Grids
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        n = 24
+        x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n))))
+        y = collect(range(0.0, 2π * (1 - 1 / n); length = n))
+        mk = trues(n, n); mk[7, 9] = false; mk[8, 9] = false; mk[13, 4] = false
+        g = GD.StructuredGrid(cart, x, y, mk; periodic = (false, true), period = (0.0, 2π))
+        f = [sin(3xi) * cos(yj) for xi in x, yj in y]
+
+        # The bare `(indices, weights)` form cannot degrade — it has no axis to rebuild a window from
+        # at a mask edge — so a caller wanting `ReduceInRun` had to give up the table entirely and pay
+        # its rebuild per call. Handing the axis alongside the table serves every policy.
+        for dim in 1:2, pol in (D.BlankMasked(), D.ShiftWithinRun(), D.ReduceInRun()), k in (3, 5)
+            a = zeros(n, n); b = zeros(n, n)
+            D.apply_stencil!(a, f, g, dim; order = 1, nodes = k, masked = NaN, policy = pol)
+            idx, w = D.axis_stencils(g, dim; order = 1, nodes = k)
+            D.apply_stencil!(b, f, g, idx, w, dim; order = 1, masked = NaN, policy = pol)
+            Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
+        end
+
+        # Holding the table is what removes the per-call allocation, which is the point of it.
+        for dim in 1:2
+            idx, w = D.axis_stencils(g, dim; order = 1, nodes = 3)
+            Test.@test _alloc(q_tbl!, zeros(n, n), f, g, (idx, w), dim, D.BlankMasked()) == 0
+        end
+        # The degrade path keeps a Fornberg scratch, but it is `O(1)` in the grid, not `O(n)`.
+        let sizes = (24, 96)
+            allocs = map(sizes) do m
+                xs = collect(range(0.0, 10.0; length = m))
+                mm = trues(m, m); mm[7, 9] = false
+                gm = GD.StructuredGrid(cart, xs, xs, mm)
+                fm = [sin(xi) * cos(yj) for xi in xs, yj in xs]
+                iw = D.axis_stencils(gm, 1; order = 1, nodes = 3)
+                _alloc(q_tbl!, zeros(m, m), fm, gm, iw, 1, D.ReduceInRun())
+            end
+            Test.@test allocs[1] == allocs[2]          # 16x the cells, the same bytes
+        end
+
+        # The bare form still refuses rather than silently ignoring the policy.
+        let idx = D.axis_stencils(g, 1; order = 1, nodes = 3)
+            Test.@test_throws ArgumentError D.apply_stencil!(zeros(n, n), f, idx[1], idx[2], 1;
+                                                             mask = mk, policy = D.ReduceInRun())
+        end
+
+        # `derivative!` is the form a geometry-aware caller uses, so it takes a table too.
+        let sph = FG.Geometry.SphericalGeometry(6.371e6),
+            lam = collect(range(0.0, 2π * (1 - 1 / 16); length = 16)),
+            phi = collect(range(-1.2, 1.2; length = 13))
+            gs = GD.StructuredGrid(sph, lam, phi)
+            fs = [sin(fj) for _ in lam, fj in phi]
+            a = zeros(16, 13); b = zeros(16, 13)
+            D.derivative!(a, fs, gs, 2; order = 1, nodes = 3, masked = NaN)
+            i2, w2 = D.axis_stencils(gs, 2; order = 1, nodes = 3)
+            D.derivative!(b, fs, gs, i2, w2, 2; order = 1, masked = NaN)
+            Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
         end
     end
 
