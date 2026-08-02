@@ -2143,6 +2143,52 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test occursin("2000×1000", sprint(show, MIME"text/plain"(), big))
     end
 
+    Test.@testset "Every architecture can be built without a mask" begin
+        GD = FG.Grids
+        C = FG.Connectivity
+        D = FG.Discretization
+        cart = FG.Geometry.CartesianGeometry{Float64}()
+        n = 8
+        x = [t for t in range(0.0, 7.0; length = n), _ in 1:n]
+        y = [u for _ in 1:n, u in range(0.0, 7.0; length = n)]
+
+        # `AllActive` used to be reachable only through `StructuredGrid`, so a curvilinear or node
+        # grid with nothing masked still paid for a dense all-true array — storage, plus a load and a
+        # branch per cell where `isactive` should fold to a constant.
+        g0 = GD.CurvilinearGrid(cart, x, y; measure = fill(1.0, n, n))
+        gm = GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
+        Test.@test GD.mask(g0) isa GD.AllActive
+        Test.@test !(GD.mask(gm) isa GD.AllActive)      # an explicit mask is still stored as given
+        Test.@test all(GD.isactive(g0, i, j) == GD.isactive(gm, i, j) for i in 1:n, j in 1:n)
+
+        # The mask is recognised by element type, not position, so the optional positional measure
+        # still parses either way.
+        let gp = GD.CurvilinearGrid(cart, x, y, fill(2.0, n, n)),
+            gpm = GD.CurvilinearGrid(cart, x, y, fill(2.0, n, n), trues(n, n))
+            Test.@test GD.mask(gp) isa GD.AllActive && GD.measure(gp, 2, 2) == 2.0
+            Test.@test !(GD.mask(gpm) isa GD.AllActive) && GD.measure(gpm, 2, 2) == 2.0
+        end
+
+        let nn = 40, xs = 10.0 .* rand(nn), ys = 6.0 .* rand(nn)
+            u0 = GD.UnstructuredGrid(cart, (xs, ys); k = 4, areas = ones(nn))
+            um = GD.UnstructuredGrid(cart, (xs, ys), trues(nn); k = 4, areas = ones(nn))
+            Test.@test GD.mask(u0) isa GD.AllActive
+            Test.@test GD.mask(GD.UnstructuredGrid(cart, xs, ys; k = 4, areas = ones(nn))) isa GD.AllActive
+            Test.@test all(GD.isactive(u0, i) == GD.isactive(um, i) for i in 1:nn)
+        end
+
+        # Everything downstream must be unchanged by which representation the grid holds.
+        let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
+            D.gradient!(g1, g2, f, C.gradient_plan(g0))
+            Test.@test maximum(abs.(g1 .- 2.0)) < 1e-10 && maximum(abs.(g2 .+ 3.0)) < 1e-10
+            Test.@test C.nneighbors_within(g0, 4, 4; ball = 2.0) ==
+                       C.nneighbors_within(gm, 4, 4; ball = 2.0)
+            Test.@test abs(D.interpolate(f, g0, (3.3, 2.2); k = 8) - (2 * 3.3 - 3 * 2.2)) < 1e-9
+            Test.@test sum(GD.measure(g0)) == sum(GD.measure(gm))
+            Test.@test length(C.build_connectivity(g0).nbrs) == length(C.build_connectivity(gm).nbrs)
+        end
+    end
+
     Test.@testset "An all-active mask carries no per-cell storage" begin
         m = FG.Grids.AllActive((7, 5))
         Test.@test size(m) == (7, 5) && length(m) == 35

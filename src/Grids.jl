@@ -1583,21 +1583,33 @@ function CurvilinearGrid(geometry::Geometry.AbstractGeometry, args...; kwargs...
     return _curvilinear_grid(geometry, coords, measure, mask; kwargs...)
 end
 
-# Trailing `mask`, optionally preceded by a `measure`; everything before them is a coordinate array.
+# Optional trailing `mask`, optionally preceded by a `measure`; everything before them is a coordinate
+# array. The mask is recognised by its element type rather than by position, so leaving it out is
+# unambiguous — and leaving it out is what a fully active grid should do, since `AllActive` costs one
+# size tuple where a dense all-true mask costs a load and a branch per cell.
 function _split_curvilinear_args(args::Tuple)
-    length(args) ≥ 2 || throw(ArgumentError(
-        "a CurvilinearGrid needs at least one coordinate array and a mask",
-    ))
-    mask = last(args)
-    mask isa AbstractArray{Bool} ||
-        throw(ArgumentError("the last positional argument must be the Bool mask, got $(typeof(mask))"))
-    rest = Base.front(args)
+    hasmask = !isempty(args) && last(args) isa AbstractArray{Bool}
+    mask = hasmask ? last(args) : nothing
+    rest = hasmask ? Base.front(args) : args
+    isempty(rest) && throw(ArgumentError("a CurvilinearGrid needs at least one coordinate array"))
+    # A trailing real array is the measure when there is one more array than each is dimensional:
+    # `N` coordinates plus it. Otherwise it is the last coordinate.
     if length(rest) ≥ 2 && last(rest) isa AbstractArray{<:Real} &&
-       !(last(rest) isa AbstractArray{Bool}) && length(rest) - 1 == ndims(mask)
+       !(last(rest) isa AbstractArray{Bool}) && length(rest) - 1 == ndims(last(rest))
         return (Base.front(rest), last(rest), mask)
     end
     return (rest, nothing, mask)
 end
+
+# No mask means every cell participates, which is a size rather than an array — the same default
+# `StructuredGrid` has always had. Resolved in its own method rather than with a `nothing` branch
+# inside the one below: that would leave `mask` a small union and cost the whole constructor its
+# specialization, which measured as the suite taking three times as long.
+_curvilinear_grid(
+    geometry::Geometry.AbstractGeometry, coords::NTuple{N,AbstractArray}, measure_pos, ::Nothing;
+    kwargs...,
+) where {N} = _curvilinear_grid(geometry, coords, measure_pos, AllActive(size(first(coords)));
+                                kwargs...)
 
 function _curvilinear_grid(
     geometry::G, coords::NTuple{N,AbstractArray}, measure_pos, mask::AbstractArray{Bool,N};
@@ -1770,7 +1782,7 @@ except on a sphere, where longitude wraps at 2π by construction and is the defa
 """
 function UnstructuredGrid(
     geometry::G, coords::NTuple{N,AbstractVector}, measure::AbstractVector,
-    mask::AbstractVector{Bool}, nbrs = nothing, ptr = nothing;
+    mask::AbstractVector{Bool} = AllActive((length(first(coords)),)), nbrs = nothing, ptr = nothing;
     periodic = nothing, period = nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     c = ntuple(d -> _to_axis(T, coords[d]), N)
@@ -2433,12 +2445,12 @@ default; a Cartesian box is opt-in and needs its `period`.
 """
 UnstructuredGrid(
     geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
-    mask::AbstractVector{Bool}; kwargs...,
+    mask::AbstractVector{Bool} = AllActive((length(x),)); kwargs...,
 ) = UnstructuredGrid(geometry, (x, y), mask; kwargs...)
 
 function UnstructuredGrid(
     geometry::Geometry.AbstractGeometry{T}, coords::NTuple{N,AbstractVector},
-    mask::AbstractVector{Bool};
+    mask::AbstractVector{Bool} = AllActive((length(first(coords)),));
     k::Integer = 6, radius::Union{Nothing,Real} = nothing, areas::Union{Nothing,AbstractVector} = nothing,
     periodic = nothing, period = nothing,
 ) where {N, T<:AbstractFloat}
