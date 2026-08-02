@@ -3629,6 +3629,71 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test @allocated(nnw(g, Nx)) == 0
     end
 
+    Test.@testset "A window for the whole grid, and an exact extent for one row" begin
+        C = FG.Connectivity
+        GD = FG.Grids
+        GE = FG.Geometry
+        R = 6.371e6
+        sph = GE.SphericalGeometry(R)
+        nλ, nφ = 72, 37
+        λ = collect(range(0.0, 2π * (1 - 1 / nλ); length = nλ))
+        φ = collect(range(-π / 2, π / 2; length = nφ))          # poles are rows
+        g = GD.StructuredGrid(sph, λ, φ)
+
+        # `metric_band` is the EXACT extent, so it is checked both ways: it must cover every cell of
+        # the row that is genuinely in range, and no cell beyond it may be in range either. A bound
+        # would pass the first and fail the second, which is the whole difference from `metric_window`.
+        dλ = λ[2] - λ[1]
+        for frac in (0.02, 0.15, 0.4, 0.9, 1.2), jt in (1, 7, 19, 31, nφ), jn in (1, 5, 18, 30, nφ)
+            r = frac * π * R
+            band = C.metric_band(g, 1, φ[jt], φ[jn], r)
+            inr = [abs(rem(l, 2π, RoundNearest)) for l in λ
+                   if GE.distance(sph, (0.0, φ[jt]), (l, φ[jn])) ≤ r]
+            if isempty(inr)
+                Test.@test band < 0 || band ≤ dλ / 2 + 1e-9
+            else
+                Test.@test band ≥ maximum(inr) - 1e-9
+                Test.@test !any(GE.distance(sph, (0.0, φ[jt]), (l, φ[jn])) ≤ r for l in λ
+                                if abs(rem(l, 2π, RoundNearest)) > band + 1e-9)
+            end
+        end
+
+        # The cases that fall out of the same expression, each of which a caller would otherwise have
+        # to special-case: a pole at either end (where the separation stops depending on longitude),
+        # a band that reaches nothing, and a ball past the antipode.
+        Test.@test C.metric_band(g, 1, 0.0, π / 2, 0.05R) < 0
+        Test.@test C.metric_band(g, 1, π / 2 - 0.01, π / 2, 0.05R) ≈ π
+        Test.@test C.metric_band(g, 1, π / 2, π / 2, 0.01R) ≈ π
+        Test.@test C.metric_band(g, 1, 0.0, 1.4, 0.01R) < 0
+        Test.@test C.metric_band(g, 1, 0.0, 0.0, 3.2R) ≈ π
+        # The latitude extent is not the same closed form, and is refused rather than answered wrongly.
+        Test.@test_throws ArgumentError C.metric_band(g, 2, 0.0, 0.1, 1.0e5)
+
+        # Cartesian: the exact half-chord of a circle at that offset.
+        let cart = FG.Geometry.CartesianGeometry{Float64}(), x = collect(range(0.0, 10.0; length = 41))
+            gc = GD.StructuredGrid(cart, x, x)
+            Test.@test C.metric_band(gc, 1, 3.0, 3.0, 2.0) ≈ 2.0
+            Test.@test C.metric_band(gc, 1, 3.0, 4.0, 2.0) ≈ sqrt(3.0)
+            Test.@test C.metric_band(gc, 1, 3.0, 6.0, 2.0) < 0
+            # The grid-level window is the per-cell one at its worst cell — checked by taking that
+            # maximum, which is the O(N) computation the O(1) form exists to avoid.
+            Test.@test C.metric_window(gc, 2.0) ==
+                       ntuple(d -> maximum(C.metric_window(gc, (i, j), 2.0)[d] for i in 1:41, j in 1:41), 2)
+        end
+
+        for r in (0.05R, 0.3R, 1.1R)
+            w = C.metric_window(g, r)
+            worst = ntuple(d -> maximum(C.metric_window(g, (i, j), r)[d] for i in 1:nλ, j in 1:nφ), 2)
+            Test.@test all(w .>= worst)      # conservative: never under-covers any cell
+        end
+        # It reads the cached extremes, so it touches no coordinate of the latitude axis.
+        let cx = CountingAxis(collect(range(-1.4, 1.4; length = 200))),
+            gcount = GD.StructuredGrid(sph, λ, cx)
+            C.metric_window(gcount, 0.2R)
+            Test.@test reads(() -> C.metric_window(gcount, 0.2R), cx) == 0
+        end
+    end
+
     Test.@testset "MetricBall queries match a brute-force scan of the same metric" begin
         C = FG.Connectivity
         GE = FG.Geometry
@@ -5766,7 +5831,7 @@ Test.@testset "FlowGeometries.jl" begin
             :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
             :fold_candidates_at, :locate, :embed_point, :fold_at,
             :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
-            :local_spacing, :cell_width, :metric_floor,
+            :local_spacing, :cell_width, :metric_floor, :metric_band,
         ])
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the

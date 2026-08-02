@@ -552,6 +552,140 @@ function metric_window end
 metric_window(grid::Grids.StructuredGrid, I::NTuple, ball) =
     metric_window(grid, I, ball, MetricTopology(grid))
 
+"""
+    metric_window(grid, ball) -> NTuple{N,Int}
+    metric_window(grid, ball, topology) -> NTuple{N,Int}
+
+The window valid for **every** cell of `grid`, rather than for one of them: the per-cell form
+maximised over the grid, which is what sizing a cache or a footprint table needs.
+
+`O(1)`. Taking `maximum` of the per-cell form would be `O(N)` for something the cached
+[`Grids.AxisStats`](@ref) already determines: the smallest gap per axis is stored, and the extreme
+`|cos φ|` over a latitude axis is at one of its two ends, since `|cos|` on `[-π/2, π/2]` is largest in
+the middle. No `cos` per row, and no scan.
+
+Conservative by construction — it is the per-cell window at the worst cell — so it never under-covers.
+"""
+metric_window(grid::Grids.StructuredGrid, ball) = metric_window(grid, ball, MetricTopology(grid))
+
+function metric_window(
+    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+) where {G<:Geometry.AbstractCartesianGeometry,T,N}
+    r = T(_ball_radius(ball))
+    sz = Grids.size_tuple(grid)
+    return ntuple(d -> _steps(r, _min_step(mt, d), sz[d]), Val(N))   # already point-independent
+end
+
+function metric_window(
+    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+) where {G<:Geometry.AbstractSphericalGeometry,T,N}
+    r = T(_ball_radius(ball))
+    sz = Grids.size_tuple(grid)
+    wrest = ntuple(d -> _steps(r, _min_step(mt, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
+    # The smallest radius anywhere, which is where a given arc spans the least distance.
+    ρ = if N ≥ 3
+        st = Grids.axis_stats(grid, 3)
+        min(abs(st.min_value), abs(st.max_value))
+    else
+        T(Geometry.radius(Grids.grid_geometry(grid)))
+    end
+    wφ = N ≥ 2 ? _angle_steps(r, 2ρ, _min_step(mt, 2), sz[2]) : 0
+    wλ = _angle_steps(r, 2ρ * _cos_extreme(grid, Val(N)), _min_step(mt, 1), sz[1])
+    return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
+end
+
+function metric_window(
+    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+) where {G<:Geometry.AbstractEllipsoidalGeometry,T,N}
+    geo = Grids.grid_geometry(grid)
+    r = T(_ball_radius(ball))
+    sz = Grids.size_tuple(grid)
+    a = T(Geometry.semimajor_axis(geo))
+    M0 = a * (one(T) - T(Geometry.eccentricity²(geo)))
+    wrest = ntuple(d -> _steps(r, _min_step(mt, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
+    cosmin = _cos_extreme(grid, Val(N))
+    if N ≥ 3
+        hmin = mt.min3
+        wφ = _steps(r, (M0 + hmin - r) * _min_step(mt, 2), sz[2])
+        wλ = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(mt, 1), sz[1])
+        return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
+    end
+    wφ = N ≥ 2 ? _steps(r, M0 * _min_step(mt, 2), sz[2]) : 0
+    wλ = _steps(r, a * cosmin * _min_step(mt, 1), sz[1])
+    return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
+end
+
+# The smallest `|cos φ|` anywhere on the latitude axis, in `O(1)`. `|cos|` on `[-π/2, π/2]` falls away
+# from the middle in both directions, so over an interval its minimum is at whichever end is farther
+# from the equator — the two stored extremes are enough, and no row is visited.
+@inline function _cos_extreme(grid::Grids.StructuredGrid{G,T,N}, ::Val{N}) where {G,T,N}
+    N ≥ 2 || return one(T)
+    st = Grids.axis_stats(grid, 2)
+    return min(abs(cos(T(st.min_value))), abs(cos(T(st.max_value))))
+end
+
+"""
+    metric_band(grid, dim, coord_t, coord_n, ball) -> T
+
+The **exact** half-width along direction `dim` of the part of the row at `coord_n` that lies within
+`ball` of a point at `coord_t`, in that direction's own coordinate units. `coord_t` and `coord_n` are
+coordinates on the *other* direction of a two-direction grid.
+
+[`metric_window`](@ref) returns a bounding box, which is the right answer for a query that then filters
+on distance. A **separable sweep** — a prefix sum along a row, a row-by-row convolution — cannot filter,
+and using the box instead of the exact extent costs it the exactness that made it worth doing. This is
+the same geodesic solve, resolved per row rather than maximised into a box.
+
+Returns a negative number where the row is out of reach entirely, so `band < 0` is the empty test. A
+row the ball covers completely gives the half-width of the whole direction (`π` in longitude).
+
+On a sphere, for `dim = 1`, this inverts the spherical law of cosines:
+
+```math
+|Δλ| ≤ \\arccos\\left(\\frac{\\cos(r/R) - \\sin φ_t \\sin φ_n}{\\cos φ_t \\cos φ_n}\\right)
+```
+
+with the empty band, the whole circle and a pole at either end all falling out of the same expression —
+the pole case being where the denominator vanishes and the separation stops depending on `λ` at all,
+handled here once rather than by each caller.
+"""
+function metric_band end
+
+function metric_band(
+    grid::Grids.StructuredGrid{G,T,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
+) where {G<:Geometry.AbstractCartesianGeometry,T}
+    r = T(_ball_radius(ball))
+    d = abs(T(coord_n) - T(coord_t))
+    d > r && return -one(T)                       # the row is farther than the ball reaches
+    return sqrt(r * r - d * d)                    # a circle's half-chord at that offset, exactly
+end
+
+function metric_band(
+    grid::Grids.StructuredGrid{G,T,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
+) where {G<:Geometry.AbstractSphericalGeometry,T}
+    dim == 1 || throw(ArgumentError(
+        "a spherical band is solved along longitude; got dim = $dim. The latitude extent at fixed " *
+        "longitudes is not a closed form in the same way — use `metric_window` for a bound.",
+    ))
+    R = T(Geometry.radius(Grids.grid_geometry(grid)))
+    rad = T(_ball_radius(ball)) / R               # the ball as a central angle
+    rad ≥ T(π) && return T(π)                     # reaches the antipode: the whole circle
+    φt, φn = T(coord_t), T(coord_n)
+    sφt, cφt = sincos(φt)
+    sφn, cφn = sincos(φn)
+    den = cφt * cφn
+    num = cos(rad) - sφt * sφn
+    # A pole at either end: the separation is `|φt - φn|` whatever the longitudes are, so the row is
+    # either wholly in or wholly out. The generic expression divides by zero here.
+    if abs(den) ≤ eps(T)
+        return abs(φt - φn) ≤ rad ? T(π) : -one(T)
+    end
+    c = num / den
+    c > one(T) && return -one(T)                  # even the nearest longitude is too far
+    c < -one(T) && return T(π)                    # every longitude is within reach
+    return acos(c)
+end
+
 function metric_window(
     grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
