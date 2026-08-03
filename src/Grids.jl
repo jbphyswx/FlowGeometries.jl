@@ -277,7 +277,18 @@ topology tuple it stays type-stable under a runtime direction.
 Whether coordinate direction `d` wraps. See [`topology`](@ref) for the type-level form and
 [`period`](@ref) for the wrap length.
 """
-@inline isperiodic(grid::AbstractGrid, d::Integer) = @inbounds periodic_flags(grid)[d]
+@inline isperiodic(grid::AbstractGrid, d::Integer) =
+    @inbounds periodic_flags(grid)[_checked_direction(periodic_flags(grid), d)]
+
+# A direction is a dimension selector, not an array index, so an out-of-range one is an
+# `ArgumentError` — the same one `_at_axis` raises — rather than whatever the underlying tuple read
+# happens to do. Without this the read is `@inbounds` on a runtime index: under `--check-bounds=yes`
+# it raises `BoundsError` from an internal, and under the default it is simply out of bounds.
+@inline function _checked_direction(t::Tuple, d::Integer)
+    1 ≤ d ≤ length(t) ||
+        throw(ArgumentError("direction $d is outside this grid's directions"))
+    return d
+end
 
 # Normalize a caller's `topology` to `NTuple{N,AbstractTopology}`. `Bool`s are accepted, and a scalar
 # or short tuple applies to the leading directions with the rest `Bounded`.
@@ -680,7 +691,8 @@ direction index stays type-stable.
 end
 
 @inline topology(grid::StructuredGrid) = getfield(grid, :topology)
-@inline period(grid::StructuredGrid, d::Integer) = @inbounds getfield(grid, :period)[d]
+@inline period(grid::StructuredGrid, d::Integer) =
+    @inbounds getfield(grid, :period)[_checked_direction(getfield(grid, :period), d)]
 
 # ---------------------------------------------------------------------------
 # Point accessors: NamedTuple default; coords! / coords(S, ...) for other storage
@@ -1423,7 +1435,8 @@ struct CurvilinearGrid{
 end
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
-@inline period(grid::CurvilinearGrid, d::Integer) = @inbounds getfield(grid, :period)[d]
+@inline period(grid::CurvilinearGrid, d::Integer) =
+    @inbounds getfield(grid, :period)[_checked_direction(getfield(grid, :period), d)]
 
 @inline function _raw_coords(
     grid::CurvilinearGrid{T,G,N}, I::Vararg{Integer,N},
@@ -1903,7 +1916,8 @@ end
 
 Wrap length of coordinate direction `d`, meaningful only where [`isperiodic`](@ref) holds.
 """
-@inline period(grid::UnstructuredGrid, d::Integer) = @inbounds getfield(grid, :period)[d]
+@inline period(grid::UnstructuredGrid, d::Integer) =
+    @inbounds getfield(grid, :period)[_checked_direction(getfield(grid, :period), d)]
 
 
 # ---------------------------------------------------------------------------
