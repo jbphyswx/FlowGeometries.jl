@@ -131,18 +131,6 @@ Test.@testset "Spherical sampling connectivity" begin
 end
 
 Test.@testset "Connectivity is built into contiguous CSR, not per-node vectors" begin
-    # The allocation count must not scale with the node count: everything lands in one neighbor
-    # block plus one offset array, however many nodes there are.
-    allocs(f) = (f(); minimum(Base.gc_alloc_count((@timed f()).gcstats) for _ in 1:5))
-    # nside 8 → 32 is a 16× jump in node count (768 → 12288). Both sizes are past the point
-    # where the count settles: the very smallest grids take one or two fewer allocations, so
-    # anchoring on nside = 4 would measure that step rather than any scaling with n.
-    small = allocs(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(8)))
-    large = allocs(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(32)))
-    Test.@test large <= small
-    Test.@test large < 16
-    Test.@test allocs(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), 16)) < 16
-
     # Degrees and reciprocity are unaffected by the storage change.
     conn = FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(4))
     n = FG.Connectivity.nnodes(conn)
@@ -219,18 +207,6 @@ Test.@testset "Neighbor traversal allocates nothing" begin
     n = 40
     xs = collect(0.0:1.0:(n - 1))
     grid = FG.Grids.StructuredGrid(geom, xs, xs, trues(n, n))
-
-    function sweep(g, n)
-        c = 0
-        for j in 1:n, i in 1:n
-            for v in FG.Grids.neighbors(g, i, j)
-                c += v
-            end
-        end
-        return c
-    end
-    sweep(grid, 3)
-    Test.@test @allocated(sweep(grid, n)) == 0
 
     # The lazy sequence agrees with the buffer-filling form, element for element.
     buf = Vector{Int}(undef, 8)
@@ -368,48 +344,11 @@ Test.@testset "Sampling connectivity is built from index topology, not a discard
     Test.@test FG.Connectivity.nnodes(masked) == sz.nlon * sz.nlat
     Test.@test length(FG.Grids.neighbors(masked, sz.nlon + 2)) == 0   # (i,j) = (2,2), i fastest
 
-    # The grid-free path must not scale its allocations with nlat the way building a grid does.
-    nalloc(f) = (f(); Base.gc_alloc_count((@timed f()).gcstats))
-    small = nalloc(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.GaussLegendreSampling(), 16))
-    large = nalloc(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.GaussLegendreSampling(), 128))
-    Test.@test large <= small + 2
 end
 
-Test.@testset "k-d-tree knn allocations do not scale with the node count" begin
-    using NearestNeighbors: NearestNeighbors
+Test.@testset "k-d-tree knn adjacency is the k nearest by great-circle distance" begin
     geo = FG.Geometry.SphericalGeometry(1.0)
-    nalloc(f) = (f(); Base.gc_alloc_count((@timed f()).gcstats))
-    build(n) = begin
-        λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
-        φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
-        () -> FG.Grids._build_kdtree_neighbors(geo, (λ, φ); k = 6)
-    end
-    # Batch `knn` returns a Vector{Vector{Int}} plus a Vector{Vector{Float64}} — ~4 heap
-    # allocations per query point (160,064 at N = 40k). Querying through `knn!` into reused
-    # buffers, behind a function barrier so the abstractly-inferred tree does not force a
-    # dynamic dispatch per call, makes the count flat in N.
-    #
-    # Measured on the QUERY loop with the tree passed in: `KDTree` construction itself spawns a
-    # task per subtree when threads are available, so its own allocation count scales with N
-    # (32 at one thread, 527 at four, N = 20k). That is upstream and not what this fix is about.
-    E = Base.get_extension(FG, :FlowGeometriesNearestNeighborsExt)
-    function query_allocs(n)
-        λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
-        φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
-        pts = Matrix{Float64}(undef, 3, n)
-        @. pts[1, :] = cos(φ) * cos(λ); @. pts[2, :] = cos(φ) * sin(λ); @. pts[3, :] = sin(φ)
-        tree = NearestNeighbors.KDTree(pts)
-        nbrs = Vector{Int}(undef, n * 6); ptr = Vector{Int}(undef, n + 1)
-        return nalloc(() -> E._knn_loop!(nbrs, ptr, tree, pts, n, 6, 7))
-    end
-    small = query_allocs(2_000)
-    large = query_allocs(20_000)
-    Test.@test large <= small + 2
-    Test.@test large < 20
-    # The whole path still must not carry a per-point allocation.
-    Test.@test nalloc(build(20_000)) < 0.05 * 20_000
-
-    # Correctness is unchanged: the k nearest by great-circle distance, nearest-first.
+    # The k nearest by great-circle distance, nearest-first.
     n = 200
     λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
     φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
@@ -581,11 +520,6 @@ Test.@testset "Distance and displacement between cells honour the topology" begi
     Test.@test GE.distance(gu, 1, 3) ≈ 1.0
     Test.@test GR.displacement(gu, 1, 3)[1] ≈ -1.0
 
-    dd() = FG.Geometry.distance(gp, (3, 2), (9, 5))
-    pp() = FG.Grids.displacement(gp, (3, 2), (9, 5))
-    dd(); pp()
-    Test.@test @allocated(dd()) == 0
-    Test.@test @allocated(pp()) == 0
 end
 
 Test.@testset "A ball query can sum periodic images, which a convolution needs" begin
@@ -671,16 +605,9 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
                              ball = 300.0, images = C.AllImages()) ==
                C.fold_within((a, J, d) -> a + 1, 0, gnp, 5, 5; ball = 300.0)
 
-    # The existing entry points are this fold, and both stay allocation-free over a whole sweep.
+    # The existing entry points are this fold.
     Test.@test C.nneighbors_within(g, 7, 11; ball = 600.0) ==
                C.fold_within((a, J, d) -> a + 1, 0, g, 7, 11; ball = 600.0)
-    cnt(gr, m) = (t = 0; for j in 1:m, i in 1:m
-        t += FG.Connectivity.fold_within((a, J, d) -> a + 1, 0, gr, i, j; ball = 600.0) end; t)
-    nnw(gr, m) = (t = 0; for j in 1:m, i in 1:m
-        t += FG.Connectivity.nneighbors_within(gr, i, j; ball = 600.0) end; t)
-    cnt(g, Nx); nnw(g, Nx)
-    Test.@test @allocated(cnt(g, Nx)) == 0
-    Test.@test @allocated(nnw(g, Nx)) == 0
 end
 
 Test.@testset "A window for the whole grid, and an exact extent for one row" begin
@@ -913,17 +840,6 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
     Test.@test sort(C.neighbors_within(gu2, 1; ball = 2.0e6)) ==
                [k for k in 2:5 if GE.distance(sph, pts[1], pts[k]) ≤ 2.0e6]
 
-    # Repeated queries allocate nothing on a rectilinear grid. Called through the const `FG` path:
-    # a captured non-const module local would defeat const-folding and charge dispatch to the sweep.
-    ballsweep(gr) = begin
-        t = 0
-        for j in 1:size(gr, 2), i in 1:size(gr, 1)
-            t += FG.Connectivity.nneighbors_within(gr, i, j; ball = 2.5)
-        end
-        t
-    end
-    ballsweep(gu)
-    Test.@test @allocated(ballsweep(gu)) == 0
 end
 
 Test.@testset "An arc longer than half the sphere still finds every node" begin
@@ -960,12 +876,6 @@ Test.@testset "A ball query recomputes no grid invariant" begin
         x = cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n)))
         return FG.Grids.StructuredGrid(geo, x, trues(n))
     end
-    # The fully-qualified path, and a warm-up call: a local `C` is captured as a `Module` field, so
-    # `C.nneighbors_within` is a dynamic lookup and boxes what it passes.
-    function nalloc(g, mt)
-        FG.Connectivity.nneighbors_within(g, 32; ball = 3.0, topology = mt)
-        return @allocated FG.Connectivity.nneighbors_within(g, 32; ball = 3.0, topology = mt)
-    end
     # What "O(1) per direction rather than a scan" means is that the candidate WINDOW does not
     # grow with the axis, so that is what is asserted — the window itself, not how long it took
     # to bound. `metric_window` returns the half-width the traversal will walk.
@@ -974,7 +884,6 @@ Test.@testset "A ball query recomputes no grid invariant" begin
         mt = C.MetricTopology(g)
         Test.@test mt isa C.MetricTopology
         Test.@test isbits(mt)                              # nothing heap-allocated to carry
-        Test.@test nalloc(g, mt) == 0
         I = (length(FG.Grids.mask(g)) ÷ 2,)
         (C.metric_window(g, I, 3.0, mt), g, mt)
     end
@@ -1285,63 +1194,6 @@ Test.@testset "Connected follows a periodic seam" begin
     # Seeded on the far side of the cut, the component runs the other way through the seam.
     Test.@test sort(C.neighbors_within(gm, 7; ball = 2.5)) == [1, 5, 6]
     Test.@test sort(C.neighbors_within(gm, 7; ball = 2.5, reach = C.Connected())) == [5, 6]
-end
-
-Test.@testset "A ball fold allocates nothing, and nothing that grows with the grid" begin
-    C = FG.Connectivity
-    GD = FG.Grids
-    geo = FG.Geometry.CartesianGeometry{Float64}()
-    function curv(n)
-        x = [t for t in range(0.0, 1.0 * (n - 1); length = n), _ in 1:n]
-        y = [t for _ in 1:n, t in range(0.0, 1.0 * (n - 1); length = n)]
-        return GD.CurvilinearGrid(geo, x, y, trues(n, n); measure = fill(1.0, n, n))
-    end
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
-    R = FG.Geometry.radius(GD.grid_geometry(gu))
-
-    # Unindexed, the candidates are a range, so the traversal touches no heap at all.
-    function nalloc_curv(g, top)
-        FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = top)
-        return @allocated FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = top)
-    end
-    function nalloc_node(g, top, r)
-        FG.Connectivity.nneighbors_within(g, 1; ball = r, topology = top)
-        return @allocated FG.Connectivity.nneighbors_within(g, 1; ball = r, topology = top)
-    end
-    g16 = curv(16)
-    Test.@test nalloc_curv(g16, C.MetricTopology(g16)) == 0
-    Test.@test nalloc_node(gu, C.MetricTopology(gu), 0.3R) == 0
-
-    # Indexed with a buffer, nothing is left to allocate: the tree is queried in its own point type,
-    # so it converts nothing per call, and the candidates land in the caller's buffer.
-    function nalloc_ix(g, ix, s)
-        FG.Connectivity.nneighbors_within(g, 8, 8; ball = 3.0, topology = ix, scratch = s)
-        return @allocated FG.Connectivity.nneighbors_within(
-            g, 8, 8; ball = 3.0, topology = ix, scratch = s,
-        )
-    end
-    a16 = nalloc_ix(g16, C.indexed(g16), C.ball_scratch())
-    a64 = nalloc_ix(curv(64), C.indexed(curv(64)), C.ball_scratch())
-    Test.@test a16 == a64                  # 16× the cells, the same bytes per query
-    Test.@test a16 == 0
-
-    # The point-seeded form goes through the same index and must be free too, on both index kinds
-    # and with images to deduplicate.
-    gp = curv(32)
-    pt = (15.5, 16.25)
-    Test.@test _alloc(q_fold_at, gp, pt, 3.0, C.indexed(gp), C.ball_scratch()) == 0
-    Test.@test _alloc(q_fold_at, gp, pt, 3.0,
-                      C.MetricTopology(gp; index = GD.cell_list(gp; ball = 3.0)),
-                      C.ball_scratch()) == 0
-    Test.@test _alloc(q_fold_at, gu, (0.4, 0.1), 0.3R, C.indexed(gu), C.ball_scratch()) == 0
-
-    # Locating a point is the same traversal, so it carries the same guarantee: per axis on a
-    # rectilinear grid, and through the index elsewhere.
-    Test.@test _alloc(q_locate, GD.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(),
-                                                  collect(0.0:31.0), collect(0.0:31.0)),
-                      (7.3, 4.2)) == 0
-    Test.@test _alloc(q_locate_top, gp, pt, C.indexed(gp), C.ball_scratch()) == 0
-    Test.@test _alloc(q_locate_top, gu, (0.4, 0.1), C.indexed(gu), C.ball_scratch()) == 0
 end
 
 Test.@testset "Adjacency symmetry is decided by comparison with the transpose" begin

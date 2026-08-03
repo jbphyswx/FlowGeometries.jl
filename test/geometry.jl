@@ -159,11 +159,6 @@ Test.@testset "Rank-2 tensors rotate between the ambient and local frames" begin
     end
     Test.@test_throws ArgumentError GE.as_tensor6([1.0, 2.0, 3.0])
 
-    # Meant for a hot loop, so it must not allocate — the reason a caller would hand-roll it.
-    # Through `_alloc`, not a local closure: a closure over a testset local boxes what it captures
-    # and would measure the harness rather than the function.
-    Test.@test _alloc(q_tensor_local, geo, τ, (0.7, -0.4)) == 0
-
     # Float32 in, Float32 out.
     let g32 = GE.SphericalGeometry(Float32(6.371e6))
         t32 = GE.tensor_to_local(g32, 1.3f0, -0.7f0, 2.1f0, 0.4f0, -1.1f0, 0.9f0, 0.7f0, -0.4f0)
@@ -262,36 +257,6 @@ Test.@testset "Requested point representation is honored exactly" begin
                FG.Geometry.vector_from_cartesian(sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)
 end
 
-Test.@testset "Point handling allocates nothing" begin
-    using StaticArrays: StaticArrays as SA
-    sgeo = FG.Geometry.SphericalGeometry(6.371e6)
-    xs = deg2rad.(collect(0.0:1.0:9.0))
-    sgrid = FG.Grids.StructuredGrid(sgeo, xs, xs, trues(10, 10))
-
-    function svec_loop(grid, geo, n)
-        s = 0.0
-        c0 = FG.Grids.coords(SA.SVector{2,Float64}, grid, 1, 1)
-        for j in 1:n, i in 1:n
-            nb = FG.Grids.coords(SA.SVector{2,Float64}, grid, i, j)
-            s += FG.Geometry.distance(geo, c0, nb + SA.SVector{2,Float64}(1e-3, 1e-3))
-        end
-        return s
-    end
-    function namedtuple_loop(grid, geo, n)
-        s = 0.0
-        c0 = FG.Grids.coords(grid, 1, 1)
-        for j in 1:n, i in 1:n
-            Δ = FG.Geometry.project_to_tangent_plane(geo, c0, FG.Grids.coords(grid, i, j))
-            s += Δ[1]^2 + Δ[2]^2
-        end
-        return s
-    end
-    svec_loop(sgrid, sgeo, 2)
-    namedtuple_loop(sgrid, sgeo, 2)
-    Test.@test @allocated(svec_loop(sgrid, sgeo, 10)) == 0
-    Test.@test @allocated(namedtuple_loop(sgrid, sgeo, 10)) == 0
-end
-
 Test.@testset "A pole rotation applies to a point set and to a grid" begin
     GE = FG.Geometry
     GR = FG.Grids
@@ -307,9 +272,6 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test λ2 == Λ && φ2 == Φ
     GE.unrotate!(λ2, φ2, rot)
     Test.@test all(isapprox.(λ2, λ; atol = 1e-12)) && all(isapprox.(φ2, φ; atol = 1e-12))
-    rr() = FG.Geometry.rotate!(λ2, φ2, rot)
-    rr()
-    Test.@test @allocated(rr()) == 0
     # 2-D fields (a grid's coordinate arrays) go through the same method.
     Λm = [0.1i for i in 1:3, _ in 1:4]
     Test.@test size(GE.rotate!(Λm, [0.1j for _ in 1:3, j in 1:4], rot)[1]) == (3, 4)

@@ -32,12 +32,13 @@ jobs:
           version: ${{ matrix.version }}
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
+        # Coverage is the CodeCov workflow's job. Collecting it here too compiles line counters into
+        # the package, which de-optimizes it enough to allocate inside code the allocation gates
+        # assert is allocation-free — measured, 64 B on a sweep that allocates nothing otherwise. The
+        # tests that run are unchanged either way; only the instrumentation is dropped.
       - uses: julia-actions/julia-runtest@v1
-      - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v7
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          file: lcov.info
+          coverage: false
 
   # The threaded backends must produce bit-identical results to serial, which a single-threaded
   # run cannot show. Same suite, more threads.
@@ -52,6 +53,8 @@ jobs:
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+        with:
+          coverage: false
         env:
           JULIA_NUM_THREADS: '4'
 

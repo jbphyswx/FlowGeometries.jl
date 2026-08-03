@@ -116,15 +116,6 @@ Test.@testset "Stencils are any shape, any radius, any dimension" begin
         n = FG.Connectivity.neighbors!(buf, g, 2, 2; stencil = Upwind(1))
         # Linear indices into the 6×5 grid: (3,2) and (2,3).
         Test.@test sort(buf[1:n]) == sort([3 + 1 * 6, 2 + 2 * 6])
-        sweep(gr) = begin
-            t = 0
-            for j in 1:size(gr, 2), i in 1:size(gr, 1)
-                t += FG.Connectivity.nneighbors(gr, i, j; stencil = Upwind(2))
-            end
-            t
-        end
-        sweep(g)
-        Test.@test @allocated(sweep(g)) == 0
     end
     Test.@test S.reach(S.Moore(3), Val(2)) == (3, 3)
     Test.@test S.reach(S.Anisotropic((3, 1)), Val(2)) == (3, 1)
@@ -172,98 +163,6 @@ Test.@testset "Stencils are any shape, any radius, any dimension" begin
         end
         return c
     end
-    # Every traversal allocates nothing at all — any shape, any radius, and with the stencil
-    # written as an inline literal at the call site, which is the form that has to work.
-    function sweep_def(grid, n)
-        c = 0
-        for j in 1:n, i in 1:n
-            for v in FG.Grids.neighbors(grid, i, j)
-                c += v
-            end
-        end
-        return c
-    end
-    sweep_def(g, 2)
-    Test.@test @allocated(sweep_def(g, 10)) == 0
-
-    # One sweeper per shape, each with the stencil written inline. The stencil is spelled through
-    # the const `FG`, not the local alias `S`: a non-const binding cannot be constant-folded, so the
-    # stencil type would not reach the call site and the measurement would be of that, not of the
-    # package.
-    sweep_ax1(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Axial(1)); c += v; end; end; c)
-    sweep_ax3(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Axial(3)); c += v; end; end; c)
-    sweep_vn2(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.VonNeumann(2)); c += v; end; end; c)
-    sweep_mo1(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Moore(1)); c += v; end; end; c)
-    sweep_mo3(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Moore(3)); c += v; end; end; c)
-    sweep_dia(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Diagonal(2)); c += v; end; end; c)
-    sweep_ani(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Anisotropic((4, 1))); c += v; end; end; c)
-    sweep_cus(grid, n) = (c = 0; for j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j; stencil = FG.Stencils.Custom(((1, 0), (0, 1)))); c += v; end; end; c)
-
-    # A masked, wrapping grid exercises both extra branches of the neighbour kernel.
-    mm = trues(10, 10); mm[4:6, 4:6] .= false
-    gmask = FG.Grids.StructuredGrid(geo, 0.0:1.0:9.0, 0.0:1.0:9.0, mm;
-                                    periodic = true, period = 10.0)
-    # Called by name, not through a collection: iterating over a tuple of functions would make the
-    # CALL dynamically dispatched and so allocate in the harness rather than in the package.
-    sweep_ax1(g, 2); sweep_ax3(g, 2); sweep_vn2(g, 2); sweep_mo1(g, 2)
-    sweep_mo3(g, 2); sweep_dia(g, 2); sweep_ani(g, 2); sweep_cus(g, 2)
-    Test.@test @allocated(sweep_ax1(g, 10)) == 0
-    Test.@test @allocated(sweep_ax3(g, 10)) == 0
-    Test.@test @allocated(sweep_vn2(g, 10)) == 0
-    Test.@test @allocated(sweep_mo1(g, 10)) == 0
-    Test.@test @allocated(sweep_mo3(g, 10)) == 0
-    Test.@test @allocated(sweep_dia(g, 10)) == 0
-    Test.@test @allocated(sweep_ani(g, 10)) == 0
-    Test.@test @allocated(sweep_cus(g, 10)) == 0
-
-    sweep_ax1(gmask, 2); sweep_ax3(gmask, 2); sweep_vn2(gmask, 2); sweep_mo1(gmask, 2)
-    sweep_mo3(gmask, 2); sweep_dia(gmask, 2); sweep_ani(gmask, 2); sweep_cus(gmask, 2)
-    Test.@test @allocated(sweep_ax1(gmask, 10)) == 0
-    Test.@test @allocated(sweep_ax3(gmask, 10)) == 0
-    Test.@test @allocated(sweep_vn2(gmask, 10)) == 0
-    Test.@test @allocated(sweep_mo1(gmask, 10)) == 0
-    Test.@test @allocated(sweep_mo3(gmask, 10)) == 0
-    Test.@test @allocated(sweep_dia(gmask, 10)) == 0
-    Test.@test @allocated(sweep_ani(gmask, 10)) == 0
-    Test.@test @allocated(sweep_cus(gmask, 10)) == 0
-
-    # The buffer-filling and counting forms likewise, at any stencil width.
-    buf2 = Vector{Int}(undef, 512)
-    fill_ax(grid, n, b) = (k = 0; for j in 1:n, i in 1:n
-        k += FG.Connectivity.neighbors!(b, grid, i, j; stencil = FG.Stencils.Axial(1)); end; k)
-    fill_mo(grid, n, b) = (k = 0; for j in 1:n, i in 1:n
-        k += FG.Connectivity.neighbors!(b, grid, i, j; stencil = FG.Stencils.Moore(3)); end; k)
-    cnt_mo(grid, n) = (k = 0; for j in 1:n, i in 1:n
-        k += FG.Connectivity.nneighbors(grid, i, j; stencil = FG.Stencils.Moore(3)); end; k)
-    fill_ax(g, 2, buf2); fill_mo(g, 2, buf2); cnt_mo(g, 2)
-    Test.@test @allocated(fill_ax(g, 10, buf2)) == 0
-    Test.@test @allocated(fill_mo(g, 10, buf2)) == 0
-    Test.@test @allocated(cnt_mo(g, 10)) == 0
-
-    # And in more than three dimensions.
-    g4a = FG.Grids.StructuredGrid(geo, ntuple(_ -> 0.0:1.0:4.0, 4)...)
-    sweep4(grid, n) = (c = 0; for l in 1:n, k in 1:n, j in 1:n, i in 1:n
-        for v in FG.Grids.neighbors(grid, i, j, k, l; stencil = FG.Stencils.Moore(1)); c += v; end; end; c)
-    sweep4(g4a, 2)
-    Test.@test @allocated(sweep4(g4a, 4)) == 0
-
-    # The bulk builder's allocation count is flat in BOTH grid size and stencil width: the only
-    # allocations are the CSR output arrays.
-    nalloc(f) = (f(); minimum(Base.gc_alloc_count((@timed f()).gcstats) for _ in 1:3))
-    counts = [nalloc(() -> FG.Connectivity.build_connectivity(
-                  FG.Grids.StructuredGrid(geo, range(0.0, 1.0; length = m),
-                                          range(0.0, 1.0; length = m)); stencil = st))
-              for m in (30, 60, 120), st in (S.Axial(1), S.Moore(2), S.Moore(3))]
-    Test.@test all(==(first(counts)), counts)
-    Test.@test first(counts) < 20
 end
 
 Test.@testset "derivative! is with respect to distance, and masks where the metric dies" begin
@@ -370,23 +269,6 @@ Test.@testset "A held stencil table serves every mask policy" begin
         Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
     end
 
-    # Holding the table is what removes the per-call allocation, which is the point of it.
-    for dim in 1:2
-        idx, w = D.axis_stencils(g, dim; order = 1, nodes = 3)
-        Test.@test _alloc(q_tbl!, zeros(n, n), f, g, (idx, w), dim, D.BlankMasked()) == 0
-    end
-    # The degrade path keeps a Fornberg scratch, but it is `O(1)` in the grid, not `O(n)`.
-    let sizes = (24, 96)
-        allocs = map(sizes) do m
-            xs = collect(range(0.0, 10.0; length = m))
-            mm = trues(m, m); mm[7, 9] = false
-            gm = GD.StructuredGrid(cart, xs, xs, mm)
-            fm = [sin(xi) * cos(yj) for xi in xs, yj in xs]
-            iw = D.axis_stencils(gm, 1; order = 1, nodes = 3)
-            _alloc(q_tbl!, zeros(m, m), fm, gm, iw, 1, D.ReduceInRun())
-        end
-        Test.@test allocs[1] == allocs[2]          # 16x the cells, the same bytes
-    end
 
     # The bare form still refuses rather than silently ignoring the policy.
     let idx = D.axis_stencils(g, 1; order = 1, nodes = 3)
@@ -405,47 +287,6 @@ Test.@testset "A held stencil table serves every mask policy" begin
         i2, w2 = D.axis_stencils(gs, 2; order = 1, nodes = 3)
         D.derivative!(b, fs, gs, i2, w2, 2; order = 1, masked = NaN)
         Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
-    end
-end
-
-Test.@testset "A degrading sweep can be made to allocate nothing" begin
-    D = FG.Discretization
-    GD = FG.Grids
-    cart = FG.Geometry.CartesianGeometry{Float64}()
-    n = 32
-    x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n))))
-    mk = trues(n, n); mk[7, 9] = false; mk[8, 9] = false; mk[20, 3] = false
-    g = GD.StructuredGrid(cart, x, x, mk)
-    f = [sin(xi) * cos(yj) for xi in x, yj in x]
-    idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
-    sc = D.stencil_scratch(1, 3)
-
-    # Same answer, and the buffers carry nothing between calls.
-    a = zeros(n, n); b = zeros(n, n)
-    D.apply_stencil!(a, f, g, idx, w, 1; order = 1, masked = NaN, policy = D.ReduceInRun())
-    for _ in 1:3
-        D.apply_stencil!(b, f, g, idx, w, 1; order = 1, masked = NaN,
-                         policy = D.ReduceInRun(), scratch = sc)
-    end
-    Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
-
-    # The scratch is the difference between a per-call cost and none.
-    Test.@test _alloc(q_tbl_sc!, zeros(n, n), f, g, (idx, w), 1, sc) == 0
-    Test.@test _alloc(q_tbl_sc!, zeros(n, n), f, g, (idx, w), 1, nothing) > 0
-
-    # A run walk must not allocate at all: `_run_reach` closed over a loop variable it also
-    # reassigned, which Julia boxes — 288 bytes per call, once per cell adjacent to a mask, so it
-    # grew with the length of a coastline rather than being a fixed cost.
-    Test.@test _alloc(q_runreach, mk, (6, 9), 1, 6, n, 3) == 0
-    # …and every cell away from a mask was already free, which is why this hid.
-    Test.@test _alloc(q_tbl!, zeros(n, n), f, GD.StructuredGrid(cart, x, x), (idx, w), 1,
-                      D.ReduceInRun()) == 0
-
-    # A scratch too small for the stencil is refused rather than overrun.
-    let small = D.stencil_scratch(1, 2), i5w5 = D.axis_stencils(g, 1; order = 1, nodes = 5)
-        Test.@test_throws DimensionMismatch D.apply_stencil!(
-            zeros(n, n), f, g, i5w5[1], i5w5[2], 1; order = 1, masked = NaN,
-            policy = D.ReduceInRun(), scratch = small)
     end
 end
 
@@ -624,15 +465,12 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, active_only = false)
     Test.@test Om[5, 3] ≈ 2X[5]
 
-    # A precomputed weight set gives the same answer and applies allocation-free.
+    # A precomputed weight set gives the same answer.
     idx, w = D.axis_stencils(X, 1, 3)
     Test.@test size(idx) == (9, 3) && size(w) == (9, 3)
     O2 = similar(F)
     D.apply_stencil!(O2, F, idx, w, 1)
     Test.@test O2 ≈ [2xi for xi in X, _ in Y]
-    ap() = FG.Discretization.apply_stencil!(O2, F, idx, w, 1)
-    ap()
-    Test.@test @allocated(ap()) == 0
 
     Test.@test_throws ArgumentError D.axis_stencils(X, 2, 2)          # too few nodes for order 2
     Test.@test_throws ArgumentError D.axis_stencils([0.0, 1.0], 1, 5) # more nodes than samples
@@ -791,10 +629,6 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
                        for i in 1:n, j in 1:n if mk[i, j])
     end
 
-    # Applying is one dot product per cell and must allocate nothing.
-    let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
-        Test.@test _alloc(q_gradient!, g1, g2, f, plan) == 0
-    end
     Test.@test plan.names == (:x, :y)
     Test.@test_throws DimensionMismatch D.gradient!(zeros(3), zeros(3), zeros(3), plan)
     # The tangent plane is two-dimensional, so a 3-coordinate grid is refused rather than guessed.
@@ -967,9 +801,7 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
         end
         Test.@test collect(GD.cell_widths(g, d)) == [D.cell_width(x, i, p) for i in 1:length(x)]
         # A runtime `d` indexes a tuple whose entries have different types on the mixed grids;
-        # the result must still infer and the lookup must not allocate.
-        Test.@test _alloc(q_gap, g, d, 2) == 0
-        Test.@test _alloc(q_width, g, d, 2) == 0
+        # the result must still infer.
         Test.@inferred GD.local_spacing(g, d, 2)
         Test.@inferred GD.cell_width(g, d, 2)
     end

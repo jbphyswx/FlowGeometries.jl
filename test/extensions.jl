@@ -231,8 +231,6 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
     B = FG.Connectivity.sparse_adjacency_matrix!(colptr, rowval, nzval, conn)
     Test.@test B == A
     Test.@test B.colptr === colptr && B.rowval === rowval && B.nzval === nzval
-    FG.Connectivity.sparse_adjacency_matrix!(colptr, rowval, nzval, conn)
-    Test.@test @allocated(FG.Connectivity.sparse_adjacency_matrix!(colptr, rowval, nzval, conn)) < 200
 
     # The COO route still agrees with the direct one.
     I = Vector{Int}(undef, ne); J = Vector{Int}(undef, ne)

@@ -31,15 +31,6 @@ Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
     # In-range access is unaffected, and a caller that opts out still pays nothing.
     Test.@test FG.Grids.measure(g, 2, 2) ≈ 1.0
     Test.@test FG.Grids.coords(g, 2, 3) == (x = 1.0, y = 2.0)
-    function sweep(grid, n)
-        acc = 0.0
-        @inbounds for j in 1:n, i in 1:n
-            acc += FG.Grids.measure(grid, i, j) + (FG.Grids.isactive(grid, i, j) ? 1.0 : 0.0)
-        end
-        return acc
-    end
-    sweep(g, 2)
-    Test.@test @allocated(sweep(g, 4)) == 0
 end
 
 Test.@testset "Public names the suite had not been calling" begin

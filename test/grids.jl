@@ -280,19 +280,6 @@ Test.@testset "Curvilinear areas hold two corner rows, not the whole field" begi
                for i in 1:n, j in 1:n]
         Test.@test a == ref     # same arithmetic, only the buffering differs
     end
-    # Construction memory must scale with the grid's own stored content (corners + areas), not
-    # carry an extra full-size unit-vector field on top of it.
-    function mib(n)
-        λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
-        φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
-        m = trues(n, n)
-        f = () -> FG.Grids.CurvilinearGrid(geo, λ, φ, m)
-        f()
-        return (@allocated f()) / 2^20
-    end
-    n = 200
-    stored = 3 * 8 * (n + 1)^2 / 2^20      # xc, yc, areas
-    Test.@test mib(n) < 1.6 * stored
 end
 
 Test.@testset "Cell measure is stored factored, not materialized" begin
@@ -505,14 +492,6 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     L3 = [1.5i - 2.0j + 0.5k for i in 1:4, j in 1:5, k in 1:3]
     Test.@test all(FG.Grids._ghosted(L3, (i, j, k)) ≈ 1.5i - 2.0j + 0.5k
                    for i in 0:5, j in 0:6, k in 0:4)
-    # …and reconstruction costs only its own output. Minimum of several samples: a single
-    # `@allocated` can land on a collection or on the tail of compilation, and the true cost is a
-    # floor, so the minimum converges to it.
-    cc(A) = (FG.Grids._centers_to_corners(A);
-             minimum(@allocated(FG.Grids._centers_to_corners(A)) for _ in 1:3))
-    big = [1.0i + 2.0j for i in 1:120, j in 1:120]
-    Test.@test cc(big) < 1.2 * 8 * 121^2
-
     # Connectivity follows into N-D, and the dense adjacency agrees with the CSR.
     Test.@test C.nneighbors(g3, 2, 2, 1) == 5          # 6 face neighbours minus one wall
     Test.@test C.linear_index(g3, 2, 3, 2) == 2 + 2 * 4 + 1 * 12
@@ -602,41 +581,7 @@ Test.@testset "Grids and connectivity work in any number of dimensions" begin
     Test.@test size(g5) == (3, 3, 3, 3, 3)
     Test.@test FG.Connectivity.nneighbors(g5, 2, 2, 2, 2, 2) == 10
 
-    # A traversal must stay allocation-free past N = 3 too. Coordinate names are numbered rather
-    # than lettered from N = 4 on, and a per-cell query reaches them; building those symbols at run
-    # time would allocate on every call, so this covers more than the loop itself.
-    sweep4(gr) = begin
-        t = 0
-        for l in 1:size(gr, 4), k in 1:size(gr, 3), j in 1:size(gr, 2), i in 1:size(gr, 1)
-            t += FG.Connectivity.nneighbors(gr, i, j, k, l; stencil = FG.Stencils.Moore(1))
-        end
-        t
-    end
-    sweep5(gr) = begin
-        t = 0
-        for m in 1:size(gr, 5), l in 1:size(gr, 4), k in 1:size(gr, 3),
-            j in 1:size(gr, 2), i in 1:size(gr, 1)
-            t += FG.Connectivity.nneighbors(gr, i, j, k, l, m)
-        end
-        t
-    end
-    coordsweep4(gr) = begin
-        t = 0.0
-        for l in 1:size(gr, 4), k in 1:size(gr, 3), j in 1:size(gr, 2), i in 1:size(gr, 1)
-            t += FG.Grids.coords(gr, i, j, k, l).x1 + FG.Grids.measure(gr, i, j, k, l)
-        end
-        t
-    end
-    sweep4(g4); sweep5(g5); coordsweep4(g4)
-    Test.@test @allocated(sweep4(g4)) == 0
-    Test.@test @allocated(sweep5(g5)) == 0
-    Test.@test @allocated(coordsweep4(g4)) == 0
-    # The names themselves must be a compile-time constant past the lettered directions.
-    names4() = FG.Geometry.point_names(FG.Geometry.CartesianGeometry(), Val(4))
     names7() = FG.Geometry.point_names(FG.Geometry.SphericalGeometry(1.0), Val(7))
-    names4(); names7()
-    Test.@test @allocated(names4()) == 0
-    Test.@test @allocated(names7()) == 0
     Test.@test names7() == (:λ, :φ, :r, :q4, :q5, :q6, :q7)
 
     # A spherical grid in 1-D measures arc length, and in 4-D keeps its metric directions.

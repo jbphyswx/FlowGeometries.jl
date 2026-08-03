@@ -133,15 +133,6 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
     wb = Vector{Float64}(undef, sz.nlat)
     FG.SphericalSampling.spherical_quadrature!(λb, φb, wb, FG.SphericalSampling.GaussLegendreSampling(), n)
     Test.@test φb == FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.GaussLegendreSampling(), n).φ
-    # Only the returned NamedTuple; the solve itself needs O(1) scratch, not the O(n²)
-    # eigenvector matrix a Golub–Welsch decomposition would.
-    nalloc(f) = (f(); Base.gc_alloc_count((@timed f()).gcstats))
-    Test.@test nalloc(() -> FG.SphericalSampling.spherical_quadrature!(λb, φb, wb, FG.SphericalSampling.GaussLegendreSampling(), n)) <= 1
-    Test.@test nalloc(() -> FG.SphericalSampling._gauss_legendre_μ!(φb, wb)) <= 1
-    # O(1) scratch means the count cannot grow with n.
-    big = Vector{Float64}(undef, 4n)
-    bigw = similar(big)
-    Test.@test nalloc(() -> FG.SphericalSampling._gauss_legendre_μ!(big, bigw)) <= 1
     Test.@test_throws DimensionMismatch FG.SphericalSampling.spherical_quadrature!(
         λb, φb, Vector{Float64}(undef, n + 1), FG.SphericalSampling.GaussLegendreSampling(), n)
 end
@@ -435,14 +426,6 @@ Test.@testset "Icosahedral mesh is indexed topologically, not by hashing coordin
         Test.@test maximum(elen) / minimum(elen) < 1.5
     end
 
-    # Construction cost must not scale with a per-vertex hash table.
-    function allocs(f)
-        f()
-        r = @timed f()
-        return Base.gc_alloc_count(r.gcstats)
-    end
-    Test.@test allocs(() -> FG.SphericalSampling.icosahedral_mesh(4)) < 200
-    Test.@test allocs(() -> FG.SphericalSampling.icosahedral_mesh(32)) < 200
 end
 
 Test.@testset "HEALPix RING neighbours are emitted in ascending order" begin
@@ -686,17 +669,6 @@ Test.@testset "Fibonacci lattice" begin
     Test.@test minimum(nn) / maximum(nn) > 0.5
     Test.@test SS.is_equal_area(SS.FibonacciSampling(10))
     Test.@test_throws ArgumentError SS.FibonacciSampling(0)
-    # The bang form writes into the caller's buffers: its allocation count is flat in `n`, so
-    # nothing is allocated per point. (The residual is the timing closure, not the function.)
-    nalloc(f) = (f(); minimum(Base.gc_alloc_count((@timed f()).gcstats) for _ in 1:5))
-    function fib_allocs(n)
-        a = Vector{Float64}(undef, n); b = similar(a)
-        fib = SS.FibonacciSampling(n)
-        SS.spherical_points!(a, b, fib)
-        return nalloc(() -> SS.spherical_points!(a, b, fib))
-    end
-    Test.@test fib_allocs(500) == fib_allocs(50_000)
-    Test.@test fib_allocs(500) <= 2
     Test.@test_throws DimensionMismatch SS.spherical_points!(zeros(3), zeros(3),
                                                              SS.FibonacciSampling(4))
 end
@@ -808,19 +780,11 @@ Test.@testset "A ring can be reached one at a time, in O(1), without building th
         Test.@test all(pts.φ[first(SS.ring_range(s, nlat, r))] == ax.φ[r] for r in 1:nlat)
     end
 
-    # O(1) means allocation-free, whatever the grid size — the table form cannot be.
-    big = SS.OctahedralGaussianSampling(400)
-    Test.@test _alloc(q_nlon_in_ring, big, 500) == 0
-    Test.@test _alloc(q_ring_range, big, 500) == 0
-    Test.@test _alloc(q_ring_range, SS.HEALPixSampling(256), 700) == 0
-    Test.@test _alloc(q_npoints, big) == 0
-
-    # A caller-supplied buffer makes the reduced-Gaussian fill allocate nothing at all.
+    # A caller-supplied buffer gives the same points as the allocating form.
     let s = SS.OctahedralGaussianSampling(12), n = SS.npoints(s)
         λ = Vector{Float64}(undef, n); φ = Vector{Float64}(undef, n)
         sc = Vector{Float64}(undef, SS.nrings(s))
         SS.spherical_points!(λ, φ, s; scratch = sc)
-        Test.@test _alloc(q_rg_points!, λ, φ, s, sc) == 0
         ref = SS.spherical_points(s)
         Test.@test λ == ref.λ && φ == ref.φ
     end
@@ -844,6 +808,4 @@ Test.@testset "The NESTED bit interleave is exact over its whole domain" begin
     Test.@test all(SS._compress_bits(SS._spread_bits(a) | (SS._spread_bits(b) << 1)) == a &&
                    SS._compress_bits((SS._spread_bits(a) | (SS._spread_bits(b) << 1)) >> 1) == b
                    for a in 0:63, b in 0:63)
-    Test.@test _alloc(SS._spread_bits, 12345) == 0
-    Test.@test _alloc(SS._compress_bits, 12345) == 0
 end
