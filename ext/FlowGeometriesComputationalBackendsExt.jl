@@ -33,6 +33,11 @@ end
 
 Execution.map_chunks(f::F, n::Integer, ::AbstractSerialBackend) where {F} = Execution.map_chunks(f, n, nothing)
 
+# Naming the serial backend explicitly reduces exactly as leaving `backend` unset does — one chunk, no
+# vector of per-chunk results to build.
+Execution._reduce_chunks(f::F, op::O, n::Integer, ::AbstractSerialBackend) where {F,O} =
+    Execution._reduce_chunks(f, op, n, nothing)
+
 # Results stay in chunk order, so the caller's combine sees the same sequence it would serially.
 function Execution.map_chunks(f::F, n::Integer, ::AbstractThreadedBackend) where {F}
     n = Int(n)

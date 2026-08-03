@@ -2079,7 +2079,7 @@ function mapreduce_within(
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
     n = length(cells)
-    parts = Execution.map_chunks(n, backend) do rng
+    return Execution._reduce_chunks(op, n, backend) do rng
         acc = init
         s = ball_scratch()
         @inbounds for t in rng
@@ -2090,7 +2090,6 @@ function mapreduce_within(
         end
         return acc
     end
-    return length(parts) == 1 ? @inbounds(parts[1]) : reduce(op, parts)
 end
 
 """

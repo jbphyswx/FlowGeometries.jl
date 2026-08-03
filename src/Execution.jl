@@ -50,6 +50,21 @@ operation is associative but not commutative.
 map_chunks(f::F, n::Integer, ::Nothing) where {F} = [f(1:Int(n))]
 
 """
+    _reduce_chunks(f, op, n, backend)
+
+`f(range)` over a partition of `1:n`, combined left to right with `op`.
+
+Distinct from [`map_chunks`](@ref) because the serial path has nothing to collect: it hands `f` the whole
+range and returns that value directly, where going through `map_chunks` would build a one-element
+`Vector` to index once and discard. The compiler usually erases that vector, so its cost shows up only
+where it cannot — a reduction is otherwise allocation-free, and this keeps it so unconditionally.
+"""
+_reduce_chunks(f::F, ::O, n::Integer, ::Nothing) where {F,O} = f(1:Int(n))
+
+_reduce_chunks(f::F, op::O, n::Integer, backend) where {F,O} =
+    reduce(op, map_chunks(f, n, backend))
+
+"""
     run_indices(f, n, backend)
 
 Apply `f(i)` for each `i in 1:n`, under the execution policy `backend` names. `f` must write only what
