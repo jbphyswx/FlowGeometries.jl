@@ -1362,7 +1362,7 @@ end
     derivative!(out, field, grid, indices, weights, dim; order=1, active_only=true, masked=zero,
                 policy=BlankMasked(), backend=nothing) -> out
 
-[`derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
+[`Discretization.derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
 above, for the entry point a geometry-aware caller actually uses.
 """
 function Discretization.derivative!(

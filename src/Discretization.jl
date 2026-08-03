@@ -830,7 +830,7 @@ end
 The working buffers a degrading [`apply_stencil!`](@ref) needs to rebuild a window at a mask edge:
 the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
 
-**One per task**, exactly as [`Connectivity.ball_scratch`](@ref) is — the buffers are written per cell,
+**One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
 so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
 one passed here.
 """
@@ -841,7 +841,7 @@ struct StencilScratch{T<:AbstractFloat}
 end
 
 """
-    stencil_scratch(order, nodes; T = Float64) -> StencilScratch
+    stencil_scratch([T = Float64], order, nodes) -> StencilScratch
 
 Buffers for the degrade path, so a caller taking many derivatives on a masked grid does not allocate
 them per call. Without one a degrading call allocates a few hundred bytes each time — `O(1)` in the
@@ -850,7 +850,9 @@ grid, but per *call*, so a flux computation taking nine derivatives pays it nine
 Only the degrading policies need it. An unmasked grid, and any grid under [`BlankMasked`](@ref), never
 rebuilds a window and allocates nothing regardless.
 """
-function stencil_scratch(order::Integer, nodes::Integer; T::Type{<:AbstractFloat} = Float64)
+stencil_scratch(order::Integer, nodes::Integer) = stencil_scratch(Float64, order, nodes)
+
+function stencil_scratch(::Type{T}, order::Integer, nodes::Integer) where {T<:AbstractFloat}
     k = Int(nodes)
     m = Int(order)
     k ≥ 1 || throw(ArgumentError("stencil_scratch needs nodes ≥ 1, got $k"))

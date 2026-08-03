@@ -142,26 +142,37 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    structured_grid(sampling, nlat; geometry, nlon, T, mask, periodic) -> StructuredGrid
+    structured_grid([T], sampling, nlat; geometry, nlon, mask, periodic) -> StructuredGrid
 
 Build a spherical `StructuredGrid` from a tensor-product sampling (Clenshaw–Curtis,
 Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). Longitude periodicity is
 auto-detected unless `periodic` is set.
+
+`T` is the element type to build in, and defaults to the `geometry`'s own — a geometry fixes the
+width of every coordinate and metric factor computed against it. Naming `T` carries the geometry to
+that width rather than letting it promote the grid back.
 """
+structured_grid(
+    s::SphericalSampling.AbstractTensorProductSphericalSampling, nlat::Integer;
+    geometry::Geometry.AbstractSphericalGeometry = Geometry.SphericalGeometry(), kwargs...,
+) = structured_grid(Geometry.float_type(geometry), s, nlat; geometry = geometry, kwargs...)
+
 function structured_grid(
+    ::Type{T},
     s::SphericalSampling.AbstractTensorProductSphericalSampling,
     nlat::Integer;
     geometry::Geometry.AbstractSphericalGeometry = Geometry.SphericalGeometry(),
     nlon::Union{Nothing,Integer} = nothing,
-    T::Type{<:AbstractFloat} = Float64,
     mask = nothing,
     periodic = nothing,
-)
-    ax = SphericalSampling.spherical_axes(s, nlat; nlon = nlon, T = T)
+) where {T<:AbstractFloat}
+    ax = SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)
     λ = ax.λ
     φ = ax.φ
     m = mask === nothing ? Grids.AllActive((length(λ), length(φ))) : mask
-    return Grids.StructuredGrid(geometry, λ, φ, m; periodic = periodic)
+    # The geometry fixes the width of every coordinate and metric factor, so a grid built at `T`
+    # around a geometry of another width comes back promoted to that other width.
+    return Grids.StructuredGrid(Geometry.similar_geometry(T, geometry), λ, φ, m; periodic = periodic)
 end
 
 """
@@ -463,48 +474,69 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    unstructured_grid(sampling, args...; geometry, T, areas, mask) -> UnstructuredGrid
+    unstructured_grid([T], sampling, args...; geometry, areas, mask) -> UnstructuredGrid
 
 Points from `spherical_points` plus exact sampling topology from `build_connectivity`.
 Default cell areas are uniform (`4π R² / N` on a sphere, `1` on Cartesian).
+
+`T` is the element type to build in, and defaults to the `geometry`'s own, as for
+[`structured_grid`](@ref).
 """
+unstructured_grid(
+    s::SphericalSampling.HEALPixSampling;
+    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
+) = unstructured_grid(Geometry.float_type(geometry), s; geometry = geometry, kwargs...)
+
 function unstructured_grid(
+    ::Type{T},
     s::SphericalSampling.HEALPixSampling;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    T::Type{<:AbstractFloat} = Float64,
     areas = nothing,
     mask = nothing,
-)
-    pts = SphericalSampling.spherical_points(s; T = T)
+) where {T<:AbstractFloat}
+    pts = SphericalSampling.spherical_points(T, s)
     conn = build_connectivity(s)
-    return _unstructured_from_points_conn(s, geometry, pts.λ, pts.φ, conn; areas = areas, mask = mask)
+    geo = Geometry.similar_geometry(T, geometry)
+    return _unstructured_from_points_conn(s, geo, pts.λ, pts.φ, conn; areas = areas, mask = mask)
 end
 
+unstructured_grid(
+    s::SphericalSampling.CubedSphereSampling, n::Integer;
+    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
+) = unstructured_grid(Geometry.float_type(geometry), s, n; geometry = geometry, kwargs...)
+
 function unstructured_grid(
+    ::Type{T},
     s::SphericalSampling.CubedSphereSampling, n::Integer;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    T::Type{<:AbstractFloat} = Float64,
     areas = nothing,
     mask = nothing,
-)
-    pts = SphericalSampling.spherical_points(s, n; T = T)
+) where {T<:AbstractFloat}
+    pts = SphericalSampling.spherical_points(T, s, n)
     conn = build_connectivity(s, n)
-    return _unstructured_from_points_conn(s, geometry, pts.λ, pts.φ, conn; areas = areas, mask = mask)
+    geo = Geometry.similar_geometry(T, geometry)
+    return _unstructured_from_points_conn(s, geo, pts.λ, pts.φ, conn; areas = areas, mask = mask)
 end
 
+unstructured_grid(
+    s::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
+    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
+) = unstructured_grid(Geometry.float_type(geometry), s, nlon, nlat; geometry = geometry, kwargs...)
+
 function unstructured_grid(
+    ::Type{T},
     s::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    T::Type{<:AbstractFloat} = Float64,
     areas = nothing,
     mask = nothing,
     stencil = Stencils.Axial(1),
-)
-    pts = SphericalSampling.spherical_points(s, nlon, nlat; T = T)
+) where {T<:AbstractFloat}
+    pts = SphericalSampling.spherical_points(T, s, nlon, nlat)
     conn = build_connectivity(s, nlon, nlat; stencil = stencil)
+    geo = Geometry.similar_geometry(T, geometry)
     # Cell areas need the panel shape, which N = 2·nlon·nlat does not determine.
-    a = areas === nothing ? _yin_yang_areas(geometry, nlon, nlat) : areas
-    return _unstructured_from_points_conn(s, geometry, pts.λ, pts.φ, conn; areas = a, mask = mask)
+    a = areas === nothing ? _yin_yang_areas(geo, nlon, nlat) : areas
+    return _unstructured_from_points_conn(s, geo, pts.λ, pts.φ, conn; areas = a, mask = mask)
 end
 
 """
@@ -535,18 +567,24 @@ function unstructured_grid(
     )
 end
 
+unstructured_grid(
+    s::SphericalSampling.IcosahedralSampling;
+    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
+) = unstructured_grid(Geometry.float_type(geometry), s; geometry = geometry, kwargs...)
+
 function unstructured_grid(
+    ::Type{T},
     s::SphericalSampling.IcosahedralSampling;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    T::Type{<:AbstractFloat} = Float64,
     areas = nothing,
     mask = nothing,
-)
-    mesh = SphericalSampling.icosahedral_mesh(s.frequency; T = T)
+) where {T<:AbstractFloat}
+    mesh = SphericalSampling.icosahedral_mesh(T, s.frequency)
     conn = _csr_from_undirected_edges(length(mesh.λ), mesh.edges)
+    geo = Geometry.similar_geometry(T, geometry)
     a = areas === nothing ?
-        _icosahedral_dual_areas(geometry, mesh.verts, mesh.triangles, length(mesh.λ)) : areas
-    return _unstructured_from_points_conn(s, geometry, mesh.λ, mesh.φ, conn; areas = a, mask = mask)
+        _icosahedral_dual_areas(geo, mesh.verts, mesh.triangles, length(mesh.λ)) : areas
+    return _unstructured_from_points_conn(s, geo, mesh.λ, mesh.φ, conn; areas = a, mask = mask)
 end
 
 """

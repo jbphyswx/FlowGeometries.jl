@@ -99,6 +99,42 @@ q_names(g)               = FG.Grids.coordinate_names(g)
 q_perflags(g)            = FG.Grids.periodic_flags(g)
 q_topo(g)                = FG.Grids.topology(g)
 
+# Element-type entry points, called with NON-constant arguments on purpose. A type given as a keyword
+# takes no part in dispatch, so the moment a call cannot be constant-folded end to end the element
+# type widens to `DataType` and the result comes back abstract — which is why every one of these
+# takes it as a leading positional argument, as `zeros` and `rand` do.
+t_gl(::Type{T}, n) where {T}     = FG.SphericalSampling._gauss_legendre_μ(T, n)
+t_axes(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_axes(T, s, n)
+t_quad(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_quadrature(T, s, n)
+t_wts(::Type{T}, s, n) where {T}  = FG.SphericalSampling.latitude_weights(T, s, n)
+t_wts1(::Type{T}, s) where {T}    = FG.SphericalSampling.latitude_weights(T, s)
+t_pts(::Type{T}, s, n) where {T}  = FG.SphericalSampling.spherical_points(T, s, n)
+t_pts1(::Type{T}, s) where {T}    = FG.SphericalSampling.spherical_points(T, s)
+t_pts2(::Type{T}, s, a, b) where {T} = FG.SphericalSampling.spherical_points(T, s, a, b)
+t_rlat(::Type{T}, s) where {T}    = FG.SphericalSampling.ring_latitudes(T, s)
+t_cube(::Type{T}, n) where {T}    = FG.SphericalSampling.cubed_sphere_points(T, n)
+t_icov(::Type{T}, f) where {T}    = FG.SphericalSampling.icosahedral_vertices(T, f)
+t_icom(::Type{T}, f) where {T}    = FG.SphericalSampling.icosahedral_mesh(T, f)
+t_yy(::Type{T}, a, b) where {T}   = FG.SphericalSampling.yin_yang_panels(T, a, b)
+t_ring(::Type{T}, a, b) where {T} = FG.SphericalSampling.ring_info(T, a, b)
+t_p2a(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2ang(T, a, b)
+t_p2v(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2vec(T, a, b)
+t_scr(::Type{T}, o, k) where {T}  = FG.Discretization.stencil_scratch(T, o, k)
+t_sgrid(::Type{T}, s, n) where {T} = FG.Connectivity.structured_grid(T, s, n)
+t_ugrid(::Type{T}, s) where {T}   = FG.Connectivity.unstructured_grid(T, s)
+
+q_nlon_in_ring(s, r)   = FG.SphericalSampling.nlon_in_ring(s, r)
+q_ring_range(s, r)     = FG.SphericalSampling.ring_range(s, r)
+q_npoints(s)           = FG.SphericalSampling.npoints(s)
+q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; scratch = sc)
+
+# A geometry defined outside the package, supplying only the accessor its hierarchy asks for.
+struct OneSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
+FG.Geometry.radius(::OneSphere{T}) where {T} = one(T)
+
+concrete_return(f::F, argtypes) where {F} =
+    (t = Base.return_types(f, argtypes)[1]; (isconcretetype(t), t))
+
 function check_shape(label, g, I)
     r = FG.Grids.grid_geometry(g) isa FG.Geometry.AbstractSphericalGeometry ? 6.371e5 : 2.5
     out = Vector{Int}(undef, 64)
@@ -1062,7 +1098,7 @@ Test.@testset "FlowGeometries.jl" begin
 
         # The Bonnet recurrence sums n terms, so Float32 cannot resolve the roots on its own; the
         # solve runs at Float64 and rounds once, keeping the result correctly rounded.
-        r32 = FG.SphericalSampling._gauss_legendre_μ(64; T = Float32)
+        r32 = FG.SphericalSampling._gauss_legendre_μ(Float32, 64)
         r64 = FG.SphericalSampling._gauss_legendre_μ(64)
         Test.@test eltype(r32.μ) === Float32
         Test.@test maximum(abs.(Float64.(r32.w) .- r64.w) ./ r64.w) < 4 * eps(Float32)
@@ -1459,7 +1495,7 @@ Test.@testset "FlowGeometries.jl" begin
         end
 
         # Float32 all the way through.
-        w32 = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.ClenshawCurtisSampling(), 12; T = Float32)
+        w32 = FG.SphericalSampling.latitude_weights(Float32, FG.SphericalSampling.ClenshawCurtisSampling(), 12)
         Test.@test eltype(w32) === Float32
         Test.@test sum(w32) ≈ 2 rtol = 1e-5
 
@@ -2366,7 +2402,7 @@ Test.@testset "FlowGeometries.jl" begin
         Test.@test minimum(ai) / maximum(ai) < 0.8
 
         # Float32 all the way through, and a clear error rather than a degenerate hull.
-        p32 = FG.SphericalSampling.spherical_points(FG.SphericalSampling.HEALPixSampling(2); T = Float32)
+        p32 = FG.SphericalSampling.spherical_points(Float32, FG.SphericalSampling.HEALPixSampling(2))
         a32 = FG.Grids._voronoi_areas(FG.Geometry.SphericalGeometry(Float32(R)), p32.λ, p32.φ)
         Test.@test eltype(a32) === Float32
         Test.@test sum(a32) ≈ 4Float32(π) * Float32(R)^2 rtol = 1e-4
@@ -3043,7 +3079,7 @@ Test.@testset "FlowGeometries.jl" begin
             Test.@test all(infos[r].latitude ≈ -infos[nrings + 1 - r].latitude for r in 1:nrings)
         end
         Test.@test abs(S.ring_info(8, 16).latitude) < 1e-15      # ring 2·nside is the equator
-        Test.@test S.ring_info(4, 3; T = Float32).colatitude isa Float32
+        Test.@test S.ring_info(Float32, 4, 3).colatitude isa Float32
         Test.@test_throws ArgumentError S.ring_info(4, 0)
         Test.@test_throws ArgumentError S.ring_info(4, 16)
         Test.@test_throws ArgumentError S.ring_info(0, 1)
@@ -6166,6 +6202,307 @@ Test.@testset "FlowGeometries.jl" begin
         end
     end
 
+    Test.@testset "The per-point kernels outside Grids allocate nothing either" begin
+        GE = FG.Geometry
+        A = FG.Axes
+        St = FG.Stencils
+        SS = FG.SphericalSampling
+        sph = GE.SphericalGeometry(6.371e6)
+        spd = GE.SpheroidGeometry()
+        P2 = (0.3, 0.4)
+        V3 = (1.0, 2.0, 3.0)
+        T6 = (1.3, -0.7, 2.1, 0.4, -1.1, 0.9)
+        rot = GE.PoleRotation(0.3, 0.4)
+        u = A.UniformAxis(0.0, 0.5, 64)
+        v = collect(u)
+        hp = SS.HEALPixSampling(4)
+        gl = SS.GaussLegendreSampling()
+
+        # These are called per point, per cell or per pixel, so an allocation here is paid on every
+        # one. The failure mode this catches is an element type reaching one of them as a runtime
+        # `Type` value: the return widens to `Any` and the kernel allocates on every call.
+        for (name, a) in (
+            ("radius",                   _alloc(GE.radius, sph)),
+            ("semimajor_axis",           _alloc(GE.semimajor_axis, spd)),
+            ("semiminor_axis",           _alloc(GE.semiminor_axis, spd)),
+            ("flattening",               _alloc(GE.flattening, spd)),
+            ("eccentricity²",            _alloc(GE.eccentricity², spd)),
+            ("meridional_radius",        _alloc(GE.meridional_radius, spd, 0.4)),
+            ("prime_vertical_radius",    _alloc(GE.prime_vertical_radius, spd, 0.4)),
+            ("as_ntuple",                _alloc(GE.as_ntuple, P2)),
+            ("as_tensor6",               _alloc(GE.as_tensor6, T6)),
+            ("point_names",              _alloc(GE.point_names, sph, Val(2))),
+            ("named_point",              _alloc(GE.named_point, sph, P2)),
+            ("area_element",             _alloc(GE.area_element, spd, 0.4, 0.01, 0.01)),
+            ("volume_element",           _alloc(GE.volume_element, sph, 0.4, 6.4e6, 0.01, 0.01, 10.0)),
+            ("spherical_to_cartesian",   _alloc(GE.spherical_to_cartesian, sph, P2)),
+            ("cartesian_to_spherical",   _alloc(GE.cartesian_to_spherical, sph, V3)),
+            ("geodetic_to_cartesian",    _alloc(GE.geodetic_to_cartesian, spd, P2)),
+            ("unit_vector",              _alloc(GE.unit_vector, Float64, P2)),
+            ("local_tangent_basis",      _alloc(GE.local_tangent_basis, sph, P2)),
+            ("project_to_tangent_plane", _alloc(GE.project_to_tangent_plane, sph, P2, (0.31, 0.41))),
+            ("nonuniform_first_derivative",
+                                         _alloc(GE.nonuniform_first_derivative, 1.0, 2.0, 4.0, 1.0, 1.5)),
+            ("vector_to_cartesian",      _alloc(GE.vector_to_cartesian, sph, 1.0, 2.0, 0.3, 0.4)),
+            ("vector_from_cartesian",    _alloc(GE.vector_from_cartesian, sph, V3, 0.3, 0.4)),
+            ("tensor_to_local",          _alloc(GE.tensor_to_local, sph, T6, 0.3, 0.4)),
+            ("tensor_from_local",        _alloc(GE.tensor_from_local, sph, T6, 0.3, 0.4)),
+            ("spherical_excess",         _alloc(GE.spherical_excess, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                                                (0.0, 0.0, 1.0))),
+            ("triangle_area",            _alloc(GE.triangle_area, sph, P2, (0.4, 0.5), (0.5, 0.4))),
+            ("rotate",                   _alloc(GE.rotate, rot, 0.5, 0.6)),
+            ("unrotate",                 _alloc(GE.unrotate, rot, 0.5, 0.6)),
+            ("similar_geometry",         _alloc(GE.similar_geometry, Float32, sph)),
+            ("float_type",               _alloc(GE.float_type, sph)),
+            ("Axes.spacing_trait",       _alloc(A.spacing_trait, u)),
+            ("Axes.wrap_sign",           _alloc(A.wrap_sign, v)),
+            ("Axes.similar_axis",        _alloc(A.similar_axis, u, 0.0, 0.5, 32)),
+            ("Axes.uniform_axis",        _alloc(A.uniform_axis, Float64, u)),
+            ("Stencils.offsets",         _alloc(St.offsets, St.Moore(1), Val(2))),
+            ("Stencils.nstencil",        _alloc(St.nstencil, St.Moore(1), Val(2))),
+            ("Stencils.reach",           _alloc(St.reach, St.Moore(1), Val(2))),
+            ("bandlimit",                _alloc(SS.bandlimit, gl, 16)),
+            ("nlat_for_bandlimit",       _alloc(SS.nlat_for_bandlimit, gl, 15)),
+            ("nlon_for_nlat",            _alloc(SS.nlon_for_nlat, gl, 16)),
+            ("npoints",                  _alloc(SS.npoints, hp)),
+            ("nrings",                   _alloc(SS.nrings, hp)),
+            ("axes_lengths",             _alloc(SS.axes_lengths, gl, 16)),
+            ("colatitude",               _alloc(SS.colatitude, 0.4)),
+            ("geographic_latitude",      _alloc(SS.geographic_latitude, 0.4)),
+            ("ang2pix",                  _alloc(SS.ang2pix, 4, 1.0, 2.0)),
+            ("pix2ang",                  _alloc(SS.pix2ang, 4, 10)),
+            ("pix2vec",                  _alloc(SS.pix2vec, 4, 10)),
+            ("vec2pix",                  _alloc(SS.vec2pix, 4, V3)),
+            ("ring2nest",                _alloc(SS.ring2nest, 4, 10)),
+            ("ring_info",                _alloc(SS.ring_info, 4, 3)),
+        )
+            a == 0 || println("    ", name, " -> ", a, " B")
+            Test.@test a == 0
+        end
+
+    end
+
+    Test.@testset "A ring can be reached one at a time, in O(1), without building the table" begin
+        SS = FG.SphericalSampling
+        samplings = (
+            ("octahedral",     SS.OctahedralGaussianSampling(6),        ()),
+            ("octahedral N=1", SS.OctahedralGaussianSampling(1),        ()),
+            ("reduced table",  SS.ReducedGaussianSampling([20, 24, 24, 20]), ()),
+            ("healpix",        SS.HEALPixSampling(4),                   ()),
+            ("healpix ns=1",   SS.HEALPixSampling(1),                   ()),
+            ("gauss-legendre", SS.GaussLegendreSampling(),              (8,)),
+            ("clenshaw",       SS.ClenshawCurtisSampling(),             (5,)),
+        )
+        for (name, s, args) in samplings
+            table = SS.nlon_per_ring(s, args...)
+            nr = SS.nrings(s, args...)
+            Test.@test length(table) == nr
+
+            # The scalar accessor and the table must agree everywhere, and the ranges must tile the
+            # flattened point vector exactly: contiguous, in order, no gap and no overlap.
+            next = 1
+            ok = true
+            for r in 1:nr
+                SS.nlon_in_ring(s, args..., r) == table[r] || (ok = false)
+                rng = SS.ring_range(s, args..., r)
+                (first(rng) == next && length(rng) == table[r]) || (ok = false)
+                next = last(rng) + 1
+            end
+            ok || println("    ring accessors disagree for ", name)
+            Test.@test ok
+            Test.@test next - 1 == sum(table)
+
+            Test.@test_throws ArgumentError SS.nlon_in_ring(s, args..., 0)
+            Test.@test_throws ArgumentError SS.ring_range(s, args..., nr + 1)
+        end
+
+        # And the ranges really are where `spherical_points` puts each ring: every point in ring r
+        # must share that ring's latitude.
+        for s in (SS.OctahedralGaussianSampling(5), SS.ReducedGaussianSampling([20, 24, 24, 20]))
+            pts = SS.spherical_points(s)
+            same = true
+            for r in 1:SS.nrings(s)
+                rng = SS.ring_range(s, r)
+                allequal(view(pts.φ, rng)) || (same = false)
+            end
+            Test.@test same
+        end
+        for ns in (1, 4)
+            s = SS.HEALPixSampling(ns)
+            pts = SS.spherical_points(s)
+            Test.@test all(allequal(view(pts.φ, SS.ring_range(s, r))) for r in 1:SS.nrings(s))
+        end
+
+        # For a tensor product the range also asserts an ORDERING — longitude fastest within a ring —
+        # which the tiling check above cannot see, since a longitude-major layout tiles just as well.
+        for (s, nlat) in ((SS.GaussLegendreSampling(), 8), (SS.ClenshawCurtisSampling(), 5),
+                          (SS.DriscollHealySampling(), 6), (SS.DriscollHealyEqualSampling(), 6))
+            pts = SS.spherical_points(s, nlat)
+            ax = SS.spherical_axes(s, nlat)
+            Test.@test all(allequal(view(pts.φ, SS.ring_range(s, nlat, r))) for r in 1:nlat)
+            Test.@test all(pts.φ[first(SS.ring_range(s, nlat, r))] == ax.φ[r] for r in 1:nlat)
+        end
+
+        # O(1) means allocation-free, whatever the grid size — the table form cannot be.
+        big = SS.OctahedralGaussianSampling(400)
+        Test.@test _alloc(q_nlon_in_ring, big, 500) == 0
+        Test.@test _alloc(q_ring_range, big, 500) == 0
+        Test.@test _alloc(q_ring_range, SS.HEALPixSampling(256), 700) == 0
+        Test.@test _alloc(q_npoints, big) == 0
+
+        # A caller-supplied buffer makes the reduced-Gaussian fill allocate nothing at all.
+        let s = SS.OctahedralGaussianSampling(12), n = SS.npoints(s)
+            λ = Vector{Float64}(undef, n); φ = Vector{Float64}(undef, n)
+            sc = Vector{Float64}(undef, SS.nrings(s))
+            SS.spherical_points!(λ, φ, s; scratch = sc)
+            Test.@test _alloc(q_rg_points!, λ, φ, s, sc) == 0
+            ref = SS.spherical_points(s)
+            Test.@test λ == ref.λ && φ == ref.φ
+        end
+        Test.@test_throws DimensionMismatch SS.spherical_points!(
+            Vector{Float64}(undef, SS.npoints(SS.OctahedralGaussianSampling(3))),
+            Vector{Float64}(undef, SS.npoints(SS.OctahedralGaussianSampling(3))),
+            SS.OctahedralGaussianSampling(3); scratch = Vector{Float64}(undef, 2),
+        )
+    end
+
+    Test.@testset "The NESTED bit interleave is exact over its whole domain" begin
+        SS = FG.SphericalSampling
+        # The cascade replaced a per-bit loop; it must agree with the definition bit for bit, not
+        # merely round-trip. Spreading places input bit b at output bit 2b.
+        defn(v) = sum(((v >> b) & 1) << (2b) for b in 0:31; init = 0)
+        Test.@test all(SS._spread_bits(v) == defn(v) for v in 0:4095)
+        Test.@test all(SS._spread_bits(v) == defn(v) for v in (1 << 20, (1 << 21) - 1, 12345678))
+        Test.@test all(SS._compress_bits(SS._spread_bits(v)) == v for v in 0:4095)
+        Test.@test all(SS._compress_bits(SS._spread_bits(v)) == v for v in (1 << 20, 987654))
+        # Interleaving two coordinates must not let one bleed into the other.
+        Test.@test all(SS._compress_bits(SS._spread_bits(a) | (SS._spread_bits(b) << 1)) == a &&
+                       SS._compress_bits((SS._spread_bits(a) | (SS._spread_bits(b) << 1)) >> 1) == b
+                       for a in 0:63, b in 0:63)
+        Test.@test _alloc(SS._spread_bits, 12345) == 0
+        Test.@test _alloc(SS._compress_bits, 12345) == 0
+    end
+
+    Test.@testset "Asking for an element type gives back that element type, knowably" begin
+        SS = FG.SphericalSampling
+        gl = SS.GaussLegendreSampling()
+        hp = SS.HEALPixSampling(4)
+        fb = SS.FibonacciSampling(200)
+        cb = SS.CubedSphereSampling()
+        yy = SS.YinYangSampling()
+        ic = SS.IcosahedralSampling(2)
+        rg = SS.OctahedralGaussianSampling(8)
+
+        # Every entry point that builds values of a chosen element type, inferred with the OTHER
+        # arguments left non-constant. Passing the type as a keyword instead of positionally makes
+        # each of these come back abstract, which then propagates into the caller's own inference —
+        # the reason the whole set takes it positionally.
+        for W in (Float64, Float32)
+            for (name, f, rest) in (
+                ("_gauss_legendre_μ",   t_gl,    Tuple{Int}),
+                ("spherical_axes",      t_axes,  Tuple{typeof(gl),Int}),
+                ("spherical_quadrature", t_quad, Tuple{typeof(gl),Int}),
+                ("latitude_weights",    t_wts,   Tuple{typeof(gl),Int}),
+                ("latitude_weights/rg", t_wts1,  Tuple{typeof(rg)}),
+                ("spherical_points/tp", t_pts,   Tuple{typeof(gl),Int}),
+                ("spherical_points/hp", t_pts1,  Tuple{typeof(hp)}),
+                ("spherical_points/fb", t_pts1,  Tuple{typeof(fb)}),
+                ("spherical_points/rg", t_pts1,  Tuple{typeof(rg)}),
+                ("spherical_points/ic", t_pts1,  Tuple{typeof(ic)}),
+                ("spherical_points/cb", t_pts,   Tuple{typeof(cb),Int}),
+                ("spherical_points/yy", t_pts2,  Tuple{typeof(yy),Int,Int}),
+                ("ring_latitudes",      t_rlat,  Tuple{typeof(rg)}),
+                ("cubed_sphere_points", t_cube,  Tuple{Int}),
+                ("icosahedral_vertices", t_icov, Tuple{Int}),
+                ("icosahedral_mesh",    t_icom,  Tuple{Int}),
+                ("yin_yang_panels",     t_yy,    Tuple{Int,Int}),
+                ("ring_info",           t_ring,  Tuple{Int,Int}),
+                ("pix2ang",             t_p2a,   Tuple{Int,Int}),
+                ("pix2vec",             t_p2v,   Tuple{Int,Int}),
+                ("stencil_scratch",     t_scr,   Tuple{Int,Int}),
+            )
+                ok, ty = concrete_return(f, Tuple{Type{W},rest.parameters...})
+                ok || println("    ", name, " (", W, ") -> ", ty)
+                Test.@test ok
+            end
+        end
+
+        # The two grid constructors are deliberately not in that list. A grid's type records whether
+        # each direction is periodic and whether each axis is uniform, and both are DETECTED from the
+        # axis values, so the type cannot be known before the axes exist. What must still hold is
+        # that the width asked for is the width built — which is a different claim, checked below.
+        for W in (Float64, Float32)
+            sg = FG.Connectivity.structured_grid(W, gl, 12)
+            Test.@test eltype(FG.Grids.axis(sg, 1)) === W
+            Test.@test FG.Grids.grid_geometry(sg) isa FG.Geometry.AbstractGeometry{W}
+            Test.@test FG.Grids.coords(sg, 1, 1).λ isa W
+
+            ug = FG.Connectivity.unstructured_grid(W, hp)
+            Test.@test FG.Grids.grid_geometry(ug) isa FG.Geometry.AbstractGeometry{W}
+            Test.@test FG.Grids.coords(ug, 1).λ isa W
+        end
+
+        # An explicit geometry is carried to the requested width too, keeping its shape: asking for a
+        # Float32 grid around a 3000 km sphere must not hand back a Float64 one.
+        gsm = FG.Connectivity.structured_grid(Float32, gl, 12;
+                                              geometry = FG.Geometry.SphericalGeometry(3.0e6))
+        Test.@test FG.Grids.grid_geometry(gsm) === FG.Geometry.SphericalGeometry{Float32}(3.0f6)
+        Test.@test eltype(FG.Grids.axis(gsm, 2)) === Float32
+
+        # With no element type named, the GEOMETRY's is the one meant — defaulting to `Float64` here
+        # would quietly rebuild a caller's Float32 geometry at double the width.
+        g32 = FG.Connectivity.structured_grid(gl, 12;
+                                              geometry = FG.Geometry.SphericalGeometry(6.371f6))
+        Test.@test eltype(FG.Grids.axis(g32, 1)) === Float32
+        Test.@test FG.Grids.grid_geometry(g32) isa FG.Geometry.AbstractGeometry{Float32}
+        u32 = FG.Connectivity.unstructured_grid(hp;
+                                                geometry = FG.Geometry.SphericalGeometry(6.371f6))
+        Test.@test FG.Grids.grid_geometry(u32) isa FG.Geometry.AbstractGeometry{Float32}
+        Test.@test FG.Grids.coords(u32, 1).λ isa Float32
+        for W in (Float64, Float32)
+            Test.@test FG.Geometry.float_type(FG.Geometry.SphericalGeometry{W}(6.371e6)) === W
+            Test.@test FG.Geometry.float_type(FG.Geometry.CartesianGeometry{W}()) === W
+        end
+
+        # A geometry defined outside the package must still inherit the whole stack, so a width it is
+        # already at asks nothing of it.
+        Test.@test FG.Geometry.similar_geometry(Float64, OneSphere{Float64}()) isa OneSphere{Float64}
+        let og = FG.Connectivity.structured_grid(gl, 8; geometry = OneSphere{Float64}())
+            Test.@test FG.Grids.grid_geometry(og) isa OneSphere{Float64}
+            Test.@test eltype(FG.Grids.axis(og, 1)) === Float64
+        end
+
+        for W in (Float64, Float32)
+            Test.@test FG.Geometry.similar_geometry(W, FG.Geometry.CartesianGeometry()) ===
+                       FG.Geometry.CartesianGeometry{W}()
+            sp = FG.Geometry.similar_geometry(W, FG.Geometry.SpheroidGeometry())
+            Test.@test sp isa FG.Geometry.SpheroidGeometry{W}
+            Test.@test FG.Geometry.flattening(sp) ≈ FG.Geometry.flattening(FG.Geometry.SpheroidGeometry())
+        end
+
+        # And the width asked for is the width returned.
+        Test.@test eltype(SS.spherical_axes(Float32, gl, 12).φ) === Float32
+        Test.@test eltype(SS.spherical_points(Float32, hp).λ) === Float32
+        Test.@test eltype(SS.latitude_weights(Float32, gl, 12)) === Float32
+        Test.@test eltype(SS.icosahedral_vertices(Float32, 2).λ) === Float32
+        Test.@test SS.ring_info(Float32, 4, 3).colatitude isa Float32
+        Test.@test SS.pix2ang(Float32, 4, 10) isa NTuple{2,Float32}
+        Test.@test SS.pix2vec(Float32, 4, 10) isa NTuple{3,Float32}
+        Test.@test SS.pix2vec(Float64, 4, 10) isa NTuple{3,Float64}
+
+        # The default stays Float64 and stays knowable.
+        Test.@test Test.@inferred(SS.pix2vec(4, 10)) isa NTuple{3,Float64}
+        Test.@test Test.@inferred(SS.pix2ang(4, 10)) isa NTuple{2,Float64}
+        Test.@test eltype(SS.spherical_points(hp).λ) === Float64
+
+        # A unit vector really is the direction its angles name, at either width.
+        for W in (Float64, Float32)
+            θ, ϕ = SS.pix2ang(W, 8, 100)
+            v = SS.pix2vec(W, 8, 100)
+            Test.@test all(v .≈ (sin(θ) * cos(ϕ), sin(θ) * sin(ϕ), cos(θ)))
+        end
+    end
+
     Test.@testset "Every public name is allocation-checked or has a stated reason not to be" begin
         public_of(m) = Set(s for s in (Symbol(b.var) for b in keys(Base.Docs.meta(m)))
                            if !startswith(String(s), "_"))
@@ -6182,6 +6519,52 @@ Test.@testset "FlowGeometries.jl" begin
             :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
             :stencil_scratch,
         ])
+
+        # Geometry, Axes and Stencils are per-point kernels almost throughout, so each name below is
+        # measured at zero allocation rather than declared to be.
+        GEOMETRY_CHECKED = Set([
+            :radius, :semimajor_axis, :semiminor_axis, :flattening, :eccentricity²,
+            :meridional_radius, :prime_vertical_radius, :as_ntuple, :as_tensor6, :point_names,
+            :named_point, :area_element, :volume_element, :spherical_to_cartesian,
+            :cartesian_to_spherical, :geodetic_to_cartesian, :unit_vector, :local_tangent_basis,
+            :project_to_tangent_plane, :nonuniform_first_derivative, :vector_to_cartesian,
+            :vector_from_cartesian, :tensor_to_local, :tensor_from_local, :spherical_excess,
+            :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
+            :similar_geometry, :float_type,
+            :spacing_trait, :similar_axis, :uniform_axis, :wrap_sign,
+            :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets,
+            :bandlimit, :nlat_for_bandlimit, :nlon_for_nlat, :npoints, :nrings, :axes_lengths,
+            :colatitude, :geographic_latitude, :ang2pix, :pix2ang, :pix2vec, :vec2pix, :ring2nest,
+            :ring_info, :admits_exact_bandlimited_quadrature, :nlon_in_ring, :ring_range,
+        ])
+
+        # Names whose whole job is to build something, or that name a thing rather than compute one.
+        GEOMETRY_NOT_CHECKED = Set(Iterators.flatten((
+            # geometry, axis, stencil and sampling TYPES
+            [:AbstractGeometry, :AbstractCartesianGeometry, :AbstractSphericalGeometry,
+             :AbstractEllipsoidalGeometry, :CartesianGeometry, :SphericalGeometry, :SpheroidGeometry,
+             :AbstractUniformAxis, :UniformAxis, :ConstantVector, :UniformSpacing, :NonuniformSpacing,
+             :AbstractStencil, :Axial, :VonNeumann, :Moore, :Diagonal, :Anisotropic, :Custom,
+             :Vertex, :CellRadius, :MetricBall,
+             :AbstractSphericalSampling, :AbstractTensorProductSphericalSampling,
+             :AbstractLatLonSampling, :AbstractReducedGaussianSampling, :AbstractRingSampling,
+             :AbstractSpectralQuadratureSampling, :ClenshawCurtisSampling, :CubedSphereSampling,
+             :DriscollHealySampling, :DriscollHealyEqualSampling, :FibonacciSampling,
+             :GaussLegendreSampling, :HEALPixSampling, :IcosahedralSampling, :LatLonSampling,
+             :McEwenWiauxSampling, :OctahedralGaussianSampling, :ReducedGaussianSampling,
+             :ScatteredSphericalSampling, :YinYangSampling, :RingScheme, :Ring, :Nested, :OpenNodes],
+            # allocating by contract: each returns a fresh array, which is the request
+            [:nlon_per_ring, :ring_latitudes, :spherical_axes, :spherical_points,
+             :spherical_quadrature, :latitude_weights, :icosahedral_vertices, :icosahedral_mesh,
+             :cubed_sphere_points, :yin_yang_panels, :chunk_ranges],
+            # the `!` forms of those, whose buffers are the caller's — covered by the `!`-form testset
+            [:spherical_axes!, :spherical_points!, :spherical_quadrature!, :latitude_weights!,
+             :icosahedral_vertices!, :cubed_sphere_points!, :yin_yang_panels!],
+            # take a function and run it; cost is the body's, not theirs
+            [:run_chunks, :run_indices, :map_chunks],
+            # builds a NamedTuple from names given at runtime, so the caller chooses the cost
+            [:build_point],
+        )))
 
         # Adding a public name without putting it in one of the two sets fails this test. That is the
         # point: what is covered is derived from what the module documents, not from a list someone
@@ -6215,8 +6598,10 @@ Test.@testset "FlowGeometries.jl" begin
             [:axis],
         )))
 
-        for m in (FG.Grids, FG.Connectivity, FG.Discretization)
-            unclassified = setdiff(public_of(m), ALLOCATION_CHECKED, NOT_CHECKED_BECAUSE)
+        for m in (FG.Grids, FG.Connectivity, FG.Discretization, FG.Geometry, FG.Axes,
+                  FG.Stencils, FG.SphericalSampling, FG.Execution)
+            unclassified = setdiff(public_of(m), ALLOCATION_CHECKED, NOT_CHECKED_BECAUSE,
+                                   GEOMETRY_CHECKED, GEOMETRY_NOT_CHECKED)
             isempty(unclassified) ||
                 println("  unclassified in ", nameof(m), ": ", join(sort!(collect(unclassified)), ", "))
             Test.@test isempty(unclassified)

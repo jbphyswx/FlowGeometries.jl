@@ -25,6 +25,26 @@ unit = FG.Geometry.SphericalGeometry(1.0)       # unit sphere
 wgs  = FG.Geometry.SpheroidGeometry()           # WGS 84 oblate spheroid
 ```
 
+## Element type
+
+A geometry is parameterized by the float type it computes in, and that type fixes the width of
+everything measured against it — coordinates, distances, metric factors. [`float_type`](@ref) reads
+it and [`similar_geometry`](@ref) carries a geometry to another width, keeping its shape:
+
+```@example geometry
+FG.Geometry.float_type(sph), FG.Geometry.similar_geometry(Float32, wgs)
+```
+
+Anything that builds at a chosen width takes the type FIRST, positionally, as `zeros` and `rand` do —
+a type given as a keyword takes no part in dispatch, so the result's element type would be unknown to
+the caller. Where a constructor takes both a width and a geometry, the width wins and the geometry is
+carried to it; where only a geometry is given, its own width is the one meant:
+
+```@example geometry
+g32 = FG.Connectivity.structured_grid(Float32, FG.SphericalSampling.GaussLegendreSampling(), 16)
+eltype(FG.Grids.axis(g32, 1)), FG.Geometry.float_type(FG.Grids.grid_geometry(g32))
+```
+
 ## Coordinate names
 
 The geometry decides what a point's components are called, and the grid types inherit that.

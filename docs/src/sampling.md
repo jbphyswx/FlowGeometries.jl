@@ -144,6 +144,27 @@ counts = FG.SphericalSampling.nlon_per_ring(oct)
 sum(w), sum(w[j] * (2π / counts[j]) * counts[j] for j in eachindex(counts)) / 4π
 ```
 
+### Walking a map ring by ring
+
+`nlon_per_ring` builds the whole table. To take rings one at a time, `nlon_in_ring` and `ring_range`
+answer for a single ring in `O(1)` and allocate nothing, so a per-ring transform or a zonal reduction
+carries no running offset and no table:
+
+```@example sampling
+SS = FG.SphericalSampling
+pts = SS.spherical_points(oct)
+zonal = [sum(view(pts.φ, SS.ring_range(oct, r))) / SS.nlon_in_ring(oct, r)
+         for r in 1:SS.nrings(oct)]
+zonal[1], zonal[end]                  # each ring is at one latitude, so this is that latitude
+```
+
+Both are defined for every sampling laid out in rings — the octahedral and tabulated reduced
+Gaussians, HEALPix, and the tensor-product grids, which take their `nlat` first:
+
+```@example sampling
+SS.ring_range(SS.HEALPixSampling(4), 3), SS.ring_range(SS.GaussLegendreSampling(), 8, 3)
+```
+
 The Fibonacci lattice spreads points one per equal-area band with a golden-angle longitude step, which
 gives a quasi-uniform set with no polar clustering and no panel seams:
 
