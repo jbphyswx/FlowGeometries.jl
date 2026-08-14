@@ -1,5 +1,9 @@
 # FlowGeometries.jl
 
+[![Build Status](https://github.com/jbphyswx/FlowGeometries.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/jbphyswx/FlowGeometries.jl/actions/workflows/ci.yml)
+[![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://jbphyswx.github.io/FlowGeometries.jl/dev/)
+[![Coverage](https://codecov.io/gh/jbphyswx/FlowGeometries.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jbphyswx/FlowGeometries.jl)
+
 Coordinate metrics, spherical samplings, and grid types — with a **dependency-free core**.
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
@@ -262,7 +266,7 @@ FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())   # 3.7–
 
 ## Documentation
 
-Full docs: <https://jbphyswx.github.io/FlowGeometries.jl>
+Full docs: <https://jbphyswx.github.io/FlowGeometries.jl/dev/>
 
 ```julia
 julia --project=docs -e 'using Pkg; Pkg.instantiate(); include("docs/make.jl")'   # build locally
