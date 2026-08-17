@@ -242,7 +242,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :fold_candidates_at, :locate, :embed_point, :fold_at,
         :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
         :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
-        :stencil_scratch,
+        :stencil_scratch, :interpolate!,
     ])
 
     # Geometry, Axes and Stencils are per-point kernels almost throughout, so each name below is

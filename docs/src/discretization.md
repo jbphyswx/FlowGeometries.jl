@@ -373,6 +373,43 @@ multi-direction operator like a divergence or a curl, which also need a result l
 boundary-condition policy — is assembled at the call site from these weights and the metric factors
 below.
 
+## A batch of fields on one grid
+
+A field may carry trailing axes beyond the grid's own — many tracers, an ensemble, a time window —
+sharing one geometry. Those axes are **batch**: every entry point takes them, differencing only along
+`dim`, which indexes the grid and not the array.
+
+```@example disc
+gb = FG.Grids.StructuredGrid(cart, xa, ya)
+fb = cat((fa .+ 100k for k in 1:4)...; dims = 3)      # (11, 9, 4) against a 2-D grid
+ob = similar(fb)
+D.derivative!(ob, fb, gb, 1; order = 1, nodes = 3)
+size(ob), ob[5, 4, 1] ≈ ob[5, 4, 4]                   # same derivative, offset field
+```
+
+Nothing about the grid depends on the batch, so the work that does not either — the stencil table, the
+metric factors, the interpolation weights, a gradient plan's coefficients — is computed once and reused
+across it. One pass over the batch is therefore *less* work than a pass per slice, not the same work
+rearranged.
+
+It also matters for a device backend. `apply_stencil!` launches over the whole output, batch included,
+so a batched call is one launch over `prod(spatial) · prod(batch)` work items where a slice loop is one
+launch each over `prod(spatial)`. A 64×64 slice is 4096 work items, well short of saturating a GPU; the
+batch is the axis with the parallelism to fill it.
+
+Evaluating a batch at a coordinate gives one value per element, through the `!` form or its allocating
+wrapper as elsewhere in the package:
+
+```@example disc
+out = Vector{Float64}(undef, 4)
+D.interpolate!(out, fb, gb, (0.7, 1.1))
+out ≈ D.interpolate(fb, gb, (0.7, 1.1))               # the allocating form agrees
+```
+
+An unbatched field still returns a scalar — the rank decides, so nothing is inferred from a length at
+run time. A mask stays the grid's own shape and applies to every element; a field whose *spatial* extent
+disagrees with the grid is still an error, and so is asking to difference along a batch axis.
+
 ## Metric factors
 
 ```@example disc

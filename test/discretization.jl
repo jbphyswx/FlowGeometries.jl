@@ -1088,3 +1088,143 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
         Test.@test wv == want
     end
 end
+
+Test.@testset "A trailing batch axis is differenced in one pass, identically to a slice loop" begin
+    D = FG.Discretization
+    GD = FG.Grids
+    GE = FG.Geometry
+    cart = GE.CartesianGeometry{Float64}()
+    nx, ny, nb, nb2 = 14, 9, 4, 3
+    x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = nx))))
+    mk = trues(nx, ny); mk[5, 4] = false; mk[6, 4] = false; mk[11, 2] = false
+    idx, w = D.axis_stencils(x, 1, 3)
+
+    # `K = 0` proves the unbatched path is untouched; `K = 1` and `K = 2` that a batch is the same
+    # answer. Every mask policy, because the mask is the part a widened signature alone gets wrong: it
+    # spans the grid's axes only, and is indexed by the leading components of each cell index.
+    for dims in ((nx, ny), (nx, ny, nb), (nx, ny, nb, nb2))
+        f = reshape([sin(3i) * cos(2j) * (k + 1)
+                     for i in 1:dims[1], j in 1:dims[2], k in 1:prod(dims[3:end]; init = 1)], dims)
+        for pol in (D.BlankMasked(), D.ShiftWithinRun(), D.ReduceInRun())
+            o = fill(NaN, dims); ref = fill(NaN, dims)
+            D.apply_stencil!(o, f, x, 1; order = 1, nodes = 3, mask = mk, masked = NaN, policy = pol)
+            for c in CartesianIndices(dims[3:end])
+                D.apply_stencil!(view(ref, :, :, Tuple(c)...), view(f, :, :, Tuple(c)...), x, 1;
+                                 order = 1, nodes = 3, mask = mk, masked = NaN, policy = pol)
+            end
+            Test.@test all(isequal(o[i], ref[i]) for i in eachindex(o))
+        end
+        # The device body walks the whole output, batch included, so it must agree bit for bit too.
+        o1 = fill(NaN, dims); o2 = fill(NaN, dims)
+        D.apply_stencil!(o1, f, x, idx, w, 1; mask = mk, masked = NaN)
+        D.apply_stencil!(o2, f, x, idx, w, 1; mask = mk, masked = NaN, backend = KernelAbstractions.CPU())
+        Test.@test all(isequal(o1[i], o2[i]) for i in eachindex(o1))
+    end
+
+    # `derivative!` divides by a metric factor, which is spatial-only and so is solved once per spatial
+    # index and reused across the batch — the batched result must still equal the slice loop exactly.
+    sph = GE.SphericalGeometry(6.371e6)
+    λ = collect(range(0.0, 2π * (1 - 1 / nx); length = nx))
+    φ = collect(range(-1.1, 1.1; length = ny))
+    for g in (GD.StructuredGrid(sph, λ, φ), GD.StructuredGrid(sph, λ, φ, mk),
+              GD.StructuredGrid(cart, collect(1.0:nx), collect(1.0:ny)))
+        f = [sin(2a) * cos(b) * (k + 1) for a in λ, b in φ, k in 1:nb]
+        for dim in 1:2, pol in (D.BlankMasked(), D.ReduceInRun())
+            o = fill(NaN, nx, ny, nb); ref = fill(NaN, nx, ny, nb)
+            D.derivative!(o, f, g, dim; order = 1, nodes = 3, masked = NaN, policy = pol)
+            for b in 1:nb
+                D.derivative!(view(ref, :, :, b), view(f, :, :, b), g, dim;
+                              order = 1, nodes = 3, masked = NaN, policy = pol)
+            end
+            Test.@test all(isequal(o[i], ref[i]) for i in eachindex(o))
+        end
+        let (i2, w2) = D.axis_stencils(g, 2; order = 1, nodes = 3)
+            o = fill(NaN, nx, ny, nb); ref = fill(NaN, nx, ny, nb)
+            D.derivative!(o, f, g, i2, w2, 2; order = 1, masked = NaN)
+            for b in 1:nb
+                D.derivative!(view(ref, :, :, b), view(f, :, :, b), g, i2, w2, 2;
+                              order = 1, masked = NaN)
+            end
+            Test.@test all(isequal(o[i], ref[i]) for i in eachindex(o))
+        end
+    end
+
+    # The metric floor still masks a pole row, in every batch element — the `Float32` case an absolute
+    # threshold gets wrong.
+    let λ32 = collect(range(0.0f0, 2π * (1 - 1 / 8); length = 8)), φ32 = Float32[-π/2, 0, π/2]
+        g32 = GD.StructuredGrid(GE.SphericalGeometry(6.371f6), λ32, φ32)
+        f32 = [sin(a) * b for a in λ32, b in φ32, _ in 1:2]
+        o32 = fill(NaN32, 8, 3, 2)
+        D.derivative!(o32, f32, g32, 1; order = 1, nodes = 3, masked = NaN32)
+        Test.@test all(isnan, view(o32, :, 1, :)) && all(isnan, view(o32, :, 3, :))
+        Test.@test !any(isnan, view(o32, :, 2, :))
+    end
+
+    # Implicit-by-rank must not swallow a real mistake.
+    g2 = GD.StructuredGrid(cart, collect(1.0:nx), collect(1.0:ny))
+    Test.@test_throws DimensionMismatch D.derivative!(zeros(nx, ny + 1, nb), zeros(nx, ny + 1, nb), g2, 1)
+    Test.@test_throws ArgumentError D.derivative!(zeros(nx, ny, nb), zeros(nx, ny, nb), g2, 3)
+    Test.@test_throws DimensionMismatch D.derivative!(zeros(nx, ny, nb), zeros(nx, ny, 2), g2, 1)
+    Test.@test_throws DimensionMismatch D.apply_stencil!(zeros(nx, ny, nb), zeros(nx, ny, nb), x,
+                                                         idx, w, 1; mask = trues(nx, ny + 1))
+end
+
+Test.@testset "A batch is evaluated at a coordinate, and gradients take one too" begin
+    D = FG.Discretization
+    C = FG.Connectivity
+    GD = FG.Grids
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    nx, ny, nb = 12, 9, 5
+    x = collect(range(0.0, 11.0; length = nx)); y = collect(range(0.0, 8.0; length = ny))
+    mk = trues(nx, ny); mk[4, 4] = false
+
+    for g in (GD.StructuredGrid(cart, x, y), GD.StructuredGrid(cart, x, y, mk))
+        f = [2.0xi - 3.0yj + 100.0b for xi in x, yj in y, b in 1:nb]
+        for p in ((3.7, 2.4), (8.4, 6.1)), pol in (D.BlankMasked(), D.ReduceInRun())
+            out = Vector{Float64}(undef, nb)
+            D.interpolate!(out, f, g, p; masked = NaN, policy = pol)
+            ref = [D.interpolate(view(f, :, :, b), g, p; masked = NaN, policy = pol) for b in 1:nb]
+            Test.@test all(isequal(out[b], ref[b]) for b in 1:nb)
+            Test.@test all(isequal(D.interpolate(f, g, p; masked = NaN, policy = pol)[b], ref[b])
+                           for b in 1:nb)          # the allocating form is the same values
+        end
+        # An unbatched field still answers with a scalar: the rank decides, not a length.
+        Test.@test D.interpolate(view(f, :, :, 1), g, (8.4, 6.1)) isa Float64
+    end
+    Test.@test_throws DimensionMismatch D.interpolate!(
+        Vector{Float64}(undef, 2), zeros(nx, ny, nb), GD.StructuredGrid(cart, x, y), (1.0, 1.0))
+
+    # Off a rectilinear grid the neighbour set and the tangent-plane fit are the point's, not the
+    # data's, so they are solved once; the values must still match a call per slice.
+    n = 12
+    X = [0.7i + 0.05j for i in 1:n, j in 1:n]; Y = [0.9j - 0.03i for i in 1:n, j in 1:n]
+    cg = GD.CurvilinearGrid(cart, X, Y, trues(n, n); measure = fill(1.0, n, n))
+    fb = [2.0X[i, j] - 3.0Y[i, j] + 50.0b for i in 1:n, j in 1:n, b in 1:4]
+    vb = D.interpolate(fb, cg, (4.2, 5.1))
+    Test.@test vb isa Vector{Float64} && length(vb) == 4
+    Test.@test all(isapprox(vb[b], D.interpolate(view(fb, :, :, b), cg, (4.2, 5.1)); atol = 1e-10)
+                   for b in 1:4)
+    Test.@test all(abs(vb[b] - (2.0 * 4.2 - 3.0 * 5.1 + 50.0b)) < 1e-8 for b in 1:4)
+    Test.@test D.interpolate(view(fb, :, :, 1), cg, (4.2, 5.1)) isa Float64
+
+    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    m = length(GD.mask(gu))
+    fu = [Float64(i) + 1000.0b for i in 1:m, b in 1:3]
+    vu = D.interpolate(fu, gu, (0.4, 0.1))
+    Test.@test vu isa Vector{Float64}
+    Test.@test all(isapprox(vu[b], D.interpolate(view(fu, :, b), gu, (0.4, 0.1)); atol = 1e-8)
+                   for b in 1:3)
+
+    # A gradient plan is geometry, so one plan serves the whole batch.
+    plan = C.gradient_plan(cg)
+    G1 = zeros(n, n, 4); G2 = zeros(n, n, 4)
+    D.gradient!(G1, G2, fb, plan)
+    R1 = zeros(n, n, 4); R2 = zeros(n, n, 4)
+    for b in 1:4
+        D.gradient!(view(R1, :, :, b), view(R2, :, :, b), view(fb, :, :, b), plan)
+    end
+    Test.@test G1 == R1 && G2 == R2
+    Test.@test all(abs(G1[i, j, b] - 2.0) < 1e-10 && abs(G2[i, j, b] + 3.0) < 1e-10
+                   for i in 2:(n - 1), j in 2:(n - 1), b in 1:4)
+    Test.@test_throws DimensionMismatch D.gradient!(zeros(n, n, 4), zeros(n, n, 4), zeros(n * 4 + 1), plan)
+end

@@ -71,6 +71,10 @@ q_nlon_in_ring(s, r)     = FG.SphericalSampling.nlon_in_ring(s, r)
 q_ring_range(s, r)       = FG.SphericalSampling.ring_range(s, r)
 q_npoints(s)             = FG.SphericalSampling.npoints(s)
 q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; scratch = sc)
+# The HELD-table form. The other overload builds the table per call — that is what `axis_stencils` is
+# for, and it is classified as allocating by contract — so measuring it would measure the table.
+q_deriv_held!(o, f, g, iw, d) = FG.Discretization.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
+q_interp!(o, f, g, p)    = FG.Discretization.interpolate!(o, f, g, p)
 
 # The per-grid-shape sweep.
 function check_shape(label, g, I)
@@ -1110,5 +1114,46 @@ Test.@testset "Applying a gradient plan allocates nothing" begin
     let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
         D.gradient!(g1, g2, f, plan)
         Test.@test _alloc(q_gradient!, g1, g2, f, plan) == 0
+    end
+end
+
+Test.@testset "A batch axis costs no allocation, and none that grows with it" begin
+    D = FG.Discretization
+    C = FG.Connectivity
+    GD = FG.Grids
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    nx, ny = 16, 11
+    x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = nx))))
+    mk = trues(nx, ny); mk[5, 4] = false; mk[6, 4] = false
+    g = GD.StructuredGrid(cart, x, collect(1.0:ny), mk)
+    sph = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
+                            collect(range(0.0, 2π * (1 - 1 / nx); length = nx)),
+                            collect(range(-1.1, 1.1; length = ny)))
+    idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
+    plan = C.gradient_plan(GD.CurvilinearGrid(cart,
+        [0.7i + 0.05j for i in 1:nx, j in 1:ny], [0.9j - 0.03i for i in 1:nx, j in 1:ny],
+        trues(nx, ny); measure = fill(1.0, nx, ny)))
+
+    # The batch adds output, not overhead: the same bytes at Nb = 1 and Nb = 8 is the claim, and zero is
+    # the stronger one. Measured through the top-level `q_*` helpers so the harness is not what is seen.
+    for (name, mk_args) in (
+        ("apply_stencil! (held table)", nb -> (q_tbl!, zeros(nx, ny, nb),
+                                              [sin(3i) * j * k for i in 1:nx, j in 1:ny, k in 1:nb],
+                                              g, (idx, w), 1, D.BlankMasked())),
+        ("derivative! (spherical, held)", nb -> (q_deriv_held!, zeros(nx, ny, nb),
+                                              [sin(3i) * j * k for i in 1:nx, j in 1:ny, k in 1:nb],
+                                              sph, D.axis_stencils(sph, 2; order = 1, nodes = 3), 2)),
+        ("gradient!",                   nb -> (q_gradient!, zeros(nx, ny, nb), zeros(nx, ny, nb),
+                                              [2.0i - 3.0j + k for i in 1:nx, j in 1:ny, k in 1:nb],
+                                              plan)),
+        ("interpolate!",                nb -> (q_interp!, Vector{Float64}(undef, nb),
+                                              [2.0i - 3.0j + k for i in 1:nx, j in 1:ny, k in 1:nb],
+                                              g, (4.5, 5.5))),
+    )
+        a1 = _alloc(mk_args(1)...)
+        a8 = _alloc(mk_args(8)...)
+        (a1 == 0 && a8 == 0) || println("    ", name, " -> ", a1, " B at Nb=1, ", a8, " B at Nb=8")
+        Test.@test a1 == 0
+        Test.@test a8 == a1                     # nothing scales with the batch
     end
 end

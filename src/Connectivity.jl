@@ -710,7 +710,10 @@ function gradient_plan(
     return Discretization.GradientPlan(ptr, nbr, c1, c2, names)
 end
 
-function Discretization.interpolate(
+# The scalar fit: one value per cell in, one value out. Reached through the rank-matched methods below,
+# which is what keeps `interpolate` type-stable — a scalar for an unbatched field, a vector for a
+# batched one, decided by the rank rather than by a length at run time.
+function _interp_scattered(
     field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}},
     p::NTuple{D,Real}; k::Integer = 8, active_only::Bool = true, masked = T(NaN),
     topology = MetricTopology(grid), scratch = nothing,
@@ -721,8 +724,9 @@ function Discretization.interpolate(
         "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
         "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
     ))
-    length(field) == length(Grids.mask(grid)) || throw(DimensionMismatch(
-        "field has $(length(field)) values for a grid of $(length(Grids.mask(grid))) cells",
+    n = length(Grids.mask(grid))
+    length(field) == n || throw(DimensionMismatch(
+        "field has $(length(field)) values for a grid of $n cells",
     ))
     geo = Grids.grid_geometry(grid)
     p0 = ntuple(d -> T(p[d]), Val(D))
@@ -739,6 +743,17 @@ function Discretization.interpolate(
                                  scratch = scratch)
         n_in > length(idx) && return masked
     end
+    return _scattered_fit(field, grid, geo, p0, idx, 0, masked)
+end
+
+# The fit at one batch element, `off` into the field. The neighbour set and the mask verdict are
+# properties of the POINT and the geometry, so a batched call solves those once — they are the k-d tree
+# query, the expensive part — and calls this per element. The per-neighbour projections are eight
+# arithmetic ops and are recomputed rather than buffered, which keeps this allocation-free.
+function _scattered_fit(
+    field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, geo,
+    p0::NTuple{D,T}, idx, off::Int, masked,
+) where {T,D}
     # Weighted least squares for `f ≈ a + g·Δr` in the tangent plane at `p`. `a` is the value there,
     # and including `g` is what makes it exact for a linear field rather than a smoothed average.
     m11 = zero(T); m12 = zero(T); m13 = zero(T)
@@ -753,7 +768,7 @@ function Discretization.interpolate(
         # Inverse-square distance, floored so a query exactly on a cell centre stays finite.
         q = δ1 * δ1 + δ2 * δ2
         w = inv(max(q, eps(T)))
-        fv = T(field[j])
+        fv = T(field[off + j])
         m11 += w;            m12 += w * δ1;      m13 += w * δ2
         m22 += w * δ1 * δ1;  m23 += w * δ1 * δ2; m33 += w * δ2 * δ2
         b1 += w * fv;        b2 += w * δ1 * fv;  b3 += w * δ2 * fv
@@ -770,10 +785,94 @@ function Discretization.interpolate(
     return (a11 * b1 + a12 * b2 + a13 * b3) / det        # the constant term: the value at `p`
 end
 
+# One value per cell — a curvilinear grid's cells are an `N`-D array, a node grid's a vector — so the
+# field's rank matching the cells' says this is a single field and the answer is a scalar.
+@inline Discretization.interpolate(
+    field::AbstractArray{<:Any,N}, grid::Grids.CurvilinearGrid{T,G,N}, p::NTuple{D,Real}; kwargs...,
+) where {T,G,N,D} = _interp_scattered(field, grid, p; kwargs...)
+
+@inline Discretization.interpolate(
+    field::AbstractVector, grid::Grids.UnstructuredGrid{T}, p::NTuple{D,Real}; kwargs...,
+) where {T,D} = _interp_scattered(field, grid, p; kwargs...)
+
+# A higher rank than the cells means trailing batch axes, and the answer is one value per element. The
+# allocating form of [`interpolate!`](@ref), as everywhere else in the package.
+function Discretization.interpolate(
+    field::AbstractArray{<:Any,NA}, grid::Grids.CurvilinearGrid{T,G,N}, p::NTuple{D,Real}; kwargs...,
+) where {T,G,N,NA,D}
+    n = length(Grids.mask(grid))
+    return Discretization.interpolate!(Vector{T}(undef, length(field) ÷ n), field, grid, p; kwargs...)
+end
+
+function Discretization.interpolate(
+    field::AbstractArray{<:Any,NA}, grid::Grids.UnstructuredGrid{T}, p::NTuple{D,Real}; kwargs...,
+) where {T,NA,D}
+    n = length(Grids.mask(grid))
+    return Discretization.interpolate!(Vector{T}(undef, length(field) ÷ n), field, grid, p; kwargs...)
+end
+
 @inline Discretization.interpolate(
     field::AbstractArray, grid::Union{Grids.CurvilinearGrid,Grids.UnstructuredGrid},
     p::Geometry.PointLike; kwargs...,
 ) = Discretization.interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
+
+"""
+    interpolate!(out, field, grid, p; k=8, …) -> out
+
+[`Discretization.interpolate`](@ref) off a rectilinear grid for a field carrying trailing BATCH axes,
+writing one value per batch element.
+
+The `k` nearest cells and the mask verdict are a property of the point and the geometry — and the k-d
+tree query is the expensive part — so they are solved once here and the tangent-plane fit is then
+applied to every element.
+"""
+function Discretization.interpolate!(
+    out::AbstractVector, field::AbstractArray,
+    grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, p::NTuple{D,Real};
+    k::Integer = 8, active_only::Bool = true, masked = T(NaN),
+    topology = MetricTopology(grid), scratch = nothing,
+    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+) where {T,D}
+    policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
+    length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
+        "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
+        "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
+    ))
+    n = length(Grids.mask(grid))
+    (length(field) % n == 0) || throw(DimensionMismatch(
+        "grid has $n cells; a field of $(length(field)) is not a whole number of them",
+    ))
+    nb = length(field) ÷ n
+    length(out) == nb || throw(DimensionMismatch(
+        "out holds $(length(out)) values but the field carries $nb batch elements",
+    ))
+    geo = Grids.grid_geometry(grid)
+    p0 = ntuple(d -> T(p[d]), Val(D))
+    idx, dist = k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
+                          scratch = scratch)
+    if isempty(idx)
+        fill!(out, masked)
+        return out
+    end
+    if policy isa Discretization.BlankMasked && active_only
+        rmax = dist[end]
+        n_in = nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
+                                 scratch = scratch)
+        if n_in > length(idx)
+            fill!(out, masked)
+            return out
+        end
+    end
+    @inbounds for b in 1:nb
+        out[b] = _scattered_fit(field, grid, geo, p0, idx, (b - 1) * n, masked)
+    end
+    return out
+end
+
+@inline Discretization.interpolate!(
+    out::AbstractVector, field::AbstractArray,
+    grid::Union{Grids.CurvilinearGrid,Grids.UnstructuredGrid}, p::Geometry.PointLike; kwargs...,
+) = Discretization.interpolate!(out, field, grid, Geometry.as_ntuple(p); kwargs...)
 
 @inline _grad_coords(grid, ::Nothing, i::Int) = Grids._raw_coords(grid, i)
 @inline _grad_coords(grid, sz::Tuple, i::Int) =
