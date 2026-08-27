@@ -277,7 +277,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :DriscollHealySampling, :DriscollHealyEqualSampling, :FibonacciSampling,
          :GaussLegendreSampling, :HEALPixSampling, :IcosahedralSampling, :LatLonSampling,
          :McEwenWiauxSampling, :OctahedralGaussianSampling, :ReducedGaussianSampling,
-         :ScatteredSphericalSampling, :YinYangSampling, :RingScheme, :Ring, :Nested, :OpenNodes],
+         :ScatteredSphericalSampling, :YinYangSampling, :RingScheme, :Ring, :Nested, :OpenNodes,
+         :AbstractEquiangularAlgorithm, :Recurrence, :Transform],
         # allocating by contract: each returns a fresh array, which is the request
         [:nlon_per_ring, :ring_latitudes, :spherical_axes, :spherical_points,
          :spherical_quadrature, :latitude_weights, :icosahedral_vertices, :icosahedral_mesh,

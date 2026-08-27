@@ -183,31 +183,39 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
         Test.@test sum(dh) ≈ 2 atol = 1e-13
         Test.@test sum(cc) ≈ 2 atol = 1e-13
     end
-    # The FFT path is what makes this O(n log n) rather than O(n²). What the suite can assert
-    # deterministically is that the path exists — the extension is loaded, so `_equiangular_sums!`
-    # resolves to its transform rather than the recurrence. That the two AGREE is asserted just
-    # below, in a subprocess with no FFT loaded; how much faster it is belongs in `benchmark/`.
-    Test.@test Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt) !== nothing
-    Test.@test parentmodule(which(FG.SphericalSampling._equiangular_sums!,
-                                  Tuple{Vector{Float64},FG.SphericalSampling.ClosedNodes,Int,Int})) ===
+    SS = FG.SphericalSampling
+    # The transform is the extension's contribution: `src` holds `Recurrence`, the extension holds
+    # `Transform`, and the resolution point picks between them by element type.
+    Test.@test parentmodule(which(SS._equiangular_sums!,
+                                  Tuple{Vector{Float64},SS.ClosedNodes,Int,Int,SS.Transform})) ===
                Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt)
+    Test.@test parentmodule(which(SS._equiangular_sums!,
+                                  Tuple{Vector{Float64},SS.ClosedNodes,Int,Int,SS.Recurrence})) ===
+               SS
+    Test.@test SS._equiangular_algorithm(Float64) === SS.Transform()   # a plannable type defaults to it
+    Test.@test SS._equiangular_algorithm(BigFloat) === SS.Recurrence() # nothing plans BigFloat
 
-    # Without an FFT implementation loaded the recurrence must still produce the same weights.
-    script = """
-    using FlowGeometries
-    const SS = FlowGeometries.SphericalSampling
-    w = SS.latitude_weights(SS.ClenshawCurtisSampling(), 64)
-    v = SS.latitude_weights(SS.DriscollHealySampling(), 64)
-    print(Base.get_extension(FlowGeometries, :FlowGeometriesAbstractFFTsExt) === nothing,
-          " ", sum(w), " ", sum(v), " ", w[7], " ", v[7])
-    """
-    out = read(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`, String)
-    parts = split(out)
-    Test.@test parts[1] == "true"                       # extension genuinely absent
-    Test.@test parse(Float64, parts[2]) ≈ 2 atol = 1e-13
-    Test.@test parse(Float64, parts[3]) ≈ 2 atol = 1e-13
-    Test.@test parse(Float64, parts[4]) ≈ direct(:open, 64)[7] atol = 1e-13
-    Test.@test parse(Float64, parts[5]) ≈ direct(:closed, 64)[7] atol = 1e-13
+    # Both algorithms are reachable by asking for one, so that correctness does not depend on which
+    # extensions happen to be loaded is checked here rather than from a second process.
+    #
+    # The WEIGHTS are compared, not the sine sums they are built from: the sums are an intermediate
+    # whose magnitude is O(1) while the weights carry a `4/nlat·sinθ` factor, and the recurrence
+    # accumulates round-off across its `nterm` steps, so the two constructions agree on the returned
+    # quantity to a tolerance the intermediate does not meet.
+    for (s, fam) in ((SS.ClenshawCurtisSampling(), :open), (SS.DriscollHealySampling(), :closed)),
+        nlat in (8, 64, 512)
+        wt = SS.latitude_weights(s, nlat; algorithm = SS.Transform())
+        wr = SS.latitude_weights(s, nlat; algorithm = SS.Recurrence())
+        Test.@test maximum(abs.(wt .- wr)) < 1e-14
+        # Each construction independently reproduces the literal defining sum.
+        Test.@test maximum(abs.(wt .- direct(fam, nlat))) < 1e-13
+        Test.@test maximum(abs.(wr .- direct(fam, nlat))) < 1e-13
+        # The default here is the transform, so it must be what an unqualified call runs.
+        Test.@test SS.latitude_weights(s, nlat) == wt
+    end
+    # Gauss–Legendre is not an equiangular family, so asking it for one of these says so.
+    Test.@test_throws ArgumentError SS.latitude_weights(
+        SS.GaussLegendreSampling(), 8; algorithm = SS.Recurrence())
 end
 
 Test.@testset "Sparse adjacency assembles straight into CSC" begin

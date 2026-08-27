@@ -19,23 +19,22 @@ using FlowGeometries.SphericalSampling: SphericalSampling, OpenNodes, ClosedNode
 @inline _twiddle(::OpenNodes, k::Int, nlat::Int, ::Type{T}) where {T} =
     cis(T(π) * T(k) / T(nlat))
 
-# `AbstractFFTs` is an INTERFACE, not an implementation: loading it does not mean a transform can
-# actually be planned. Plenty of packages (CairoMakie among them) pull it in without a backend, and
-# this extension fires on any of them. Without this guard the fast path would replace working
-# weights with a `MethodError` — an extension must only ever add capability.
-# Check the two-argument `plan_bfft!(x, dims)` that `bfft!` actually dispatches to. The one-argument
-# form is a generic fallback that exists with no backend at all, so testing it would answer "yes"
-# and then fail.
+# `AbstractFFTs` is an interface, not an implementation: it can be loaded with nothing able to plan a
+# transform. Tests the two-argument `plan_bfft!(x, dims)` that `bfft!` dispatches to; the one-argument
+# form exists generically and would answer yes.
 @inline _has_fft(::Type{T}) where {T} =
     hasmethod(AbstractFFTs.plan_bfft!, Tuple{Vector{Complex{T}},UnitRange{Int}})
 
+# The only place availability is consulted; the methods below implement one algorithm each.
+
+SphericalSampling._equiangular_algorithm(::Type{T}) where {T<:AbstractFloat} =
+    _has_fft(T) ? SphericalSampling.Transform() : SphericalSampling.Recurrence()
+
 function SphericalSampling._equiangular_sums!(
     s::AbstractVector{T}, family::Union{OpenNodes,ClosedNodes}, nlat::Int, nterm::Int,
+    ::SphericalSampling.Transform,
 ) where {T<:AbstractFloat}
     length(s) == nlat || throw(DimensionMismatch("s must have length nlat"))
-    _has_fft(T) || return @invoke SphericalSampling._equiangular_sums!(
-        s::AbstractVector{T}, family::Any, nlat::Int, nterm::Int,
-    )
     d = zeros(Complex{T}, nlat)
     @inbounds for k in 0:(nterm - 1)
         d[k + 1] = (one(T) / T(2k + 1)) * _twiddle(family, k, nlat, T)

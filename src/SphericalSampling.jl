@@ -957,14 +957,59 @@ end
 # ---------------------------------------------------------------------------
 
 """
+    AbstractEquiangularAlgorithm
+
+Which construction computes an equiangular node family's sine sums: [`Recurrence`](@ref), always
+available, or [`Transform`](@ref), which needs an FFT planner.
+
+A type rather than an availability check, as the mask policies are: the two agree only to round-off, so
+naming one pins a result on a machine that differs only in whether an FFT backend is installed.
+"""
+abstract type AbstractEquiangularAlgorithm end
+
+"""
+    Recurrence()
+
+The angle-addition recurrence: `O(nlat·nterm)`, no dependency, defined for every element type.
+"""
+struct Recurrence <: AbstractEquiangularAlgorithm end
+
+"""
+    Transform()
+
+One length-`nlat` backward transform: `O(nlat·log nlat)`. Implemented by the `AbstractFFTs` extension,
+and raises without one — a planner has to exist for this to mean anything.
+"""
+struct Transform <: AbstractEquiangularAlgorithm end
+
+"""
+    _equiangular_algorithm(T) -> AbstractEquiangularAlgorithm
+
+The default for element type `T`: [`Recurrence`](@ref) unless a loaded extension can plan a transform
+for it. The single place availability is consulted, so no method below branches on it.
+"""
+_equiangular_algorithm(::Type) = Recurrence()
+
+"""
     latitude_weights!(w, sampling, nlat) -> w
 
-Fill preallocated latitude quadrature weights (`length(w) == nlat`).
+Fill preallocated latitude quadrature weights (`length(w) == nlat`). The equiangular families also
+take `algorithm` — see [`latitude_weights`](@ref).
 """
 function latitude_weights! end
 
-function latitude_weights!(w::AbstractVector{T}, ::AbstractGaussLegendreSampling, nlat::Integer) where {T<:AbstractFloat}
+# `algorithm` is accepted here only so asking for one names the reason it does not apply, rather than
+# reporting an unsupported keyword on a function that does accept it for other samplings.
+function latitude_weights!(
+    w::AbstractVector{T}, ::AbstractGaussLegendreSampling, nlat::Integer;
+    algorithm::Union{Nothing,AbstractEquiangularAlgorithm} = nothing,
+) where {T<:AbstractFloat}
     nlat = Int(nlat)
+    algorithm === nothing || throw(ArgumentError(
+        "Gauss–Legendre weights come from the Bogaert root solve, not the equiangular sine-series " *
+        "rule, so there is no $(algorithm) to select. `algorithm` applies to DriscollHealySampling " *
+        "and ClenshawCurtisSampling.",
+    ))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
     _gauss_legendre!(T, nothing, w, nlat)
     return w
@@ -986,16 +1031,32 @@ struct ClosedNodes end
     T(π) * T(i - 1) / T(nlat)
 
 """
-    _equiangular_sums!(s, family, nlat, nterm) -> s
+    _equiangular_sums!(s, family, nlat, nterm[, algorithm]) -> s
 
 `s[i] = Σ_{k=0}^{nterm-1} sin((2k+1)·θᵢ)/(2k+1)` for the given node family.
 
-Evaluated by the angle-addition recurrence
-`sin((2k+1)θ) = 2cos(2θ)·sin((2k−1)θ) − sin((2k−3)θ)`, seeded with `s₋₁ = −sin θ`, `s₀ = sin θ`, so
-each term costs two multiplies rather than a `sin`. This is `O(nlat·nterm)`; loading an FFT
-implementation replaces it with one length-`nlat` transform (see the `AbstractFFTs` extension).
+With no `algorithm`, [`_equiangular_algorithm`](@ref) chooses one for the element type.
 """
-function _equiangular_sums!(s::AbstractVector{T}, family, nlat::Int, nterm::Int) where {T<:AbstractFloat}
+@inline _equiangular_sums!(
+    s::AbstractVector{T}, family, nlat::Int, nterm::Int,
+) where {T<:AbstractFloat} =
+    _equiangular_sums!(s, family, nlat, nterm, _equiangular_algorithm(T))
+
+# `Transform` names a capability an extension supplies, so the name resolves either way and says what
+# is missing rather than raising `MethodError` on a type the caller can see is defined.
+_equiangular_sums!(::AbstractVector{T}, _, ::Int, ::Int, ::Transform) where {T<:AbstractFloat} =
+    throw(ArgumentError(
+        "Transform() needs an FFT planner for $T; load an AbstractFFTs implementation (FFTW, for " *
+        "one), or ask for Recurrence()",
+    ))
+
+"""
+The recurrence: `sin((2k+1)θ) = 2cos(2θ)·sin((2k−1)θ) − sin((2k−3)θ)`, seeded with `s₋₁ = −sin θ`,
+`s₀ = sin θ`, so each term costs two multiplies rather than a `sin`.
+"""
+function _equiangular_sums!(
+    s::AbstractVector{T}, family, nlat::Int, nterm::Int, ::Recurrence,
+) where {T<:AbstractFloat}
     @inbounds for i in 1:nlat
         θi = _node_theta(family, i, nlat, T)
         sθ = sin(θi)
@@ -1013,7 +1074,7 @@ function _equiangular_sums!(s::AbstractVector{T}, family, nlat::Int, nterm::Int)
 end
 
 """
-    _equiangular_weights!(w, family, nlat) -> w
+    _equiangular_weights!(w, family, nlat[, algorithm]) -> w
 
 Latitude quadrature weights for an equiangular node set, from the sine-series expansion of the
 `sinθ` Jacobian:
@@ -1023,21 +1084,29 @@ Latitude quadrature weights for an equiangular node set, from the sine-series ex
 `family` is [`OpenNodes`](@ref) or `ClosedNodes`, so one construction serves both. Weights sum to
 `∫₀^π sinθ dθ = 2` — see [`latitude_weights`](@ref) for why every sampling here uses that
 normalization.
+
+`algorithm` selects which construction computes the sums; omitted, the element type's default does.
 """
-function _equiangular_weights!(w::AbstractVector{T}, family, nlat::Int) where {T<:AbstractFloat}
+function _equiangular_weights!(
+    w::AbstractVector{T}, family, nlat::Int,
+    algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
+) where {T<:AbstractFloat}
     nterm = (nlat + 1) ÷ 2
-    _equiangular_sums!(w, family, nlat, nterm)      # w doubles as the sum buffer
+    _equiangular_sums!(w, family, nlat, nterm, algorithm)   # w doubles as the sum buffer
     @inbounds for i in 1:nlat
         w[i] *= (T(4) / T(nlat)) * sin(_node_theta(family, i, nlat, T))
     end
     return w
 end
 
-function latitude_weights!(w::AbstractVector{T}, ::AbstractDriscollHealySampling, nlat::Integer) where {T<:AbstractFloat}
+function latitude_weights!(
+    w::AbstractVector{T}, ::AbstractDriscollHealySampling, nlat::Integer;
+    algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
+) where {T<:AbstractFloat}
     nlat = Int(nlat)
     iseven(nlat) || throw(ArgumentError("DH nlat must be even"))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    return _equiangular_weights!(w, ClosedNodes(), nlat)
+    return _equiangular_weights!(w, ClosedNodes(), nlat, algorithm)
 end
 
 """
@@ -1053,19 +1122,22 @@ quadrature-based analysis only up to `lmax ≈ (N−1)/2`. The reported band lim
 grid can represent, not what this quadrature can integrate. Use `GaussLegendreSampling` (exact to
 `2N−1`) when analysis must be exact at the stated band limit.
 """
-function latitude_weights!(w::AbstractVector{T}, ::AbstractClenshawCurtisSampling, nlat::Integer) where {T<:AbstractFloat}
+function latitude_weights!(
+    w::AbstractVector{T}, ::AbstractClenshawCurtisSampling, nlat::Integer;
+    algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
+) where {T<:AbstractFloat}
     nlat = Int(nlat)
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    return _equiangular_weights!(w, OpenNodes(), nlat)
+    return _equiangular_weights!(w, OpenNodes(), nlat, algorithm)
 end
 
-latitude_weights!(::AbstractVector, ::AbstractMcEwenWiauxSampling, ::Integer) = throw(ArgumentError(
+latitude_weights!(::AbstractVector, ::AbstractMcEwenWiauxSampling, ::Integer; _...) = throw(ArgumentError(
     "McEwen–Wiaux latitude weights are not implemented: the MW quadrature is not the sine-series " *
     "rule the other equiangular samplings use (it is built on an extension of the sphere to a torus), " *
     "and applying that rule to MW nodes is not exact even for l = 0. Use `GaussLegendreSampling`, " *
     "`DriscollHealySampling`, or `ClenshawCurtisSampling` if you need quadrature weights.",
 ))
-latitude_weights!(::AbstractVector, ::AbstractLatLonSampling, ::Integer) =
+latitude_weights!(::AbstractVector, ::AbstractLatLonSampling, ::Integer; _...) =
     throw(ArgumentError("LatLonSampling is an arbitrary lat–lon layout with no spectral quadrature weights"))
 
 """
@@ -1083,12 +1155,21 @@ else; the longitude factor is the caller's, so a full-sphere integral is always
 
 regardless of which sampling produced the weights. Not every sampling has them — `LatLonSampling`
 has no spectral quadrature at all, and `McEwenWiauxSampling`'s is a different construction.
-"""
-latitude_weights(s::AbstractSphericalSampling, nlat::Integer) = latitude_weights(Float64, s, nlat)
 
-function latitude_weights(::Type{T}, s::AbstractSphericalSampling, nlat::Integer) where {T<:AbstractFloat}
+The equiangular families — Driscoll–Healy and Clenshaw–Curtis — additionally take
+`algorithm::`[`AbstractEquiangularAlgorithm`](@ref), which pins the construction of their sine sums.
+The two constructions agree only to round-off, so naming one fixes the result across machines that
+differ in whether an FFT backend is installed. Gauss–Legendre's weights come from a root solve rather
+than the sine-series rule and take no `algorithm`.
+"""
+latitude_weights(s::AbstractSphericalSampling, nlat::Integer; kwargs...) =
+    latitude_weights(Float64, s, nlat; kwargs...)
+
+function latitude_weights(
+    ::Type{T}, s::AbstractSphericalSampling, nlat::Integer; kwargs...,
+) where {T<:AbstractFloat}
     w = Vector{T}(undef, Int(nlat))
-    return latitude_weights!(w, s, nlat)
+    return latitude_weights!(w, s, nlat; kwargs...)
 end
 
 # ---------------------------------------------------------------------------
