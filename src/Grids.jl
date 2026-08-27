@@ -36,6 +36,138 @@ Unstructured / node grids.  Default: [`UnstructuredGrid`](@ref).
 abstract type AbstractUnstructuredGrid{G<:Geometry.AbstractGeometry, T<:AbstractFloat} <: AbstractGrid{G,T} end
 
 # ---------------------------------------------------------------------------
+# What a traversal asks of a layout
+# ---------------------------------------------------------------------------
+#
+# Three questions, and every neighbourhood algorithm here is a function of the answers rather than of
+# which grid type it was handed: how a cell is named, where its adjacency comes from, and how a
+# distance query enumerates candidates. They are independent — a layout picks one answer to each — so
+# they are three traits and not one, and a new layout supplies three methods instead of joining every
+# traversal's dispatch table.
+
+"""
+    AbstractCellAddress
+
+How a cell of a grid is named: [`CartesianCells`](@ref) or [`FlatCells`](@ref). Read it with
+[`cell_address`](@ref).
+"""
+abstract type AbstractCellAddress end
+
+"""
+    CartesianCells()
+
+A cell is an `NTuple{N,Int}` into an `N`-dimensional array of cells, so a traversal walks
+`CartesianIndices` and converts to a linear index to report. Rectilinear, curvilinear and every
+panel layout.
+"""
+struct CartesianCells <: AbstractCellAddress end
+
+"""
+    FlatCells()
+
+A cell is one integer into a flat list, so the index a traversal walks and the index it reports are
+the same number. Node sets, and the pixelizations whose cells are enumerated by a single id.
+"""
+struct FlatCells <: AbstractCellAddress end
+
+"""
+    cell_address(grid) -> AbstractCellAddress
+
+Whether `grid`'s cells are named by an index tuple or by a single integer.
+"""
+function cell_address end
+
+@inline cell_address(::AbstractStructuredGrid) = CartesianCells()
+@inline cell_address(::AbstractCurvilinearGrid) = CartesianCells()
+@inline cell_address(::AbstractUnstructuredGrid) = FlatCells()
+
+"""
+    AbstractAdjacency
+
+Where a cell's neighbours come from: [`IndexStencilNeighbors`](@ref), [`FormulaNeighbors`](@ref) or
+[`StoredMeshNeighbors`](@ref). Read it with [`adjacency_source`](@ref).
+
+Distinct from [`AbstractCandidateSource`](@ref): adjacency is the mesh's own neighbour relation, and a
+candidate source answers a question about *distance*, which no adjacency determines.
+"""
+abstract type AbstractAdjacency end
+
+"""
+    IndexStencilNeighbors()
+
+Neighbours are offsets in the cell index space, wrapped or clipped per direction — the whole of what
+`Connectivity.IndexTopology` carries. Coordinates never enter.
+"""
+struct IndexStencilNeighbors <: AbstractAdjacency end
+
+"""
+    FormulaNeighbors()
+
+Neighbours are closed-form arithmetic on the cell id, with no graph and no coordinates stored: a
+pixelization's face tables, a ring grid's in-ring and adjacent-ring maps, a panel seam.
+"""
+struct FormulaNeighbors <: AbstractAdjacency end
+
+"""
+    StoredMeshNeighbors()
+
+Neighbours are read from stored incidence, because the mesh is genuinely arbitrary and no formula
+describes it.
+"""
+struct StoredMeshNeighbors <: AbstractAdjacency end
+
+"""
+    adjacency_source(grid) -> AbstractAdjacency
+
+Where `grid`'s neighbour relation comes from.
+"""
+function adjacency_source end
+
+@inline adjacency_source(::AbstractStructuredGrid) = IndexStencilNeighbors()
+@inline adjacency_source(::AbstractCurvilinearGrid) = IndexStencilNeighbors()
+@inline adjacency_source(::AbstractUnstructuredGrid) = StoredMeshNeighbors()
+
+"""
+    AbstractCandidateSource
+
+How a distance query enumerates the cells it must test: [`SeparableWindow`](@ref) or
+[`IndexedCandidates`](@ref). Read it with [`candidate_source`](@ref).
+
+Either way the caller's exact `distance ≤ r` gate decides membership, so both must return a SUPERSET
+of the ball — which is what makes the two enumerations agree by construction rather than by two
+implementations happening to match.
+"""
+abstract type AbstractCandidateSource end
+
+"""
+    SeparableWindow()
+
+The grid has separable axes, so a bounding index window per direction contains every cell within a
+given distance and is `O(1)` to compute — see `Connectivity.metric_window`. No index is needed and
+nothing is buffered.
+"""
+struct SeparableWindow <: AbstractCandidateSource end
+
+"""
+    IndexedCandidates()
+
+The grid has no separable axes to bound with, so candidates come from a spatial index over its cell
+centres.
+"""
+struct IndexedCandidates <: AbstractCandidateSource end
+
+"""
+    candidate_source(grid) -> AbstractCandidateSource
+
+How a distance query on `grid` enumerates candidates.
+"""
+function candidate_source end
+
+@inline candidate_source(::AbstractStructuredGrid) = SeparableWindow()
+@inline candidate_source(::AbstractCurvilinearGrid) = IndexedCandidates()
+@inline candidate_source(::AbstractUnstructuredGrid) = IndexedCandidates()
+
+# ---------------------------------------------------------------------------
 # Common interface
 # ---------------------------------------------------------------------------
 # Coordinate STORAGE is positional: every grid holds an `NTuple{N,<:AbstractArray{T}}` of coordinate
@@ -2727,21 +2859,76 @@ a full period, and this reports the short way round instead.
 """
 function displacement end
 
-@inline function displacement(
-    grid::Union{StructuredGrid{G,T,N},CurvilinearGrid{T,G,N}},
-    I::NTuple{N,Integer}, J::NTuple{N,Integer},
-) where {G,T,N}
-    p0 = _raw_coords(grid, I...)
-    q = _min_image(p0, _raw_coords(grid, J...), _wrap_lengths(grid, Val(N)))
-    return ntuple(d -> q[d] - p0[d], Val(N))
+"""
+    _cell_indices(grid, cell) -> Tuple{Vararg{Int}}
+
+A cell as the index tuple every mask and coordinate accessor here takes: the tuple itself where cells
+are [`CartesianCells`](@ref), and `(i,)` where they are [`FlatCells`](@ref).
+
+Both the trait and the cell's own type are dispatched on, because they answer different questions: the
+trait says how this layout names a cell, the cell's type how the caller named it. A pair that does not
+agree — an integer for a tuple-addressed grid — has no method and reaches the message below, rather
+than failing frames down in `_raw_coords` on an arity the caller never chose.
+"""
+@inline _cell_indices(grid::AbstractGrid, c) = _cell_indices(grid, c, cell_address(grid))
+@inline _cell_indices(_grid, I::Tuple{Vararg{Integer}}, ::CartesianCells) = map(Int, I)
+@inline _cell_indices(_grid, i::Integer, ::FlatCells) = (Int(i),)
+
+_cell_indices(grid, c, ::CartesianCells) = throw(ArgumentError(
+    "a cell of $(nameof(typeof(grid))) is named by $(length(coordinates(grid))) indices, " *
+    "not by a $(typeof(c))",
+))
+_cell_indices(grid, c, ::FlatCells) = throw(ArgumentError(
+    "a cell of $(nameof(typeof(grid))) is named by one integer, not by a $(typeof(c))",
+))
+
+# The three things a traversal asks about a cell, each one expression for every layout.
+@inline _cell_coords(grid::AbstractGrid, c) = _raw_coords(grid, _cell_indices(grid, c)...)
+@inline _cell_active(grid::AbstractGrid, c) = isactive(grid, _cell_indices(grid, c)...)
+@inline _cell_checkbounds(grid::AbstractGrid, c) =
+    checkbounds(Bool, mask(grid), _cell_indices(grid, c)...) ||
+        throw(BoundsError(mask(grid), c))
+
+"""
+    _cell_named_by(grid, I::Tuple) -> cell
+
+The cell a caller named with the indices `I`: the tuple itself where cells are [`CartesianCells`](@ref),
+and its single element where they are [`FlatCells`](@ref). This is what an entry point taking
+`I::Vararg{Integer}` hands the traversals.
+"""
+@inline _cell_named_by(grid::AbstractGrid, I::Tuple{Vararg{Integer}}) =
+    _cell_named_by(grid, I, cell_address(grid))
+@inline _cell_named_by(_grid, I::Tuple{Vararg{Integer}}, ::CartesianCells) = map(Int, I)
+@inline _cell_named_by(_grid, I::Tuple{Integer}, ::FlatCells) = Int(@inbounds I[1])
+
+_cell_named_by(grid, I, ::FlatCells) = throw(ArgumentError(
+    "a cell of $(nameof(typeof(grid))) is named by one integer; got $(length(I))",
+))
+
+"""
+    _cell_from_linear(grid, lin) -> cell
+
+The cell a linear index names, which is what a spatial index reports and the inverse of the linear
+index a traversal reports.
+"""
+@inline _cell_from_linear(grid::AbstractGrid, lin::Integer) =
+    _cell_from_linear(grid, Int(lin), cell_address(grid))
+@inline _cell_from_linear(grid, lin::Int, ::CartesianCells) =
+    Tuple(@inbounds CartesianIndices(size_tuple(grid))[lin])
+@inline _cell_from_linear(_grid, lin::Int, ::FlatCells) = lin
+
+# `Val(length(p0))` rather than a grid type parameter: `_raw_coords` returns an `NTuple` whose length is
+# in its type, and that length is the coordinate count on every architecture — the grid rank where the
+# two coincide, and the node set's coordinate count where they do not.
+@inline function _min_image_pair(grid::AbstractGrid, I, J)
+    p0 = _cell_coords(grid, I)
+    q = _min_image(p0, _cell_coords(grid, J), _wrap_lengths(grid, Val(length(p0))))
+    return p0, q
 end
 
-@inline function displacement(
-    grid::UnstructuredGrid{T,G,N}, i::Integer, j::Integer,
-) where {T,G,N}
-    p0 = _raw_coords(grid, i)
-    q = _min_image(p0, _raw_coords(grid, j), _wrap_lengths(grid, Val(N)))
-    return ntuple(d -> q[d] - p0[d], Val(N))
+@inline function displacement(grid::AbstractGrid, I, J)
+    p0, q = _min_image_pair(grid, I, J)
+    return ntuple(d -> q[d] - p0[d], Val(length(p0)))
 end
 
 """
@@ -2757,20 +2944,8 @@ periodic direction, not the full extent, which is what the point form on the raw
 A bounded direction contributes its plain coordinate difference. See [`displacement`](@ref) for the
 offset it was taken from.
 """
-@inline function Geometry.distance(
-    grid::Union{StructuredGrid{G,T,N},CurvilinearGrid{T,G,N}},
-    I::NTuple{N,Integer}, J::NTuple{N,Integer},
-) where {G,T,N}
-    p0 = _raw_coords(grid, I...)
-    q = _min_image(p0, _raw_coords(grid, J...), _wrap_lengths(grid, Val(N)))
-    return Geometry.distance(grid_geometry(grid), p0, q)
-end
-
-@inline function Geometry.distance(
-    grid::UnstructuredGrid{T,G,N}, i::Integer, j::Integer,
-) where {T,G,N}
-    p0 = _raw_coords(grid, i)
-    q = _min_image(p0, _raw_coords(grid, j), _wrap_lengths(grid, Val(N)))
+@inline function Geometry.distance(grid::AbstractGrid, I, J)
+    p0, q = _min_image_pair(grid, I, J)
     return Geometry.distance(grid_geometry(grid), p0, q)
 end
 
