@@ -66,14 +66,12 @@ FG.Geometry.radius(::OneSphere{T}) where {T} = one(T)
 concrete_return(f::F, argtypes) where {F} =
     (t = Base.return_types(f, argtypes)[1]; (isconcretetype(t), t))
 
+const TOPICS = ["geometry", "axes", "grids", "sampling", "discretization", "connectivity",
+                "extensions", "allocations", "api"]
+
+# No argument runs every topic. Naming some — `Pkg.test(test_args = ["axes"])` — runs only those.
 Test.@testset "FlowGeometries.jl" begin
-    include("geometry.jl")
-    include("axes.jl")
-    include("grids.jl")
-    include("sampling.jl")
-    include("discretization.jl")
-    include("connectivity.jl")
-    include("extensions.jl")
-    include("allocations.jl")
-    include("api.jl")
+    for topic in (isempty(ARGS) ? TOPICS : ARGS)
+        include(topic * ".jl")
+    end
 end
