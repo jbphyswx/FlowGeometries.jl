@@ -157,28 +157,64 @@ Neighbors as linear indices into `grid.mask`. Prefer `neighbors!` on hot paths.
 function neighbors! end
 function nneighbors end
 
-# ---- Unstructured ------------------------------------------------------------
+# One entry point each, resolved by `Grids.adjacency_source`. The arity stays a type parameter because a
+# `Vararg{Integer}` without one is not specialized on arity and allocates per call.
 
-@inline nneighbors(grid::Grids.UnstructuredGrid, idx::Integer; _...) =
-    length(Grids.neighbors(grid, idx))
+neighbors!(
+    out::AbstractVector{<:Integer}, grid::Grids.AbstractGrid, I::Vararg{Integer,NI};
+    stencil = Stencils.Axial(1), active_only::Bool = true,
+) where {NI} = _neighbors!(out, grid, Grids._cell_named_by(grid, I), _stencil_val(stencil),
+                           active_only, Grids.adjacency_source(grid))
 
-function neighbors!(out::AbstractVector{<:Integer}, grid::Grids.UnstructuredGrid, idx::Integer; _...)
-    nbr = Grids.neighbors(grid, idx)
+nneighbors(
+    grid::Grids.AbstractGrid, I::Vararg{Integer,NI};
+    stencil = Stencils.Axial(1), active_only::Bool = true,
+) where {NI} = _nneighbors(grid, Grids._cell_named_by(grid, I), _stencil_val(stencil),
+                           active_only, Grids.adjacency_source(grid))
+
+function Grids.neighbors(
+    grid::Grids.AbstractGrid, I::Vararg{Integer,NI};
+    stencil = Stencils.Axial(1), active_only::Bool = true,
+) where {NI}
+    return _neighbors(grid, Grids._cell_named_by(grid, I), _stencil_val(stencil), active_only,
+                      Grids.adjacency_source(grid))
+end
+
+# ---- Adjacency from index-space offsets --------------------------------------
+
+@inline _neighbors!(out, grid, I, sten::Stencils.AbstractStencil, active_only::Bool,
+                    ::Grids.IndexStencilNeighbors) =
+    neighbors!(out, IndexTopology(grid), I, sten, active_only)
+
+@inline _nneighbors(grid, I, sten::Stencils.AbstractStencil, active_only::Bool,
+                    ::Grids.IndexStencilNeighbors) =
+    _nneighbors(IndexTopology(grid), I, sten, active_only)
+
+@inline function _neighbors(grid, I, sten::Stencils.AbstractStencil, active_only::Bool,
+                            ::Grids.IndexStencilNeighbors)
+    Grids._cell_checkbounds(grid, I)
+    return _stencil_neighbors(grid, I, sten, active_only)
+end
+
+# ---- Adjacency read from stored incidence ------------------------------------
+#
+# A stored graph is the mesh's own neighbour relation, so a stencil does not enter it.
+
+@inline _nneighbors(grid, i::Int, _sten, _active_only, ::Grids.StoredMeshNeighbors) =
+    length(Grids.neighbors(grid, i))
+
+@inline _neighbors(grid, i::Int, _sten, _active_only, ::Grids.StoredMeshNeighbors) =
+    Grids.neighbors(grid, i)
+
+function _neighbors!(out::AbstractVector{<:Integer}, grid, i::Int, _sten, _active_only,
+                     ::Grids.StoredMeshNeighbors)
+    nbr = Grids.neighbors(grid, i)
     n = length(nbr)
     n ≤ length(out) || throw(ArgumentError("out too short (need ≥ $n)"))
     @inbounds for k in 1:n
         out[k] = nbr[k]
     end
     return n
-end
-
-# ---- Structured --------------------------------------------------------------
-
-function neighbors!(
-    out::AbstractVector{<:Integer}, grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    stencil = Stencils.Axial(1), active_only::Bool = true,
-) where {G,T,N}
-    return neighbors!(out, grid, I, _stencil_val(stencil), active_only)
 end
 
 # ---- Index topology ----------------------------------------------------------
@@ -201,10 +237,16 @@ struct IndexTopology{N,M}
 end
 
 # `Grids.mask`, not `grid.mask`: dot access on a grid resolves coordinate names first, which is not free.
-@inline IndexTopology(grid::Grids.StructuredGrid{G,T,N}) where {G,T,N} =
+# Defined where a cell's index space and the coordinate directions are the same directions, which is
+# what makes one `periodic` flag per axis of `size` meaningful.
+@inline IndexTopology(grid::Grids.AbstractGrid) = IndexTopology(grid, Grids.cell_address(grid))
+@inline IndexTopology(grid, ::Grids.CartesianCells) =
     IndexTopology(Grids.size_tuple(grid), _periodic_flags(grid), Grids.mask(grid))
-@inline IndexTopology(grid::Grids.CurvilinearGrid) =
-    IndexTopology(Grids.size_tuple(grid), _periodic_flags(grid), Grids.mask(grid))
+
+IndexTopology(grid, ::Grids.FlatCells) = throw(ArgumentError(
+    "$(nameof(typeof(grid))) enumerates its cells flatly, so it has no index space for a stencil to " *
+    "range over; its adjacency is $(Grids.adjacency_source(grid))",
+))
 
 @inline _active(::IndexTopology{N,Nothing}, ::Vararg{Int,N}) where {N} = true
 @inline _active(t::IndexTopology{N}, I::Vararg{Int,N}) where {N} = @inbounds t.mask[I...]
@@ -257,17 +299,6 @@ function neighbors!(
     end
 end
 
-@inline neighbors!(
-    out::AbstractVector{<:Integer}, grid::Grids.StructuredGrid{G,T,N},
-    I::NTuple{N,Integer}, sten::Stencils.AbstractStencil, active_only::Bool,
-) where {G,T,N} = neighbors!(out, IndexTopology(grid), map(Int, I), sten, active_only)
-
-function nneighbors(
-    grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    stencil = Stencils.Axial(1), active_only::Bool = true,
-) where {G,T,N}
-    return _nneighbors(IndexTopology(grid), map(Int, I), _stencil_val(stencil), active_only)
-end
 
 """
     StencilNeighbors{G,N,S}
@@ -289,7 +320,6 @@ end
 Base.IteratorSize(::Type{<:StencilNeighbors}) = Base.HasLength()
 Base.IteratorEltype(::Type{<:StencilNeighbors}) = Base.HasEltype()
 Base.eltype(::Type{<:StencilNeighbors}) = Int
-Base.length(s::StencilNeighbors) = _nneighbors(s.grid, s.I, s.stencil, s.active_only)
 
 @inline function Base.iterate(s::StencilNeighbors{GR,N}, k::Int = 0) where {GR,N}
     grid = s.grid
@@ -309,59 +339,13 @@ Base.length(s::StencilNeighbors) = _nneighbors(s.grid, s.I, s.stencil, s.active_
     return nothing
 end
 
-# The iterator counts through the same topology kernel, for either grid type.
-@inline _nneighbors(
-    grid::Union{Grids.StructuredGrid,Grids.CurvilinearGrid}, I::NTuple{N,Int},
-    sten::Stencils.AbstractStencil, active_only::Bool,
-) where {N} = _nneighbors(IndexTopology(grid), I, sten, active_only)
+# The iterator counts through the same kernel its own walk uses.
+Base.length(s::StencilNeighbors) =
+    _nneighbors(s.grid, s.I, s.stencil, s.active_only, Grids.adjacency_source(s.grid))
 
-function Grids.neighbors(
-    grid::Grids.StructuredGrid{G,T,N}, I::Vararg{Integer,N};
-    stencil = Stencils.Axial(1), active_only::Bool = true,
-) where {G,T,N}
-    Ii = map(Int, I)
-    sz = Grids.size_tuple(grid)
-    @inbounds for d in 1:N
-        (1 ≤ Ii[d] ≤ sz[d]) || throw(BoundsError(Grids.mask(grid), I))
-    end
-    return _stencil_neighbors(grid, Ii, _stencil_val(stencil), active_only)
-end
 
 @inline _stencil_neighbors(grid::GR, I::NTuple{N,Int}, sten::S, active_only::Bool) where {GR,N,S} =
     StencilNeighbors{GR,N,S}(grid, I, sten, active_only)
-
-# ---- Curvilinear -------------------------------------------------------------
-
-function neighbors!(
-    out::AbstractVector{<:Integer}, grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
-    stencil = Stencils.Axial(1), active_only::Bool = true,
-) where {T,G,N}
-    return neighbors!(out, grid, map(Int, I), _stencil_val(stencil), active_only)
-end
-
-@inline neighbors!(
-    out::AbstractVector{<:Integer}, grid::Grids.CurvilinearGrid{T,G,N},
-    I::NTuple{N,Int}, sten::Stencils.AbstractStencil, active_only::Bool,
-) where {T,G,N} = neighbors!(out, IndexTopology(grid), I, sten, active_only)
-
-function nneighbors(
-    grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
-    stencil = Stencils.Axial(1), active_only::Bool = true,
-) where {T,G,N}
-    return _nneighbors(IndexTopology(grid), map(Int, I), _stencil_val(stencil), active_only)
-end
-
-function Grids.neighbors(
-    grid::Grids.CurvilinearGrid{T,G,N}, I::Vararg{Integer,N};
-    stencil = Stencils.Axial(1), active_only::Bool = true,
-) where {T,G,N}
-    Ii = map(Int, I)
-    sz = Grids.size_tuple(grid)
-    @inbounds for d in 1:N
-        (1 ≤ Ii[d] ≤ sz[d]) || throw(BoundsError(Grids.mask(grid), Ii))
-    end
-    return _stencil_neighbors(grid, Ii, _stencil_val(stencil), active_only)
-end
 
 # ---------------------------------------------------------------------------
 # Metric neighbourhoods — queries by physical distance

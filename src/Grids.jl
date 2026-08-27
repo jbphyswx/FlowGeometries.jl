@@ -2898,7 +2898,16 @@ and its single element where they are [`FlatCells`](@ref). This is what an entry
 """
 @inline _cell_named_by(grid::AbstractGrid, I::Tuple{Vararg{Integer}}) =
     _cell_named_by(grid, I, cell_address(grid))
-@inline _cell_named_by(_grid, I::Tuple{Vararg{Integer}}, ::CartesianCells) = map(Int, I)
+
+# Both lengths are known from their types, so the check folds away where the call is right. It is made
+# here and not in `_cell_indices`, which a traversal reaches per cell with a cell it built itself.
+@inline function _cell_named_by(grid, I::Tuple{Vararg{Integer}}, ::CartesianCells)
+    length(I) == ndims(grid) || throw(ArgumentError(
+        "a cell of $(nameof(typeof(grid))) is named by $(ndims(grid)) indices; got $(length(I))",
+    ))
+    return map(Int, I)
+end
+
 @inline _cell_named_by(_grid, I::Tuple{Integer}, ::FlatCells) = Int(@inbounds I[1])
 
 _cell_named_by(grid, I, ::FlatCells) = throw(ArgumentError(
