@@ -74,6 +74,13 @@ end
 struct OneSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::OneSphere{T}) where {T} = one(T)
 
+# A geometry whose metric varies along direction 1, which the built-in sphere's never does. It exists to
+# hold the bulk operators to `metric_invariant_directions` rather than to the sphere's own invariance.
+struct TiltedSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
+FG.Geometry.radius(::TiltedSphere{T}) where {T} = one(T)
+FG.Geometry.scale_factors(::TiltedSphere{T}, p::Tuple{Real,Real}) where {T} =
+    (one(T) + T(0.5) * cos(T(p[1])), one(T) + T(0.25) * sin(T(p[2])))
+
 concrete_return(f::F, argtypes) where {F} =
     (t = Base.return_types(f, argtypes)[1]; (isconcretetype(t), t))
 

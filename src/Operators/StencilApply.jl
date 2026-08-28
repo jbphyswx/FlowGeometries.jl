@@ -329,6 +329,7 @@ end
     k == 5 && return f(Val(5))
     k == 6 && return f(Val(6))
     k == 7 && return f(Val(7))
+    k == 8 && return f(Val(8))
     k == 9 && return f(Val(9))
     return f(k)
 end

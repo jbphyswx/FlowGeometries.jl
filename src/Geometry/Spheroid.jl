@@ -111,6 +111,9 @@ end
     return ((prime_vertical_radius(g, φ) + h) * cos(φ), meridional_radius(g, φ) + h, one(T))
 end
 
+# `M` and `N` are functions of latitude, and the height enters additively: longitude enters neither.
+metric_invariant_directions(::SpheroidGeometry{T}) where {T} = (1,)
+
 """
     area_element(geo::AbstractEllipsoidalGeometry, φ, dλ, dφ)
 

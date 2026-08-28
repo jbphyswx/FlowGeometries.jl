@@ -289,6 +289,26 @@ end
 @inline scale_factors(geo::AbstractGeometry, p) = scale_factors(geo, as_ntuple(p))
 
 """
+    metric_invariant_directions(geo) -> NTuple{K,Int}
+
+The coordinate directions along which [`scale_factors`](@ref) does not vary.
+
+A bulk operation that divides by a scale factor can then solve it once per line rather than per cell:
+on a sphere no factor depends on longitude, so a whole row shares one value.
+
+The default is `()` — no direction is assumed invariant — and it is declared per CONCRETE geometry
+rather than per hierarchy. A subtype of [`AbstractSphericalGeometry`](@ref) may write its own
+`scale_factors`, and inheriting a claim about them would hoist a value that in fact varies, giving a
+wrong derivative rather than a slow one. Declare the directions for your own geometry to opt in.
+"""
+function metric_invariant_directions end
+
+metric_invariant_directions(::AbstractGeometry) = ()
+
+# `(R·cosφ, R)` and `(r·cosφ, r, 1)`: longitude enters neither.
+metric_invariant_directions(::SphericalGeometry{T}) where {T} = (1,)
+
+"""
     jacobian(geo, point) -> T
 
 `∏` of [`scale_factors`](@ref): the volume element per unit coordinate volume at `point`.

@@ -1240,3 +1240,69 @@ Test.@testset "A batch is evaluated at a coordinate, and gradients take one too"
                    for i in 2:(n - 1), j in 2:(n - 1), b in 1:4)
     Test.@test_throws DimensionMismatch O.gradient!(zeros(n, n, 4), zeros(n, n, 4), zeros(n * 4 + 1), plan)
 end
+
+Test.@testset "The metric hoist is the geometry's claim, not an assumption" begin
+    GE = FG.Geometry
+    GD = FG.Grids
+    O = FG.Operators
+    D = FG.Discretization
+
+    # The built-ins declare longitude; the abstracts declare nothing, so a subtype that writes its own
+    # scale_factors inherits no claim about them.
+    Test.@test GE.metric_invariant_directions(GE.SphericalGeometry()) == (1,)
+    Test.@test GE.metric_invariant_directions(GE.SpheroidGeometry()) == (1,)
+    Test.@test GE.metric_invariant_directions(GE.CartesianGeometry()) == ()
+    Test.@test GE.metric_invariant_directions(OneSphere{Float64}()) == ()
+
+    # A geometry whose h_λ varies with λ: the hoist would divide every cell of a row by the factor at
+    # λ = λ[1]. `derivative!` must instead divide each cell by its own.
+    nx, ny = 16, 12
+    λ = collect(range(0, 2π * (1 - 1 / nx); length = nx))
+    φ = collect(range(-1.0, 1.0; length = ny))
+    f = [sin(2li) * cos(pj) for li in λ, pj in φ]
+    g = GD.StructuredGrid(TiltedSphere{Float64}(), λ, φ; periodic = (true, false),
+                          period = (2π, 0.0))
+    for dim in (1, 2)
+        got = similar(f)
+        O.derivative!(got, f, g, dim; order = 1, nodes = 5)
+        idx, w = D.axis_stencils(dim == 1 ? λ : φ, 1, 5; period = dim == 1 ? 2π : nothing)
+        raw = similar(f)
+        O.apply_stencil!(raw, f, dim == 1 ? λ : φ, idx, w, dim)
+        want = [raw[i, j] / GE.scale_factors(TiltedSphere{Float64}(), (λ[i], φ[j]))[dim]
+                for i in 1:nx, j in 1:ny]
+        Test.@test maximum(abs.(got .- want)) < 1e-12
+    end
+
+    # The sphere's answers are unchanged by the routing: the hoisted and per-cell paths are the same
+    # arithmetic where the factor genuinely is constant along the row.
+    gs = GD.StructuredGrid(GE.SphericalGeometry(), λ, φ; periodic = (true, false),
+                           period = (2π, 0.0))
+    for dim in (1, 2)
+        got = similar(f)
+        O.derivative!(got, f, gs, dim; order = 1, nodes = 5)
+        got2 = similar(f)
+        O.apply_stencil!(got2, f, gs, dim; order = 1, nodes = 5)
+        Test.@test all(isfinite, got[:, 2:(ny - 1)])
+        # dividing the raw stencil by the factor at each cell reproduces it
+        want = [got2[i, j] / GE.scale_factors(GE.SphericalGeometry(), (λ[i], φ[j]))[dim]
+                for i in 1:nx, j in 1:ny]
+        Test.@test got ≈ want rtol = 1e-14
+    end
+end
+
+Test.@testset "An 8-node stencil keeps its unrolled inner loop" begin
+    O = FG.Operators
+    # k nodes span degree ≤ k−1, so 7 must miss a degree-7 polynomial and 8 must hit it — the pair
+    # that shows the specialisation both bites and is right.
+    xs = collect(range(0.0, 1.0; length = 24))
+    p7 = @. xs^7 - 2xs^3 + 1
+    d7 = @. 7xs^6 - 6xs^2
+    errs = map((7, 8, 9)) do k
+        o = similar(xs)
+        O.apply_stencil!(o, p7, xs, 1; order = 1, nodes = k)
+        maximum(abs.(o .- d7))
+    end
+    Test.@test errs[1] > 1e-8
+    Test.@test errs[2] < 1e-10
+    Test.@test errs[3] < 1e-10
+end

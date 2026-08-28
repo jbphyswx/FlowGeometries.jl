@@ -258,7 +258,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :project_to_tangent_plane, :nonuniform_first_derivative, :vector_to_cartesian,
         :vector_from_cartesian, :tensor_to_local, :tensor_from_local, :spherical_excess,
         :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
-        :similar_geometry, :float_type, :similar_rotation,
+        :similar_geometry, :float_type, :similar_rotation, :metric_invariant_directions,
         :spacing_trait, :similar_axis, :uniform_axis, :wrap_sign,
         :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets,
         :bandlimit, :nlat_for_bandlimit, :nlon_for_nlat, :npoints, :nrings, :axes_lengths,

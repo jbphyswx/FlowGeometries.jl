@@ -192,11 +192,16 @@ function _scale_by_metric!(
     out::AbstractArray{S,NA}, grid::Grids.StructuredGrid{T, G,N}, dim::Int, masked,
 ) where {S,G,T,N,NA}
     geo = Grids.grid_geometry(grid)
+    # Whether the factor can be solved once per row is the geometry's to say: a geometry defined outside
+    # this package writes its own `scale_factors`, and hoisting one that varies along direction 1 would
+    # give a wrong derivative rather than a slow one.
+    1 in Geometry.metric_invariant_directions(geo) ||
+        return _scale_by_metric_percell!(out, grid, dim, masked)
     floor_ = Discretization.metric_floor(geo)
     sz = Grids.size_tuple(grid)
-    # No scale factor depends on longitude, so it is constant along axis 1 whichever direction is
-    # differenced: computed once per remaining index, then swept along the contiguous axis. Any axis-1
-    # coordinate serves for the point it is evaluated at, so the first one is used.
+    # The factor is constant along axis 1 whichever direction is differenced: computed once per remaining
+    # index, then swept along the contiguous axis. Any axis-1 coordinate serves for the point it is
+    # evaluated at, so the first one is used.
     @inbounds x1 = first(Grids.coordinates(grid, 1))
     rest = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
     # No scale factor depends on the batch either, so `h` is solved once per SPATIAL index and reused
@@ -245,6 +250,40 @@ function _scale_by_metric!(
                 for i in 1:sz[1]
                     out[i, tr..., tb...] *= inv_h
                 end
+            end
+        end
+    end
+    return out
+end
+
+# The general path: the scale factor is evaluated at each cell's own point, direction 1 included. Taken
+# by a geometry that does not declare direction 1 metric-invariant, which is the safe default.
+function _scale_by_metric_percell!(
+    out::AbstractArray{S,NA}, grid::Grids.StructuredGrid{T, G,N}, dim::Int, masked,
+) where {S,G,T,N,NA}
+    geo = Grids.grid_geometry(grid)
+    floor_ = Discretization.metric_floor(geo)
+    sz = Grids.size_tuple(grid)
+    ncell = prod(sz)
+    nb = length(out) ÷ ncell
+    spatial = CartesianIndices(sz)
+    linear = IndexStyle(out) === IndexLinear() && !Base.has_offset_axes(out)
+    batch = CartesianIndices(ntuple(d -> size(out, N + d), Val(NA - N)))
+    @inbounds for (k, I) in enumerate(spatial)
+        pt = ntuple(d -> T(Grids.coordinates(grid, d)[I[d]]), Val(N))
+        h = Geometry.scale_factors(geo, pt)[dim]
+        degenerate = abs(h) ≤ floor_
+        inv_h = degenerate ? zero(T) : inv(h)
+        if linear
+            for b in 0:(nb - 1)
+                j = b * ncell + k
+                out[j] = degenerate ? masked : out[j] * inv_h
+            end
+        else
+            ti = Tuple(I)
+            for Ib in batch
+                J = (ti..., Tuple(Ib)...)
+                out[J...] = degenerate ? masked : out[J...] * inv_h
             end
         end
     end
