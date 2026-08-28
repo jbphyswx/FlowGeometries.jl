@@ -104,16 +104,20 @@ end
 end
 
 """
-    cell_list(grid; ball) -> CellListIndex
+    cell_list(grid; ball, active_only = false) -> CellListIndex
 
 Build a [`CellListIndex`](@ref) over `grid`'s cell centres, binned at side `ball` — the radius you mean
 to query at. Needs no external package.
 
-`active_only` leaves masked cells out, so a mostly-masked grid — a basin, a catchment — is indexed at
-the size of its active region rather than of its bounding box. The index records the choice, and a
-query that asks to see masked cells raises against one built this way.
+`active_only = true` leaves masked cells out, so a mostly-masked grid — a basin, a catchment — is
+indexed at the size of its active region rather than of its bounding box. It is not the default because
+such an index answers only queries at that same policy: it holds no masked cell, so a query asking to
+see one raises rather than returning a short answer. The default covers every cell and therefore serves
+both policies, an `active_only = true` query filtering what it is handed.
+
+Where the policy is known — a sweep, which passes its own — narrowing is worth asking for.
 """
-function cell_list(grid::AbstractGrid{G,T}; ball::Real, active_only::Bool = true) where {G,T}
+function cell_list(grid::AbstractGrid{G,T}; ball::Real, active_only::Bool = false) where {G,T}
     h = T(ball)
     h > 0 || throw(ArgumentError("the bin side must be positive, got $ball"))
     embedding = embedding_of(grid)

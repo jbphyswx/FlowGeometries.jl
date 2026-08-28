@@ -55,11 +55,13 @@ end
 
 # A radius to start the search from: the cell's own size scaled to hold roughly `k` of them. Too small
 # only costs a doubling, and the doubling is what makes the result independent of the guess.
+#
+# The root is over the COORDINATE directions
 @inline function _knn_seed_radius(grid::Grids.AbstractGrid{G,T}, I, k::Int) where {G,T}
-    N = length(Grids.size_tuple(grid))
+    D = Grids.ncoordinates(grid)
     m = T(Grids.measure(grid, I...))
-    cell = m > 0 ? m^(one(T) / N) : one(T)
-    return T(1.5) * cell * T(max(k, 1))^(one(T) / N)
+    cell = m > 0 ? m^(one(T) / D) : one(T)
+    return T(1.5) * cell * T(max(k, 1))^(one(T) / D)
 end
 
 """
@@ -108,42 +110,28 @@ function _k_nearest!(
     return n
 end
 
-# One pair of methods per architecture, each with the arity in the signature: a `Vararg{Integer}` with
-# no length parameter is not specialized on arity and allocates on every call.
-for (GT, NP) in ((:(Grids.StructuredGrid{T, G,N}), true), (:(Grids.CurvilinearGrid{T,G,N}), true))
-    @eval begin
-        function k_nearest!(
-            idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::$GT, I::Vararg{Integer,N};
-            k::Integer, active_only::Bool = true, topology = MetricTopology(grid),
-            scratch = nothing, reach::AbstractReach = Unrestricted(),
-        ) where {G,T,N}
-            Ii = map(Int, I)
-            return _k_nearest!(idx, dist, grid, Ii, Ii, Int(k), active_only, topology, scratch, reach)
-        end
-        function k_nearest(grid::$GT, I::Vararg{Integer,N}; k::Integer, kwargs...) where {G,T,N}
-            kk = Int(k)
-            idx = Vector{Int}(undef, kk)
-            dist = Vector{T}(undef, kk)
-            n = k_nearest!(idx, dist, grid, I...; k = kk, kwargs...)
-            return resize!(idx, n), resize!(dist, n)
-        end
-    end
-end
-
+# One pair of methods for every layout: how a cell is named is `Grids.cell_address`, which
+# `_cell_named_by` resolves, and the search itself reads only coordinates and the mask. The arity stays a
+# type parameter because a `Vararg{Integer}` with no length is not specialized on arity and allocates on
+# every call.
 function k_nearest!(
-    idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::Grids.UnstructuredGrid, i::Integer;
+    idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::Grids.AbstractGrid,
+    I::Vararg{Integer,NI};
     k::Integer, active_only::Bool = true, topology = MetricTopology(grid),
     scratch = nothing, reach::AbstractReach = Unrestricted(),
-)
-    ii = Int(i)
-    return _k_nearest!(idx, dist, grid, ii, (ii,), Int(k), active_only, topology, scratch, reach)
+) where {NI}
+    Iraw = map(Int, I)
+    return _k_nearest!(idx, dist, grid, Grids._cell_named_by(grid, Iraw), Iraw,
+                       Int(k), active_only, topology, scratch, reach)
 end
 
-function k_nearest(grid::Grids.UnstructuredGrid{T}, i::Integer; k::Integer, kwargs...) where {T}
+function k_nearest(
+    grid::Grids.AbstractGrid{G,T}, I::Vararg{Integer,NI}; k::Integer, kwargs...,
+) where {G,T,NI}
     kk = Int(k)
     idx = Vector{Int}(undef, kk)
     dist = Vector{T}(undef, kk)
-    n = k_nearest!(idx, dist, grid, i; k = kk, kwargs...)
+    n = k_nearest!(idx, dist, grid, I...; k = kk, kwargs...)
     return resize!(idx, n), resize!(dist, n)
 end
 

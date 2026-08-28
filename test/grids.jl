@@ -670,3 +670,196 @@ Test.@testset "A curvilinear measure may be given positionally or by keyword" be
     bypos = FG.Grids.CurvilinearGrid(geo, xs, ys, a, trues(4, 4))
     Test.@test FG.Grids.measure(bykw) == FG.Grids.measure(bypos) == a
 end
+
+Test.@testset "A formula layout stores its arithmetic's parameters, not its results" begin
+    G = FG.Grids
+    C = FG.Connectivity
+    SS = FG.SphericalSampling
+    geo = FG.Geometry.SphericalGeometry()
+    R = FG.Geometry.radius(geo)
+
+    Test.@testset "HEALPixGrid storage is independent of nside" begin
+        sizes = [Base.summarysize(G.HEALPixGrid(geo, ns)) for ns in (1, 8, 64, 256, 1024)]
+        Test.@test allequal(sizes)
+        Test.@test length(G.HEALPixGrid(geo, 1024)) == 12 * 1024^2
+        # The same resolution as a node set: three vectors of 12.6 million entries.
+        Test.@test Base.summarysize(G.HEALPixGrid(geo, 8)) <
+                   Base.summarysize(healpix_node_grid(8)) / 1000
+    end
+
+    Test.@testset "HEALPix coords, measure and neighbours are the pixelization's" begin
+        for ns in (1, 2, 4, 8)
+            g = G.HEALPixGrid(geo, ns)
+            pts = SS.spherical_points(SS.HEALPixSampling(ns))
+            npix = SS.healpix_npix(ns)
+            Test.@test length(g) == npix
+            buf = Vector{Int}(undef, 8)
+            for i in 1:npix
+                c = G.coords(g, i)
+                Test.@test c.λ ≈ pts.λ[i] atol = 1e-13
+                Test.@test c.φ ≈ pts.φ[i] atol = 1e-13
+                # Equal-area is the whole point of the pixelization.
+                Test.@test G.measure(g, i) ≈ 4π * R^2 / npix rtol = 1e-14
+                # The face-table walk speaks 0-based pixels; a cell here is 1-based.
+                n = C.healpix_neighbors!(buf, ns, i - 1)
+                Test.@test sort(collect(G.neighbors(g, i))) == sort(buf[1:n] .+ 1)
+                Test.@test C.nneighbors(g, i) == n
+            end
+            Test.@test sum(G.measure(g)) ≈ 4π * R^2 rtol = 1e-12
+            # `materialize` is the ring walk; the per-cell accessor is the pixel formula. Same numbers.
+            λ, φ = G.materialize(g)
+            Test.@test λ == pts.λ
+            Test.@test φ == pts.φ
+        end
+    end
+
+    Test.@testset "RingGrid storage is O(nrings), not O(npoints)" begin
+        a = G.RingGrid(geo, SS.OctahedralGaussianSampling(32))
+        b = G.RingGrid(geo, SS.OctahedralGaussianSampling(64))
+        Test.@test length(b) > 3 * length(a)          # points grow with N²
+        Test.@test Base.summarysize(b) < 2.5 * Base.summarysize(a)   # storage grows with N
+        for N in (8, 32, 128)
+            oct = SS.OctahedralGaussianSampling(N)
+            g = G.RingGrid(geo, oct)
+            Test.@test length(g) == SS.npoints(oct)
+            Test.@test G.nrings(g) == SS.nrings(oct)
+        end
+    end
+
+    Test.@testset "RingGrid coords and ring bookkeeping are the sampling's" begin
+        for N in (4, 8, 24)
+            oct = SS.OctahedralGaussianSampling(N)
+            g = G.RingGrid(geo, oct)
+            pts = SS.spherical_points(oct)
+            for i in eachindex(pts.λ)
+                c = G.coords(g, i)
+                Test.@test c.λ ≈ pts.λ[i] atol = 1e-13
+                Test.@test c.φ ≈ pts.φ[i] atol = 1e-13
+            end
+            for r in 1:SS.nrings(oct)
+                Test.@test G.ring_range(g, r) == SS.ring_range(oct, r)
+                Test.@test G.nlon_in_ring(g, r) == SS.nlon_in_ring(oct, r)
+                Test.@test all(G.ring_of(g, i) == r for i in G.ring_range(g, r))
+            end
+            λ, φ = G.materialize(g)
+            Test.@test λ == pts.λ
+            Test.@test φ == pts.φ
+        end
+    end
+
+    Test.@testset "A ringwise measure is exact and carries one value per ring" begin
+        ratios = Float64[]
+        for N in (4, 16, 64, 256)
+            g = G.RingGrid(geo, SS.OctahedralGaussianSampling(N))
+            m = G.measure(g)
+            Test.@test m isa G.RingwiseVector
+            Test.@test length(m) == length(g)
+            # `Σ nlon_r · w_r · R² · 2π/nlon_r = 2π R² Σ w_r = 4π R²`, the weights summing to 2.
+            Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-12
+            Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
+            for r in (1, 2, G.nrings(g) ÷ 2, G.nrings(g))
+                Test.@test allequal(m[i] for i in G.ring_range(g, r))
+            end
+            push!(ratios, Base.summarysize(collect(m)) / Base.summarysize(m))
+        end
+        # Storage tracks rings, so the saving over the dense form grows with resolution.
+        Test.@test issorted(ratios)
+        Test.@test first(ratios) > 1
+    end
+
+    Test.@testset "A ring grid's adjacency is in-ring plus the straddling pairs" begin
+        g = G.RingGrid(geo, SS.OctahedralGaussianSampling(8))
+        for i in 1:length(g)
+            nb = collect(G.neighbors(g, i))
+            Test.@test allunique(nb)
+            Test.@test !(i in nb)
+            Test.@test all(1 .≤ nb .≤ length(g))
+            Test.@test length(nb) ≤ G.max_neighbors(g)
+            r = G.ring_of(g, i)
+            Test.@test all(abs(G.ring_of(g, j) - r) ≤ 1 for j in nb)
+            # Both in-ring neighbours are distinct wherever the ring holds three or more points.
+            G.nlon_in_ring(g, r) ≥ 3 &&
+                Test.@test count(j -> G.ring_of(g, j) == r, nb) == 2
+        end
+        # Adjacent rings of unequal width make the relation directed: a wide ring's point can straddle
+        # a narrow ring's point that does not straddle it back. Whatever the rate, the materialized CSR
+        # must reproduce the per-cell query exactly.
+        conn = C.build_connectivity(g)
+        for i in 1:length(g)
+            Test.@test sort(collect(G.neighbors(conn, i))) == sort(collect(G.neighbors(g, i)))
+        end
+    end
+
+    Test.@testset "A formula layout answers the three traits and refuses coordinate arrays" begin
+        for g in (G.HEALPixGrid(geo, 4), G.RingGrid(geo, SS.OctahedralGaussianSampling(8)))
+            Test.@test G.cell_address(g) === G.FlatCells()
+            Test.@test G.adjacency_source(g) === G.FormulaNeighbors()
+            Test.@test G.candidate_source(g) === G.IndexedCandidates()
+            Test.@test G.ncoordinates(g) == 2
+            # There are no coordinate ARRAYS and no index space, and both say so rather than
+            # materializing something to answer with.
+            Test.@test_throws ArgumentError G.coordinates(g)
+            Test.@test_throws ArgumentError C.IndexTopology(g)
+        end
+    end
+
+    Test.@testset "A formula layout's distance queries agree with a brute-force scan" begin
+        for (g, r) in ((G.HEALPixGrid(geo, 4), 2.0e6),
+                       (G.RingGrid(geo, SS.OctahedralGaussianSampling(8)), 1.5e6))
+            n = length(g)
+            for i in (1, 40, n ÷ 2, n)
+                ref = sort([j for j in 1:n if j != i && FG.Geometry.distance(g, i, j) ≤ r])
+                Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
+                mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
+                Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
+            end
+            # An index over a layout that stores nothing must not re-densify it into one.
+            Test.@test Base.summarysize(g) < 1000
+        end
+    end
+
+    Test.@testset "A formula layout honours a mask and follows its geometry's width" begin
+        npix = SS.healpix_npix(2)
+        m = trues(npix); m[5] = false
+        g = G.HEALPixGrid(geo, 2; mask = m)
+        Test.@test !G.isactive(g, 5)
+        Test.@test C.nneighbors(g, 5) == 0
+        Test.@test !(5 in collect(G.neighbors(g, 6)))
+        Test.@test 5 in collect(G.neighbors(g, 6; active_only = false))
+        Test.@test count(G.mask(g)) == npix - 1
+
+        for W in (Float64, Float32)
+            gw = G.HEALPixGrid(FG.Geometry.SphericalGeometry(W(6.371e6)), 4)
+            rw = G.RingGrid(FG.Geometry.SphericalGeometry(W(6.371e6)),
+                            SS.OctahedralGaussianSampling(8))
+            Test.@test eltype(gw) === eltype(rw) === W
+            Test.@test G.coords(gw, 7).λ isa W
+            Test.@test G.coords(rw, 7).λ isa W
+            Test.@test G.measure(gw, 7) isa W
+            Test.@test G.measure(rw, 7) isa W
+        end
+    end
+
+    Test.@testset "A formula layout survives a structural rebuild" begin
+        # `rebuild` re-derives every type parameter from the field values, which is what lets one
+        # generic `Adapt` method serve every layout — including one whose storage is four ring vectors.
+        g = G.HEALPixGrid(geo, 4)
+        npix = SS.healpix_npix(4)
+        m = trues(npix); m[3] = false
+        g2 = G.rebuild(g, (mask = m,))
+        Test.@test g2 isa G.HEALPixGrid
+        Test.@test !G.isactive(g2, 3)
+        Test.@test G.nside(g2) == 4
+        Test.@test G.coords(g2, 10) == G.coords(g, 10)
+        Test.@test_throws ArgumentError G.rebuild(g, (nlon = m,))
+
+        rg = G.RingGrid(geo, SS.OctahedralGaussianSampling(8))
+        rm = trues(length(rg)); rm[7] = false
+        rg2 = G.rebuild(rg, (mask = rm,))
+        Test.@test rg2 isa G.RingGrid
+        Test.@test !G.isactive(rg2, 7)
+        Test.@test G.nrings(rg2) == G.nrings(rg)
+        Test.@test all(G.coords(rg2, i) == G.coords(rg, i) for i in 1:length(rg))
+        Test.@test G.measure(rg2, 7) == G.measure(rg, 7)
+    end
+end

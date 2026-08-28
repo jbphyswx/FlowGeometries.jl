@@ -49,6 +49,11 @@ end
 
 HEALPixGrid(nside::Integer; kwargs...) = HEALPixGrid(Geometry.SphericalGeometry(), nside; kwargs...)
 
+@inline _from_fields(
+    geometry::G, nside::Int, scheme::S, mask::B,
+) where {T,G<:Geometry.AbstractSphericalGeometry{T},S,B} =
+    HEALPixGrid{T,G,S,B}(geometry, nside, scheme, mask)
+
 """
     nside(grid::HEALPixGrid) -> Int
 
@@ -110,6 +115,19 @@ end
 @inline measure(grid::HEALPixGrid{T}) where {T} =
     Axes.ConstantVector(T(4π) * T(Geometry.radius(grid_geometry(grid)))^2 / T(npixels(grid)),
                         npixels(grid))
+
+# ---- materialization --------------------------------------------------------
+
+# The whole cloud as a ring walk: colatitude is constant along a ring, so this costs `4·nside − 1`
+# `acos` calls where the generic per-cell path costs one per pixel. Only the RING ordering has this
+# shape — under `Nested` a ring's pixels are not contiguous, so that scheme takes the generic path.
+function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Ring}) where {T,G}
+    n = npixels(grid)
+    p = SphericalSampling.spherical_points!(
+        Vector{T}(undef, n), Vector{T}(undef, n), SphericalSampling.HEALPixSampling(nside(grid)),
+    )
+    return (p.λ, p.φ)
+end
 
 # ---- display ----------------------------------------------------------------
 

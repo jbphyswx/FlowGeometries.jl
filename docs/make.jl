@@ -17,6 +17,7 @@ const MODULES = [
     FlowGeometries.SphericalSampling,
     FlowGeometries.Grids,
     FlowGeometries.Connectivity,
+    FlowGeometries.Operators,
     FlowGeometries.Execution,
 ]
 
@@ -51,6 +52,7 @@ makedocs(;
             "Discretization" => "api/discretization.md",
             "Grids" => "api/grids.md",
             "Connectivity" => "api/connectivity.md",
+            "Operators" => "api/operators.md",
             "Execution" => "api/execution.md",
         ],
     ],

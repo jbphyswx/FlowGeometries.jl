@@ -510,25 +510,11 @@ Default cell areas are uniform (`4π R² / N` on a sphere, `1` on Cartesian).
 
 `T` is the element type to build in, and defaults to the `geometry`'s own, as for
 [`structured_grid`](@ref).
+
+There is no HEALPix form: the pixelization is a layout, [`Grids.HEALPixGrid`](@ref), whose coordinates,
+adjacency and measure are arithmetic in `(nside, pixel)`. A caller who genuinely wants the dense point
+cloud asks for it with [`Grids.materialize`](@ref).
 """
-unstructured_grid(
-    s::SphericalSampling.HEALPixSampling;
-    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
-) = unstructured_grid(Geometry.float_type(geometry), s; geometry = geometry, kwargs...)
-
-function unstructured_grid(
-    ::Type{T},
-    s::SphericalSampling.HEALPixSampling;
-    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    areas = nothing,
-    mask = nothing,
-) where {T<:AbstractFloat}
-    pts = SphericalSampling.spherical_points(T, s)
-    conn = build_connectivity(s)
-    geo = Geometry.similar_geometry(T, geometry)
-    return _unstructured_from_points_conn(s, geo, pts.λ, pts.φ, conn; areas = areas, mask = mask)
-end
-
 unstructured_grid(
     s::SphericalSampling.CubedSphereSampling, n::Integer;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,

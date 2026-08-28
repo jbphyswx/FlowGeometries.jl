@@ -80,6 +80,11 @@ end
 RingGrid(sampling::SphericalSampling.AbstractReducedGaussianSampling; kwargs...) =
     RingGrid(Geometry.SphericalGeometry(), sampling; kwargs...)
 
+@inline _from_fields(
+    geometry::G, latitudes::VT, nlon::VI, offset::VI, ring_area::VT, mask::B,
+) where {T,G<:Geometry.AbstractSphericalGeometry{T},VT<:AbstractVector{T},VI,B} =
+    RingGrid{T,G,VT,VI,B}(geometry, latitudes, nlon, offset, ring_area, mask)
+
 """
     nrings(grid::RingGrid) -> Int
 
@@ -161,6 +166,27 @@ end
 
 @inline measure(grid::RingGrid) =
     RingwiseVector(getfield(grid, :ring_area), getfield(grid, :offset))
+
+# ---- materialization --------------------------------------------------------
+
+# A ring walk rather than the generic per-cell one: the ring a cell belongs to is known from the loop,
+# so no cell pays the `O(log nrings)` bisection `ring_of` does.
+function materialize(grid::RingGrid{T}) where {T}
+    n = length(grid)
+    λ = Vector{T}(undef, n)
+    φ = Vector{T}(undef, n)
+    lat = getfield(grid, :latitudes)
+    @inbounds for r in 1:nrings(grid)
+        m = nlon_in_ring(grid, r)
+        Δλ = T(2π) / T(m)
+        φr = lat[r]
+        for (j, k) in enumerate(ring_range(grid, r))
+            λ[k] = T(j - 1) * Δλ
+            φ[k] = φr
+        end
+    end
+    return (λ, φ)
+end
 
 # ---- display ----------------------------------------------------------------
 

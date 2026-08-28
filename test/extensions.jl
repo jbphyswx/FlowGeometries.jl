@@ -324,7 +324,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     # An unindexed topology is device-safe; one holding a k-d tree is refused, not silently dropped.
     gs = GD.StructuredGrid(cart, collect(0.0:7.0), collect(0.0:7.0))
     Test.@test Adapt.adapt(Array, C.MetricTopology(gs)) === C.MetricTopology(gs)
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(2))
+    gu = healpix_node_grid(2)
     Test.@test_throws ArgumentError Adapt.adapt(Array, C.indexed(gu))
     Test.@test !isbits(C.indexed(gu))
 

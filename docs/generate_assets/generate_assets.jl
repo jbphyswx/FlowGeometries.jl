@@ -104,7 +104,7 @@ end
 
 function fig_cell_areas()
     cases = [
-        ("HEALPix", FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(16))),
+        ("HEALPix", FG.Grids.HEALPixGrid(16)),
         ("Cubed sphere", FG.Connectivity.unstructured_grid(FG.SphericalSampling.CubedSphereSampling(), 24)),
         ("Icosahedral", FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))),
     ]
@@ -112,10 +112,11 @@ function fig_cell_areas()
     for (k, (name, g)) in enumerate(cases)
         a = FG.Grids.measure(g)
         rel = a ./ Statistics.mean(a)
+        λ, φ = FG.Grids.materialize(g)
         ax = disc_axis(fig, 2, k, @sprintf("%s — min/max %.2f", name, minimum(a) / maximum(a)))
         xs = Float64[]; ys = Float64[]; cs = Float64[]
-        for i in eachindex(g.λ)
-            x, y, vis = ortho(g.λ[i], g.φ[i], VIEW...)
+        for i in eachindex(λ)
+            x, y, vis = ortho(λ[i], φ[i], VIEW...)
             vis && (push!(xs, x); push!(ys, y); push!(cs, rel[i]))
         end
         CM.scatter!(ax, xs, ys; color = cs, colormap = :viridis, colorrange = (0.5, 1.5),
@@ -186,20 +187,21 @@ function fig_connectivity()
     fig = CM.Figure(; size = (940, 420))
 
     nside = 8
-    g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(nside))
-    conn = FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(nside))
+    g = FG.Grids.HEALPixGrid(nside)
+    conn = FG.Connectivity.build_connectivity(g)
+    λ, φ = FG.Grids.materialize(g)
     ax = disc_axis(fig, 2, 1, "HEALPix RING adjacency (nside $nside)")
     for i in 1:FG.Connectivity.nnodes(conn)
-        xi, yi, vi = ortho(g.λ[i], g.φ[i], VIEW...)
+        xi, yi, vi = ortho(λ[i], φ[i], VIEW...)
         vi || continue
         for j in FG.Grids.neighbors(conn, i)
             j > i || continue
-            xj, yj, vj = ortho(g.λ[j], g.φ[j], VIEW...)
+            xj, yj, vj = ortho(λ[j], φ[j], VIEW...)
             vj || continue
             CM.lines!(ax, [xi, xj], [yi, yj]; color = (:steelblue, 0.45), linewidth = 0.6)
         end
     end
-    sphere_scatter!(ax, g.λ, g.φ; markersize = 3.0)
+    sphere_scatter!(ax, λ, φ; markersize = 3.0)
 
     ν = 8
     mesh = FG.SphericalSampling.icosahedral_mesh(ν)

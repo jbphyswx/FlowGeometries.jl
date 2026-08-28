@@ -154,7 +154,7 @@ Test.@testset "Default node areas follow the sampling's equal-area trait" begin
     tot = 4π * R^2
 
     # Equal-area by construction: uniform is exact.
-    gh = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4); geometry = geo)
+    gh = healpix_node_grid(4; geometry = geo)
     ah = FG.Grids.measure(gh)
     Test.@test all(≈(tot / length(ah)), ah)
     Test.@test sum(ah) ≈ tot rtol = 1e-12
@@ -998,7 +998,7 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
     end
 
     # Node sets, including a radius past the antipode.
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     ixu = C.indexed(gu)
     su = C.ball_scratch()
     for (idx, r) in ((1, 0.3R), (100, 0.3R), (192, 0.3R), (1, 3.1R))
@@ -1129,7 +1129,7 @@ Test.@testset "Connected is the reachable part of the ball, not the ball" begin
 
     # A node set's adjacency is the one it stores, so a stencil is meaningless there and is refused
     # rather than ignored.
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     R = FG.Geometry.radius(GD.grid_geometry(gu))
     Test.@test issubset(sort(C.neighbors_within(gu, 1; ball = 0.4R, reach = C.Connected())),
                         sort(C.neighbors_within(gu, 1; ball = 0.4R)))
@@ -1150,7 +1150,7 @@ Test.@testset "Ball connectivity builders agree with the per-cell query, on ever
     ys = [y for _ in 1:9, y in range(0.0, 8.0; length = 9)]
     mask = trues(9, 9); mask[3, 7] = false
     gcv = GD.CurvilinearGrid(geo, xs, ys, mask; measure = fill(1.0, 9, 9))
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     R = FG.Geometry.radius(GD.grid_geometry(gu))
 
     for (grid, r, idxs) in ((gcv, 3.5, CartesianIndices((9, 9))),
@@ -1279,7 +1279,7 @@ Test.@testset "k nearest is exact under the geometry's own metric" begin
         Test.@test issorted(gd)
     end
 
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     for k in (1, 6, 20)
         gi, gd = C.k_nearest(gu, 1; k = k)
         wi, wd = brute(gu, (1,), k)
@@ -1362,7 +1362,7 @@ Test.@testset "Queries can be seeded by a point, not just a cell" begin
         Test.@test C.nneighbors_within(g, p; ball = r) == length(want)
     end
 
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     for i in (1, 100)
         base = GD._raw_coords(gu, i)
         p = (base[1] + 0.01, base[2] + 0.01)
@@ -1546,5 +1546,84 @@ Test.@testset "Per-query cost does not grow with the grid" begin
             c ≤ 64 || println("    ", name, " candidates at n=", length(GD.mask(g)), ": ", c)
             Test.@test c ≤ 64
         end
+    end
+end
+
+Test.@testset "An index records its mask policy, and a sweep passes its own" begin
+    C = FG.Connectivity
+    GD = FG.Grids
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    cart = GE.CartesianGeometry{Float64}()
+    sph = GE.SphericalGeometry(6.371e6)
+    R = GE.radius(sph)
+
+    n = 12
+    X = [Float64(i) for i in 1:n, _ in 1:n]
+    Y = [Float64(j) for _ in 1:n, j in 1:n]
+    mk = trues(n, n); mk[3:9, 3:9] .= false          # mostly-masked interior
+    cgm = GD.CurvilinearGrid(cart, X, Y, mk)
+
+    # Narrowing is worth asking for: the index is the size of the active region, not the bounding box.
+    full = GD.cell_list(cgm; ball = 1.5)
+    act = GD.cell_list(cgm; ball = 1.5, active_only = true)
+    Test.@test Base.summarysize(act) < Base.summarysize(full)
+    # …and it answers only at that policy, rather than returning a short answer.
+    Test.@test C.nneighbors_within(cgm, 1, 1; ball = 1.5,
+                                   topology = C.MetricTopology(cgm; index = act)) ==
+               C.nneighbors_within(cgm, 1, 1; ball = 1.5)
+    Test.@test_throws ArgumentError C.nneighbors_within(
+        cgm, 1, 1; ball = 1.5, active_only = false,
+        topology = C.MetricTopology(cgm; index = act))
+    # The default covers every cell, so it serves both policies and `locate` needs no special index.
+    let top = C.MetricTopology(cgm; index = full)
+        for ao in (true, false)
+            for I in ((1, 1), (5, 5), (n, n))
+                Test.@test sort(C.neighbors_within(cgm, I...; ball = 1.5, active_only = ao,
+                                                   topology = top)) ==
+                           sort(C.neighbors_within(cgm, I...; ball = 1.5, active_only = ao))
+            end
+        end
+        Test.@test GD.locate(cgm, (5.2, 5.2); topology = top, scratch = C.ball_scratch()) ==
+                   GD.locate(cgm, (5.2, 5.2))
+    end
+
+    # One `build_connectivity_within` body serves every layout: the cell naming comes from
+    # `cell_address`, the candidate bound from `candidate_source`, and each row must equal what the
+    # per-cell query returns for that cell — at both mask policies, on every architecture.
+    msk = trues(6, 5); msk[3, 3] = false; msk[4, 4] = false
+    nbrs = [2, 1, 3, 2, 4, 3]
+    ptr = [1, 2, 4, 6, 7, 7]
+    cases = (("structured periodic, masked",
+              GD.StructuredGrid(cart, range(0.0; step = 1.0, length = 6),
+                                range(0.0; step = 1.0, length = 5), msk;
+                                topology = (GD.Periodic(), GD.Bounded()), period = (6.0, 0.0)), 1.5),
+             ("curvilinear, masked", cgm, 1.5),
+             ("node set", GD.UnstructuredGrid(sph, ([0.0, 0.1, 0.2, 0.3, 1.0],
+                                                    [0.0, 0.0, 0.0, 0.0, 1.0]),
+                                              fill(1.0, 5), GD.AllActive((5,)), nbrs, ptr), 0.15R),
+             ("HEALPix", GD.HEALPixGrid(sph, 4), 2.0e6),
+             ("ring", GD.RingGrid(sph, SS.OctahedralGaussianSampling(8)), 1.5e6))
+    for (name, g, r) in cases, ao in (true, false)
+        conn = C.build_connectivity_within(g; ball = r, active_only = ao)
+        cs = GD.cells(g)
+        for k in 1:length(cs)
+            cell = GD.cell_at(g, cs[k])
+            got = sort(collect(GD.neighbors(conn, k)))
+            want = sort(C.neighbors_within(g, cell...; ball = r, active_only = ao))
+            got == want || println("    ", name, " (active_only=", ao, ") row ", k,
+                                   ": ", got, " ≠ ", want)
+            Test.@test got == want
+            Test.@test !(k in got)              # a ball adjacency is the neighbours, not the closed ball
+        end
+        # The metric is symmetric, so the graph it induces is, whichever cells are excluded.
+        Test.@test C.is_symmetric_adjacency(conn)
+    end
+
+    # Which default topology a sweep builds is `candidate_source`: a separable window needs no index.
+    Test.@test C.default_sweep_topology(GD.StructuredGrid(cart, 0.0:1.0:5.0, 0.0:1.0:4.0),
+                                        1.5, true).index === nothing
+    for g in (cgm, GD.HEALPixGrid(sph, 2), GD.RingGrid(sph, SS.OctahedralGaussianSampling(4)))
+        Test.@test C.default_sweep_topology(g, 1.5e6, true).index isa GD.CellListIndex
     end
 end

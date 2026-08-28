@@ -435,11 +435,11 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     X = collect(range(0.0, 1.0; length = 9))
     Y = collect(range(0.0, 2.0; length = 7))
     F = [xi^2 + 3yi for xi in X, yi in Y]
-    O = similar(F)
-    O.apply_stencil!(O, F, X, 1; order = 1, nodes = 3)
-    Test.@test maximum(abs, O .- [2xi for xi in X, _ in Y]) < 1e-11
-    O.apply_stencil!(O, F, Y, 2; order = 1, nodes = 3)
-    Test.@test maximum(abs, O .- 3.0) < 1e-11
+    Od = similar(F)
+    O.apply_stencil!(Od, F, X, 1; order = 1, nodes = 3)
+    Test.@test maximum(abs, Od .- [2xi for xi in X, _ in Y]) < 1e-11
+    O.apply_stencil!(Od, F, Y, 2; order = 1, nodes = 3)
+    Test.@test maximum(abs, Od .- 3.0) < 1e-11
     F3 = [xi^2 + 3yi + 2zi for xi in X, yi in Y, zi in 0.0:0.5:1.0]
     O3 = similar(F3)
     O.apply_stencil!(O3, F3, collect(0.0:0.5:1.0), 3; order = 1, nodes = 3)
@@ -478,8 +478,8 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
 
     Test.@test_throws ArgumentError D.axis_stencils(X, 2, 2)          # too few nodes for order 2
     Test.@test_throws ArgumentError D.axis_stencils([0.0, 1.0], 1, 5) # more nodes than samples
-    Test.@test_throws ArgumentError O.apply_stencil!(O, F, X, 3)      # no direction 3 in a matrix
-    Test.@test_throws DimensionMismatch O.apply_stencil!(O, F, X[1:5], 1)
+    Test.@test_throws ArgumentError O.apply_stencil!(Od, F, X, 3)      # no direction 3 in a matrix
+    Test.@test_throws DimensionMismatch O.apply_stencil!(Od, F, X[1:5], 1)
     Test.@test_throws DimensionMismatch O.apply_stencil!(similar(F, 3, 3), F, idx, w, 1)
 end
 
@@ -1219,7 +1219,7 @@ Test.@testset "A batch is evaluated at a coordinate, and gradients take one too"
     Test.@test all(abs(vb[b] - (2.0 * 4.2 - 3.0 * 5.1 + 50.0b)) < 1e-8 for b in 1:4)
     Test.@test O.interpolate(view(fb, :, :, 1), cg, (4.2, 5.1)) isa Float64
 
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     m = length(GD.mask(gu))
     fu = [Float64(i) + 1000.0b for i in 1:m, b in 1:3]
     vu = O.interpolate(fu, gu, (0.4, 0.1))

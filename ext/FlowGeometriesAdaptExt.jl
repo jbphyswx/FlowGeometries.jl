@@ -33,14 +33,19 @@ Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.UniformAxis) = a
 Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 
 # One method for every layout: the array-backed fields are adapted and handed to `Grids.rebuild`, which
-# re-derives the grid's type parameters from what they became. Geometry, topology, period, the sampling
-# tag and the per-axis reductions are immutable scalars and travel unchanged, so none is named here.
-const _ADAPTED = (:coordinates, :corners, :measure, :mask, :neighbor_nbrs, :neighbor_ptr)
+# re-derives the grid's type parameters from what they became.
+#
+# Which fields those are is decided by what they ARE, not by a list of names: an array, or a tuple of
+# them. Geometry, topology, period, the sampling tag, a resolution parameter and the per-axis reductions
+# are immutable scalars or tuples of them, so they fail the test and travel unchanged — and a layout
+# whose storage is four ring vectors rather than a coordinate tuple needs no entry anywhere.
+@inline _is_adaptable(v) = v isa AbstractArray
+@inline _is_adaptable(v::Tuple) = !isempty(v) && all(x -> x isa AbstractArray, v)
 
 function Adapt.adapt_structure(to, grid::Grids.AbstractGrid)
     changed = NamedTuple(
         n => (v = getfield(grid, n); v isa Tuple ? _adapt_tuple(to, v) : Adapt.adapt(to, v))
-        for n in _ADAPTED if n in fieldnames(typeof(grid))
+        for n in fieldnames(typeof(grid)) if _is_adaptable(getfield(grid, n))
     )
     return Grids.rebuild(grid, changed)
 end

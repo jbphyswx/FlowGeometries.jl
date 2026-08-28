@@ -232,7 +232,7 @@ axes for a window to bound, so without an index a query tests every cell.
 centres at the radius you mean to query at, and a query visits the bins its ball can reach:
 
 ```@example conn
-gc = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(8))
+gc = FG.Grids.HEALPixGrid(8)
 top = FG.Connectivity.MetricTopology(gc; index = FG.Grids.cell_list(gc; ball = 2.0e6))
 FG.Connectivity.nneighbors_within(gc, 1; ball = 2.0e6, topology = top)
 ```
@@ -245,7 +245,7 @@ run inside a kernel, and it is why the sweeps build one by default.
 
 ```@example conn
 using NearestNeighbors                                    # loads the extension
-gu = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(8))
+gu = FG.Grids.HEALPixGrid(8)
 ixu = FG.Connectivity.indexed(gu)
 scratch = FG.Connectivity.ball_scratch()
 FG.Connectivity.nneighbors_within(gu, 1; ball = 2.0e6, topology = ixu, scratch = scratch)

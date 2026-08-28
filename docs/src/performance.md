@@ -33,7 +33,6 @@ size step:
 | `unstructured_grid` cubed sphere | 1.79 | 28 | 1.04 |
 | `unstructured_grid` icosahedral | 4.00 | 80 | 1.04 |
 | `unstructured_grid` Yin–Yang | 3.76 | 41 | 0.98 |
-| `unstructured_grid` HEALPix | 1.22 | 18 | 1.06 |
 
 Allocation counts are flat in `n` everywhere. `build_connectivity`'s 91 MiB is the CSR output itself
 for ~2M nodes, not overhead.

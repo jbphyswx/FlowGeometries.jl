@@ -162,9 +162,12 @@ Test.@testset "Asking for an element type gives back that element type, knowably
         Test.@test FG.Grids.grid_geometry(sg) isa FG.Geometry.AbstractGeometry{W}
         Test.@test FG.Grids.coords(sg, 1, 1).λ isa W
 
-        ug = FG.Connectivity.unstructured_grid(W, hp)
-        Test.@test FG.Grids.grid_geometry(ug) isa FG.Geometry.AbstractGeometry{W}
-        Test.@test FG.Grids.coords(ug, 1).λ isa W
+        # A layout takes its width from its geometry alone: it stores no coordinates to carry one.
+        hg = FG.Grids.HEALPixGrid(FG.Geometry.SphericalGeometry(W(6.371e6)), 4)
+        Test.@test FG.Grids.grid_geometry(hg) isa FG.Geometry.AbstractGeometry{W}
+        Test.@test FG.Grids.coords(hg, 1).λ isa W
+        Test.@test FG.Grids.measure(hg, 1) isa W
+        Test.@test eltype(first(FG.Grids.materialize(hg))) === W
     end
 
     # An explicit geometry is carried to the requested width too, keeping its shape: asking for a
@@ -180,10 +183,10 @@ Test.@testset "Asking for an element type gives back that element type, knowably
                                           geometry = FG.Geometry.SphericalGeometry(6.371f6))
     Test.@test eltype(FG.Grids.axis(g32, 1)) === Float32
     Test.@test FG.Grids.grid_geometry(g32) isa FG.Geometry.AbstractGeometry{Float32}
-    u32 = FG.Connectivity.unstructured_grid(hp;
-                                            geometry = FG.Geometry.SphericalGeometry(6.371f6))
-    Test.@test FG.Grids.grid_geometry(u32) isa FG.Geometry.AbstractGeometry{Float32}
-    Test.@test FG.Grids.coords(u32, 1).λ isa Float32
+    r32 = FG.Grids.RingGrid(FG.Geometry.SphericalGeometry(6.371f6),
+                            FG.SphericalSampling.OctahedralGaussianSampling(8))
+    Test.@test FG.Grids.grid_geometry(r32) isa FG.Geometry.AbstractGeometry{Float32}
+    Test.@test FG.Grids.coords(r32, 1).λ isa Float32
     for W in (Float64, Float32)
         Test.@test FG.Geometry.float_type(FG.Geometry.SphericalGeometry{W}(6.371e6)) === W
         Test.@test FG.Geometry.float_type(FG.Geometry.CartesianGeometry{W}()) === W
@@ -242,7 +245,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :fold_candidates_at, :locate, :embed_point, :fold_at,
         :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
         :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
-        :stencil_scratch, :interpolate!,
+        :stencil_scratch, :interpolate!, :healpix_neighbor_ids,
     ])
 
     # Geometry, Axes and Stencils are per-point kernels almost throughout, so each name below is
@@ -319,7 +322,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
          :sampling, :rebuild, :ncoordinates, :materialize, :cells, :cell_at, :embedded_at,
          :embedding_of, :max_neighbors, :formula_neighbors, :nside, :scheme, :npixels,
-         :HEALPixGrid, :FormulaNeighborSeq],
+         :HEALPixGrid, :RingGrid, :RingwiseVector, :FormulaNeighborSeq, :ring_of],
     # allocating forms, whose whole job is to return a fresh array
     [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,
      :centers, :faces, :nodes, :cell_widths],

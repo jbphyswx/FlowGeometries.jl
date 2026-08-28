@@ -57,7 +57,18 @@ t_p2a(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2ang(T, a, b)
 t_p2v(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2vec(T, a, b)
 t_scr(::Type{T}, o, k) where {T}  = FG.Operators.stencil_scratch(T, o, k)
 t_sgrid(::Type{T}, s, n) where {T} = FG.Connectivity.structured_grid(T, s, n)
-t_ugrid(::Type{T}, s) where {T}   = FG.Connectivity.unstructured_grid(T, s)
+
+# The HEALPix pixelization as a node set: the layout materialized into dense coordinate vectors and a
+# stored CSR graph. `HEALPixGrid` is how the pixelization is used; this is the explicit "as a cloud"
+# form, and it is what the unstructured code paths below are exercised against — they need a grid whose
+# coordinates and adjacency are DATA, which is exactly what the layout is not.
+function healpix_node_grid(nside::Integer; geometry = FG.Geometry.SphericalGeometry())
+    g = FG.Grids.HEALPixGrid(geometry, nside)
+    λ, φ = FG.Grids.materialize(g)
+    conn = FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(Int(nside)))
+    return FG.Grids.UnstructuredGrid(geometry, λ, φ, collect(FG.Grids.measure(g)),
+                                     FG.Grids.AllActive((length(λ),)), conn.nbrs, conn.ptr)
+end
 
 # A geometry defined outside the package, supplying only the accessor its hierarchy asks for.
 struct OneSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end

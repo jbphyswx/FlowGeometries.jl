@@ -7,14 +7,24 @@ healpix_nring(s::HEALPixSampling) = healpix_nring(s.nside)
 healpix_pixel_area(nside::Integer) = 4π / healpix_npix(nside)
 healpix_pixel_area(s::HEALPixSampling) = healpix_pixel_area(s.nside)
 
+# A ring walk, not a pixel walk: colatitude is constant along a ring, so the `acos` and the latitude
+# conversion happen `4·nside − 1` times rather than `12·nside²`, and a pixel's longitude is
+# `(j − shift)·Δϕ` with `Δϕ` the ring's. `ringpix` is `4·nr` in every regime, so one expression for `Δϕ`
+# reproduces all three exactly.
 function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, s::HEALPixSampling) where {T<:AbstractFloat}
     npix = healpix_npix(s)
     length(λ) == npix && length(φ) == npix || throw(DimensionMismatch("buffers must have length healpix_npix"))
-    nside = s.nside
-    @inbounds for ipix in 0:(npix - 1)
-        θ, ϕ = _healpix_pix2ang_ring(nside, ipix, T)
-        λ[ipix + 1] = ϕ
-        φ[ipix + 1] = geographic_latitude(θ)
+    ns = s.nside
+    @inbounds for r in 1:healpix_nring(ns)
+        info = ring_info(T, ns, r)
+        m = info.ringpix
+        Δϕ = T(π) / (T(2) * T(m ÷ 4))
+        shift = info.shifted ? T(0.5) : one(T)
+        for j in 1:m
+            k = info.startpix + j
+            λ[k] = mod((T(j) - shift) * Δϕ, T(2π))
+            φ[k] = info.latitude
+        end
     end
     return (; λ, φ)
 end

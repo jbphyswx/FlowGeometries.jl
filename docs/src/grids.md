@@ -26,7 +26,15 @@ and an activity mask.
 |---|---|---|
 | `StructuredGrid` | one 1-D axis per direction | rectilinear: lat–lon, any tensor-product sampling |
 | `CurvilinearGrid` | one `N`-D array per direction | logically rectangular, geometrically warped |
-| `UnstructuredGrid` | one value per node, plus CSR neighbours | HEALPix, icosahedral, cubed sphere, scattered |
+| `HEALPixGrid` | none — `(nside, pixel)` arithmetic | the HEALPix pixelization |
+| `RingGrid` | one value per *ring* | reduced Gaussian, octahedral |
+| `UnstructuredGrid` | one value per node, plus CSR neighbours | icosahedral, cubed sphere, scattered |
+
+The first two store coordinates because a warped mesh's are arbitrary; the last stores them because a
+node set's are the caller's. The middle two store none: a cell's position, its neighbours and its area
+are closed-form in the layout's parameters, so they hold those parameters instead. `HEALPixGrid` is the
+same size at `nside = 1024` — 12.6 million pixels — as at `nside = 1`. Ask for the dense cloud with
+[`Grids.materialize`](@ref) when something outside needs it.
 
 ## Building one
 
@@ -35,7 +43,8 @@ using FlowGeometries: FlowGeometries as FG
 
 # From a sampling — the usual route
 grid = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 64)
-g    = FG.Connectivity.unstructured_grid(FG.SphericalSampling.HEALPixSampling(16))
+g    = FG.Grids.HEALPixGrid(16)
+rg   = FG.Grids.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(64))
 
 # Or directly, in any number of dimensions; the mask is optional
 sg  = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), λaxis, φaxis, mask)
@@ -45,9 +54,26 @@ g4  = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
 size(g4)
 ```
 
+A formula layout's storage does not depend on its resolution, and the arithmetic is what answers every
+per-cell question:
+
+```@example grids
+g1024 = FG.Grids.HEALPixGrid(1024)                 # 12 582 912 pixels
+Base.summarysize(g) == Base.summarysize(g1024), length(g1024)
+```
+
+```@example grids
+FG.Grids.coords(g, 100), FG.Grids.measure(g, 100), collect(FG.Grids.neighbors(g, 100))
+```
+
+```@example grids
+λ, φ = FG.Grids.materialize(g)                     # the dense cloud, asked for explicitly
+length(λ)
+```
+
 ## The common interface
 
-Everything below works on all three architectures:
+Everything below works on every architecture:
 
 ```@example grids
 out = zeros(2)
@@ -158,15 +184,15 @@ nodes = FG.Grids.UnstructuredGrid(cart, (rand(6), rand(6), rand(6)), ones(6), tr
 FG.Grids.coordinate_names(nodes), FG.Grids.coords(nodes, 4)
 ```
 
-## Cell areas on unstructured grids
+## Cell areas on the spherical node sets
 
-`unstructured_grid` computes exact cell areas in closed form, dispatched on the sampling — never a
-uniform `4πR²/N` fallback, which is right only for equal-area samplings and silently wrong elsewhere
-(icosahedral dual cells span a min/max ratio of 0.52).
+Cell areas are an exact closed form, dispatched on the sampling — never a uniform `4πR²/N` fallback,
+which is right only for equal-area samplings and silently wrong elsewhere (icosahedral dual cells span
+a min/max ratio of 0.52).
 
-| sampling | default areas |
+| layout / sampling | default areas |
 |---|---|
-| HEALPix | uniform `4πR²/N` — exact by construction |
+| `HEALPixGrid` | uniform `4πR²/N` — exact by construction, and stored as one number |
 | cubed sphere | spherical excess of each cell's own panel quadrilateral |
 | icosahedral | true dual-cell areas, from the mesh's own triangulation |
 | Yin–Yang | lat–lon patch area, `R²Δλ·2sin(Δφ/2)·cosφ` |

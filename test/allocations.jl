@@ -37,7 +37,7 @@ q_within_top(g, r, I, t) = FG.Connectivity.nneighbors_within(g, I...; ball = r, 
 q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
                                                    ball = r, topology = t, scratch = s)
 q_locate(g, p)           = FG.Grids.locate(g, p)
-q_runreach(m, I, d, i, n, k) = FG.Discretization._run_reach(m, I, d, i, n, k, false)
+q_runreach(m, I, d, i, n, k) = FG.Operators._run_reach(m, I, d, i, n, k, false)
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
 q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
@@ -76,21 +76,26 @@ q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; 
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 
-# The per-grid-shape sweep.
-function check_shape(label, g, I)
+# The per-grid-shape sweep. `axes = false` for a layout that stores no coordinate arrays: the spacing
+# accessors are an axis notion and there are no axes, which the layout says rather than answers.
+function check_shape(label, g, I; axes::Bool = true)
     r = FG.Grids.grid_geometry(g) isa FG.Geometry.AbstractSphericalGeometry ? 6.371e5 : 2.5
     out = Vector{Int}(undef, 64)
     buf = Vector{Int}(undef, 4096)
-    pt = Vector{Float64}(undef, length(I))
+    pt = Vector{Float64}(undef, FG.Grids.ncoordinates(g))
     dts = Vector{Float64}(undef, 64)
     mt = FG.Connectivity.MetricTopology(g)
     J = ntuple(d -> I[d] + 1, length(I))
+    # `distance` and `displacement` take a CELL, which is an index tuple or a single integer depending
+    # on the layout's `cell_address` — the other entry points here take the indices and splat them.
+    cI = FG.Grids._cell_named_by(g, I)
+    cJ = FG.Grids._cell_named_by(g, J)
     checks = (
         ("coords",             _alloc(q_coords, g, I)),
         ("measure",            _alloc(q_measure, g, I)),
         ("isactive",           _alloc(q_active, g, I)),
-        ("distance(g,I,J)",    _alloc(q_dist, g, I, J)),
-        ("displacement",       _alloc(q_disp, g, I, J)),
+        ("distance(g,I,J)",    _alloc(q_dist, g, cI, cJ)),
+        ("displacement",       _alloc(q_disp, g, cI, cJ)),
         ("nneighbors",         _alloc(q_nn, g, I)),
         ("neighbors!",         _alloc(q_nbrs!, out, g, I)),
         ("neighbors iterator", _alloc(q_iter, g, I)),
@@ -116,16 +121,17 @@ function check_shape(label, g, I)
         a == 0 || println("    ", label, " / metric_window -> ", a, " B")
         Test.@test a == 0
     end
-    for d in 1:length(I)
+    for d in 1:FG.Grids.ncoordinates(g)
         # `spacing` is the constant-spacing accessor and errors on an irregular axis, by design.
-        if FG.Grids.isuniform(g, d)
+        if axes && FG.Grids.isuniform(g, d)
             a = _alloc(q_spacing, g, d)
             a == 0 || println("    ", label, " / spacing(d=", d, ") -> ", a, " B")
             Test.@test a == 0
         end
-        for (name, a) in (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
-                          ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
-                          ("isuniform", _alloc(q_isuni, g, d)), ("period", _alloc(q_period, g, d)))
+        span = (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
+                ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
+                ("period", _alloc(q_period, g, d)))
+        for (name, a) in (axes ? (span..., ("isuniform", _alloc(q_isuni, g, d))) : span)
             a == 0 || println("    ", label, " / ", name, "(d=", d, ") -> ", a, " B")
             Test.@test a == 0
         end
@@ -148,7 +154,7 @@ function check_shape(label, g, I)
     end
 
     Test.@test (Test.@inferred q_coords(g, I)) isa NamedTuple
-    Test.@test (Test.@inferred q_dist(g, I, J)) isa Float64
+    Test.@test (Test.@inferred q_dist(g, cI, cJ)) isa Float64
     Test.@test (Test.@inferred q_nwithin(g, r, I)) isa Int
     Test.@test (Test.@inferred q_top(g)) isa FG.Connectivity.MetricTopology
     return nothing
@@ -644,6 +650,12 @@ Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begi
                     collect(range(-1.2, 1.2; length = n))), (12, 12))
     check_shape("curvilinear 2-D", FG.Grids.CurvilinearGrid(cart, cx, cy, trues(n, n);
                     measure = fill(1.0, n, n)), (12, 12))
+    # A layout whose coordinates, adjacency and measure are arithmetic must reach the same floor: the
+    # arithmetic runs in registers, so there is nothing for a per-cell read to allocate.
+    check_shape("HEALPix nside=8", FG.Grids.HEALPixGrid(sph, 8), (100,); axes = false)
+    check_shape("octahedral N=16",
+                FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(16)),
+                (100,); axes = false)
 
     # `apply_stencil!` drives the field loop through the same index-parallel entry point the device
     # path uses, so it is gated here rather than trusted.
@@ -949,6 +961,22 @@ Test.@testset "The NESTED bit interleave allocates nothing" begin
     Test.@test _alloc(SS._compress_bits, 12345) == 0
 end
 
+Test.@testset "The pixel neighbour walk returns a stack tuple, allocating nothing" begin
+    C = FG.Connectivity
+    # The tuple form is why a traversal over a formula layout needs no scratch threaded through it, so
+    # it is measured directly and not only through the layout that calls it.
+    for ns in (1, 4, 64)
+        Test.@test _alloc(C.healpix_neighbor_ids, ns, 10) == 0
+        Test.@test _alloc(C.healpix_neighbors!, Vector{Int}(undef, 8), ns, 10) == 0
+    end
+    ids, n = C.healpix_neighbor_ids(4, 10)
+    Test.@test ids isa NTuple{8,Int}
+    Test.@test (Test.@inferred C.healpix_neighbor_ids(4, 10)) isa Tuple{NTuple{8,Int},Int}
+    buf = Vector{Int}(undef, 8)
+    Test.@test C.healpix_neighbors!(buf, 4, 10) == n
+    Test.@test sort(buf[1:n]) == sort(collect(ids)[1:n])
+end
+
 Test.@testset "Holding a stencil table removes the per-call allocation" begin
     D = FG.Discretization
     O = FG.Operators
@@ -977,7 +1005,7 @@ Test.@testset "A ball fold allocates nothing, and nothing that grows with the gr
         y = [t for _ in 1:n, t in range(0.0, 1.0 * (n - 1); length = n)]
         return GD.CurvilinearGrid(geo, x, y, trues(n, n); measure = fill(1.0, n, n))
     end
-    gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
+    gu = healpix_node_grid(4)
     R = FG.Geometry.radius(GD.grid_geometry(gu))
 
     # Unindexed, the candidates are a range, so the traversal touches no heap at all.
