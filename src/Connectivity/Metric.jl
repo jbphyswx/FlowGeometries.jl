@@ -60,9 +60,10 @@ A stencil query reads `(size, periodic, mask)` and `IndexTopology` carries it. A
 needs the tightest per-direction step bound, which sizes the search window, and — where there are no
 separable axes to bound with — a spatial index.
 
-Constructing one is `O(1)` and allocates nothing: the per-axis reductions live on the grid already, as
-[`Grids.AxisStats`](@ref), computed once when it was built. So the default `topology` on every query
-costs nothing and there is no hoisting to remember. What is still worth hoisting is the **index**, which
+Constructing one is `O(1)` and allocates nothing: it reads the per-axis reductions through
+[`Grids.minimum_spacing`](@ref), [`Grids.bounds`](@ref) and [`Grids.extent`](@ref), each of which a
+layout answers without a scan. So the default `topology` on every query costs nothing and there is no
+hoisting to remember. What is still worth hoisting is the **index**, which
 is not built by default because a k-d tree inside a single query would cost more than the scan it
 replaces — [`foreach_within`](@ref) and [`mapreduce_within`](@ref) do that hoisting for a sweep, and
 [`indexed`](@ref) does it explicitly.
@@ -199,8 +200,8 @@ const _BallLike = Union{Real,Stencils.MetricBall}
 The window valid for **every** cell of `grid`, rather than for one of them: the per-cell form
 maximised over the grid, which is what sizing a cache or a footprint table needs.
 
-`O(1)`. Taking `maximum` of the per-cell form would be `O(N)` for something the cached
-[`Grids.AxisStats`](@ref) already determines: the smallest gap per axis is stored, and the extreme
+`O(1)`. Taking `maximum` of the per-cell form would be `O(N)` for something the per-axis reductions
+already determine: [`Grids.minimum_spacing`](@ref) gives the smallest gap per axis, and the extreme
 `|cos φ|` over a latitude axis is at one of its two ends, since `|cos|` on `[-π/2, π/2]` is largest in
 the middle. No `cos` per row, and no scan.
 

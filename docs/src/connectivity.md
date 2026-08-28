@@ -213,8 +213,8 @@ separate implementation from a structured one: it is the `N = 2` case of the sam
 A ball query is the one thing that cannot work that way. It needs coordinates, and the smallest step per
 direction, which is what bounds the candidate window on a **stretched** axis. That is
 [`Connectivity.MetricTopology`](@ref), the same idea for the metric path — and it is `O(1)` to build,
-because the per-axis reductions it needs are computed once when the grid is and stored as
-[`Grids.AxisStats`](@ref):
+because it reads the per-axis reductions through [`Grids.minimum_spacing`](@ref) and
+[`Grids.bounds`](@ref), which every layout answers without a scan:
 
 ```@example conn
 mt = FG.Connectivity.MetricTopology(g)

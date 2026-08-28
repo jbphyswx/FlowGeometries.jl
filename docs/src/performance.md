@@ -42,8 +42,10 @@ for ~2M nodes, not overhead.
 
 A ball query has costs that are properties of the *grid*, not of the query: the smallest step per
 direction, which bounds the candidate window, the span of each axis, and — where there are no separable
-axes to bound with — a spatial index. The first two are reduced once when the grid is built and stored as
-[`Grids.AxisStats`](@ref); [`Connectivity.MetricTopology`](@ref) then reads them in `O(1)`.
+axes to bound with — a spatial index. The first two are read through
+[`Grids.minimum_spacing`](@ref) and [`Grids.bounds`](@ref), which every layout answers in `O(1)` — a
+rectilinear grid from reductions taken once when it was built, a layout whose coordinates are a formula
+from its own parameters. [`Connectivity.MetricTopology`](@ref) carries them for a whole sweep.
 
 The effect is that the per-query default costs nothing, so there is no hoisting to get right. On a
 stretched axis, with the radius and the window's cell count held fixed:
