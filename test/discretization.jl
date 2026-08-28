@@ -1492,3 +1492,67 @@ Test.@testset "derivative! fuses the metric into the sweep, identically" begin
     end
     Test.@test fused_seen > 0            # the gate above actually exercised the fused path
 end
+
+Test.@testset "The ! forms write into the caller's buffers and allocate nothing" begin
+    D = FG.Discretization
+
+    for x in (collect(range(0.0, 4.0; length = 40)),
+              collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = 40)))))
+        # `axis_stencils!` builds the same table, and with a scratch it allocates nothing: the two
+        # matrices are the caller's and the Fornberg buffers come from the scratch.
+        for (ord, k) in ((1, 3), (1, 4), (1, 5), (2, 5)), per in (nothing, 12.0)
+            ri, rw = D.axis_stencils(x, ord, k; period = per)
+            gi = Matrix{Int}(undef, size(ri))
+            gw = Matrix{Float64}(undef, size(rw))
+            D.axis_stencils!(gi, gw, x, ord, k; period = per)
+            Test.@test gi == ri
+            Test.@test gw == rw
+        end
+        let sc = D.stencil_scratch(2, 5),
+            gi = Matrix{Int}(undef, length(x), 5), gw = Matrix{Float64}(undef, length(x), 5)
+            Test.@test _alloc(q_axst!, gi, gw, x, 2, 5, sc) == 0
+            # a scratch too small for the table says so rather than reading past it
+            Test.@test_throws ArgumentError D.axis_stencils!(gi, gw, x, 2, 5;
+                                                             scratch = D.stencil_scratch(1, 2))
+        end
+
+        # faces!/centers! agree with the allocating forms and are free.
+        f = D.faces(x)
+        of = similar(x, length(x) + 1)
+        Test.@test D.faces!(of, x) == f
+        oc = similar(x, length(f) - 1)
+        Test.@test D.centers!(oc, f) == D.centers(f)
+        Test.@test _alloc(q_faces!, of, x) == 0
+        Test.@test _alloc(q_centers!, oc, f) == 0
+
+        # lagrange_weights! likewise, at every node count and on both sides of the axis.
+        for k in (2, 3, 5)
+            for v in (x[1], x[end], (x[3] + x[4]) / 2, x[1] - 1.0)
+                ri, rw = D.lagrange_weights(x, v, k)
+                w = Vector{Float64}(undef, k)
+                gi, gw = D.lagrange_weights!(w, x, v, k)
+                Test.@test gi == ri
+                Test.@test gw == rw
+                Test.@test sum(gw) ≈ 1.0 atol = 1e-12      # a partition of unity, so it interpolates
+            end
+            Test.@test _alloc(q_lagr!, Vector{Float64}(undef, k), x, 1.7, k) == 0
+        end
+    end
+
+    # An empty axis has no faces, which is what both forms say about it.
+    Test.@test D.faces!(Float64[], Float64[]) == D.faces(Float64[])
+    Test.@test D.faces!(zeros(2), [3.0]) == D.faces([3.0])
+    Test.@test D.centers!(zeros(1), [0.0, 2.0]) == [1.0]
+
+    # A wrongly sized buffer is a mistake, not a silent partial write.
+    Test.@test_throws DimensionMismatch D.faces!(zeros(3), collect(1.0:5.0))
+    Test.@test_throws DimensionMismatch D.centers!(zeros(9), collect(1.0:5.0))
+    Test.@test_throws DimensionMismatch D.axis_stencils!(
+        Matrix{Int}(undef, 3, 3), Matrix{Float64}(undef, 3, 3), collect(1.0:5.0), 1, 3)
+    Test.@test_throws ArgumentError D.lagrange_weights!(zeros(2), collect(1.0:5.0), 2.0, 4)
+
+    # `interpolation_weights` has no `!` form because it needs none: the pair comes back as a tuple.
+    Test.@test _alloc(q_iw, collect(1.0:5.0), 2.4) == 0
+    Test.@test (Test.@inferred D.interpolation_weights(collect(1.0:5.0), 2.4)) isa
+               Tuple{Int,Tuple{Float64,Float64}}
+end

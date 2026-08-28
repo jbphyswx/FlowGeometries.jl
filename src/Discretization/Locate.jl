@@ -167,13 +167,27 @@ The stencil is centred on `v` as far as the axis allows and shifted inward at th
 count is honoured everywhere rather than degrading near a boundary.
 """
 function lagrange_weights(x::AbstractVector{T}, v::Real, nodes::Integer) where {T<:AbstractFloat}
+    return lagrange_weights!(Vector{T}(undef, Int(nodes)), x, v, nodes)
+end
+
+"""
+    lagrange_weights!(w, x, v, nodes) -> (indices, w)
+
+[`lagrange_weights`](@ref) into a caller-owned vector of length `nodes`.
+
+The indices come back as a range, which is a value and not an allocation, so with `w` supplied the call
+allocates nothing — the form to use when interpolating many points along one axis.
+"""
+function lagrange_weights!(
+    w::AbstractVector{T}, x::AbstractVector{T}, v::Real, nodes::Integer,
+) where {T<:AbstractFloat}
     n = length(x)
     k = Int(nodes)
     k ≥ 1 || throw(ArgumentError("need at least one node, got $k"))
     k ≤ n || throw(ArgumentError("cannot use $k nodes on an axis of $n samples"))
+    length(w) ≥ k || throw(ArgumentError("w holds $(length(w)) weights, and $k are needed"))
     i0 = clamp(nearest_index(x, v) - (k - 1) ÷ 2, 1, n - k + 1)
     idx = i0:(i0 + k - 1)
-    w = Vector{T}(undef, k)
     vT = T(v)
     @inbounds for a in 1:k
         num = one(T)

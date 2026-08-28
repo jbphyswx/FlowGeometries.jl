@@ -40,13 +40,37 @@ cell — so nothing about the axis's spacing guarantee is lost.
 function faces(x::AbstractVector{T}) where {T<:AbstractFloat}
     n = length(x)
     n == 0 && return similar(x, T, 0)
-    f = similar(x, T, n + 1)
+    return faces!(similar(x, T, n + 1), x)
+end
+
+"""
+    faces!(out, x) -> out
+
+[`faces`](@ref) into a caller-owned vector of length `N+1`.
+
+The form to use when staggering repeatedly — a moving mesh, a column solver stepping in time — where the
+`N+1` faces are otherwise allocated per call.
+"""
+function faces!(out::AbstractVector{T}, x::AbstractVector{T}) where {T<:AbstractFloat}
+    n = length(x)
+    # An axis of `n` centres has `n+1` faces, and an empty one has none — which is what `faces` returns
+    # for it, so the two agree on that case rather than one of them raising.
+    want = iszero(n) ? 0 : n + 1
+    length(out) == want || throw(DimensionMismatch(
+        "out holds $(length(out)) faces for an axis of $n centres, which has $want",
+    ))
+    n == 0 && return out
+    return _faces!(out, x, n)
+end
+
+function _faces!(f::AbstractVector{T}, x::AbstractVector{T}, n::Int) where {T<:AbstractFloat}
     if n == 1
         # A single cell has no neighbour to halve the distance to; it is given unit width.
         @inbounds f[1] = x[1] - one(T) / 2
         @inbounds f[2] = x[1] + one(T) / 2
         return f
     end
+
     @inbounds for i in 2:n
         f[i] = (x[i-1] + x[i]) / T(2)
     end
@@ -73,11 +97,24 @@ widths rather than recovering the centre. The two are inverse only where the wid
 function centers(f::AbstractVector{T}) where {T<:AbstractFloat}
     n = length(f) - 1
     n ≥ 0 || throw(ArgumentError("an axis of faces needs at least one entry"))
-    c = similar(f, T, n)
+    return centers!(similar(f, T, n), f)
+end
+
+"""
+    centers!(out, f) -> out
+
+[`centers`](@ref) into a caller-owned vector of length `N`, for an axis of `N+1` faces.
+"""
+function centers!(out::AbstractVector{T}, f::AbstractVector{T}) where {T<:AbstractFloat}
+    n = length(f) - 1
+    n ≥ 0 || throw(ArgumentError("an axis of faces needs at least one entry"))
+    length(out) == n || throw(DimensionMismatch(
+        "out holds $(length(out)) centres for $(length(f)) faces, which have $n",
+    ))
     @inbounds for i in 1:n
-        c[i] = (f[i] + f[i+1]) / T(2)
+        out[i] = (f[i] + f[i+1]) / T(2)
     end
-    return c
+    return out
 end
 
 function centers(a::AbstractRange{T}) where {T<:AbstractFloat}

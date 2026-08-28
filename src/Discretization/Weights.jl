@@ -143,6 +143,44 @@ choose a staggering or a boundary condition.
 
 
 """
+    StencilScratch{T}
+
+The working buffers a degrading [`apply_stencil!`](@ref) needs to rebuild a window at a mask edge:
+the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
+
+**One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
+so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
+one passed here.
+"""
+struct StencilScratch{T<:AbstractFloat,VT<:AbstractVector{T},MT<:AbstractMatrix{T}}
+    w::VT             # the weights of one rebuilt row
+    c::MT             # the Fornberg recursion table
+    n::VT             # the row's node coordinates, unwrapped across a seam
+end
+
+"""
+    stencil_scratch([T = Float64], order, nodes) -> StencilScratch
+
+Buffers for the degrade path, so a caller taking many derivatives on a masked grid does not allocate
+them per call. Without one a degrading call allocates a few hundred bytes each time — `O(1)` in the
+grid, but per *call*, so a flux computation taking nine derivatives pays it nine times.
+
+Only the degrading policies need it. An unmasked grid, and any grid under [`BlankMasked`](@ref), never
+rebuilds a window and allocates nothing regardless.
+"""
+stencil_scratch(order::Integer, nodes::Integer) = stencil_scratch(Float64, order, nodes)
+
+function stencil_scratch(::Type{T}, order::Integer, nodes::Integer) where {T<:AbstractFloat}
+    k = Int(nodes)
+    m = Int(order)
+    k ≥ 1 || throw(ArgumentError("stencil_scratch needs nodes ≥ 1, got $k"))
+    m ≥ 0 || throw(ArgumentError("stencil_scratch needs order ≥ 0, got $m"))
+    w = Vector{T}(undef, k)
+    c = Matrix{T}(undef, k, m + 1)
+    return StencilScratch{T,typeof(w),typeof(c)}(w, c, Vector{T}(undef, k))
+end
+
+"""
     _window_start(i, k, lo, hi) -> Int
 
 First index of a `k`-node window centred on `i` and shifted to fit inside `[lo, hi]`. The whole-axis
@@ -169,40 +207,82 @@ function axis_stencils(
 ) where {T<:AbstractFloat}
     n = length(x)
     k = Int(nodes)
-    ord = Int(order)
+    _check_stencil_shape(n, k, Int(order))
+    return axis_stencils!(Matrix{Int}(undef, n, k), Matrix{T}(undef, n, k), x, order, nodes;
+                          period = period)
+end
+
+@inline function _check_stencil_shape(n::Int, k::Int, ord::Int)
     k ≥ ord + 1 || throw(ArgumentError(
         "an order-$ord derivative needs at least $(ord + 1) nodes, got $k",
     ))
     k ≤ n || throw(ArgumentError("cannot use $k nodes on an axis of $n samples"))
-    idx = Matrix{Int}(undef, n, k)
-    wts = Matrix{T}(undef, n, k)
-    half = (k - 1) ÷ 2
-    buf = Vector{T}(undef, k)
+    return nothing
+end
+
+"""
+    axis_stencils!(indices, weights, x, order, nodes; period=nothing, scratch=nothing) -> (indices, weights)
+
+[`axis_stencils`](@ref) into two caller-owned `n × nodes` matrices.
+
+The table is `O(n·k)`, so a caller rebuilding it — at each step of a stretching mesh, say — should own
+the matrices rather than have two allocated per call. Pass a [`stencil_scratch`](@ref) as well and the
+call allocates nothing at all: the remaining buffers are the Fornberg table and the node list, which are
+`O(k)` but still per call without one.
+"""
+function axis_stencils!(
+    indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix{T},
+    x::AbstractVector{T}, order::Integer, nodes::Integer;
+    period::Union{Nothing,Real} = nothing, scratch = nothing,
+) where {T<:AbstractFloat}
+    n = length(x)
+    k = Int(nodes)
+    ord = Int(order)
+    _check_stencil_shape(n, k, ord)
+    size(indices) == (n, k) || throw(DimensionMismatch(
+        "indices is $(size(indices)) but the table is ($n, $k)",
+    ))
+    size(weights) == (n, k) || throw(DimensionMismatch(
+        "weights is $(size(weights)) but the table is ($n, $k)",
+    ))
     # Reused across every sample: the allocating `fd_weights` would be two per sample, ~8000 on a
     # 4096-sample axis, for a table whose size never changes.
-    wbuf = Vector{T}(undef, k)
-    cbuf = Matrix{T}(undef, k, ord + 1)
+    buf, wbuf, cbuf = _weight_bufs(scratch, T, k, ord)
+    half = (k - 1) ÷ 2
     P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
     @inbounds for i in 1:n
         if period === nothing
             i0 = _window_start(i, k, 1, n)
             for q in 1:k
-                idx[i, q] = i0 + q - 1
+                indices[i, q] = i0 + q - 1
                 buf[q] = x[i0 + q - 1]
             end
         else
             for q in 1:k
                 raw = i - half + q - 1
-                idx[i, q] = mod1(raw, n)
+                indices[i, q] = mod1(raw, n)
                 buf[q] = x[mod1(raw, n)] + T(fld(raw - 1, n)) * P
             end
         end
         fd_weights!(wbuf, cbuf, buf, x[i], ord)
         for q in 1:k
-            wts[i, q] = wbuf[q]
+            weights[i, q] = wbuf[q]
         end
     end
-    return idx, wts
+    return indices, weights
+end
+
+# The node list, the row's weights and the Fornberg table, from a caller's scratch or freshly.
+@inline _weight_bufs(::Nothing, ::Type{T}, k::Int, ord::Int) where {T} =
+    (Vector{T}(undef, k), Vector{T}(undef, k), Matrix{T}(undef, k, ord + 1))
+
+@inline function _weight_bufs(s::StencilScratch{T}, ::Type{T}, k::Int, ord::Int) where {T}
+    (length(s.n) ≥ k && length(s.w) ≥ k && size(s.c, 1) ≥ k && size(s.c, 2) ≥ ord + 1) ||
+        throw(ArgumentError(
+            "this scratch holds $(length(s.w)) × $(size(s.c, 2)) and the table needs $k × $(ord + 1) " *
+            "— build it with `stencil_scratch($ord, $k)`",
+        ))
+    return (s.n, s.w, s.c)
 end
 
 

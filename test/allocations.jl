@@ -76,6 +76,11 @@ q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; 
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
+q_axst!(i, w, x, o, k, s) = FG.Discretization.axis_stencils!(i, w, x, o, k; scratch = s)
+q_faces!(o, x)           = FG.Discretization.faces!(o, x)
+q_centers!(o, f)         = FG.Discretization.centers!(o, f)
+q_lagr!(w, x, v, k)      = FG.Discretization.lagrange_weights!(w, x, v, k)
+q_iw(x, v)               = FG.Discretization.interpolation_weights(x, v)
 q_conn(g, r, s)          = FG.Connectivity.nneighbors_within(g, 12, 9; ball = r,
                               reach = FG.Connectivity.Connected(), scratch = s)
 q_connf(g, r, s)         = FG.Connectivity.nneighbors_within(g, 7; ball = r,
@@ -868,7 +873,7 @@ Test.@testset "A degrading sweep can be made to allocate nothing" begin
     g = GD.StructuredGrid(cart, x, x, mk)
     f = [sin(xi) * cos(yj) for xi in x, yj in x]
     idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
-    sc = O.stencil_scratch(1, 3)
+    sc = D.stencil_scratch(1, 3)
 
     # Same answer, and the buffers carry nothing between calls.
     a = zeros(n, n); b = zeros(n, n)
@@ -892,7 +897,7 @@ Test.@testset "A degrading sweep can be made to allocate nothing" begin
                       O.ReduceInRun()) == 0
 
     # A scratch too small for the stencil is refused rather than overrun.
-    let small = O.stencil_scratch(1, 2), i5w5 = D.axis_stencils(g, 1; order = 1, nodes = 5)
+    let small = D.stencil_scratch(1, 2), i5w5 = D.axis_stencils(g, 1; order = 1, nodes = 5)
         Test.@test_throws DimensionMismatch O.apply_stencil!(
             zeros(n, n), f, g, i5w5[1], i5w5[2], 1; order = 1, masked = NaN,
             policy = O.ReduceInRun(), scratch = small)

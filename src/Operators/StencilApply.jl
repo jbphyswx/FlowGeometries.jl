@@ -100,45 +100,7 @@ end
 
 # Rebuilding a stencil needs the axis and a scratch table, so it is a chunked host loop: a launch has
 # nowhere to put the per-cell Fornberg table. `BlankMasked` above keeps the index-parallel path.
-"""
-    StencilScratch{T}
-
-The working buffers a degrading [`apply_stencil!`](@ref) needs to rebuild a window at a mask edge:
-the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
-
-**One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
-so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
-one passed here.
-"""
-struct StencilScratch{T<:AbstractFloat,VT<:AbstractVector{T},MT<:AbstractMatrix{T}}
-    w::VT             # the weights of one rebuilt row
-    c::MT             # the Fornberg recursion table
-    n::VT             # the row's node coordinates, unwrapped across a seam
-end
-
-"""
-    stencil_scratch([T = Float64], order, nodes) -> StencilScratch
-
-Buffers for the degrade path, so a caller taking many derivatives on a masked grid does not allocate
-them per call. Without one a degrading call allocates a few hundred bytes each time — `O(1)` in the
-grid, but per *call*, so a flux computation taking nine derivatives pays it nine times.
-
-Only the degrading policies need it. An unmasked grid, and any grid under [`BlankMasked`](@ref), never
-rebuilds a window and allocates nothing regardless.
-"""
-stencil_scratch(order::Integer, nodes::Integer) = stencil_scratch(Float64, order, nodes)
-
-function stencil_scratch(::Type{T}, order::Integer, nodes::Integer) where {T<:AbstractFloat}
-    k = Int(nodes)
-    m = Int(order)
-    k ≥ 1 || throw(ArgumentError("stencil_scratch needs nodes ≥ 1, got $k"))
-    m ≥ 0 || throw(ArgumentError("stencil_scratch needs order ≥ 0, got $m"))
-    w = Vector{T}(undef, k)
-    c = Matrix{T}(undef, k, m + 1)
-    return StencilScratch{T,typeof(w),typeof(c)}(w, c, Vector{T}(undef, k))
-end
-
-@inline function _fits(s::StencilScratch, k::Int, ord::Int)
+@inline function _fits(s::Discretization.StencilScratch, k::Int, ord::Int)
     return length(s.w) ≥ k && length(s.n) ≥ k && size(s.c, 1) ≥ k && size(s.c, 2) ≥ ord + 1
 end
 
@@ -158,7 +120,7 @@ function _apply_stencil_degrade!(
     wrap = period !== nothing
     # A caller's buffers are usable only where there is one chunk: they are written per cell, so
     # concurrent chunks would race on them. The threaded path allocates its own set per chunk.
-    if backend === nothing && scratch isa StencilScratch{T}
+    if backend === nothing && scratch isa Discretization.StencilScratch{T}
         _fits(scratch, k, ord) || throw(DimensionMismatch(
             "scratch holds $(length(scratch.w)) nodes × $(size(scratch.c, 2)) orders; this call " *
             "needs $k × $(ord + 1) — build it with `stencil_scratch($ord, $k)`",

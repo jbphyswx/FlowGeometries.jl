@@ -244,6 +244,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
         :fold_candidates_at, :locate, :embed_point, :fold_at,
         :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
+        :axis_stencils!, :faces!, :centers!, :lagrange_weights!,
         :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
         :stencil_scratch, :interpolate!, :healpix_neighbor_ids,
         :plan_row, :nnodes, :derivative_order, :axis_length,
