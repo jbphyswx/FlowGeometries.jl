@@ -89,7 +89,7 @@ read, and the shifted end rows handled from the plan's own `O(K²)` table.
 """
 function _plan_sweep_host!(
     out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K},
-    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M},
+    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, invh = nothing,
 ) where {S,N,T,K,dim,M}
     sz = size(field)
     n = sz[dim]
@@ -102,6 +102,15 @@ function _plan_sweep_host!(
             for p in 0:(npost - 1)
                 _plan_first_linear!(out, field, plan, mask, masked, p * outer,
                                     (p % mpost) * outer, n, Val(K))
+                # The metric factor is constant on this slab, and the slab is still in cache: scaling
+                # it here costs an L1 pass where a second sweep over `out` costs a DRAM one.
+                #
+                # `invh` holds one factor per SPATIAL row, and `p` counts the batch axes too — the batch
+                # is the slowest, so slab `p` takes spatial row `p % length(invh)`, exactly as it takes
+                # mask slab `p % mpost`.
+                invh === nothing ||
+                    _scale_span!(out, p * outer + 1, n,
+                                 @inbounds(invh[mod1(p + 1, length(invh))]), masked)
             end
             return out
         end
@@ -109,10 +118,17 @@ function _plan_sweep_host!(
             nodes, wts = Discretization.plan_row(plan, j)
             _plan_row_linear!(out, field, nodes, wts, mask, masked, j, p * outer,
                               (p % mpost) * outer, stride, Val(K))
+            invh === nothing ||
+                _scale_span!(out, p * outer + (j - 1) * stride + 1, stride,
+                             @inbounds(invh[mod1(p * n + j, length(invh))]), masked)
         end
         return out
     end
-    # Anything that does not index linearly asks the array for its own indexing.
+    # Anything that does not index linearly asks the array for its own indexing, and takes the metric
+    # as a separate pass: the address arithmetic a fused span needs is what it does not have.
+    invh === nothing || throw(ArgumentError(
+        "a fused metric factor needs the linear layout; scale as a separate pass for this array type",
+    ))
     pre = CartesianIndices(ntuple(d -> sz[d], Val(dim - 1)))
     post = CartesianIndices(ntuple(d -> sz[dim + d], Val(N - dim)))
     @inbounds for Ipost in post, j in 1:n
@@ -121,6 +137,26 @@ function _plan_sweep_host!(
                    Val(dim), Val(N), Val(M))
     end
     return out
+end
+
+"""
+    _scale_span!(out, start, len, inv_h, masked) -> nothing
+
+Multiply the contiguous span `out[start:start+len-1]` by `inv_h`, or write `masked` across it when
+`inv_h` is zero — which is how a degenerate scale factor reaches here, `derivative!` having compared it
+against the geometry's own [`Discretization.metric_floor`](@ref).
+"""
+@inline function _scale_span!(out::AbstractArray{S}, start::Int, len::Int, inv_h, masked) where {S}
+    if iszero(inv_h)
+        @inbounds for t in 0:(len - 1)
+            out[start + t] = masked
+        end
+    else
+        @inbounds for t in 0:(len - 1)
+            out[start + t] *= inv_h
+        end
+    end
+    return nothing
 end
 
 # `dim == 1`: the differenced direction is the contiguous one. The interior span carries the weights in
@@ -132,15 +168,9 @@ end
     left = plan.left
     right = plan.right
     w = plan.weights
-    # A wrapping axis is centred everywhere, so every row goes through `plan_row`'s index wrap.
-    if plan.wrap
-        @inbounds for j in 1:n
-            _plan_cell_linear!(out, field, Discretization.plan_row(plan, j)..., mask, masked,
-                               off, moff, j, Val(K))
-        end
-        return nothing
-    end
-    # The shifted rows at the two ends. An even `K` shifts `left` at the bottom and `right` at the top.
+    # The two ends, whichever way the axis closes: `plan_row` gives a shifted window on a bounded axis
+    # and a wrapped one on a periodic axis. Only these rows differ between the two — a wrapping axis's
+    # interior does not wrap either, so it takes the same constant-coefficient span below.
     @inbounds for j in 1:left
         _plan_cell_linear!(out, field, Discretization.plan_row(plan, j)..., mask, masked,
                            off, moff, j, Val(K))

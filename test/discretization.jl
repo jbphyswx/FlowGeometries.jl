@@ -1418,3 +1418,77 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
     Test.@test_throws DimensionMismatch O.apply_stencil!(
         zeros(8, 4), zeros(8, 4), D.stencil_plan(range(0.0, 1.0; length = 9), 1, 3), 1)
 end
+
+Test.@testset "derivative! fuses the metric into the sweep, identically" begin
+    GE = FG.Geometry
+    GD = FG.Grids
+    O = FG.Operators
+    D = FG.Discretization
+
+    # The fused path applies only where the factor is constant across the span the inner loop writes.
+    let cart = GE.CartesianGeometry(), sph = GE.SphericalGeometry()
+        ax = range(0.0, 1.0; length = 12)
+        gc = GD.StructuredGrid(cart, ax, ax)
+        gs = GD.StructuredGrid(sph, range(0, 2π * (1 - 1 / 12); length = 12), ax;
+                               periodic = (true, false), period = (2π, 0.0))
+        g3 = GD.StructuredGrid(sph, range(0, 2π * (1 - 1 / 12); length = 12), ax, ax;
+                               periodic = (true, false, false), period = (2π, 0.0, 0.0))
+        f2 = zeros(12, 12)
+        f3 = zeros(12, 12, 12)
+        upl(g, d) = D.stencil_plan(g, d; order = 1, nodes = 3)
+        # a Cartesian metric is the identity: nothing to fuse
+        Test.@test !O._fusable(f2, f2, upl(gc, 1), cart, 1, nothing)
+        # a sphere fuses in directions 1 and 2, not 3 — there the span covers a direction the factor
+        # varies along
+        Test.@test O._fusable(f2, f2, upl(gs, 1), sph, 1, nothing)
+        Test.@test O._fusable(f2, f2, upl(gs, 2), sph, 2, nothing)
+        Test.@test !O._fusable(f3, f3, upl(g3, 3), sph, 3, nothing)
+        # a stretched axis has no constant row to carry
+        gst = GD.StructuredGrid(sph, range(0, 2π * (1 - 1 / 12); length = 12),
+                                collect(cumsum(fill(0.1, 12))); periodic = (true, false),
+                                period = (2π, 0.0))
+        Test.@test !O._fusable(f2, f2, upl(gst, 2), sph, 2, nothing)
+        # and a geometry that does not declare direction 1 invariant
+        gt = GD.StructuredGrid(TiltedSphere{Float64}(), range(0, 2π * (1 - 1 / 12); length = 12), ax;
+                               periodic = (true, false), period = (2π, 0.0))
+        Test.@test !O._fusable(f2, f2, upl(gt, 1), TiltedSphere{Float64}(), 1, nothing)
+    end
+
+    # Where it does fuse, the answer must be what the two passes gave — bit for bit, being the same
+    # multiplication by the same factor.
+    fused_seen = 0
+    for geo in (GE.SphericalGeometry(), GE.SpheroidGeometry())
+        for (nx, ny, nz, nb) in ((16, 12, 0, 0), (9, 7, 0, 3), (8, 6, 5, 0), (8, 6, 5, 2))
+            λ = range(0, 2π * (1 - 1 / nx); length = nx)
+            φ = range(-1.4, 1.4; length = ny)
+            axs = nz == 0 ? (λ, φ) : (λ, φ, range(1.0, 2.0; length = nz))
+            szs = nz == 0 ? (nx, ny) : (nx, ny, nz)
+            fsz = nb == 0 ? szs : (szs..., nb)
+            fld = reshape(collect(Float64, 1:prod(fsz)), fsz) ./ prod(fsz)
+            msk = trues(szs)
+            msk[CartesianIndices(szs)[2]] = false
+            for gg in (GD.StructuredGrid(geo, axs...;
+                            periodic = (true, false, false)[1:length(axs)],
+                            period = (2π, 0.0, 0.0)[1:length(axs)]),
+                       GD.StructuredGrid(geo, axs...; mask = msk,
+                            periodic = (true, false, false)[1:length(axs)],
+                            period = (2π, 0.0, 0.0)[1:length(axs)]))
+                for dim in 1:length(axs)
+                    pl = D.stencil_plan(gg, dim; order = 1, nodes = 5)
+                    mk = GD.mask(gg) isa GD.AllActive ? nothing : GD.mask(gg)
+                    O._fusable(fld, fld, pl, geo, dim, mk) && (fused_seen += 1)
+                    a = fill(NaN, fsz)
+                    b = fill(NaN, fsz)
+                    c = fill(NaN, fsz)
+                    O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
+                    O.apply_stencil!(b, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
+                    O._scale_by_metric!(b, gg, dim, -3.0)
+                    O.derivative!(c, fld, gg, pl, dim; masked = -3.0)
+                    Test.@test isequal(a, b)
+                    Test.@test isequal(c, b)
+                end
+            end
+        end
+    end
+    Test.@test fused_seen > 0            # the gate above actually exercised the fused path
+end
