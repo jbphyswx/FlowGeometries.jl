@@ -327,3 +327,98 @@ Test.@testset "Axis widths use bulk operations, not per-element scalar reads" be
     FG.Discretization.cell_widths(c2)
     Test.@test c2.scalar_reads - c1.scalar_reads <= 4n + 16   # grows linearly, not quadratically
 end
+
+Test.@testset "An analytic axis is a formula, and inverts instead of searching" begin
+    A = FG.Axes
+    D = FG.Discretization
+    GD = FG.Grids
+
+    axes_under_test = (
+        ("GeometricAxis r=1.15", A.GeometricAxis(0.0, 10.0, 1.15, 40)),
+        ("GeometricAxis r=0.85", A.GeometricAxis(0.0, 100.0, 0.85, 40)),
+        ("GeometricAxis descending", A.GeometricAxis(1000.0, -20.0, 1.1, 30)),
+        ("GeometricAxis r=2.5", A.GeometricAxis(1.0, 0.5, 2.5, 12)),
+        ("PowerAxis p=2", A.PowerAxis(0.0, 5000.0, 2.0, 40)),
+        ("PowerAxis p=0.5", A.PowerAxis(0.0, 5000.0, 0.5, 40)),
+        ("PowerAxis descending", A.PowerAxis(0.0, -6000.0, 1.7, 25)),
+    )
+
+    for (_, a) in axes_under_test
+        n = length(a)
+        # `coordinate` IS the indexing, at every integer — one definition, not two that agree.
+        Test.@test all(A.coordinate(a, Float64(i)) === a[i] for i in 1:n)
+        # …and `index_at` is its inverse, which is what removes the search.
+        Test.@test all(abs(A.index_at(a, a[i]) - i) < 1e-9 for i in 1:n)
+        # Strictly monotone, which is what makes that inverse single-valued.
+        Test.@test all(sign(a[i + 1] - a[i]) == sign(a[2] - a[1]) for i in 1:(n - 1))
+        # Not uniform, and it does not pretend to be.
+        Test.@test A.spacing_trait(a) === A.NonuniformSpacing()
+        Test.@test !A.isuniform(a)
+        Test.@test_throws ArgumentError A.spacing(a)
+        # The endpoint reductions are closed form, and agree with the samples.
+        Test.@test extrema(a) == extrema(collect(a))
+        Test.@test first(a) === a[1] && last(a) === a[n]
+        # It is its parameters: `isbits`, and the same size at any length.
+        Test.@test isbits(a)
+    end
+
+    # A geometric axis's gaps ARE a geometric progression — the property it is named for.
+    let a = A.GeometricAxis(0.0, 10.0, 1.15, 40)
+        g = [a[i + 1] - a[i] for i in 1:(length(a) - 1)]
+        Test.@test g[1] ≈ a.Δ
+        Test.@test all(isapprox(g[i + 1], g[i] * a.ratio; rtol = 1e-12) for i in 1:(length(g) - 1))
+    end
+
+    # Every query answers exactly what the search over the same samples answers — at the samples, inside
+    # every cell, ON every face, and outside both ends. The closed form is an optimization, not a
+    # different convention: faces are still the coordinate midpoints, not the index midpoints.
+    for (_, a) in axes_under_test
+        n = length(a)
+        dense = collect(a)
+        probes = Float64[]
+        for i in 1:n
+            push!(probes, a[i])
+            i < n && append!(probes,
+                             [a[i] + t * (a[i + 1] - a[i]) for t in (0.001, 0.25, 0.5, 0.75, 0.999)])
+        end
+        append!(probes, [D._face_at(a, j, n) for j in 1:(n + 1)])
+        w = abs(a[n] - a[1])
+        append!(probes, [a[1] - 0.3w, a[1] - 1e-9w, a[n] + 1e-9w, a[n] + 0.3w])
+        Test.@test all(D.locate(a, v) == D.locate(dense, v) for v in probes)
+        Test.@test all(D.nearest_index(a, v) == D.nearest_index(dense, v) for v in probes)
+        Test.@test all(D.interpolation_weights(a, v) == D.interpolation_weights(dense, v)
+                       for v in probes)
+    end
+
+    # Storage is the parameters, so it does not grow with the sample count.
+    Test.@test Base.summarysize(A.PowerAxis(0.0, 1.0, 1.6, 20)) ==
+               Base.summarysize(A.PowerAxis(0.0, 1.0, 1.6, 20_000))
+    Test.@test Base.summarysize(A.GeometricAxis(0.0, 1.0, 1.2, 20)) ==
+               Base.summarysize(A.GeometricAxis(0.0, 1.0, 1.2, 20_000))
+
+    # As a grid's last direction: kept as itself, and measuring what its samples would.
+    let sph = FG.Geometry.SphericalGeometry(6.371e6),
+        λ = collect(range(0, 2π; length = 13)[1:12]),
+        φ = collect(range(-1.2, 1.2; length = 9)),
+        z = A.PowerAxis(6.371e6, 8.0e4, 1.6, 20)
+        g = GD.StructuredGrid(sph, λ, φ, z)
+        gd = GD.StructuredGrid(sph, λ, φ, collect(z))
+        Test.@test GD.coordinates(g, 3) === z          # kept, not collected into a Vector
+        Test.@test !GD.isuniform(g, 3)
+        Test.@test GD.coords(g, 2, 3, 4) == (λ = λ[2], φ = φ[3], r = z[4])
+        Test.@test all(GD.measure(g, i, j, k) == GD.measure(gd, i, j, k)
+                       for i in 1:12, j in 1:9, k in 1:20)
+        Test.@test GD.locate(g, (0.3, 0.1, z[7] + 1.0)) == GD.locate(gd, (0.3, 0.1, z[7] + 1.0))
+    end
+
+    # What cannot be inverted single-valuedly is refused at construction, once, rather than producing
+    # a wrong index later.
+    Test.@test_throws ArgumentError A.GeometricAxis(0.0, 1.0, 1.0, 10)    # constant gaps: a UniformAxis
+    Test.@test_throws ArgumentError A.GeometricAxis(0.0, 1.0, -2.0, 10)   # not monotone
+    Test.@test_throws ArgumentError A.GeometricAxis(0.0, 0.0, 1.2, 10)    # no first gap
+    Test.@test_throws ArgumentError A.GeometricAxis(0.0, 1.0, 1.2, -1)
+    Test.@test_throws ArgumentError A.PowerAxis(0.0, 1.0, 0.0, 10)        # a zero exponent is flat
+    Test.@test_throws ArgumentError A.PowerAxis(0.0, 1.0, -1.0, 10)
+    Test.@test_throws ArgumentError A.PowerAxis(0.0, 0.0, 2.0, 10)
+    Test.@test_throws ArgumentError A.PowerAxis(0.0, 1.0, 2.0, 1)
+end

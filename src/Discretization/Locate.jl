@@ -16,13 +16,18 @@ function locate(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     n == 0 && return 0
     vT = T(v)
     @inbounds ascending = n == 1 || x[n] ≥ x[1]
+    _in_span(x, vT, n, ascending) || return 0
+    return _locate_bisect(x, vT, n, ascending)
+end
+
+# Whether `v` lies between the outer faces, which is what makes it locatable at all.
+@inline function _in_span(x::AbstractVector{T}, vT::T, n::Int, ascending::Bool) where {T}
     f1 = _face_at(x, 1, n)
     fe = _face_at(x, n + 1, n)
-    if ascending
-        (vT < f1 || vT > fe) && return 0
-    else
-        (vT > f1 || vT < fe) && return 0
-    end
+    return ascending ? (f1 ≤ vT ≤ fe) : (fe ≤ vT ≤ f1)
+end
+
+@inline function _locate_bisect(x::AbstractVector{T}, vT::T, n::Int, ascending::Bool) where {T}
     lo, hi = 1, n + 1
     while hi - lo > 1
         mid = (lo + hi) ÷ 2
@@ -34,6 +39,29 @@ function locate(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
         end
     end
     return lo
+end
+
+# An analytic axis inverts, so the cell comes from the inverse rather than from `log₂ n` face
+# evaluations. A face lies strictly between two samples, so the containing cell `i` has
+# `index_at(v) ∈ (i-1, i+1)` — the seed is within one cell, and one comparison against the neighbouring
+# face settles it, exactly as on a uniform axis. The faces themselves are still the coordinate
+# midpoints `_face_at` defines, so this agrees with the bisection cell for cell.
+function locate(a::Axes.AbstractAnalyticAxis{T}, v::Real) where {T<:AbstractFloat}
+    n = length(a)
+    n == 0 && return 0
+    vT = T(v)
+    @inbounds ascending = n == 1 || a[n] ≥ a[1]
+    _in_span(a, vT, n, ascending) || return 0
+    n == 1 && return 1
+    ξ = Axes.index_at(a, vT)
+    isfinite(ξ) || return _locate_bisect(a, vT, n, ascending)
+    i = clamp(round(Int, ξ), 1, n)
+    if i > 1 && (ascending ? vT < _face_at(a, i, n) : vT > _face_at(a, i, n))
+        i -= 1
+    elseif i < n && (ascending ? vT ≥ _face_at(a, i + 1, n) : vT ≤ _face_at(a, i + 1, n))
+        i += 1
+    end
+    return i
 end
 
 # The bisection above needs `log₂ n` of the `n + 1` faces, so they are evaluated one at a time from
@@ -137,7 +165,9 @@ function interpolation_weights(x::AbstractVector{T}, v::Real) where {T<:Abstract
 end
 
 # The left index of the pair of samples that brackets `v`, clamped to the ends.
-function _bracket(x::AbstractVector{T}, v::T, n::Int) where {T}
+_bracket(x::AbstractVector{T}, v::T, n::Int) where {T} = _bracket_bisect(x, v, n)
+
+@inline function _bracket_bisect(x::AbstractVector{T}, v::T, n::Int) where {T}
     @inbounds ascending = x[n] ≥ x[1]
     lo, hi = 1, n
     @inbounds while hi - lo > 1
@@ -155,6 +185,22 @@ function _bracket(a::AbstractRange{T}, v::T, n::Int) where {T<:AbstractFloat}
     Δ = T(step(a))
     iszero(Δ) && return 1
     return clamp(Int(floor((v - T(first(a))) / Δ)) + 1, 1, n - 1)
+end
+
+# The inverse gives the bracketing pair directly. `x[i] ≤ v` exactly when `i ≤ index_at(v)`, the
+# coordinate being monotone in the index, so `floor` is the answer up to the rounding of the inverse
+# itself — which one comparison against the samples settles.
+function _bracket(a::Axes.AbstractAnalyticAxis{T}, v::T, n::Int) where {T<:AbstractFloat}
+    ξ = Axes.index_at(a, v)
+    isfinite(ξ) || return _bracket_bisect(a, v, n)
+    i = clamp(floor(Int, ξ), 1, n - 1)
+    @inbounds ascending = a[n] ≥ a[1]
+    @inbounds if i > 1 && (ascending ? v < a[i] : v > a[i])
+        i -= 1
+    elseif i < n - 1 && (ascending ? v ≥ a[i + 1] : v ≤ a[i + 1])
+        i += 1
+    end
+    return i
 end
 
 """

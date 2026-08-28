@@ -34,8 +34,10 @@ Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology) = throw(ArgumentEr
     "build the topology there, or use `MetricTopology(grid)` without an index",
 ))
 
-# `isbits`: no heap reference to move.
+# `isbits`: no heap reference to move. An analytic axis is its formula's parameters, so moving it
+# means moving those, not evaluating the formula onto the device.
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.UniformAxis) = a
+Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.AbstractAnalyticAxis) = a
 Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 
 # One method for every layout: the array-backed fields are adapted and handed to `Grids.rebuild`, which

@@ -266,6 +266,196 @@ uniform_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = throw(Argu
 
 
 # ---------------------------------------------------------------------------
+# Analytic axes
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractAnalyticAxis{T} <: AbstractVector{T}
+
+An axis whose coordinate is a FORMULA of its index, and whose formula inverts in closed form.
+
+The third axis kind. An [`AbstractUniformAxis`](@ref) carries a constant spacing in its type; a plain
+`Vector` has nothing but its samples. A stretched vertical coordinate is neither: the spacing genuinely
+varies, so it is not uniform, but the samples are `n` evaluations of two or three parameters, and
+storing them stores a formula's output.
+
+A subtype implements three methods:
+
+- `Base.length(a)`
+- [`coordinate`](@ref)`(a, ξ)` — the coordinate at CONTINUOUS index `ξ`, agreeing with `a[i]` at every
+  integer `i`
+- [`index_at`](@ref)`(a, x)` — its inverse, the continuous index whose coordinate is `x`
+
+and gets indexing, the `O(1)` endpoint reductions, and — through the inverse — `locate`,
+`nearest_index` and the interpolation weights without a search. Locating a coordinate on a stretched
+`Vector` bisects in `O(log n)`; here the inverse names the cell directly and one comparison against the
+neighbouring face settles the rounding.
+
+The coordinate must be strictly monotone in `ξ`, which is what makes the inverse single-valued. That is
+checked once by a constructor, not on every call. Where `index_at` cannot answer — a coordinate outside
+the formula's domain, which a far-extrapolated face can be — it returns a non-finite value and the
+caller falls back to the search, so the answer is the same either way.
+"""
+abstract type AbstractAnalyticAxis{T<:AbstractFloat} <: AbstractVector{T} end
+
+"""
+    coordinate(a, ξ) -> T
+
+The coordinate of [`AbstractAnalyticAxis`](@ref) `a` at continuous index `ξ`, equal to `a[i]` at every
+integer index. Half-integer `ξ` is what a face sits at in INDEX space, which is not in general where a
+face sits in coordinate space — this package's faces are coordinate midpoints — so it is the formula
+that is being extended here, not the cell boundary.
+"""
+function coordinate end
+
+"""
+    index_at(a, x) -> T
+
+The continuous index at which [`AbstractAnalyticAxis`](@ref) `a` has coordinate `x`: the inverse of
+[`coordinate`](@ref), and the reason a query on such an axis needs no search.
+
+Returns a non-finite value where `x` lies outside the formula's domain, which callers take as "no
+closed-form answer" and fall back to bisection.
+"""
+function index_at end
+
+spacing_trait(::AbstractAnalyticAxis) = NonuniformSpacing()
+
+@inline Base.size(a::AbstractAnalyticAxis) = (length(a),)
+Base.IndexStyle(::Type{<:AbstractAnalyticAxis}) = IndexLinear()
+
+@inline function Base.getindex(a::AbstractAnalyticAxis{T}, i::Int) where {T}
+    @boundscheck checkbounds(a, i)
+    return coordinate(a, T(i))
+end
+
+@inline Base.first(a::AbstractAnalyticAxis{T}) where {T} = coordinate(a, one(T))
+@inline Base.last(a::AbstractAnalyticAxis{T}) where {T} = coordinate(a, T(length(a)))
+
+# Strictly monotone by contract, so the extremes are the endpoints and no scan is needed.
+@inline Base.minimum(a::AbstractAnalyticAxis) = isempty(a) ? _empty_reduce(a, "minimum") :
+    (last(a) ≥ first(a) ? first(a) : last(a))
+@inline Base.maximum(a::AbstractAnalyticAxis) = isempty(a) ? _empty_reduce(a, "maximum") :
+    (last(a) ≥ first(a) ? last(a) : first(a))
+@inline Base.extrema(a::AbstractAnalyticAxis) = (minimum(a), maximum(a))
+
+@inline wrap_sign(a::AbstractAnalyticAxis{T}) where {T} =
+    length(a) < 2 ? one(T) : (last(a) ≥ first(a) ? one(T) : -one(T))
+
+Base.show(io::IO, ::MIME"text/plain", a::AbstractAnalyticAxis{T}) where {T} =
+    (print(io, length(a), "-element ", nameof(typeof(a)), "{", T, "}: "); show(io, a))
+
+"""
+    GeometricAxis(origin, Δ, ratio, n)
+    GeometricAxis{T}(origin, Δ, ratio, n)
+
+`n` samples whose successive gaps are `Δ, Δ·r, Δ·r², …` — the stretched grid a boundary layer or a
+model's vertical levels are usually built on, held as four numbers rather than `n`.
+
+    x(ξ) = origin + Δ·(r^(ξ-1) − 1)/(r − 1)
+
+so `x(1) = origin` and `x(i+1) − x(i) = Δ·r^(i-1)`. The inverse is a logarithm, which is what makes
+locating a coordinate on it `O(1)`.
+
+`r > 0` and `r ≠ 1`. At `r == 1` the gaps are constant and the axis is a [`UniformAxis`](@ref), which
+carries that in its type; this one would only hide it.
+"""
+struct GeometricAxis{T<:AbstractFloat} <: AbstractAnalyticAxis{T}
+    origin::T
+    Δ::T
+    ratio::T
+    n::Int
+
+    function GeometricAxis{T}(origin, Δ, ratio, n::Integer) where {T<:AbstractFloat}
+        r = convert(T, ratio)
+        d = convert(T, Δ)
+        n ≥ 0 || throw(ArgumentError("a GeometricAxis needs n ≥ 0, got $n"))
+        r > 0 || throw(ArgumentError("a GeometricAxis needs a positive ratio, got $r"))
+        r != one(T) || throw(ArgumentError(
+            "a ratio of 1 makes the gaps constant; that axis is a UniformAxis, which says so in its " *
+            "type — `UniformAxis(origin, Δ, n)`",
+        ))
+        iszero(d) || return new{T}(convert(T, origin), d, r, Int(n))
+        throw(ArgumentError("a GeometricAxis needs a nonzero first gap, got $d"))
+    end
+end
+
+function GeometricAxis(origin::Real, Δ::Real, ratio::Real, n::Integer)
+    T = float(promote_type(typeof(origin), typeof(Δ), typeof(ratio)))
+    return GeometricAxis{T}(origin, Δ, ratio, n)
+end
+
+@inline Base.length(a::GeometricAxis) = a.n
+
+@inline coordinate(a::GeometricAxis{T}, ξ::Real) where {T} =
+    a.origin + a.Δ * (a.ratio^(T(ξ) - one(T)) - one(T)) / (a.ratio - one(T))
+
+@inline function index_at(a::GeometricAxis{T}, x::Real) where {T}
+    u = one(T) + (T(x) - a.origin) * (a.ratio - one(T)) / a.Δ
+    # `u ≤ 0` is outside the formula's reach — the gaps shrink geometrically towards a finite limit
+    # point, and no index maps beyond it.
+    return u > zero(T) ? one(T) + log(u) / log(a.ratio) : T(NaN)
+end
+
+Base.show(io::IO, a::GeometricAxis{T}) where {T} = print(
+    io, "GeometricAxis{", T, "}(", a.origin, ", Δ=", a.Δ, ", r=", a.ratio, ", n=", a.n, ")",
+)
+
+"""
+    PowerAxis(origin, extent, exponent, n)
+    PowerAxis{T}(origin, extent, exponent, n)
+
+`n` samples spanning `origin` to `origin + extent` with the index mapped through a power:
+
+    x(ξ) = origin + extent·((ξ-1)/(n-1))^p
+
+`p == 1` is uniform, `p > 1` clusters samples near `origin`, and `p < 1` clusters them near the far
+end — the shape ocean depth levels and a stretched radial coordinate are usually given. The inverse is
+a root, so locating a coordinate on it is `O(1)`.
+
+`n ≥ 2`, `p > 0`, and a nonzero extent.
+"""
+struct PowerAxis{T<:AbstractFloat} <: AbstractAnalyticAxis{T}
+    origin::T
+    extent::T
+    exponent::T
+    n::Int
+
+    function PowerAxis{T}(origin, extent, exponent, n::Integer) where {T<:AbstractFloat}
+        L = convert(T, extent)
+        p = convert(T, exponent)
+        n ≥ 2 || throw(ArgumentError("a PowerAxis needs n ≥ 2, got $n"))
+        p > 0 || throw(ArgumentError("a PowerAxis needs a positive exponent, got $p"))
+        iszero(L) && throw(ArgumentError("a PowerAxis needs a nonzero extent"))
+        return new{T}(convert(T, origin), L, p, Int(n))
+    end
+end
+
+function PowerAxis(origin::Real, extent::Real, exponent::Real, n::Integer)
+    T = float(promote_type(typeof(origin), typeof(extent), typeof(exponent)))
+    return PowerAxis{T}(origin, extent, exponent, n)
+end
+
+@inline Base.length(a::PowerAxis) = a.n
+
+@inline function coordinate(a::PowerAxis{T}, ξ::Real) where {T}
+    s = (T(ξ) - one(T)) / T(a.n - 1)
+    # Below the first sample the power is not real; the formula is continued by odd reflection, which
+    # keeps it monotone and keeps `index_at` its exact inverse there.
+    return a.origin + a.extent * (s ≥ zero(T) ? s^a.exponent : -((-s)^a.exponent))
+end
+
+@inline function index_at(a::PowerAxis{T}, x::Real) where {T}
+    u = (T(x) - a.origin) / a.extent
+    s = u ≥ zero(T) ? u^inv(a.exponent) : -((-u)^inv(a.exponent))
+    return one(T) + s * T(a.n - 1)
+end
+
+Base.show(io::IO, a::PowerAxis{T}) where {T} = print(
+    io, "PowerAxis{", T, "}(", a.origin, ", extent=", a.extent, ", p=", a.exponent, ", n=", a.n, ")",
+)
+
+# ---------------------------------------------------------------------------
 # ConstantVector
 # ---------------------------------------------------------------------------
 
