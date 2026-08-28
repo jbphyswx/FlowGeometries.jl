@@ -51,23 +51,26 @@ function _gradient_plan(
     msk = Grids.mask(grid)
     sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
     n = length(msk)
+    # The connectivity already gives every degree, so the result is SIZED rather than grown: an
+    # inactive or coincident neighbour is dropped, which only ever lowers the count, so
+    # `length(c.nbrs)` is an exact upper bound and one `resize!` at the end reclaims the difference.
+    cap = length(c.nbrs)
     ptr = Vector{Int}(undef, n + 1)
-    nbr = Int[]
-    coef = ntuple(_ -> T[], Val(D))
-    sizehint!(nbr, length(c.nbrs))
-    for d in 1:D
-        sizehint!(coef[d], length(c.nbrs))
-    end
+    nbr = Vector{Int}(undef, cap)
+    coef = ntuple(_ -> Vector{T}(undef, cap), Val(D))
     # Scratch for one cell's neighbours: the displacements are needed twice, once to accumulate `A`
-    # and once to weight it by `A⁺`, and re-projecting them would double the trigonometry.
-    dcol = ntuple(_ -> T[], Val(D))
-    wk = T[]
+    # and once to weight it by `A⁺`, and re-projecting them would double the trigonometry. Sized to
+    # the largest degree once, so it is never reallocated either.
+    maxdeg = 0
+    @inbounds for i in 1:n
+        maxdeg = max(maxdeg, c.ptr[i + 1] - c.ptr[i])
+    end
+    dcol = ntuple(_ -> Vector{T}(undef, maxdeg), Val(D))
+    wk = Vector{T}(undef, maxdeg)
+    w = 0                                              # write cursor into `nbr`/`coef`
     @inbounds ptr[1] = 1
     @inbounds for i in 1:n
-        for d in 1:D
-            empty!(dcol[d])
-        end
-        empty!(wk)
+        m = 0                                          # this cell's kept neighbours
         if !(active_only && !msk[i])
             p0 = _grad_coords(grid, sz, i)
             for t in c.ptr[i]:(c.ptr[i + 1] - 1)
@@ -77,14 +80,16 @@ function _gradient_plan(
                 δ = ntuple(d -> T(Δ[d]), Val(D))
                 q = _contract(δ, δ)
                 q > 0 || continue                     # a coincident neighbour carries no direction
+                m += 1
                 for d in 1:D
-                    push!(dcol[d], δ[d])
+                    dcol[d][m] = δ[d]
                 end
-                push!(wk, inv(q)); push!(nbr, j)
+                wk[m] = inv(q)
+                nbr[w + m] = j
             end
             A = ntuple(r -> ntuple(s -> begin
                     acc = zero(T)
-                    for t in eachindex(wk)
+                    for t in 1:m
                         acc += wk[t] * dcol[r][t] * dcol[s][t]
                     end
                     acc
@@ -96,14 +101,19 @@ function _gradient_plan(
                 trA += A[d][d]
             end
             P = _sympinv(A, max(trA, one(T)) * sqrt(eps(T)))
-            for t in eachindex(wk)
+            for t in 1:m
                 δ = ntuple(d -> dcol[d][t], Val(D))
                 for d in 1:D
-                    push!(coef[d], wk[t] * _contract(P[d], δ))
+                    coef[d][w + t] = wk[t] * _contract(P[d], δ)
                 end
             end
         end
-        ptr[i + 1] = ptr[i] + length(wk)
+        w += m
+        ptr[i + 1] = ptr[i] + m
+    end
+    resize!(nbr, w)
+    for d in 1:D
+        resize!(coef[d], w)
     end
     return GradientPlan(ptr, nbr, coef, Geometry.point_names(geo, Val(D)))
 end

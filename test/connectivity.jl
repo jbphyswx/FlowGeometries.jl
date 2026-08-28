@@ -1654,6 +1654,29 @@ Test.@testset "A stencil's count and reach are properties of its shape" begin
     Test.@test S.nstencil(S.Moore(3), Val(4)) == 2400
     Test.@test S.reach(S.Moore(3), Val(4)) == (3, 3, 3, 3)
     Test.@test (Test.@inferred S.reach(S.Moore(3), Val(4))) isa NTuple{4,Int}
+
+    # Symmetry is a property of the shape too — whether the offset set is closed under negation, which
+    # is what lets an adjacency built from it be READ as its own transpose. Each built-in is defined by
+    # a condition on |δ|, so it contains −δ with δ; checked here against the offsets themselves.
+    for N in (1, 2, 3), st in (S.Axial(1), S.Axial(3), S.VonNeumann(2), S.Moore(1), S.Moore(2),
+                               S.Diagonal(1), S.Anisotropic((3, 1, 2)[1:N]))
+        offs = Set(S.offsets(st, Val(N)))
+        Test.@test S.is_symmetric(st, Val(N)) == all(o -> map(-, o) in offs, offs)
+        Test.@test S.is_symmetric(st, Val(N))
+    end
+    # A `Custom` set is whatever it was given, decided at compile time from the type.
+    Test.@test S.is_symmetric(S.Custom(((1, 0), (-1, 0), (0, 1), (0, -1))), Val(2))
+    Test.@test !S.is_symmetric(S.Custom(((1, 0), (0, 1))), Val(2))
+    # A caller's own shape answers `false` unless it says otherwise: a wrong `true` would be read as a
+    # transpose, where a wrong `false` only costs one.
+    Test.@test !S.is_symmetric(Upwind(1), Val(2))
+    Test.@test !S.is_symmetric(Upwind(2), Val(3))
+    # Read from the type, so the widest built-in costs nothing rather than walking 2400 offsets.
+    Test.@test (Test.@inferred S.is_symmetric(S.Moore(3), Val(4))) === true
+    let f() = S.is_symmetric(S.Moore(3), Val(4))
+        f()
+        Test.@test @allocated(f()) == 0
+    end
 end
 
 Test.@testset "A prefix scan and an index reduction are execution primitives" begin

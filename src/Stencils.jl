@@ -150,6 +150,31 @@ const _BuiltinStencil = Union{Axial,VonNeumann,Moore,Diagonal,Anisotropic,Custom
     return :($(Tuple(_offset_list(s, N))))
 end
 
+"""
+    is_symmetric(stencil, Val(N)) -> Bool
+
+Whether the offset set is closed under negation: `δ` is an offset exactly when `−δ` is.
+
+A graph built from a symmetric stencil is a symmetric graph, and stays one under masking and under
+clipping at a boundary — an edge and its reverse are dropped together, both being the same pair of
+cells. That lets a symmetric adjacency be READ as its own transpose instead of built again.
+
+`Axial`, `VonNeumann`, `Moore`, `Diagonal` and `Anisotropic` are symmetric by construction: each is
+defined by a condition on `|δ|` and so contains `−δ` with `δ`. `Custom` is whatever it was given, and
+is checked once at compile time. A caller's own shape answers `false` unless it says otherwise, which
+costs it a transpose and never a wrong answer — see [`AbstractStencil`](@ref).
+"""
+function is_symmetric end
+
+is_symmetric(::AbstractStencil, ::Val) = false
+is_symmetric(::Union{Axial,VonNeumann,Moore,Diagonal,Anisotropic}, ::Val) = true
+
+@generated function is_symmetric(::Custom{O}, ::Val{N}) where {O,N}
+    all(o -> length(o) == N, O) || return :(false)
+    set = Set(O)
+    return :($(all(o -> map(-, o) in set, O)))
+end
+
 @inline _axis_unit(N::Int, d::Int, k::Int) = ntuple(i -> i == d ? k : 0, N)
 
 # Built at generation time, never at run time. `offsets` returns the whole tuple, which is convenient

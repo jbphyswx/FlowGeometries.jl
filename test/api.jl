@@ -264,7 +264,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
         :similar_geometry, :float_type, :similar_rotation, :metric_invariant_directions,
         :spacing_trait, :similar_axis, :uniform_axis, :wrap_sign, :coordinate, :index_at,
-        :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets,
+        :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets, :is_symmetric,
         :bandlimit, :nlat_for_bandlimit, :nlon_for_nlat, :npoints, :nrings, :axes_lengths,
         :colatitude, :geographic_latitude, :ang2pix, :pix2ang, :pix2vec, :vec2pix, :ring2nest,
         :ring_info, :admits_exact_bandlimited_quadrature, :nlon_in_ring, :ring_range,

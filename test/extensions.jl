@@ -367,6 +367,46 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
     I = Vector{Int}(undef, ne); J = Vector{Int}(undef, ne)
     Test.@test FG.Connectivity.sparse_adjacency_coo!(I, J, conn) == ne
     Test.@test SparseArrays.sparse(I, J, trues(ne), n, n) == A
+
+    # A symmetric graph's CSR arrays ARE its CSC arrays, so the matrix reads the neighbour list rather
+    # than transposing it into a second permanent copy. What decides that is the STENCIL's symmetry,
+    # read from its type: a stencil need not be symmetric, and wrapping an asymmetric graph would
+    # return the transpose of the adjacency, which is a different matrix. The contract — entry `(i, j)`
+    # set exactly when `j` is a neighbour of `i` — is what gets checked, on every shape.
+    let cart = FG.Geometry.CartesianGeometry{Float64}(),
+        xs = collect(0.0:1.0:4.0), ys = collect(0.0:1.0:3.0),
+        mk = trues(5, 4)
+        mk[3, 2] = false
+        gg = FG.Grids.StructuredGrid(cart, xs, ys)
+        gm = FG.Grids.StructuredGrid(cart, xs, ys, mk)
+        λn = [0.3i for i in 0:19]
+        φn = [0.2 * sin(3.0i) for i in 0:19]
+        gu = FG.Grids.UnstructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), (λn, φn), trues(20);
+                                       k = 3, areas = ones(20))
+        cases = (("Axial", gg, (;)),
+                 ("Moore", gg, (; stencil = FG.Stencils.Moore(1))),
+                 ("Upwind, asymmetric", gg, (; stencil = Upwind(1))),
+                 ("Custom forward-only", gg, (; stencil = FG.Stencils.Custom(((1, 0), (0, 1))))),
+                 ("masked", gm, (;)),
+                 ("stored kNN adjacency", gu, (;)),
+                 ("formula neighbours", FG.Grids.HEALPixGrid(2), (;)))
+        for (_, g, kw) in cases
+            cn = FG.Connectivity.build_connectivity(g; kw...)
+            M = FG.Connectivity.sparse_adjacency_matrix(g; kw...)
+            Test.@test SparseArrays.nnz(M) == FG.Connectivity.nedges(cn)
+            Test.@test all(M[i, Int(cn.nbrs[k])]
+                           for i in 1:FG.Connectivity.nnodes(cn)
+                           for k in cn.ptr[i]:(cn.ptr[i + 1] - 1))
+        end
+        # And the wrap is what makes the symmetric case the CHEAPER one: asking the built graph
+        # instead would answer by building the very transpose the wrap exists to avoid.
+        big = FG.Grids.StructuredGrid(cart, collect(range(0.0, 1.0; length = 120)),
+                                      collect(range(0.0, 1.0; length = 120)))
+        sym() = FG.Connectivity.sparse_adjacency_matrix(big)
+        asym() = FG.Connectivity.sparse_adjacency_matrix(big; stencil = Upwind(1))
+        sym(); asym()
+        Test.@test @allocated(sym()) < @allocated(asym())
+    end
 end
 
 Test.@testset "Index-parallel loops run as kernels and give the same answer" begin
