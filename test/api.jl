@@ -329,7 +329,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         [:axis],
     )))
 
-    for m in (FG.Grids, FG.Connectivity, FG.Discretization, FG.Geometry, FG.Axes,
+    for m in (FG.Grids, FG.Connectivity, FG.Discretization, FG.Operators, FG.Geometry, FG.Axes,
               FG.Stencils, FG.SphericalSampling, FG.Execution)
         unclassified = setdiff(public_of(m), ALLOCATION_CHECKED, NOT_CHECKED_BECAUSE,
                                GEOMETRY_CHECKED, GEOMETRY_NOT_CHECKED)

@@ -167,6 +167,7 @@ end
 
 Test.@testset "derivative! is with respect to distance, and masks where the metric dies" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     GE = FG.Geometry
     R = 6.371e6
@@ -179,20 +180,20 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
     # ∂/∂north of sin φ is cos φ / R — the physical derivative, not the coordinate one.
     f = [sin(fj) for _ in λ, fj in φ]
     o = zeros(nλ, nφ)
-    D.derivative!(o, f, g, 2; order = 1, nodes = 5, masked = NaN)
+    O.derivative!(o, f, g, 2; order = 1, nodes = 5, masked = NaN)
     want = [cos(fj) / R for _ in λ, fj in φ]
     int = 4:(nφ - 3)
     Test.@test maximum(abs.(o[:, int] .- want[:, int])) < 1e-3 * maximum(abs.(want[:, int]))
     # …and it is exactly the coordinate derivative divided by the metric, cell by cell.
     co = zeros(nλ, nφ)
-    D.apply_stencil!(co, f, g, 2; order = 1, nodes = 5)
+    O.apply_stencil!(co, f, g, 2; order = 1, nodes = 5)
     Test.@test all(o[i, j] ≈ co[i, j] / GE.scale_factors(sph, (λ[i], φ[j]))[2]
                    for i in 1:nλ, j in int)
 
     # ∂/∂east of sin λ cos φ is cos λ / R, and the poles have no east at all.
     f2 = [sin(l) * cos(fj) for l in λ, fj in φ]
     o2 = zeros(nλ, nφ)
-    D.derivative!(o2, f2, g, 1; order = 1, nodes = 5, masked = NaN)
+    O.derivative!(o2, f2, g, 1; order = 1, nodes = 5, masked = NaN)
     j0 = nφ ÷ 2 + 1
     Test.@test maximum(abs.(o2[:, j0] .- [cos(l) / R for l in λ])) < 1e-3 / R
     Test.@test all(isnan, o2[:, 1]) && all(isnan, o2[:, nφ])
@@ -208,7 +209,7 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
         g32 = GD.StructuredGrid(s32, λ32, φ32)
         f32 = [sin(l) * cos(fj) for l in λ32, fj in φ32]
         o32 = zeros(Float32, n1, n2)
-        D.derivative!(o32, f32, g32, 1; order = 1, nodes = 3, masked = Float32(NaN))
+        O.derivative!(o32, f32, g32, 1; order = 1, nodes = 3, masked = Float32(NaN))
         Test.@test abs(GE.scale_factors(s32, (0.0f0, φ32[1]))[1]) > 1.0f-12   # the trap
         Test.@test all(isnan, o32[:, 1]) && all(isnan, o32[:, n2])
         Test.@test eltype(o32) === Float32
@@ -220,8 +221,8 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
         gc = GD.StructuredGrid(cart, x, x)
         fc = [xi^2 + yi for xi in x, yi in x]
         a = zeros(12, 12); b = zeros(12, 12)
-        D.apply_stencil!(a, fc, gc, 1; order = 1, nodes = 3)
-        D.derivative!(b, fc, gc, 1; order = 1, nodes = 3)
+        O.apply_stencil!(a, fc, gc, 1; order = 1, nodes = 3)
+        O.derivative!(b, fc, gc, 1; order = 1, nodes = 3)
         Test.@test a == b
         Test.@test D.metric_floor(cart) == 0.0
     end
@@ -234,8 +235,8 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
         gs = GD.StructuredGrid(spd, λs, φs)
         fs = [sin(2fj) for _ in λs, fj in φs]
         os = zeros(n1, n2); cs = zeros(n1, n2)
-        D.derivative!(os, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
-        D.apply_stencil!(cs, fs, gs, 2; order = 1, nodes = 5)
+        O.derivative!(os, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
+        O.apply_stencil!(cs, fs, gs, 2; order = 1, nodes = 5)
         Test.@test all(os[i, j] ≈ cs[i, j] / GE.scale_factors(spd, (λs[i], φs[j]))[2]
                        for i in 1:n1, j in 1:n2)
         Test.@test GE.scale_factors(spd, (0.0, 0.0))[2] != GE.scale_factors(spd, (0.0, 1.2))[2]
@@ -249,6 +250,7 @@ end
 
 Test.@testset "A held stencil table serves every mask policy" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
     n = 24
@@ -261,19 +263,19 @@ Test.@testset "A held stencil table serves every mask policy" begin
     # The bare `(indices, weights)` form cannot degrade — it has no axis to rebuild a window from
     # at a mask edge — so a caller wanting `ReduceInRun` had to give up the table entirely and pay
     # its rebuild per call. Handing the axis alongside the table serves every policy.
-    for dim in 1:2, pol in (D.BlankMasked(), D.ShiftWithinRun(), D.ReduceInRun()), k in (3, 5)
+    for dim in 1:2, pol in (O.BlankMasked(), O.ShiftWithinRun(), O.ReduceInRun()), k in (3, 5)
         a = zeros(n, n); b = zeros(n, n)
-        D.apply_stencil!(a, f, g, dim; order = 1, nodes = k, masked = NaN, policy = pol)
+        O.apply_stencil!(a, f, g, dim; order = 1, nodes = k, masked = NaN, policy = pol)
         idx, w = D.axis_stencils(g, dim; order = 1, nodes = k)
-        D.apply_stencil!(b, f, g, idx, w, dim; order = 1, masked = NaN, policy = pol)
+        O.apply_stencil!(b, f, g, idx, w, dim; order = 1, masked = NaN, policy = pol)
         Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
     end
 
 
     # The bare form still refuses rather than silently ignoring the policy.
     let idx = D.axis_stencils(g, 1; order = 1, nodes = 3)
-        Test.@test_throws ArgumentError D.apply_stencil!(zeros(n, n), f, idx[1], idx[2], 1;
-                                                         mask = mk, policy = D.ReduceInRun())
+        Test.@test_throws ArgumentError O.apply_stencil!(zeros(n, n), f, idx[1], idx[2], 1;
+                                                         mask = mk, policy = O.ReduceInRun())
     end
 
     # `derivative!` is the form a geometry-aware caller uses, so it takes a table too.
@@ -283,15 +285,16 @@ Test.@testset "A held stencil table serves every mask policy" begin
         gs = GD.StructuredGrid(sph, lam, phi)
         fs = [sin(fj) for _ in lam, fj in phi]
         a = zeros(16, 13); b = zeros(16, 13)
-        D.derivative!(a, fs, gs, 2; order = 1, nodes = 3, masked = NaN)
+        O.derivative!(a, fs, gs, 2; order = 1, nodes = 3, masked = NaN)
         i2, w2 = D.axis_stencils(gs, 2; order = 1, nodes = 3)
-        D.derivative!(b, fs, gs, i2, w2, 2; order = 1, masked = NaN)
+        O.derivative!(b, fs, gs, i2, w2, 2; order = 1, masked = NaN)
         Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
     end
 end
 
 Test.@testset "The host sweep is a different loop shape, and the same answer" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
 
@@ -311,8 +314,8 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
         idx, w = D.axis_stencils(ax, 1, k)
         a = zeros(n, n + 1); b = zeros(n, n + 1)
         mm = msk ? m : nothing
-        D.apply_stencil!(a, f, idx, w, dim; mask = mm, masked = NaN)
-        D.apply_stencil!(b, f, idx, w, dim; mask = mm, masked = NaN, backend = KernelAbstractions.CPU())
+        O.apply_stencil!(a, f, idx, w, dim; mask = mm, masked = NaN)
+        O.apply_stencil!(b, f, idx, w, dim; mask = mm, masked = NaN, backend = KernelAbstractions.CPU())
         all(isequal(a[i], b[i]) for i in eachindex(a)) || (bad += 1)
     end
     Test.@test bad == 0
@@ -326,8 +329,8 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
         for (dim, ax, want) in ((1, xs, 1.0), (2, ys, 2.0), (3, zs, 4.0))
             idx, w = D.axis_stencils(ax, 1, 3)
             o = zeros(n, n, n); ob = zeros(n, n, n)
-            D.apply_stencil!(o, f3, idx, w, dim)
-            D.apply_stencil!(ob, f3, idx, w, dim; backend = KernelAbstractions.CPU())
+            O.apply_stencil!(o, f3, idx, w, dim)
+            O.apply_stencil!(ob, f3, idx, w, dim; backend = KernelAbstractions.CPU())
             Test.@test maximum(abs.(o .- want)) < 1e-10
             Test.@test o == ob
         end
@@ -340,10 +343,10 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
         f = [xi^2 + yi for xi in xs, yi in xs]
         idx, w = D.axis_stencils(xs, 1, 3)
         o = zeros(n, n)
-        D.apply_stencil!(o, f, idx, w, 1)
+        O.apply_stencil!(o, f, idx, w, 1)
         v = view(f, :, :)                                  # a view is still linear here
         ov = zeros(n, n)
-        D.apply_stencil!(ov, v, idx, w, 1)
+        O.apply_stencil!(ov, v, idx, w, 1)
         Test.@test o == ov
     end
 
@@ -354,8 +357,8 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
         for k in (10, 12)
             idx, w = D.axis_stencils(xs, 1, k)
             a = zeros(n, n); b = zeros(n, n)
-            D.apply_stencil!(a, f, idx, w, 1)
-            D.apply_stencil!(b, f, idx, w, 1; backend = KernelAbstractions.CPU())
+            O.apply_stencil!(a, f, idx, w, 1)
+            O.apply_stencil!(b, f, idx, w, 1; backend = KernelAbstractions.CPU())
             Test.@test a == b
         end
     end
@@ -370,9 +373,9 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
         f = [sin(3xi) * cos(yi) for xi in xs, yi in ys]
         for dim in 1:2
             a = zeros(n, n); b = zeros(n, n)
-            D.apply_stencil!(a, f, g, dim; order = 1, nodes = 5, masked = NaN)
+            O.apply_stencil!(a, f, g, dim; order = 1, nodes = 5, masked = NaN)
             idx, w = D.axis_stencils(g, dim; order = 1, nodes = 5)
-            D.apply_stencil!(b, f, g, idx, w, dim; masked = NaN)
+            O.apply_stencil!(b, f, g, idx, w, dim; masked = NaN)
             Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
         end
         # The periodic direction's table is genuinely the wrapped one.
@@ -383,6 +386,7 @@ end
 
 Test.@testset "apply_stencil! differentiates a field along one direction" begin
     D = FG.Discretization
+    O = FG.Operators
     geo = FG.Geometry.CartesianGeometry()
 
     # Exact for any polynomial the node count spans, at EVERY sample — the ends included, because
@@ -390,20 +394,20 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     x = collect(range(0.0, 2.0; length = 11))
     f = @. 3x^2 - 2x + 5
     out = similar(f)
-    D.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
+    O.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
     Test.@test maximum(abs, out .- (6 .* x .- 2)) < 1e-12
-    D.apply_stencil!(out, f, x, 1; order = 2, nodes = 3)
+    O.apply_stencil!(out, f, x, 1; order = 2, nodes = 3)
     Test.@test maximum(abs, out .- 6.0) < 1e-11
 
     # A stretched axis is equally exact: the weights are per-sample, not one set reused.
     xs = [0.0, 0.11, 0.37, 0.9, 1.05, 1.6, 1.62, 2.0]
     outs = similar(xs)
-    D.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
+    O.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
     Test.@test maximum(abs, outs .- (6 .* xs .- 2)) < 1e-11
     # 3 nodes cannot span a cubic; 4 can. Both statements matter — the first shows the test bites.
-    D.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 3)
+    O.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 3)
     Test.@test maximum(abs, outs .- 3 .* xs .^ 2) > 1e-3
-    D.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 4)
+    O.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 4)
     Test.@test maximum(abs, outs .- 3 .* xs .^ 2) < 1e-11
 
     # Periodic: the stencil stays centred and wraps, so the seam is no worse than the interior,
@@ -411,7 +415,7 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     perr(m) = begin
         lm = collect(range(0, 2π; length = m + 1)[1:m])
         o = similar(lm)
-        D.apply_stencil!(o, sin.(lm), lm, 1; order = 1, nodes = 5, period = 2π)
+        O.apply_stencil!(o, sin.(lm), lm, 1; order = 1, nodes = 5, period = 2π)
         (maximum(abs, o .- cos.(lm)),
          max(abs(o[1] - cos(lm[1])), abs(o[m] - cos(lm[m]))),
          maximum(abs, o[(m ÷ 4):(m ÷ 2)] .- cos.(lm[(m ÷ 4):(m ÷ 2)])))
@@ -423,7 +427,7 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     # A descending axis wraps the other way, and getting the sign wrong shows up here.
     λd = collect(range(2π, 0; length = 65)[1:64])
     od = similar(λd)
-    D.apply_stencil!(od, sin.(λd), λd, 1; order = 1, nodes = 5, period = 2π)
+    O.apply_stencil!(od, sin.(λd), λd, 1; order = 1, nodes = 5, period = 2π)
     Test.@test maximum(abs, od .- cos.(λd)) < 1e-5
     Test.@test FG.Axes.wrap_sign(λd) == -1.0 && FG.Axes.wrap_sign(-λd) == 1.0
 
@@ -432,24 +436,24 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     Y = collect(range(0.0, 2.0; length = 7))
     F = [xi^2 + 3yi for xi in X, yi in Y]
     O = similar(F)
-    D.apply_stencil!(O, F, X, 1; order = 1, nodes = 3)
+    O.apply_stencil!(O, F, X, 1; order = 1, nodes = 3)
     Test.@test maximum(abs, O .- [2xi for xi in X, _ in Y]) < 1e-11
-    D.apply_stencil!(O, F, Y, 2; order = 1, nodes = 3)
+    O.apply_stencil!(O, F, Y, 2; order = 1, nodes = 3)
     Test.@test maximum(abs, O .- 3.0) < 1e-11
     F3 = [xi^2 + 3yi + 2zi for xi in X, yi in Y, zi in 0.0:0.5:1.0]
     O3 = similar(F3)
-    D.apply_stencil!(O3, F3, collect(0.0:0.5:1.0), 3; order = 1, nodes = 3)
+    O.apply_stencil!(O3, F3, collect(0.0:0.5:1.0), 3; order = 1, nodes = 3)
     Test.@test maximum(abs, O3 .- 2.0) < 1e-11
 
     # The grid form supplies axis, wrap period and mask, so none of it is restated.
     gx = FG.Grids.StructuredGrid(geo, X, Y)
     Og = similar(F)
-    D.apply_stencil!(Og, F, gx, 1; order = 1, nodes = 3)
+    O.apply_stencil!(Og, F, gx, 1; order = 1, nodes = 3)
     Test.@test Og ≈ [2xi for xi in X, _ in Y]
     λ = collect(range(0, 2π; length = 65)[1:64])
     gp = FG.Grids.StructuredGrid(geo, λ, [0.0, 1.0]; periodic = true, period = 2π)
     Op = similar([sin(l) for l in λ, _ in 1:2])
-    D.apply_stencil!(Op, [sin(l) for l in λ, _ in 1:2], gp, 1; order = 1, nodes = 5)
+    O.apply_stencil!(Op, [sin(l) for l in λ, _ in 1:2], gp, 1; order = 1, nodes = 5)
     Test.@test maximum(abs, Op[:, 1] .- cos.(λ)) < 1e-5
 
     # A derivative that would read an inactive cell is not invented.
@@ -457,31 +461,32 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     mk[5, 3] = false
     gm = FG.Grids.StructuredGrid(geo, X, Y, mk)
     Om = fill(NaN, 9, 7)
-    D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = -1.0)
+    O.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = -1.0)
     Test.@test Om[5, 3] == -1.0                       # the inactive cell itself
     Test.@test Om[4, 3] == -1.0 && Om[6, 3] == -1.0   # its stencil neighbours
     Test.@test Om[2, 3] ≈ 2X[2] && Om[8, 3] ≈ 2X[8]   # cells that never read it
     Test.@test Om[5, 4] ≈ 2X[5]                       # a different row is unaffected
-    D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, active_only = false)
+    O.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, active_only = false)
     Test.@test Om[5, 3] ≈ 2X[5]
 
     # A precomputed weight set gives the same answer.
     idx, w = D.axis_stencils(X, 1, 3)
     Test.@test size(idx) == (9, 3) && size(w) == (9, 3)
     O2 = similar(F)
-    D.apply_stencil!(O2, F, idx, w, 1)
+    O.apply_stencil!(O2, F, idx, w, 1)
     Test.@test O2 ≈ [2xi for xi in X, _ in Y]
 
     Test.@test_throws ArgumentError D.axis_stencils(X, 2, 2)          # too few nodes for order 2
     Test.@test_throws ArgumentError D.axis_stencils([0.0, 1.0], 1, 5) # more nodes than samples
-    Test.@test_throws ArgumentError D.apply_stencil!(O, F, X, 3)      # no direction 3 in a matrix
-    Test.@test_throws DimensionMismatch D.apply_stencil!(O, F, X[1:5], 1)
-    Test.@test_throws DimensionMismatch D.apply_stencil!(similar(F, 3, 3), F, idx, w, 1)
+    Test.@test_throws ArgumentError O.apply_stencil!(O, F, X, 3)      # no direction 3 in a matrix
+    Test.@test_throws DimensionMismatch O.apply_stencil!(O, F, X[1:5], 1)
+    Test.@test_throws DimensionMismatch O.apply_stencil!(similar(F, 3, 3), F, idx, w, 1)
 end
 
 Test.@testset "A field can be evaluated at a coordinate, on every architecture" begin
     C = FG.Connectivity
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
 
@@ -493,10 +498,10 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
     f = [2xi - 3yj + 0.5 * xi * yj + 7 for xi in x, yj in y]
     exact(px, py) = 2px - 3py + 0.5 * px * py + 7
     for px in range(0.05, 1.95; length = 9), py in range(-0.95, 2.95; length = 7)
-        Test.@test D.interpolate(f, g, (px, py)) ≈ exact(px, py) atol = 1e-10
+        Test.@test O.interpolate(f, g, (px, py)) ≈ exact(px, py) atol = 1e-10
     end
     # And a cell's own value at its centre, which multilinear interpolation must reproduce.
-    Test.@test all(D.interpolate(f, g, (x[i], y[j])) ≈ f[i, j] for i in 1:nx, j in 1:ny)
+    Test.@test all(O.interpolate(f, g, (x[i], y[j])) ≈ f[i, j] for i in 1:nx, j in 1:ny)
 
     # A periodic direction interpolates ACROSS its seam rather than clamping at the last sample,
     # which is the case a caller composing per-axis weights by hand gets wrong.
@@ -504,8 +509,8 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
         gp = GD.StructuredGrid(cart, λ, z; periodic = (true, false), period = (2π, 0.0))
         fp = [sin(l) for l in λ, _ in z]
         mid = λ[end] + (2π - λ[end]) / 2         # strictly between the last sample and the first
-        Test.@test D.interpolate(fp, gp, (mid, 0.0)) ≈ (sin(λ[end]) + sin(λ[1])) / 2
-        Test.@test D.interpolate(fp, gp, (2π + 0.3, 0.0)) ≈ D.interpolate(fp, gp, (0.3, 0.0))
+        Test.@test O.interpolate(fp, gp, (mid, 0.0)) ≈ (sin(λ[end]) + sin(λ[1])) / 2
+        Test.@test O.interpolate(fp, gp, (2π + 0.3, 0.0)) ≈ O.interpolate(fp, gp, (0.3, 0.0))
     end
 
     # Scattered and curvilinear: a least-squares plane, so a linear field is exact — a plain
@@ -515,9 +520,9 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
         fu = 2.0 .* xs .- 3.0 .* ys .+ 5.0
         for _ in 1:20
             px, py = 1.0 + 8.0 * rand(), 1.0 + 4.0 * rand()
-            Test.@test D.interpolate(fu, gu, (px, py); k = 8) ≈ 2px - 3py + 5 atol = 1e-8
+            Test.@test O.interpolate(fu, gu, (px, py); k = 8) ≈ 2px - 3py + 5 atol = 1e-8
         end
-        Test.@test all(D.interpolate(fu, gu, (xs[i], ys[i]); k = 8) ≈ fu[i] for i in 1:20)
+        Test.@test all(O.interpolate(fu, gu, (xs[i], ys[i]); k = 8) ≈ fu[i] for i in 1:20)
     end
     let n = 14
         xc = [t + 0.35u for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
@@ -526,7 +531,7 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
         fc = 2.0 .* xc .- 3.0 .* yc .+ 5.0
         for _ in 1:15
             px, py = 2.0 + 5.0 * rand(), 0.0 + 3.0 * rand()
-            Test.@test D.interpolate(fc, cg, (px, py); k = 8) ≈ 2px - 3py + 5 atol = 1e-8
+            Test.@test O.interpolate(fc, cg, (px, py); k = 8) ≈ 2px - 3py + 5 atol = 1e-8
         end
     end
 
@@ -535,24 +540,25 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
         mk[5, 4] = false
         gm = GD.StructuredGrid(cart, x, y, mk)
         pin = ((x[5] + x[6]) / 2, (y[4] + y[5]) / 2)      # its corners include the hole
-        Test.@test isnan(D.interpolate(f, gm, pin; masked = NaN))
-        Test.@test !isnan(D.interpolate(f, gm, pin; masked = NaN, policy = D.ReduceInRun()))
-        Test.@test !isnan(D.interpolate(f, gm, (x[1], y[1]); masked = NaN))
-        Test.@test_throws ArgumentError D.interpolate(f, gm, pin; policy = D.ShiftWithinRun())
+        Test.@test isnan(O.interpolate(f, gm, pin; masked = NaN))
+        Test.@test !isnan(O.interpolate(f, gm, pin; masked = NaN, policy = O.ReduceInRun()))
+        Test.@test !isnan(O.interpolate(f, gm, (x[1], y[1]); masked = NaN))
+        Test.@test_throws ArgumentError O.interpolate(f, gm, pin; policy = O.ShiftWithinRun())
     end
 
     # A point is a point however it is written.
-    let a = D.interpolate(f, g, (0.7, 1.1))
-        Test.@test a == D.interpolate(f, g, [0.7, 1.1])
-        Test.@test a == D.interpolate(f, g, (x = 0.7, y = 1.1))
-        Test.@test a == D.interpolate(f, g, StaticArrays.SVector(0.7, 1.1))
+    let a = O.interpolate(f, g, (0.7, 1.1))
+        Test.@test a == O.interpolate(f, g, [0.7, 1.1])
+        Test.@test a == O.interpolate(f, g, (x = 0.7, y = 1.1))
+        Test.@test a == O.interpolate(f, g, StaticArrays.SVector(0.7, 1.1))
     end
-    Test.@test_throws DimensionMismatch D.interpolate(zeros(3, 3), g, (0.5, 0.5))
+    Test.@test_throws DimensionMismatch O.interpolate(zeros(3, 3), g, (0.5, 0.5))
 end
 
 Test.@testset "A least-squares gradient where there is no separable axis" begin
     C = FG.Connectivity
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     GE = FG.Geometry
     cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -563,12 +569,12 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     x = [t + 0.35u for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
     y = [u - 0.2t for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
     cg = GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
-    plan = C.gradient_plan(cg)
+    plan = O.gradient_plan(cg)
     Test.@test length(plan) == n * n
     for (a, b) in ((2.0, -3.0), (0.0, 1.0), (-1.5, 0.0))
         f = a .* x .+ b .* y .+ 7.0
         g1 = zeros(n, n); g2 = zeros(n, n)
-        D.gradient!(g1, g2, f, plan)
+        O.gradient!(g1, g2, f, plan)
         # Every cell, boundaries and corners included — a one-sided stencil is still exact for a
         # linear field as long as it spans both tangent directions.
         Test.@test maximum(abs.(g1 .- a)) < 1e-10
@@ -584,10 +590,10 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
         sg = GD.StructuredGrid(cart, xs, ys)
         ff = [sin(3xi) * cos(2yj) for xi in xs, yj in ys]
         q1 = zeros(m, m); q2 = zeros(m, m)
-        D.gradient!(q1, q2, ff, C.gradient_plan(og))
+        O.gradient!(q1, q2, ff, O.gradient_plan(og))
         s1 = zeros(m, m); s2 = zeros(m, m)
-        D.apply_stencil!(s1, ff, sg, 1; order = 1, nodes = 3)
-        D.apply_stencil!(s2, ff, sg, 2; order = 1, nodes = 3)
+        O.apply_stencil!(s1, ff, sg, 1; order = 1, nodes = 3)
+        O.apply_stencil!(s2, ff, sg, 2; order = 1, nodes = 3)
         int = 2:(m - 1)
         Test.@test maximum(abs.(q1[int, int] .- s1[int, int])) < 1e-12
         Test.@test maximum(abs.(q2[int, int] .- s2[int, int])) < 1e-12
@@ -600,7 +606,7 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
         φu = GD.coordinates(gu, 2)
         fu = [sin(φ) for φ in φu]                    # ∂/∂north = cos φ / R, ∂/∂east = 0
         h1 = zeros(length(fu)); h2 = zeros(length(fu))
-        D.gradient!(h1, h2, fu, C.gradient_plan(gu))
+        O.gradient!(h1, h2, fu, O.gradient_plan(gu))
         want = [cos(φ) / R for φ in φu]
         Test.@test maximum(abs.(h2 .- want)) < 0.05 * maximum(abs.(want))
         Test.@test maximum(abs.(h1)) < 0.05 * maximum(abs.(want))
@@ -611,7 +617,7 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     let xl = collect(range(0.0, 5.0; length = 6)), yl = zeros(6)
         lg = GD.UnstructuredGrid(cart, (xl, yl), trues(6); k = 2, areas = ones(6))
         l1 = zeros(6); l2 = zeros(6)
-        D.gradient!(l1, l2, 3.0 .* xl, C.gradient_plan(lg))
+        O.gradient!(l1, l2, 3.0 .* xl, O.gradient_plan(lg))
         Test.@test all(isapprox.(l1, 3.0; atol = 1e-10))     # the resolved direction is exact
         Test.@test all(iszero, l2)                           # the other is zero, not enormous
     end
@@ -623,23 +629,24 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
         mg = GD.CurvilinearGrid(cart, x, y, mk; measure = fill(1.0, n, n))
         mf = 2.0 .* x .- 3.0 .* y
         m1 = zeros(n, n); m2 = zeros(n, n)
-        D.gradient!(m1, m2, mf, C.gradient_plan(mg))
+        O.gradient!(m1, m2, mf, O.gradient_plan(mg))
         Test.@test iszero(m1[5, 5]) && iszero(m2[5, 5])
         Test.@test all(abs(m1[i, j] - 2.0) < 1e-10 && abs(m2[i, j] + 3.0) < 1e-10
                        for i in 1:n, j in 1:n if mk[i, j])
     end
 
     Test.@test plan.names == (:x, :y)
-    Test.@test_throws DimensionMismatch D.gradient!(zeros(3), zeros(3), zeros(3), plan)
+    Test.@test_throws DimensionMismatch O.gradient!(zeros(3), zeros(3), zeros(3), plan)
     # The tangent plane is two-dimensional, so a 3-coordinate grid is refused rather than guessed.
     let g3 = GD.UnstructuredGrid(cart, (rand(6), rand(6), rand(6)), trues(6); k = 3,
                                  areas = ones(6))
-        Test.@test_throws ArgumentError C.gradient_plan(g3)
+        Test.@test_throws ArgumentError O.gradient_plan(g3)
     end
 end
 
 Test.@testset "Staggering, point location and interpolation weights" begin
     D = FG.Discretization
+    O = FG.Operators
     A = FG.Axes
     # Faces bracket the centres, one more of them, at the midpoints.
     x = [0.0, 1.0, 3.0, 6.0]
@@ -740,6 +747,7 @@ end
 
 Test.@testset "Per-index gaps and widths are public, exact and free of allocation" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     GE = FG.Geometry
     cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -834,6 +842,7 @@ end
 
 Test.@testset "Fornberg finite-difference weights are exact to their stated order" begin
     D = FG.Discretization
+    O = FG.Operators
     # The classic equispaced formulas, reproduced from the general recursion.
     Test.@test D.fd_weights([-1.0, 0.0, 1.0], 0.0, 1) ≈ [-0.5, 0.0, 0.5]
     Test.@test D.fd_weights([-1.0, 0.0, 1.0], 0.0, 2) ≈ [1.0, -2.0, 1.0]
@@ -889,6 +898,7 @@ end
 
 Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     geo = FG.Geometry.CartesianGeometry()
     x = collect(0.0:1.0:6.0)
@@ -902,7 +912,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     # whole axis. That is what the other policies exist to avoid.
     for nodes in (2, 3, 5)
         o = zeros(7, 1)
-        D.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes)
+        O.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes)
         Test.@test iszero(o[3, 1])               # active, blanked by its masked neighbour
         nodes == 5 && Test.@test all(iszero, o)
     end
@@ -910,28 +920,28 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     # Runs here are [1,3] and [5,7], so five nodes do not fit and only ReduceInRun can fill them.
     for nodes in (2, 3)
         o = zeros(7, 1)
-        D.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes, policy = D.ShiftWithinRun())
+        O.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes, policy = O.ShiftWithinRun())
         Test.@test all(isapprox.(o[active, 1], 1.0))
         Test.@test iszero(o[4, 1])
     end
     for nodes in (2, 3, 5)
         o = zeros(7, 1)
-        D.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes, policy = D.ReduceInRun())
+        O.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes, policy = O.ReduceInRun())
         Test.@test all(isapprox.(o[active, 1], 1.0))
         Test.@test iszero(o[4, 1])
     end
 
     # Nothing anyone gets today changes: no mask, or the default policy, is bit-identical.
-    for nodes in (2, 3, 5), pol in (D.BlankMasked(), D.ShiftWithinRun(), D.ReduceInRun())
+    for nodes in (2, 3, 5), pol in (O.BlankMasked(), O.ShiftWithinRun(), O.ReduceInRun())
         a = zeros(7, 1); b = zeros(7, 1)
-        D.apply_stencil!(a, f, nomask, 1; order = 1, nodes = nodes)
-        D.apply_stencil!(b, f, nomask, 1; order = 1, nodes = nodes, policy = pol)
+        O.apply_stencil!(a, f, nomask, 1; order = 1, nodes = nodes)
+        O.apply_stencil!(b, f, nomask, 1; order = 1, nodes = nodes, policy = pol)
         Test.@test a == b
     end
     for nodes in (2, 3, 5)
         a = zeros(7, 1); b = zeros(7, 1)
-        D.apply_stencil!(a, f, grid, 1; order = 1, nodes = nodes)
-        D.apply_stencil!(b, f, grid, 1; order = 1, nodes = nodes, policy = D.BlankMasked())
+        O.apply_stencil!(a, f, grid, 1; order = 1, nodes = nodes)
+        O.apply_stencil!(b, f, grid, 1; order = 1, nodes = nodes, policy = O.BlankMasked())
         Test.@test a == b
     end
 
@@ -943,8 +953,8 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     gn = GD.StructuredGrid(geo, xl, [0.0])
     fl = reshape([sin(3xi) for xi in xl], n, 1)
     a = zeros(n, 1); b = zeros(n, 1)
-    D.apply_stencil!(a, fl, gn, 1; order = 1, nodes = 5)
-    D.apply_stencil!(b, fl, gl, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+    O.apply_stencil!(a, fl, gn, 1; order = 1, nodes = 5)
+    O.apply_stencil!(b, fl, gl, 1; order = 1, nodes = 5, policy = O.ShiftWithinRun())
     for i in 1:n
         abs(i - 30) > 4 && 2 < i < n - 1 && Test.@test a[i, 1] === b[i, 1]
     end
@@ -958,7 +968,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
         gg = GD.StructuredGrid(geo, xx, [0.0], mm)
         ff = reshape([sin(3xi) for xi in xx], m, 1)
         oo = zeros(m, 1)
-        D.apply_stencil!(oo, ff, gg, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+        O.apply_stencil!(oo, ff, gg, 1; order = 1, nodes = 5, policy = O.ShiftWithinRun())
         j = m ÷ 2 - 1                            # the cell against the mask edge
         push!(errs, abs(oo[j, 1] - 3cos(3xx[j])))
     end
@@ -971,8 +981,8 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     fp = reshape([sin(2π * xi / L) for xi in xp], np, 1)
     gfull = GD.StructuredGrid(geo, xp, [0.0]; periodic = (true, false), period = (L, 0.0))
     pa = zeros(np, 1); pb = zeros(np, 1)
-    D.apply_stencil!(pa, fp, gfull, 1; order = 1, nodes = 5)
-    D.apply_stencil!(pb, fp, gfull, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+    O.apply_stencil!(pa, fp, gfull, 1; order = 1, nodes = 5)
+    O.apply_stencil!(pb, fp, gfull, 1; order = 1, nodes = 5, policy = O.ShiftWithinRun())
     Test.@test pa == pb
     seam = Float64[]
     for m in (64, 128, 256)
@@ -981,7 +991,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
         gg = GD.StructuredGrid(geo, xx, [0.0], mm; periodic = (true, false), period = (Lm, 0.0))
         ff = reshape([sin(2π * xi / Lm) for xi in xx], m, 1)
         oo = zeros(m, 1)
-        D.apply_stencil!(oo, ff, gg, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
+        O.apply_stencil!(oo, ff, gg, 1; order = 1, nodes = 5, policy = O.ShiftWithinRun())
         Test.@test oo[1, 1] != 0                 # the seam cell is reached through the wrap
         push!(seam, abs(oo[1, 1] - 2π / Lm * cos(2π * xx[1] / Lm)))
     end
@@ -1003,7 +1013,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
         g2 = GD.StructuredGrid(geo, x2, [0.0], m2; periodic = (true, false), period = (L2, 0.0))
         f2 = reshape([sin(2π * xi / L2) for xi in x2], np2, 1)
         o2 = zeros(np2, 1)
-        D.apply_stencil!(o2, f2, g2, 1; order = 1, nodes = k2, policy = D.ShiftWithinRun())
+        O.apply_stencil!(o2, f2, g2, 1; order = 1, nodes = k2, policy = O.ShiftWithinRun())
         for i in 1:np2
             m2[i, 1] || continue
             back = 0
@@ -1030,16 +1040,16 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     gs = GD.StructuredGrid(geo, collect(0.0:8.0), [0.0], ms)
     fs = reshape(collect(0.0:8.0), 9, 1)
     os = zeros(9, 1); orr = zeros(9, 1)
-    D.apply_stencil!(os, fs, gs, 1; order = 1, nodes = 5, policy = D.ShiftWithinRun())
-    D.apply_stencil!(orr, fs, gs, 1; order = 1, nodes = 5, policy = D.ReduceInRun())
+    O.apply_stencil!(os, fs, gs, 1; order = 1, nodes = 5, policy = O.ShiftWithinRun())
+    O.apply_stencil!(orr, fs, gs, 1; order = 1, nodes = 5, policy = O.ReduceInRun())
     Test.@test all(iszero, os)
     Test.@test all(isapprox.(orr[[1, 2, 3, 5, 6, 7], 1], 1.0))
     Test.@test iszero(orr[9, 1])                 # a run of one holds no first derivative
 
     # The matrix form has no axis to rebuild from, and says so rather than ignoring the policy.
     idx, w = D.axis_stencils(x, 1, 3)
-    Test.@test_throws ArgumentError D.apply_stencil!(zeros(7, 1), f, idx, w, 1;
-                                                     mask = msk, policy = D.ShiftWithinRun())
+    Test.@test_throws ArgumentError O.apply_stencil!(zeros(7, 1), f, idx, w, 1;
+                                                     mask = msk, policy = O.ShiftWithinRun())
 
     # The END OF THE AXIS bounds a window exactly as the end of a run does, so under `ReduceInRun`
     # `nodes` is a ceiling there too. These are ordinary degenerate grids — a single-latitude
@@ -1052,7 +1062,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
             g2 = GD.StructuredGrid(geo, xa, ys)
             f2 = [xi + 5yi for xi in xa, yi in ys]
             o2 = zeros(length(xa), ny)
-            D.apply_stencil!(o2, f2, g2, 2; order = 1, nodes = 5, policy = D.ReduceInRun(),
+            O.apply_stencil!(o2, f2, g2, 2; order = 1, nodes = 5, policy = O.ReduceInRun(),
                              masked = NaN)
             Test.@test all(isapprox.(o2, want))
         end
@@ -1060,16 +1070,16 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
         g1 = GD.StructuredGrid(geo, xa, [3.0])
         f1 = reshape([2xi for xi in xa], length(xa), 1)
         o1 = zeros(length(xa), 1)
-        D.apply_stencil!(o1, f1, g1, 2; order = 1, nodes = 3, policy = D.ReduceInRun(),
+        O.apply_stencil!(o1, f1, g1, 2; order = 1, nodes = 3, policy = O.ReduceInRun(),
                          masked = NaN)
         Test.@test all(isnan, o1)
         # …while the other direction of the very same grid is untouched by any of it.
         od = zeros(length(xa), 1)
-        D.apply_stencil!(od, f1, g1, 1; order = 1, nodes = 3, policy = D.ReduceInRun())
+        O.apply_stencil!(od, f1, g1, 1; order = 1, nodes = 3, policy = O.ReduceInRun())
         Test.@test all(isapprox.(od, 2.0))
         # The policies that do not claim to degrade keep the error.
-        for pol in (D.BlankMasked(), D.ShiftWithinRun())
-            Test.@test_throws ArgumentError D.apply_stencil!(zeros(length(xa), 1), f1, g1, 2;
+        for pol in (O.BlankMasked(), O.ShiftWithinRun())
+            Test.@test_throws ArgumentError O.apply_stencil!(zeros(length(xa), 1), f1, g1, 2;
                                                              order = 1, nodes = 3, policy = pol)
         end
         # And `axis_stencils` itself still means exactly `nodes`: it is handed no policy.
@@ -1091,6 +1101,7 @@ end
 
 Test.@testset "A trailing batch axis is differenced in one pass, identically to a slice loop" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     GE = FG.Geometry
     cart = GE.CartesianGeometry{Float64}()
@@ -1105,19 +1116,19 @@ Test.@testset "A trailing batch axis is differenced in one pass, identically to 
     for dims in ((nx, ny), (nx, ny, nb), (nx, ny, nb, nb2))
         f = reshape([sin(3i) * cos(2j) * (k + 1)
                      for i in 1:dims[1], j in 1:dims[2], k in 1:prod(dims[3:end]; init = 1)], dims)
-        for pol in (D.BlankMasked(), D.ShiftWithinRun(), D.ReduceInRun())
+        for pol in (O.BlankMasked(), O.ShiftWithinRun(), O.ReduceInRun())
             o = fill(NaN, dims); ref = fill(NaN, dims)
-            D.apply_stencil!(o, f, x, 1; order = 1, nodes = 3, mask = mk, masked = NaN, policy = pol)
+            O.apply_stencil!(o, f, x, 1; order = 1, nodes = 3, mask = mk, masked = NaN, policy = pol)
             for c in CartesianIndices(dims[3:end])
-                D.apply_stencil!(view(ref, :, :, Tuple(c)...), view(f, :, :, Tuple(c)...), x, 1;
+                O.apply_stencil!(view(ref, :, :, Tuple(c)...), view(f, :, :, Tuple(c)...), x, 1;
                                  order = 1, nodes = 3, mask = mk, masked = NaN, policy = pol)
             end
             Test.@test all(isequal(o[i], ref[i]) for i in eachindex(o))
         end
         # The device body walks the whole output, batch included, so it must agree bit for bit too.
         o1 = fill(NaN, dims); o2 = fill(NaN, dims)
-        D.apply_stencil!(o1, f, x, idx, w, 1; mask = mk, masked = NaN)
-        D.apply_stencil!(o2, f, x, idx, w, 1; mask = mk, masked = NaN, backend = KernelAbstractions.CPU())
+        O.apply_stencil!(o1, f, x, idx, w, 1; mask = mk, masked = NaN)
+        O.apply_stencil!(o2, f, x, idx, w, 1; mask = mk, masked = NaN, backend = KernelAbstractions.CPU())
         Test.@test all(isequal(o1[i], o2[i]) for i in eachindex(o1))
     end
 
@@ -1129,20 +1140,20 @@ Test.@testset "A trailing batch axis is differenced in one pass, identically to 
     for g in (GD.StructuredGrid(sph, λ, φ), GD.StructuredGrid(sph, λ, φ, mk),
               GD.StructuredGrid(cart, collect(1.0:nx), collect(1.0:ny)))
         f = [sin(2a) * cos(b) * (k + 1) for a in λ, b in φ, k in 1:nb]
-        for dim in 1:2, pol in (D.BlankMasked(), D.ReduceInRun())
+        for dim in 1:2, pol in (O.BlankMasked(), O.ReduceInRun())
             o = fill(NaN, nx, ny, nb); ref = fill(NaN, nx, ny, nb)
-            D.derivative!(o, f, g, dim; order = 1, nodes = 3, masked = NaN, policy = pol)
+            O.derivative!(o, f, g, dim; order = 1, nodes = 3, masked = NaN, policy = pol)
             for b in 1:nb
-                D.derivative!(view(ref, :, :, b), view(f, :, :, b), g, dim;
+                O.derivative!(view(ref, :, :, b), view(f, :, :, b), g, dim;
                               order = 1, nodes = 3, masked = NaN, policy = pol)
             end
             Test.@test all(isequal(o[i], ref[i]) for i in eachindex(o))
         end
         let (i2, w2) = D.axis_stencils(g, 2; order = 1, nodes = 3)
             o = fill(NaN, nx, ny, nb); ref = fill(NaN, nx, ny, nb)
-            D.derivative!(o, f, g, i2, w2, 2; order = 1, masked = NaN)
+            O.derivative!(o, f, g, i2, w2, 2; order = 1, masked = NaN)
             for b in 1:nb
-                D.derivative!(view(ref, :, :, b), view(f, :, :, b), g, i2, w2, 2;
+                O.derivative!(view(ref, :, :, b), view(f, :, :, b), g, i2, w2, 2;
                               order = 1, masked = NaN)
             end
             Test.@test all(isequal(o[i], ref[i]) for i in eachindex(o))
@@ -1155,22 +1166,23 @@ Test.@testset "A trailing batch axis is differenced in one pass, identically to 
         g32 = GD.StructuredGrid(GE.SphericalGeometry(6.371f6), λ32, φ32)
         f32 = [sin(a) * b for a in λ32, b in φ32, _ in 1:2]
         o32 = fill(NaN32, 8, 3, 2)
-        D.derivative!(o32, f32, g32, 1; order = 1, nodes = 3, masked = NaN32)
+        O.derivative!(o32, f32, g32, 1; order = 1, nodes = 3, masked = NaN32)
         Test.@test all(isnan, view(o32, :, 1, :)) && all(isnan, view(o32, :, 3, :))
         Test.@test !any(isnan, view(o32, :, 2, :))
     end
 
     # Implicit-by-rank must not swallow a real mistake.
     g2 = GD.StructuredGrid(cart, collect(1.0:nx), collect(1.0:ny))
-    Test.@test_throws DimensionMismatch D.derivative!(zeros(nx, ny + 1, nb), zeros(nx, ny + 1, nb), g2, 1)
-    Test.@test_throws ArgumentError D.derivative!(zeros(nx, ny, nb), zeros(nx, ny, nb), g2, 3)
-    Test.@test_throws DimensionMismatch D.derivative!(zeros(nx, ny, nb), zeros(nx, ny, 2), g2, 1)
-    Test.@test_throws DimensionMismatch D.apply_stencil!(zeros(nx, ny, nb), zeros(nx, ny, nb), x,
+    Test.@test_throws DimensionMismatch O.derivative!(zeros(nx, ny + 1, nb), zeros(nx, ny + 1, nb), g2, 1)
+    Test.@test_throws ArgumentError O.derivative!(zeros(nx, ny, nb), zeros(nx, ny, nb), g2, 3)
+    Test.@test_throws DimensionMismatch O.derivative!(zeros(nx, ny, nb), zeros(nx, ny, 2), g2, 1)
+    Test.@test_throws DimensionMismatch O.apply_stencil!(zeros(nx, ny, nb), zeros(nx, ny, nb), x,
                                                          idx, w, 1; mask = trues(nx, ny + 1))
 end
 
 Test.@testset "A batch is evaluated at a coordinate, and gradients take one too" begin
     D = FG.Discretization
+    O = FG.Operators
     C = FG.Connectivity
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -1180,18 +1192,18 @@ Test.@testset "A batch is evaluated at a coordinate, and gradients take one too"
 
     for g in (GD.StructuredGrid(cart, x, y), GD.StructuredGrid(cart, x, y, mk))
         f = [2.0xi - 3.0yj + 100.0b for xi in x, yj in y, b in 1:nb]
-        for p in ((3.7, 2.4), (8.4, 6.1)), pol in (D.BlankMasked(), D.ReduceInRun())
+        for p in ((3.7, 2.4), (8.4, 6.1)), pol in (O.BlankMasked(), O.ReduceInRun())
             out = Vector{Float64}(undef, nb)
-            D.interpolate!(out, f, g, p; masked = NaN, policy = pol)
-            ref = [D.interpolate(view(f, :, :, b), g, p; masked = NaN, policy = pol) for b in 1:nb]
+            O.interpolate!(out, f, g, p; masked = NaN, policy = pol)
+            ref = [O.interpolate(view(f, :, :, b), g, p; masked = NaN, policy = pol) for b in 1:nb]
             Test.@test all(isequal(out[b], ref[b]) for b in 1:nb)
-            Test.@test all(isequal(D.interpolate(f, g, p; masked = NaN, policy = pol)[b], ref[b])
+            Test.@test all(isequal(O.interpolate(f, g, p; masked = NaN, policy = pol)[b], ref[b])
                            for b in 1:nb)          # the allocating form is the same values
         end
         # An unbatched field still answers with a scalar: the rank decides, not a length.
-        Test.@test D.interpolate(view(f, :, :, 1), g, (8.4, 6.1)) isa Float64
+        Test.@test O.interpolate(view(f, :, :, 1), g, (8.4, 6.1)) isa Float64
     end
-    Test.@test_throws DimensionMismatch D.interpolate!(
+    Test.@test_throws DimensionMismatch O.interpolate!(
         Vector{Float64}(undef, 2), zeros(nx, ny, nb), GD.StructuredGrid(cart, x, y), (1.0, 1.0))
 
     # Off a rectilinear grid the neighbour set and the tangent-plane fit are the point's, not the
@@ -1200,31 +1212,31 @@ Test.@testset "A batch is evaluated at a coordinate, and gradients take one too"
     X = [0.7i + 0.05j for i in 1:n, j in 1:n]; Y = [0.9j - 0.03i for i in 1:n, j in 1:n]
     cg = GD.CurvilinearGrid(cart, X, Y, trues(n, n); measure = fill(1.0, n, n))
     fb = [2.0X[i, j] - 3.0Y[i, j] + 50.0b for i in 1:n, j in 1:n, b in 1:4]
-    vb = D.interpolate(fb, cg, (4.2, 5.1))
+    vb = O.interpolate(fb, cg, (4.2, 5.1))
     Test.@test vb isa Vector{Float64} && length(vb) == 4
-    Test.@test all(isapprox(vb[b], D.interpolate(view(fb, :, :, b), cg, (4.2, 5.1)); atol = 1e-10)
+    Test.@test all(isapprox(vb[b], O.interpolate(view(fb, :, :, b), cg, (4.2, 5.1)); atol = 1e-10)
                    for b in 1:4)
     Test.@test all(abs(vb[b] - (2.0 * 4.2 - 3.0 * 5.1 + 50.0b)) < 1e-8 for b in 1:4)
-    Test.@test D.interpolate(view(fb, :, :, 1), cg, (4.2, 5.1)) isa Float64
+    Test.@test O.interpolate(view(fb, :, :, 1), cg, (4.2, 5.1)) isa Float64
 
     gu = C.unstructured_grid(FG.SphericalSampling.HEALPixSampling(4))
     m = length(GD.mask(gu))
     fu = [Float64(i) + 1000.0b for i in 1:m, b in 1:3]
-    vu = D.interpolate(fu, gu, (0.4, 0.1))
+    vu = O.interpolate(fu, gu, (0.4, 0.1))
     Test.@test vu isa Vector{Float64}
-    Test.@test all(isapprox(vu[b], D.interpolate(view(fu, :, b), gu, (0.4, 0.1)); atol = 1e-8)
+    Test.@test all(isapprox(vu[b], O.interpolate(view(fu, :, b), gu, (0.4, 0.1)); atol = 1e-8)
                    for b in 1:3)
 
     # A gradient plan is geometry, so one plan serves the whole batch.
-    plan = C.gradient_plan(cg)
+    plan = O.gradient_plan(cg)
     G1 = zeros(n, n, 4); G2 = zeros(n, n, 4)
-    D.gradient!(G1, G2, fb, plan)
+    O.gradient!(G1, G2, fb, plan)
     R1 = zeros(n, n, 4); R2 = zeros(n, n, 4)
     for b in 1:4
-        D.gradient!(view(R1, :, :, b), view(R2, :, :, b), view(fb, :, :, b), plan)
+        O.gradient!(view(R1, :, :, b), view(R2, :, :, b), view(fb, :, :, b), plan)
     end
     Test.@test G1 == R1 && G2 == R2
     Test.@test all(abs(G1[i, j, b] - 2.0) < 1e-10 && abs(G2[i, j, b] + 3.0) < 1e-10
                    for i in 2:(n - 1), j in 2:(n - 1), b in 1:4)
-    Test.@test_throws DimensionMismatch D.gradient!(zeros(n, n, 4), zeros(n, n, 4), zeros(n * 4 + 1), plan)
+    Test.@test_throws DimensionMismatch O.gradient!(zeros(n, n, 4), zeros(n, n, 4), zeros(n * 4 + 1), plan)
 end

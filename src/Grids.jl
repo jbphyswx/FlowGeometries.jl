@@ -10,7 +10,6 @@ using ..Discretization: Discretization
 include("Grids/Interface.jl")
 include("Grids/Measure.jl")
 include("Grids/Structured.jl")
-include("Grids/Fields.jl")
 include("Grids/Curvilinear.jl")
 include("Grids/Unstructured.jl")
 include("Grids/Embedding.jl")

@@ -55,7 +55,7 @@ t_yy(::Type{T}, a, b) where {T}   = FG.SphericalSampling.yin_yang_panels(T, a, b
 t_ring(::Type{T}, a, b) where {T} = FG.SphericalSampling.ring_info(T, a, b)
 t_p2a(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2ang(T, a, b)
 t_p2v(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2vec(T, a, b)
-t_scr(::Type{T}, o, k) where {T}  = FG.Discretization.stencil_scratch(T, o, k)
+t_scr(::Type{T}, o, k) where {T}  = FG.Operators.stencil_scratch(T, o, k)
 t_sgrid(::Type{T}, s, n) where {T} = FG.Connectivity.structured_grid(T, s, n)
 t_ugrid(::Type{T}, s) where {T}   = FG.Connectivity.unstructured_grid(T, s)
 

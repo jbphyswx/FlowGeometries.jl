@@ -16,9 +16,9 @@ using FlowGeometries: FlowGeometries as FG
 using NearestNeighbors: NearestNeighbors
 using Printf: @printf
 
-const A = FG.Axes
 const C = FG.Connectivity
 const D = FG.Discretization
+const O = FG.Operators
 const GD = FG.Grids
 const SS = FG.SphericalSampling
 
@@ -65,13 +65,13 @@ function bench_stencil()
         f = [sin(3xi) * cos(2yi) for xi in x, yi in x]
         out = similar(f)
         for dim in 1:2
-            t = best(() -> D.apply_stencil!(out, f, g, dim; order = 1, nodes = 3), 5)
+            t = best(() -> O.apply_stencil!(out, f, g, dim; order = 1, nodes = 3), 5)
             row("N=$n dim=$dim  grid form (builds its table)", t)
         end
         # With the table built once, which is what a caller applying many fields pays.
         for dim in 1:2
             idx, w = D.axis_stencils(x, 1, 3)
-            t = best(() -> D.apply_stencil!(out, f, idx, w, dim), 5)
+            t = best(() -> O.apply_stencil!(out, f, idx, w, dim), 5)
             row("N=$n dim=$dim  prebuilt table", t)
         end
     end
@@ -134,8 +134,8 @@ end
 # asserts the subtyping; the payoff is a number, and a number belongs here.
 function bench_axis()
     group("searchsorted on a uniform axis")
-    ts = best(() -> searchsortedfirst(A.UniformAxis(0.0, 1e-1, 10), 0.5), 2000)
-    tl = best(() -> searchsortedfirst(A.UniformAxis(0.0, 1e-7, 10^7), 0.5), 2000)
+    ts = best(() -> searchsortedfirst(FG.Axes.UniformAxis(0.0, 1e-1, 10), 0.5), 2000)
+    tl = best(() -> searchsortedfirst(FG.Axes.UniformAxis(0.0, 1e-7, 10^7), 0.5), 2000)
     row("n=10", ts); row("n=10^7", tl)
     ratio_row("growth over 10^6× n", ts, tl)
 end

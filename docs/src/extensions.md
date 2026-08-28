@@ -72,7 +72,7 @@ supports, and makes the second raise on a device backend rather than quietly run
 ```julia
 using KernelAbstractions
 backend = KernelAbstractions.CPU()          # or a vendor backend
-FG.Discretization.apply_stencil!(out, field, x, 1; order = 2, backend = backend)
+FG.Operators.apply_stencil!(out, field, x, 1; order = 2, backend = backend)
 FG.Connectivity.build_connectivity(grid; stencil = FG.Stencils.Moore(1), backend = backend)
 ```
 

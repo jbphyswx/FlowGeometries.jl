@@ -248,6 +248,7 @@ end
 
 Test.@testset "Index-parallel loops run as kernels and give the same answer" begin
     D = FG.Discretization
+    O = FG.Operators
     C = FG.Connectivity
     GD = FG.Grids
     cpu = KernelAbstractions.CPU()
@@ -258,13 +259,13 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     f = [sin(xi) * cos(yj) for xi in x, yj in y]
     ref = similar(f); dev = similar(f)
     for (ax, dim, ord) in ((x, 1, 1), (y, 2, 2))
-        D.apply_stencil!(ref, f, ax, dim; order = ord, nodes = 5)
-        D.apply_stencil!(dev, f, ax, dim; order = ord, nodes = 5, backend = cpu)
+        O.apply_stencil!(ref, f, ax, dim; order = ord, nodes = 5)
+        O.apply_stencil!(dev, f, ax, dim; order = ord, nodes = 5, backend = cpu)
         Test.@test ref == dev
     end
     msk = trues(n, m); msk[10:14, :] .= false
-    D.apply_stencil!(ref, f, x, 1; order = 1, nodes = 5, mask = msk)
-    D.apply_stencil!(dev, f, x, 1; order = 1, nodes = 5, mask = msk, backend = cpu)
+    O.apply_stencil!(ref, f, x, 1; order = 1, nodes = 5, mask = msk)
+    O.apply_stencil!(dev, f, x, 1; order = 1, nodes = 5, mask = msk, backend = cpu)
     Test.@test ref == dev
 
     cart = FG.Geometry.CartesianGeometry{Float64}()

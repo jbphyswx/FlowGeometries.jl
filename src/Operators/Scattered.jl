@@ -2,8 +2,8 @@
     gradient_plan(grid; stencil=Stencils.Axial(1), active_only=true, conn=nothing) -> GradientPlan
 
 Build the least-squares gradient of `grid` — the geometry of it, with no field involved. See
-[`Discretization.GradientPlan`](@ref) for what it is and why it is that; apply it with
-[`Discretization.gradient!`](@ref).
+[`GradientPlan`](@ref) for what it is and why it is that; apply it with
+[`gradient!`](@ref).
 
 This is the counterpart of `apply_stencil!` for the two architectures that have no separable axis to
 difference along: a `CurvilinearGrid`, whose neighbours come from its index topology, and an
@@ -30,7 +30,7 @@ function gradient_plan(
     # `build_connectivity` already resolves this per architecture: an index-space stencil on a
     # curvilinear grid, the stored adjacency on a node set, which ignores the stencil.
     c = conn === nothing ?
-        build_connectivity(grid; stencil = stencil, active_only = active_only) : conn
+        Connectivity.build_connectivity(grid; stencil = stencil, active_only = active_only) : conn
     geo = Grids.grid_geometry(grid)
     msk = Grids.mask(grid)
     sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
@@ -66,7 +66,7 @@ function gradient_plan(
             # Relative tolerance: `A` scales with the weights, and `wₖ = 1/|Δrₖ|²` makes it O(number
             # of neighbours), so the cut has to be against its own size rather than an absolute number.
             tol = max(a + cc, one(T)) * sqrt(eps(T))
-            p11, p12, p22 = Discretization._sympinv2(a, b, cc, tol)
+            p11, p12, p22 = _sympinv2(a, b, cc, tol)
             for t in eachindex(wk)
                 push!(c1, wk[t] * (p11 * d1[t] + p12 * d2[t]))
                 push!(c2, wk[t] * (p12 * d1[t] + p22 * d2[t]))
@@ -75,7 +75,7 @@ function gradient_plan(
         ptr[i + 1] = ptr[i] + length(wk)
     end
     names = Geometry.point_names(geo, Val(2))
-    return Discretization.GradientPlan(ptr, nbr, c1, c2, names)
+    return GradientPlan(ptr, nbr, c1, c2, names)
 end
 
 # The scalar fit: one value per cell in, one value out. Reached through the rank-matched methods below,
@@ -84,10 +84,10 @@ end
 function _interp_scattered(
     field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}},
     p::NTuple{D,Real}; k::Integer = 8, active_only::Bool = true, masked = T(NaN),
-    topology = MetricTopology(grid), scratch = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    topology = Connectivity.MetricTopology(grid), scratch = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,D}
-    policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
+    policy isa ShiftWithinRun && _interp_mask_error(policy)
     length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
         "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
         "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
@@ -98,16 +98,16 @@ function _interp_scattered(
     ))
     geo = Grids.grid_geometry(grid)
     p0 = ntuple(d -> T(p[d]), Val(D))
-    idx, dist = k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
+    idx, dist = Connectivity.k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
                           scratch = scratch)
     isempty(idx) && return masked
     # `BlankMasked` refuses where the neighbourhood is not wholly active, on the same rule a stencil
     # uses; `k_nearest` with `active_only` has already dropped those, so the test is whether doing so
     # left a hole — a cell nearer than the farthest one kept, that was skipped.
-    if policy isa Discretization.BlankMasked && active_only
+    if policy isa BlankMasked && active_only
         msk = Grids.mask(grid)
         rmax = dist[end]
-        n_in = nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
+        n_in = Connectivity.nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
                                  scratch = scratch)
         n_in > length(idx) && return masked
     end
@@ -155,53 +155,53 @@ end
 
 # One value per cell — a curvilinear grid's cells are an `N`-D array, a node grid's a vector — so the
 # field's rank matching the cells' says this is a single field and the answer is a scalar.
-@inline Discretization.interpolate(
+@inline interpolate(
     field::AbstractArray{<:Any,N}, grid::Grids.CurvilinearGrid{T,G,N}, p::NTuple{D,Real}; kwargs...,
 ) where {T,G,N,D} = _interp_scattered(field, grid, p; kwargs...)
 
-@inline Discretization.interpolate(
+@inline interpolate(
     field::AbstractVector, grid::Grids.UnstructuredGrid{T}, p::NTuple{D,Real}; kwargs...,
 ) where {T,D} = _interp_scattered(field, grid, p; kwargs...)
 
 # A higher rank than the cells means trailing batch axes, and the answer is one value per element. The
 # allocating form of [`interpolate!`](@ref), as everywhere else in the package.
-function Discretization.interpolate(
+function interpolate(
     field::AbstractArray{<:Any,NA}, grid::Grids.CurvilinearGrid{T,G,N}, p::NTuple{D,Real}; kwargs...,
 ) where {T,G,N,NA,D}
     n = length(Grids.mask(grid))
-    return Discretization.interpolate!(Vector{T}(undef, length(field) ÷ n), field, grid, p; kwargs...)
+    return interpolate!(Vector{T}(undef, length(field) ÷ n), field, grid, p; kwargs...)
 end
 
-function Discretization.interpolate(
+function interpolate(
     field::AbstractArray{<:Any,NA}, grid::Grids.UnstructuredGrid{T}, p::NTuple{D,Real}; kwargs...,
 ) where {T,NA,D}
     n = length(Grids.mask(grid))
-    return Discretization.interpolate!(Vector{T}(undef, length(field) ÷ n), field, grid, p; kwargs...)
+    return interpolate!(Vector{T}(undef, length(field) ÷ n), field, grid, p; kwargs...)
 end
 
-@inline Discretization.interpolate(
+@inline interpolate(
     field::AbstractArray, grid::Union{Grids.CurvilinearGrid,Grids.UnstructuredGrid},
     p::Geometry.PointLike; kwargs...,
-) = Discretization.interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
+) = interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
 
 """
     interpolate!(out, field, grid, p; k=8, …) -> out
 
-[`Discretization.interpolate`](@ref) off a rectilinear grid for a field carrying trailing BATCH axes,
+[`interpolate`](@ref) off a rectilinear grid for a field carrying trailing BATCH axes,
 writing one value per batch element.
 
 The `k` nearest cells and the mask verdict are a property of the point and the geometry — and the k-d
 tree query is the expensive part — so they are solved once here and the tangent-plane fit is then
 applied to every element.
 """
-function Discretization.interpolate!(
+function interpolate!(
     out::AbstractVector, field::AbstractArray,
     grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, p::NTuple{D,Real};
     k::Integer = 8, active_only::Bool = true, masked = T(NaN),
-    topology = MetricTopology(grid), scratch = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    topology = Connectivity.MetricTopology(grid), scratch = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,D}
-    policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
+    policy isa ShiftWithinRun && _interp_mask_error(policy)
     length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
         "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
         "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
@@ -216,15 +216,15 @@ function Discretization.interpolate!(
     ))
     geo = Grids.grid_geometry(grid)
     p0 = ntuple(d -> T(p[d]), Val(D))
-    idx, dist = k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
+    idx, dist = Connectivity.k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
                           scratch = scratch)
     if isempty(idx)
         fill!(out, masked)
         return out
     end
-    if policy isa Discretization.BlankMasked && active_only
+    if policy isa BlankMasked && active_only
         rmax = dist[end]
-        n_in = nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
+        n_in = Connectivity.nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
                                  scratch = scratch)
         if n_in > length(idx)
             fill!(out, masked)
@@ -237,10 +237,10 @@ function Discretization.interpolate!(
     return out
 end
 
-@inline Discretization.interpolate!(
+@inline interpolate!(
     out::AbstractVector, field::AbstractArray,
     grid::Union{Grids.CurvilinearGrid,Grids.UnstructuredGrid}, p::Geometry.PointLike; kwargs...,
-) = Discretization.interpolate!(out, field, grid, Geometry.as_ntuple(p); kwargs...)
+) = interpolate!(out, field, grid, Geometry.as_ntuple(p); kwargs...)
 
 @inline _grad_coords(grid, ::Nothing, i::Int) = Grids._raw_coords(grid, i)
 @inline _grad_coords(grid, sz::Tuple, i::Int) =

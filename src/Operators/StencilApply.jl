@@ -1,125 +1,3 @@
-# ---------------------------------------------------------------------------
-# Applying a weight set along one direction
-# ---------------------------------------------------------------------------
-
-"""
-    AbstractMaskPolicy
-
-What [`apply_stencil!`](@ref) does at the edge of the active region: [`BlankMasked`](@ref),
-[`ShiftWithinRun`](@ref) or [`ReduceInRun`](@ref).
-
-A **type**, like the image and reach conventions in `Connectivity`: which cells carry a number and which
-carry `masked` is a property of the result, so it belongs in the call rather than in a runtime tag.
-"""
-abstract type AbstractMaskPolicy end
-
-"""
-    BlankMasked()
-
-Write `masked` at a cell that is inactive **or** whose stencil reads an inactive cell. The default, and
-the only policy that never invents a value: where the stencil cannot be formed from active data, there
-is no derivative.
-
-Its cost is a dead band. Every active cell within `nodes - 1` of a masked cell is blanked, so a
-five-point derivative loses two cells either side of every coastline.
-"""
-struct BlankMasked <: AbstractMaskPolicy end
-
-"""
-    ShiftWithinRun()
-
-Shift the stencil to fit inside the run of active samples containing the cell, keeping the full node
-count — the same thing the stencil already does at the end of a bounded axis, with the end of the active
-run as the boundary. `masked` only where the run is shorter than `nodes`.
-
-The accuracy order is therefore the same everywhere a value is written, which is the property
-[`fd_weights`](@ref) exists to preserve. On a run of at least `nodes` active samples the weights are
-**identical** to the unmasked ones, so the interior of an active region is bit-for-bit unchanged.
-"""
-struct ShiftWithinRun <: AbstractMaskPolicy end
-
-"""
-    ReduceInRun()
-
-[`ShiftWithinRun`](@ref), and where the run cannot hold `nodes`, use the largest window it can, down to
-`order + 1` samples. `masked` below that, where no derivative of that order exists.
-
-This trades accuracy order for coverage — a five-point scheme becomes three-point in a strait three
-cells wide — so it is named rather than reached by fallback. Ask for it when a value everywhere matters
-more than a uniform order.
-
-Under this policy `nodes` is a **ceiling**, not a demand, and that applies to the end of the axis as
-well as the end of a run: an axis with fewer than `nodes` samples uses as many as it has instead of
-raising, and one with fewer than `order + 1` is `masked` throughout. A single-latitude strip, a
-two-level column and a one-cell-wide channel are ordinary grids, and asking for "second order where the
-axis allows it" should not require the caller to clamp `nodes` themselves. The other two policies keep
-the error, since neither claims to degrade.
-"""
-struct ReduceInRun <: AbstractMaskPolicy end
-
-"""
-    _window_start(i, k, lo, hi) -> Int
-
-First index of a `k`-node window centred on `i` and shifted to fit inside `[lo, hi]`. The whole-axis
-case is `lo = 1, hi = n`; the masked case is the same expression with the bounds of the active run,
-which is why both share this.
-"""
-@inline _window_start(i::Int, k::Int, lo::Int, hi::Int) = clamp(i - (k - 1) ÷ 2, lo, hi - k + 1)
-
-"""
-    axis_stencils(x, order, nodes; period=nothing) -> (indices, weights)
-
-The `order`-th derivative's [`fd_weights`](@ref) at **every** sample of axis `x`, as two `n × nodes`
-matrices: the axis indices each sample reads, and the weight on each.
-
-One row per sample, so a stretched axis costs nothing extra downstream — the varying weights are
-already here. Built once and reused by [`apply_stencil!`](@ref).
-
-`period === nothing` shifts the stencil inward at the two ends, exactly as the single-sample
-[`fd_weights`](@ref) does. Given a period the stencil stays centred everywhere and wraps, with the
-wrapped samples' coordinates carried across the seam so the spacing there is the true one.
-"""
-function axis_stencils(
-    x::AbstractVector{T}, order::Integer, nodes::Integer; period::Union{Nothing,Real} = nothing,
-) where {T<:AbstractFloat}
-    n = length(x)
-    k = Int(nodes)
-    ord = Int(order)
-    k ≥ ord + 1 || throw(ArgumentError(
-        "an order-$ord derivative needs at least $(ord + 1) nodes, got $k",
-    ))
-    k ≤ n || throw(ArgumentError("cannot use $k nodes on an axis of $n samples"))
-    idx = Matrix{Int}(undef, n, k)
-    wts = Matrix{T}(undef, n, k)
-    half = (k - 1) ÷ 2
-    buf = Vector{T}(undef, k)
-    # Reused across every sample: the allocating `fd_weights` would be two per sample, ~8000 on a
-    # 4096-sample axis, for a table whose size never changes.
-    wbuf = Vector{T}(undef, k)
-    cbuf = Matrix{T}(undef, k, ord + 1)
-    P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
-    @inbounds for i in 1:n
-        if period === nothing
-            i0 = _window_start(i, k, 1, n)
-            for q in 1:k
-                idx[i, q] = i0 + q - 1
-                buf[q] = x[i0 + q - 1]
-            end
-        else
-            for q in 1:k
-                raw = i - half + q - 1
-                idx[i, q] = mod1(raw, n)
-                buf[q] = x[mod1(raw, n)] + T(fld(raw - 1, n)) * P
-            end
-        end
-        fd_weights!(wbuf, cbuf, buf, x[i], ord)
-        for q in 1:k
-            wts[i, q] = wbuf[q]
-        end
-    end
-    return idx, wts
-end
-
 """
     apply_stencil!(out, field, x, dim; order=1, nodes=order+1, period=nothing,
                    mask=nothing, masked=zero) -> out
@@ -167,7 +45,7 @@ function apply_stencil!(
         end
         k = min(k, length(x))
     end
-    idx, wts = axis_stencils(x, ord, k; period = period)
+    idx, wts = Discretization.axis_stencils(x, ord, k; period = period)
     return apply_stencil!(out, field, x, idx, wts, dim; order = ord, period = period, mask = mask,
                           masked = masked, backend = backend, policy = policy, scratch = scratch)
 end
@@ -376,7 +254,7 @@ end
             j = mod1(raw, n)
             nbuf[q] = x[j] + T(fld(raw - 1, n)) * P
         end
-        _fd_weights!(wbuf, cbuf, nbuf, kk, x[i], ord)
+        Discretization._fd_weights!(wbuf, cbuf, nbuf, kk, x[i], ord)
         acc = zero(S)
         for q in 1:kk
             raw = base + s + q - 1

@@ -41,15 +41,15 @@ q_runreach(m, I, d, i, n, k) = FG.Discretization._run_reach(m, I, d, i, n, k, fa
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
 q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
-q_gradient!(a, b, f, plan) = FG.Discretization.gradient!(a, b, f, plan)
-q_tbl!(o, f, g, iw, d, pol) = FG.Discretization.apply_stencil!(o, f, g, iw[1], iw[2], d;
+q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
+q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
-q_tbl_sc!(o, f, g, iw, d, sc) = FG.Discretization.apply_stencil!(
+q_tbl_sc!(o, f, g, iw, d, sc) = FG.Operators.apply_stencil!(
     o, f, g, iw[1], iw[2], d; order = 1, masked = NaN,
-    policy = FG.Discretization.ReduceInRun(), scratch = sc)
+    policy = FG.Operators.ReduceInRun(), scratch = sc)
 q_width(g, d, i)         = FG.Grids.cell_width(g, d, i)
-q_stencil!(o, f, ix, w, d) = FG.Discretization.apply_stencil!(o, f, ix, w, d)
-q_stencil_m!(o, f, ix, w, d, msk) = FG.Discretization.apply_stencil!(o, f, ix, w, d; mask = msk)
+q_stencil!(o, f, ix, w, d) = FG.Operators.apply_stencil!(o, f, ix, w, d)
+q_stencil_m!(o, f, ix, w, d, msk) = FG.Operators.apply_stencil!(o, f, ix, w, d; mask = msk)
 q_area(g, I)             = FG.Grids.area(g, I...)
 q_coords!(o, g, I)       = FG.Grids.coords!(o, g, I...)
 q_axis(g, d)             = length(FG.Grids.axis(g, d))
@@ -73,8 +73,8 @@ q_npoints(s)             = FG.SphericalSampling.npoints(s)
 q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; scratch = sc)
 # The HELD-table form. The other overload builds the table per call — that is what `axis_stencils` is
 # for, and it is classified as allocating by contract — so measuring it would measure the table.
-q_deriv_held!(o, f, g, iw, d) = FG.Discretization.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
-q_interp!(o, f, g, p)    = FG.Discretization.interpolate!(o, f, g, p)
+q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
+q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 
 # The per-grid-shape sweep.
 function check_shape(label, g, I)
@@ -156,6 +156,7 @@ end
 
 Test.@testset "A degrading sweep's cost is O(1) in the grid, not O(n)" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
     # The degrade path keeps a Fornberg scratch, but it is `O(1)` in the grid, not `O(n)`.
@@ -166,7 +167,7 @@ Test.@testset "A degrading sweep's cost is O(1) in the grid, not O(n)" begin
             gm = GD.StructuredGrid(cart, xs, xs, mm)
             fm = [sin(xi) * cos(yj) for xi in xs, yj in xs]
             iw = D.axis_stencils(gm, 1; order = 1, nodes = 3)
-            _alloc(q_tbl!, zeros(m, m), fm, gm, iw, 1, D.ReduceInRun())
+            _alloc(q_tbl!, zeros(m, m), fm, gm, iw, 1, O.ReduceInRun())
         end
         Test.@test allocs[1] == allocs[2]          # 16x the cells, the same bytes
     end
@@ -174,12 +175,13 @@ end
 
 Test.@testset "A precomputed weight set applies allocation-free" begin
     D = FG.Discretization
+    O = FG.Operators
     X = collect(range(0.0, 8.0; length = 9))
     Y = collect(range(0.0, 4.0; length = 5))
     F = [xi^2 for xi in X, _ in Y]
     idx, w = D.axis_stencils(X, 1, 3)
     O2 = similar(F)
-    ap() = FG.Discretization.apply_stencil!(O2, F, idx, w, 1)
+    ap() = FG.Operators.apply_stencil!(O2, F, idx, w, 1)
     ap()
     Test.@test @allocated(ap()) == 0
 end
@@ -838,6 +840,7 @@ end
 
 Test.@testset "A degrading sweep can be made to allocate nothing" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
     n = 32
@@ -846,14 +849,14 @@ Test.@testset "A degrading sweep can be made to allocate nothing" begin
     g = GD.StructuredGrid(cart, x, x, mk)
     f = [sin(xi) * cos(yj) for xi in x, yj in x]
     idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
-    sc = D.stencil_scratch(1, 3)
+    sc = O.stencil_scratch(1, 3)
 
     # Same answer, and the buffers carry nothing between calls.
     a = zeros(n, n); b = zeros(n, n)
-    D.apply_stencil!(a, f, g, idx, w, 1; order = 1, masked = NaN, policy = D.ReduceInRun())
+    O.apply_stencil!(a, f, g, idx, w, 1; order = 1, masked = NaN, policy = O.ReduceInRun())
     for _ in 1:3
-        D.apply_stencil!(b, f, g, idx, w, 1; order = 1, masked = NaN,
-                         policy = D.ReduceInRun(), scratch = sc)
+        O.apply_stencil!(b, f, g, idx, w, 1; order = 1, masked = NaN,
+                         policy = O.ReduceInRun(), scratch = sc)
     end
     Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
 
@@ -867,13 +870,13 @@ Test.@testset "A degrading sweep can be made to allocate nothing" begin
     Test.@test _alloc(q_runreach, mk, (6, 9), 1, 6, n, 3) == 0
     # …and every cell away from a mask was already free, which is why this hid.
     Test.@test _alloc(q_tbl!, zeros(n, n), f, GD.StructuredGrid(cart, x, x), (idx, w), 1,
-                      D.ReduceInRun()) == 0
+                      O.ReduceInRun()) == 0
 
     # A scratch too small for the stencil is refused rather than overrun.
-    let small = D.stencil_scratch(1, 2), i5w5 = D.axis_stencils(g, 1; order = 1, nodes = 5)
-        Test.@test_throws DimensionMismatch D.apply_stencil!(
+    let small = O.stencil_scratch(1, 2), i5w5 = D.axis_stencils(g, 1; order = 1, nodes = 5)
+        Test.@test_throws DimensionMismatch O.apply_stencil!(
             zeros(n, n), f, g, i5w5[1], i5w5[2], 1; order = 1, masked = NaN,
-            policy = D.ReduceInRun(), scratch = small)
+            policy = O.ReduceInRun(), scratch = small)
     end
 end
 
@@ -948,6 +951,7 @@ end
 
 Test.@testset "Holding a stencil table removes the per-call allocation" begin
     D = FG.Discretization
+    O = FG.Operators
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
     n = 24
@@ -960,7 +964,7 @@ Test.@testset "Holding a stencil table removes the per-call allocation" begin
     # Holding the table is what removes the per-call allocation, which is the point of it.
     for dim in 1:2
         idx, w = D.axis_stencils(g, dim; order = 1, nodes = 3)
-        Test.@test _alloc(q_tbl!, zeros(n, n), f, g, (idx, w), dim, D.BlankMasked()) == 0
+        Test.@test _alloc(q_tbl!, zeros(n, n), f, g, (idx, w), dim, O.BlankMasked()) == 0
     end
 end
 
@@ -1102,6 +1106,7 @@ end
 
 Test.@testset "Applying a gradient plan allocates nothing" begin
     D = FG.Discretization
+    O = FG.Operators
     C = FG.Connectivity
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -1109,16 +1114,17 @@ Test.@testset "Applying a gradient plan allocates nothing" begin
     x = [0.7i + 0.05j for i in 1:n, j in 1:n]
     y = [0.9j - 0.03i for i in 1:n, j in 1:n]
     grid = GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
-    plan = C.gradient_plan(grid)
+    plan = O.gradient_plan(grid)
     # Applying is one dot product per cell and must allocate nothing.
     let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
-        D.gradient!(g1, g2, f, plan)
+        O.gradient!(g1, g2, f, plan)
         Test.@test _alloc(q_gradient!, g1, g2, f, plan) == 0
     end
 end
 
 Test.@testset "A batch axis costs no allocation, and none that grows with it" begin
     D = FG.Discretization
+    O = FG.Operators
     C = FG.Connectivity
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -1130,7 +1136,7 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
                             collect(range(0.0, 2π * (1 - 1 / nx); length = nx)),
                             collect(range(-1.1, 1.1; length = ny)))
     idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
-    plan = C.gradient_plan(GD.CurvilinearGrid(cart,
+    plan = O.gradient_plan(GD.CurvilinearGrid(cart,
         [0.7i + 0.05j for i in 1:nx, j in 1:ny], [0.9j - 0.03i for i in 1:nx, j in 1:ny],
         trues(nx, ny); measure = fill(1.0, nx, ny)))
 
@@ -1139,7 +1145,7 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
     for (name, mk_args) in (
         ("apply_stencil! (held table)", nb -> (q_tbl!, zeros(nx, ny, nb),
                                               [sin(3i) * j * k for i in 1:nx, j in 1:ny, k in 1:nb],
-                                              g, (idx, w), 1, D.BlankMasked())),
+                                              g, (idx, w), 1, O.BlankMasked())),
         ("derivative! (spherical, held)", nb -> (q_deriv_held!, zeros(nx, ny, nb),
                                               [sin(3i) * j * k for i in 1:nx, j in 1:ny, k in 1:nb],
                                               sph, D.axis_stencils(sph, 2; order = 1, nodes = 3), 2)),

@@ -322,6 +322,7 @@ Test.@testset "Every architecture can be built without a mask" begin
     GD = FG.Grids
     C = FG.Connectivity
     D = FG.Discretization
+    O = FG.Operators
     cart = FG.Geometry.CartesianGeometry{Float64}()
     n = 8
     x = [t for t in range(0.0, 7.0; length = n), _ in 1:n]
@@ -354,11 +355,11 @@ Test.@testset "Every architecture can be built without a mask" begin
 
     # Everything downstream must be unchanged by which representation the grid holds.
     let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
-        D.gradient!(g1, g2, f, C.gradient_plan(g0))
+        O.gradient!(g1, g2, f, O.gradient_plan(g0))
         Test.@test maximum(abs.(g1 .- 2.0)) < 1e-10 && maximum(abs.(g2 .+ 3.0)) < 1e-10
         Test.@test C.nneighbors_within(g0, 4, 4; ball = 2.0) ==
                    C.nneighbors_within(gm, 4, 4; ball = 2.0)
-        Test.@test abs(D.interpolate(f, g0, (3.3, 2.2); k = 8) - (2 * 3.3 - 3 * 2.2)) < 1e-9
+        Test.@test abs(O.interpolate(f, g0, (3.3, 2.2); k = 8) - (2 * 3.3 - 3 * 2.2)) < 1e-9
         Test.@test sum(GD.measure(g0)) == sum(GD.measure(gm))
         Test.@test length(C.build_connectivity(g0).nbrs) == length(C.build_connectivity(gm).nbrs)
     end

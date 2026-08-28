@@ -19,7 +19,6 @@ using ..Grids: Grids
 include("Connectivity/CSR.jl")
 include("Connectivity/IndexStencil.jl")
 include("Connectivity/Metric.jl")
-include("Connectivity/Interpolate.jl")
 include("Connectivity/Reach.jl")
 include("Connectivity/PointQueries.jl")
 include("Connectivity/KNearest.jl")

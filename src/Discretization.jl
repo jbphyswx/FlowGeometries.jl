@@ -19,7 +19,5 @@ include("Discretization/Staggering.jl")
 include("Discretization/Spacing.jl")
 include("Discretization/Locate.jl")
 include("Discretization/Weights.jl")
-include("Discretization/StencilApply.jl")
-include("Discretization/Operators.jl")
 
 end # module Discretization

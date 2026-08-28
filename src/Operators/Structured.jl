@@ -2,23 +2,23 @@
 """
     apply_stencil!(out, field, grid, dim; order=1, nodes=order+1, active_only=true, masked=zero) -> out
 
-[`Discretization.apply_stencil!`](@ref) with the axis, wrap period and mask taken from `grid`, so a
+[`apply_stencil!`](@ref) with the axis, wrap period and mask taken from `grid`, so a
 periodic direction wraps and an inactive cell is honoured without restating any of it.
 
 Only a rectilinear direction has a 1-D axis to difference along, so this is a `StructuredGrid` method.
 """
-function Discretization.apply_stencil!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
+function apply_stencil!(
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), Int(dim))
-    msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
-    return Discretization.apply_stencil!(
-        out, field, coordinates(grid, dim), dim;
+    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
+    return apply_stencil!(
+        out, field, Grids.coordinates(grid, dim), dim;
         order = order, nodes = nodes,
-        period = isperiodic(grid, dim) ? period(grid, dim) : nothing,
+        period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
         mask = msk, masked = masked, backend = backend, policy = policy, scratch = scratch,
     )
 end
@@ -26,14 +26,14 @@ end
 # The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
 # past the last sample the pair is `(n, 1)` across the seam, where `interpolation_weights` alone would
 # clamp and return the endpoint value.
-@inline function _interp_pair(grid::StructuredGrid{T, G,N}, d::Int, v::T) where {G,T,N}
-    x = coordinates(grid, d)
+@inline function _interp_pair(grid::Grids.StructuredGrid{T, G,N}, d::Int, v::T) where {G,T,N}
+    x = Grids.coordinates(grid, d)
     n = length(x)
     n == 1 && return (1, 1, one(T), zero(T))
-    if isperiodic(grid, d)
-        L = T(period(grid, d))
+    if Grids.isperiodic(grid, d)
+        L = T(Grids.period(grid, d))
         if L > 0
-            lo = T(bounds(grid, d)[1])
+            lo = T(Grids.bounds(grid, d)[1])
             v = lo + mod(v - lo, L)
             @inbounds x1, xn = T(x[1]), T(x[n])
             asc = xn ≥ x1
@@ -49,23 +49,23 @@ end
     return (Int(i), Int(i) + 1, w[1], w[2])
 end
 
-function Discretization.interpolate(
-    field::AbstractArray{S,N}, grid::StructuredGrid{T, G,N}, p::NTuple{N,Real};
+function interpolate(
+    field::AbstractArray{S,N}, grid::Grids.StructuredGrid{T, G,N}, p::NTuple{N,Real};
     active_only::Bool = true, masked = S(NaN),
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,G,T,N}
     _check_interp(field, grid, Val(N), policy)
     return _interp_at(field, grid, p, 0, active_only, masked, policy)
 end
 
 @inline function _check_interp(
-    field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N}, ::Val{N}, policy,
+    field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N}, ::Val{N}, policy,
 ) where {NA,G,T,N}
-    policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
+    policy isa ShiftWithinRun && _interp_mask_error(policy)
     NA ≥ N || throw(DimensionMismatch("field has $NA axes but the grid has $N"))
-    ntuple(d -> size(field, d), Val(N)) == size_tuple(grid) || throw(DimensionMismatch(
+    ntuple(d -> size(field, d), Val(N)) == Grids.size_tuple(grid) || throw(DimensionMismatch(
         "field's leading $N axes $(ntuple(d -> size(field, d), Val(N))) do not match the grid " *
-        "$(size_tuple(grid))",
+        "$(Grids.size_tuple(grid))",
     ))
     return nothing
 end
@@ -73,12 +73,12 @@ end
 # One batch element, at linear offset `off` into the field. The bracketing cell and its weights are a
 # property of the POINT and the grid, so a batched call solves them once and calls this per element.
 function _interp_at(
-    field::AbstractArray{S}, grid::StructuredGrid{T, G,N}, p::NTuple{N,Real}, off::Int,
+    field::AbstractArray{S}, grid::Grids.StructuredGrid{T, G,N}, p::NTuple{N,Real}, off::Int,
     active_only::Bool, masked, policy,
 ) where {S,G,T,N}
     prs = ntuple(d -> _interp_pair(grid, d, T(p[d])), Val(N))
-    msk = active_only && !(mask(grid) isa AllActive) ? mask(grid) : nothing
-    sz = size_tuple(grid)
+    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
+    sz = Grids.size_tuple(grid)
     acc = zero(S)
     wsum = zero(T)
     # The `2^N` corners of the bracketing cell, each weighted by the product of its per-axis weights.
@@ -87,7 +87,7 @@ function _interp_at(
         iszero(w) && continue
         I = ntuple(d -> c[d] == 1 ? prs[d][1] : prs[d][2], Val(N))
         if msk !== nothing && !msk[I...]
-            policy isa Discretization.BlankMasked && return masked
+            policy isa BlankMasked && return masked
             continue                                   # `ReduceInRun`: drop it and renormalize
         end
         # Linear, so one expression serves the unbatched field and a slice of a batched one.
@@ -101,27 +101,27 @@ function _interp_at(
     return wsum > 0 ? acc / S(wsum) : masked
 end
 
-@inline Discretization.interpolate(
-    field::AbstractArray, grid::StructuredGrid, p::Geometry.PointLike; kwargs...,
+@inline interpolate(
+    field::AbstractArray, grid::Grids.StructuredGrid, p::Geometry.PointLike; kwargs...,
 ) =
-    Discretization.interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
+    interpolate(field, grid, Geometry.as_ntuple(p); kwargs...)
 
 """
     interpolate!(out, field, grid, p; active_only=true, masked=NaN, policy=BlankMasked()) -> out
 
-[`Discretization.interpolate`](@ref) at one coordinate for a field carrying trailing BATCH axes: `out`
+[`interpolate`](@ref) at one coordinate for a field carrying trailing BATCH axes: `out`
 receives one value per batch element, in the order those axes are laid out.
 
 The bracketing cell and its `2^N` corner weights depend on the point and the grid, not on the data, so
 they are solved once here and applied to every element — less work than one `interpolate` per slice.
 """
-function Discretization.interpolate!(
-    out::AbstractVector{S}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
+function interpolate!(
+    out::AbstractVector{S}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     p::NTuple{N,Real}; active_only::Bool = true, masked = S(NaN),
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
+    policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,G,T,N,NA}
     _check_interp(field, grid, Val(N), policy)
-    n = prod(size_tuple(grid))
+    n = prod(Grids.size_tuple(grid))
     nb = length(field) ÷ n
     length(out) == nb || throw(DimensionMismatch(
         "out holds $(length(out)) values but the field carries $nb batch elements",
@@ -132,26 +132,26 @@ function Discretization.interpolate!(
     return out
 end
 
-@inline Discretization.interpolate!(
-    out::AbstractVector, field::AbstractArray, grid::StructuredGrid, p::Geometry.PointLike; kwargs...,
-) = Discretization.interpolate!(out, field, grid, Geometry.as_ntuple(p); kwargs...)
+@inline interpolate!(
+    out::AbstractVector, field::AbstractArray, grid::Grids.StructuredGrid, p::Geometry.PointLike; kwargs...,
+) = interpolate!(out, field, grid, Geometry.as_ntuple(p); kwargs...)
 
 # The allocating form, as everywhere else in the package: `spherical_points!`/`spherical_points`,
 # `latitude_weights!`/`latitude_weights`.
-function Discretization.interpolate(
-    field::AbstractArray{S,NA}, grid::StructuredGrid{T, G,N}, p::NTuple{N,Real}; kwargs...,
+function interpolate(
+    field::AbstractArray{S,NA}, grid::Grids.StructuredGrid{T, G,N}, p::NTuple{N,Real}; kwargs...,
 ) where {S,G,T,N,NA}
-    n = prod(size_tuple(grid))
-    return Discretization.interpolate!(Vector{S}(undef, length(field) ÷ n), field, grid, p; kwargs...)
+    n = prod(Grids.size_tuple(grid))
+    return interpolate!(Vector{S}(undef, length(field) ÷ n), field, grid, p; kwargs...)
 end
 
-function Discretization.derivative!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
+function derivative!(
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
-    Discretization.apply_stencil!(out, field, grid, dim; order = order, nodes = nodes,
+    apply_stencil!(out, field, grid, dim; order = order, nodes = nodes,
                                   active_only = active_only, masked = masked, backend = backend,
                                   policy = policy, scratch = scratch)
     return _scale_by_metric!(out, grid, Int(dim), masked)
@@ -162,7 +162,7 @@ end
 # many leading axes are spatial, and a disagreement THERE is still a mistake and still raises — only
 # extra trailing axes are new.
 @inline function _check_batched(
-    out::AbstractArray{<:Any,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
+    out::AbstractArray{<:Any,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     ::Val{N}, dim::Int,
 ) where {NA,G,T,N}
     NA ≥ N || throw(DimensionMismatch(
@@ -175,9 +175,9 @@ end
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
     ))
-    ntuple(d -> size(field, d), Val(N)) == size_tuple(grid) || throw(DimensionMismatch(
+    ntuple(d -> size(field, d), Val(N)) == Grids.size_tuple(grid) || throw(DimensionMismatch(
         "field's leading $N axes $(ntuple(d -> size(field, d), Val(N))) do not match the grid " *
-        "$(size_tuple(grid))",
+        "$(Grids.size_tuple(grid))",
     ))
     return nothing
 end
@@ -185,19 +185,19 @@ end
 # A Cartesian metric is the identity, so the derivative with respect to distance is already the one
 # `apply_stencil!` wrote and there is nothing to divide by.
 @inline _scale_by_metric!(
-    out::AbstractArray{S,NA}, ::StructuredGrid{T, G,N}, ::Int, _masked,
+    out::AbstractArray{S,NA}, ::Grids.StructuredGrid{T, G,N}, ::Int, _masked,
 ) where {S,G<:Geometry.AbstractCartesianGeometry,T,N,NA} = out
 
 function _scale_by_metric!(
-    out::AbstractArray{S,NA}, grid::StructuredGrid{T, G,N}, dim::Int, masked,
+    out::AbstractArray{S,NA}, grid::Grids.StructuredGrid{T, G,N}, dim::Int, masked,
 ) where {S,G,T,N,NA}
-    geo = grid_geometry(grid)
+    geo = Grids.grid_geometry(grid)
     floor_ = Discretization.metric_floor(geo)
-    sz = size_tuple(grid)
+    sz = Grids.size_tuple(grid)
     # No scale factor depends on longitude, so it is constant along axis 1 whichever direction is
     # differenced: computed once per remaining index, then swept along the contiguous axis. Any axis-1
     # coordinate serves for the point it is evaluated at, so the first one is used.
-    @inbounds x1 = first(coordinates(grid, 1))
+    @inbounds x1 = first(Grids.coordinates(grid, 1))
     rest = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
     # No scale factor depends on the batch either, so `h` is solved once per SPATIAL index and reused
     # across the batch — strictly less work than the per-slice loop this replaces, which re-solved it
@@ -211,7 +211,7 @@ function _scale_by_metric!(
     nb = length(out) ÷ ncell
     if IndexStyle(out) === IndexLinear() && !Base.has_offset_axes(out)
         @inbounds for (p, Ir) in enumerate(rest)
-            pt = (x1, ntuple(d -> T(coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
+            pt = (x1, ntuple(d -> T(Grids.coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
             h = Geometry.scale_factors(geo, pt)[dim]
             sbase = (p - 1) * sz[1]
             if abs(h) ≤ floor_
@@ -231,7 +231,7 @@ function _scale_by_metric!(
     # own indexing instead.
     batch = CartesianIndices(ntuple(d -> size(out, N + d), Val(NA - N)))
     @inbounds for Ir in rest
-        pt = (x1, ntuple(d -> T(coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
+        pt = (x1, ntuple(d -> T(Grids.coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
         h = Geometry.scale_factors(geo, pt)[dim]
         tr = Tuple(Ir)
         for Ib in batch
@@ -252,7 +252,7 @@ function _scale_by_metric!(
 end
 
 """
-    axis_stencils(grid, dim; order=1, nodes=order+1) -> (indices, weights)
+    Discretization.axis_stencils(grid, dim; order=1, nodes=order+1) -> (indices, weights)
 
 [`Discretization.axis_stencils`](@ref) for direction `dim` of `grid`, taking that direction's axis and
 wrap period from the grid.
@@ -262,12 +262,12 @@ same direction should build it once and hand it to the `(out, field, grid, indic
 form — the `(out, field, grid, dim)` form above rebuilds it on every call.
 """
 function Discretization.axis_stencils(
-    grid::StructuredGrid{T, G,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
+    grid::Grids.StructuredGrid{T, G,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     return Discretization.axis_stencils(
-        coordinates(grid, dim), order, nodes;
-        period = isperiodic(grid, dim) ? period(grid, dim) : nothing,
+        Grids.coordinates(grid, dim), order, nodes;
+        period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
     )
 end
 
@@ -285,18 +285,18 @@ masked grid would otherwise have to give up the table and pay its rebuild on eve
 This is the form to use in a loop over fields: the table is the same for all of them, and building it
 is the one part of the work that does not depend on the field.
 """
-function Discretization.apply_stencil!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
+function apply_stencil!(
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), Int(dim))
     # Both the mask and the period are `Union{Nothing, …}` if resolved with a ternary, and a small
     # union crossing a keyword boundary boxes — 96 bytes per call on a path whose whole purpose is to
     # allocate nothing. Branching instead leaves every leaf concretely typed.
-    msk = mask(grid)
-    if active_only && !(msk isa AllActive)
+    msk = Grids.mask(grid)
+    if active_only && !(msk isa Grids.AllActive)
         return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), msk, masked,
                            backend, policy, scratch)
     end
@@ -305,15 +305,15 @@ function Discretization.apply_stencil!(
 end
 
 @inline function _apply_tbl!(
-    out, field, grid::StructuredGrid, indices, weights, dim::Int, order::Int, msk, masked, backend,
+    out, field, grid::Grids.StructuredGrid, indices, weights, dim::Int, order::Int, msk, masked, backend,
     policy, scratch,
 )
-    x = coordinates(grid, dim)
-    return isperiodic(grid, dim) ?
-        Discretization.apply_stencil!(out, field, x, indices, weights, dim; order = order,
-                                      period = period(grid, dim), mask = msk, masked = masked,
+    x = Grids.coordinates(grid, dim)
+    return Grids.isperiodic(grid, dim) ?
+        apply_stencil!(out, field, x, indices, weights, dim; order = order,
+                                      period = Grids.period(grid, dim), mask = msk, masked = masked,
                                       backend = backend, policy = policy, scratch = scratch) :
-        Discretization.apply_stencil!(out, field, x, indices, weights, dim; order = order,
+        apply_stencil!(out, field, x, indices, weights, dim; order = order,
                                       period = nothing, mask = msk, masked = masked,
                                       backend = backend, policy = policy, scratch = scratch)
 end
@@ -322,16 +322,16 @@ end
     derivative!(out, field, grid, indices, weights, dim; order=1, active_only=true, masked=zero,
                 policy=BlankMasked(), backend=nothing) -> out
 
-[`Discretization.derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
+[`derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
 above, for the entry point a geometry-aware caller actually uses.
 """
-function Discretization.derivative!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
+function derivative!(
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
-    policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
+    policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
-    Discretization.apply_stencil!(out, field, grid, indices, weights, dim; order = order,
+    apply_stencil!(out, field, grid, indices, weights, dim; order = order,
                                   active_only = active_only, masked = masked, backend = backend,
                                   policy = policy, scratch = scratch)
     return _scale_by_metric!(out, grid, Int(dim), masked)

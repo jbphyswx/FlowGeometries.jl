@@ -187,7 +187,7 @@ one — so no halo either.
 x = collect(range(0.0, 2.0; length = 11))
 f = @. 3x^2 - 2x + 5
 out = similar(f)
-D.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
+O.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
 maximum(abs, out .- (6x .- 2))          # exact for a quadratic, ends included
 ```
 
@@ -196,7 +196,7 @@ A stretched axis is equally exact, because the weights are built per sample rath
 ```@example disc
 xs = [0.0, 0.11, 0.37, 0.9, 1.05, 1.6, 1.62, 2.0]
 outs = similar(xs)
-D.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
+O.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
 maximum(abs, outs .- (6xs .- 2))
 ```
 
@@ -206,7 +206,7 @@ the seam so the spacing there is the true one — the seam is then no worse than
 ```@example disc
 λ = collect(range(0, 2π; length = 65)[1:64])
 o = similar(λ)
-D.apply_stencil!(o, sin.(λ), λ, 1; order = 1, nodes = 5, period = 2π)
+O.apply_stencil!(o, sin.(λ), λ, 1; order = 1, nodes = 5, period = 2π)
 maximum(abs, o .- cos.(λ)), abs(o[1] - cos(λ[1]))
 ```
 
@@ -221,7 +221,7 @@ F = [xi^2 + 3yi for xi in X, yi in Y]
 mk = trues(9, 7); mk[5, 3] = false
 gm = FG.Grids.StructuredGrid(geo, X, Y, mk)
 Om = similar(F)
-D.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = NaN)
+O.apply_stencil!(Om, F, gm, 1; order = 1, nodes = 3, masked = NaN)
 Om[3:7, 3]                               # the masked cell and the two that read it
 ```
 
@@ -242,9 +242,9 @@ gr = FG.Grids.StructuredGrid(geo, xr, [0.0], mr)
 fr = reshape(collect(0.0:6.0), 7, 1)         # f = x, so df/dx is exactly 1
 
 blanked  = zeros(7, 1); shifted = zeros(7, 1)
-D.apply_stencil!(blanked, fr, gr, 1; order = 1, nodes = 5, masked = NaN)
-D.apply_stencil!(shifted, fr, gr, 1; order = 1, nodes = 5, masked = NaN,
-                 policy = D.ShiftWithinRun())
+O.apply_stencil!(blanked, fr, gr, 1; order = 1, nodes = 5, masked = NaN)
+O.apply_stencil!(shifted, fr, gr, 1; order = 1, nodes = 5, masked = NaN,
+                 policy = O.ShiftWithinRun())
 vec(blanked), vec(shifted)
 ```
 
@@ -286,7 +286,7 @@ lat = collect(range(-π/2, π/2; length = 25))          # both poles are rows of
 gs  = FG.Grids.StructuredGrid(sph, lon, lat)
 fs  = [sin(φ) for _ in lon, φ in lat]                 # ∂/∂north should be cos(φ)/R
 dn  = zeros(48, 25)
-D.derivative!(dn, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
+O.derivative!(dn, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
 dn[1, 12], cos(lat[12]) / R
 ```
 
@@ -295,7 +295,7 @@ number invented. Longitude at a pole is that case — `h_λ = R cos φ → 0`:
 
 ```@example disc
 de = zeros(48, 25)
-D.derivative!(de, [sin(λ) * cos(φ) for λ in lon, φ in lat], gs, 1;
+O.derivative!(de, [sin(λ) * cos(φ) for λ in lon, φ in lat], gs, 1;
               order = 1, nodes = 5, masked = NaN)
 all(isnan, de[:, 1]), all(isnan, de[:, 25]), any(isnan, de[:, 2:24])
 ```
@@ -320,7 +320,7 @@ different expression, and a wrong one.
 
 `apply_stencil!` needs a separable axis to difference along. A `CurvilinearGrid` has none, and a node
 set's neighbours come from connectivity rather than an index offset, so neither has a stencil.
-`Connectivity.gradient_plan` builds a least-squares gradient for them instead, and
+`Operators.gradient_plan` builds a least-squares gradient for them instead, and
 [`gradient!`](@ref) applies it:
 
 ```@example disc
@@ -329,11 +329,11 @@ nn   = 14
 xg   = [t + 0.35u for t in range(0, 10; length = nn), u in range(0, 6; length = nn)]   # sheared
 yg   = [u - 0.2t  for t in range(0, 10; length = nn), u in range(0, 6; length = nn)]
 cgrid = FG.Grids.CurvilinearGrid(cart, xg, yg, trues(nn, nn); measure = fill(1.0, nn, nn))
-plan  = FG.Connectivity.gradient_plan(cgrid)
+plan  = FG.Operators.gradient_plan(cgrid)
 
 fld = 2.0 .* xg .- 3.0 .* yg .+ 7        # ∇ = (2, -3) everywhere
 g1, g2 = zeros(nn, nn), zeros(nn, nn)
-D.gradient!(g1, g2, fld, plan)
+O.gradient!(g1, g2, fld, plan)
 maximum(abs, g1 .- 2), maximum(abs, g2 .+ 3)
 ```
 
@@ -356,7 +356,7 @@ Observational data has a coordinate, not a cell index. [`interpolate`](@ref) ans
 xa = collect(range(0, 2; length = 11)); ya = collect(range(-1, 3; length = 9))
 ga = FG.Grids.StructuredGrid(cart, xa, ya)
 fa = [2xi - 3yj + 0.5xi * yj + 7 for xi in xa, yj in ya]
-D.interpolate(fa, ga, (0.7, 1.1)), 2*0.7 - 3*1.1 + 0.5*0.7*1.1 + 7
+O.interpolate(fa, ga, (0.7, 1.1)), 2*0.7 - 3*1.1 + 0.5*0.7*1.1 + 7
 ```
 
 Multilinear on a rectilinear grid; a weighted least-squares plane on a curvilinear grid or a node set,
@@ -383,7 +383,7 @@ sharing one geometry. Those axes are **batch**: every entry point takes them, di
 gb = FG.Grids.StructuredGrid(cart, xa, ya)
 fb = cat((fa .+ 100k for k in 1:4)...; dims = 3)      # (11, 9, 4) against a 2-D grid
 ob = similar(fb)
-D.derivative!(ob, fb, gb, 1; order = 1, nodes = 3)
+O.derivative!(ob, fb, gb, 1; order = 1, nodes = 3)
 size(ob), ob[5, 4, 1] ≈ ob[5, 4, 4]                   # same derivative, offset field
 ```
 
@@ -402,8 +402,8 @@ wrapper as elsewhere in the package:
 
 ```@example disc
 out = Vector{Float64}(undef, 4)
-D.interpolate!(out, fb, gb, (0.7, 1.1))
-out ≈ D.interpolate(fb, gb, (0.7, 1.1))               # the allocating form agrees
+O.interpolate!(out, fb, gb, (0.7, 1.1))
+out ≈ O.interpolate(fb, gb, (0.7, 1.1))               # the allocating form agrees
 ```
 
 An unbatched field still returns a scalar — the rank decides, so nothing is inferred from a length at

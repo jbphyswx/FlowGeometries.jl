@@ -140,3 +140,86 @@ choose a staggering or a boundary condition.
 """
 @inline jacobian(geometry::Geometry.AbstractGeometry, point) =
     Geometry.jacobian(geometry, point)
+
+
+"""
+    _window_start(i, k, lo, hi) -> Int
+
+First index of a `k`-node window centred on `i` and shifted to fit inside `[lo, hi]`. The whole-axis
+case is `lo = 1, hi = n`; the masked case is the same expression with the bounds of the active run,
+which is why both share this.
+"""
+@inline _window_start(i::Int, k::Int, lo::Int, hi::Int) = clamp(i - (k - 1) ÷ 2, lo, hi - k + 1)
+
+"""
+    axis_stencils(x, order, nodes; period=nothing) -> (indices, weights)
+
+The `order`-th derivative's [`fd_weights`](@ref) at **every** sample of axis `x`, as two `n × nodes`
+matrices: the axis indices each sample reads, and the weight on each.
+
+One row per sample, so a stretched axis costs nothing extra downstream — the varying weights are
+already here. Built once and reused by [`apply_stencil!`](@ref).
+
+`period === nothing` shifts the stencil inward at the two ends, exactly as the single-sample
+[`fd_weights`](@ref) does. Given a period the stencil stays centred everywhere and wraps, with the
+wrapped samples' coordinates carried across the seam so the spacing there is the true one.
+"""
+function axis_stencils(
+    x::AbstractVector{T}, order::Integer, nodes::Integer; period::Union{Nothing,Real} = nothing,
+) where {T<:AbstractFloat}
+    n = length(x)
+    k = Int(nodes)
+    ord = Int(order)
+    k ≥ ord + 1 || throw(ArgumentError(
+        "an order-$ord derivative needs at least $(ord + 1) nodes, got $k",
+    ))
+    k ≤ n || throw(ArgumentError("cannot use $k nodes on an axis of $n samples"))
+    idx = Matrix{Int}(undef, n, k)
+    wts = Matrix{T}(undef, n, k)
+    half = (k - 1) ÷ 2
+    buf = Vector{T}(undef, k)
+    # Reused across every sample: the allocating `fd_weights` would be two per sample, ~8000 on a
+    # 4096-sample axis, for a table whose size never changes.
+    wbuf = Vector{T}(undef, k)
+    cbuf = Matrix{T}(undef, k, ord + 1)
+    P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
+    @inbounds for i in 1:n
+        if period === nothing
+            i0 = _window_start(i, k, 1, n)
+            for q in 1:k
+                idx[i, q] = i0 + q - 1
+                buf[q] = x[i0 + q - 1]
+            end
+        else
+            for q in 1:k
+                raw = i - half + q - 1
+                idx[i, q] = mod1(raw, n)
+                buf[q] = x[mod1(raw, n)] + T(fld(raw - 1, n)) * P
+            end
+        end
+        fd_weights!(wbuf, cbuf, buf, x[i], ord)
+        for q in 1:k
+            wts[i, q] = wbuf[q]
+        end
+    end
+    return idx, wts
+end
+
+
+"""
+    metric_floor(geometry) -> T
+
+The magnitude below which a scale factor is treated as degenerate: `L·√eps(T)` for a curved geometry of
+size `L`, and `0` for a Cartesian one, whose metric never degenerates.
+
+Relative to both the geometry's size and the element type on purpose — see [`derivative!`](@ref) for
+what an absolute constant does in `Float32`.
+"""
+function metric_floor end
+
+
+@inline metric_floor(::Geometry.AbstractCartesianGeometry{T}) where {T} = zero(T)
+@inline metric_floor(g::Geometry.AbstractSphericalGeometry{T}) where {T} =
+    Geometry.radius(g) * sqrt(eps(T))
+@inline metric_floor(g::Geometry.AbstractEllipsoidalGeometry{T}) where {T} =
+    Geometry.semimajor_axis(g) * sqrt(eps(T))
