@@ -10,7 +10,8 @@ they fall in, and a query visits the bins its ball can reach.
 
 Three properties distinguish it from a tree, and all three are why it is the one that runs on a device:
 
-  * it is **arrays only** — bin offsets and point ids — so `Adapt` moves it like any other field;
+  * it is **arrays only** — bin offsets, point ids and the bin each sits in — so `Adapt` moves it like
+    any other field, and it holds no copy of the coordinates, which stay on the grid;
   * every point lands in **exactly one** bin, because periodicity wraps the bin coordinate rather than
     replicating the point, so a query emits each cell once and needs no candidate buffer to deduplicate
     into. That is what lets [`fold_candidates`](@ref) be a fold rather than a list;
@@ -20,18 +21,44 @@ Three properties distinguish it from a tree, and all three are why it is the one
 Build it for the radius you intend to query at: `h` is that radius, so a query touches `3ᴰ` bins. A much
 larger radius still works and costs `(2⌈r/h⌉+1)ᴰ` bins.
 """
-struct CellListIndex{D,T<:AbstractFloat,E<:AbstractEmbedding,MT<:AbstractMatrix{T},VI<:AbstractVector{Int}}
-    pts::MT                 # D × n embedded centres, one entry per cell, never replicated
+struct CellListIndex{D,T<:AbstractFloat,E<:AbstractEmbedding,VI<:AbstractVector{Int},
+                     VB<:AbstractVector{NTuple{D,Int}}}
+    n::Int                  # cells indexed, one entry each, never replicated
     lo::NTuple{D,T}         # bin-lattice origin
     h::NTuple{D,T}          # bin width per direction
     nbins::NTuple{D,Int}    # per-direction bin count where the direction wraps; 0 otherwise
     wrap::NTuple{D,Bool}
     starts::VI              # nbucket + 1, CSR over buckets
     items::VI               # point ids, grouped by bucket
+    bins::VB                # each item's bin, in the same order — see `fold_candidates_at`
     embedding::E
 end
 
 @inline _nbuckets(ix::CellListIndex) = length(ix.starts) - 1
+
+"""
+    embedded_at(grid, cell) -> NTuple{D,T}
+
+A cell's centre in the space an index searches, from the grid rather than from a stored copy: `O(1)`
+arithmetic where the coordinates are a formula, and a read where they are data.
+"""
+@inline embedded_at(grid::AbstractGrid, cell) = embed_point(grid, _cell_coords(grid, cell))
+
+"""
+    cells(grid)
+
+What a traversal of every cell iterates, and `cell_at` turns one of its elements into a cell. Together
+they are how a layout is walked without knowing how it names a cell — see [`cell_address`](@ref).
+"""
+@inline cells(grid::AbstractGrid) = cells(grid, cell_address(grid))
+@inline cells(grid, ::CartesianCells) = CartesianIndices(size_tuple(grid))
+@inline cells(grid, ::FlatCells) = Base.OneTo(length(mask(grid)))
+
+@inline cell_at(grid::AbstractGrid, c) = cell_at(grid, c, cell_address(grid))
+@inline cell_at(_grid, ci::CartesianIndex, ::CartesianCells) = Tuple(ci)
+@inline cell_at(_grid, k::Integer, ::FlatCells) = Int(k)
+
+@inline first_cell(grid::AbstractGrid) = cell_at(grid, first(cells(grid)))
 
 # Bins in a query window, saturating: a radius far wider than the bin side gives a per-direction reach
 # whose plain product overflows `Int` and would wrap to a small — or negative — number.
@@ -65,10 +92,6 @@ end
     return Int(h % UInt(nbucket)) + 1
 end
 
-@inline function _bin_at(ix::CellListIndex{D,T}, k::Integer) where {D,T}
-    return _bin_of(ix, ntuple(d -> @inbounds(ix.pts[d, k]), Val(D)))
-end
-
 """
     cell_list(grid; ball) -> CellListIndex
 
@@ -78,34 +101,41 @@ to query at. Needs no external package.
 function cell_list(grid::AbstractGrid{G,T}; ball::Real) where {G,T}
     h = T(ball)
     h > 0 || throw(ArgumentError("the bin side must be positive, got $ball"))
-    all_pts, ng, embedding = embedded_points(grid)
+    embedding = embedding_of(grid)
     hemb = T(embedded_radius(embedding, h))
     hemb > 0 || throw(ArgumentError("radius $ball is degenerate in this embedding"))
-    n = size(all_pts, 2) ÷ ng
-    # Originals only. The periodic images `embedded_points` adds are for a tree, which has no way to wrap;
-    # a lattice wraps its own bin coordinate, and one entry per cell is what lets a query emit each cell
-    # exactly once and so need no buffer.
-    pts = ng == 1 ? all_pts : all_pts[:, 1:n]
-    # A function barrier on the dimension. `size(pts, 1)` is a runtime value, so building the index type
-    # from it inline leaves the whole construction loop dynamically dispatched — measured at 34 MiB and
+    # A function barrier on the dimension: it is a runtime value here, so building the index type from
+    # it inline leaves the whole construction loop dynamically dispatched — measured at 34 MiB and
     # 196 ms for 65k points, against 3 ms once the dimension is a type.
-    return _build_cell_list(grid, pts, embedding, hemb, Val(size(pts, 1)))
+    D = length(embedded_at(grid, first_cell(grid)))
+    return _build_cell_list(grid, embedding, hemb, Val(D))
 end
 
+# Streamed: a cell's position is read from the grid three times rather than materialized once into a
+# `D × n` matrix. That is what keeps the index `O(n)` integers on a layout whose coordinates are a
+# formula, where holding them would reintroduce exactly the array the layout exists to avoid — and on a
+# node set it is a read of vectors that already exist.
 function _build_cell_list(
-    grid, pts::AbstractMatrix{T}, embedding::E, hemb::T, ::Val{D},
+    grid, embedding::E, hemb::T, ::Val{D},
 ) where {T,E<:AbstractEmbedding,D}
-    n = size(pts, 2)
-    # Wrapping is a property of the grid's own directions, and only survives into the embedding when the
-    # embedding is the coordinates themselves. A sphere's seam is already closed by the transform.
-    wrap, nbins, lo, hd = _cell_lattice(grid, pts, embedding, hemb, Val(D))
-    IX = CellListIndex{D,T,E,typeof(pts),Vector{Int}}
-    ixp = IX(pts, lo, hd, nbins, wrap, Int[], Int[], embedding)
+    cs = cells(grid)
+    n = length(cs)
+    wrap, nbins, lo, hd = _cell_lattice(grid, embedding, hemb, Val(D))
+
+    @inline function binof(c)
+        x = map(T, embedded_at(grid, cell_at(grid, c)))
+        return ntuple(Val(D)) do d
+            @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - lo[d]) / hd[d]))
+            @inbounds wrap[d] ? mod(b, nbins[d]) : b
+        end
+    end
 
     nbucket = max(1, nextpow(2, max(n, 1)))
     counts = zeros(Int, nbucket + 1)
-    @inbounds for k in 1:n
-        counts[_bin_hash(_bin_at(ixp, k), nbucket) + 1] += 1
+    cellbin = Vector{NTuple{D,Int}}(undef, n)
+    @inbounds for (k, c) in enumerate(cs)
+        cellbin[k] = binof(c)
+        counts[_bin_hash(cellbin[k], nbucket) + 1] += 1
     end
     starts = Vector{Int}(undef, nbucket + 1)
     starts[1] = 1
@@ -114,12 +144,59 @@ function _build_cell_list(
     end
     cursor = copy(starts)
     items = Vector{Int}(undef, n)
+    bins = Vector{NTuple{D,Int}}(undef, n)
     @inbounds for k in 1:n
-        b = _bin_hash(_bin_at(ixp, k), nbucket)
+        b = _bin_hash(cellbin[k], nbucket)
         items[cursor[b]] = k
+        bins[cursor[b]] = cellbin[k]      # parallel to `items`, so a walk reads both contiguously
         cursor[b] += 1
     end
-    return IX(pts, lo, hd, nbins, wrap, starts, items, embedding)
+    return CellListIndex{D,T,E,Vector{Int},Vector{NTuple{D,Int}}}(
+        n, lo, hd, nbins, wrap, starts, items, bins, embedding,
+    )
+end
+
+"""
+    _embedded_floor(grid, embedding, h, ::Val{D}) -> NTuple{D,T}
+
+A lower bound on the embedded coordinate in each direction, less one bin, which is where the lattice
+starts. `O(1)`: no cell is read.
+
+It only has to be a bound, not the tightest one — the lattice is unbounded along a direction that does
+not wrap, and bins are hashed, so a loose origin shifts every bin index equally and changes nothing. The
+bound comes from the geometry, which is what lets a layout be indexed without a pass over its cells.
+"""
+function _embedded_floor end
+
+# The embedding is the coordinates themselves, and their span is an axis reduction the grid already has.
+@inline _embedded_floor(grid, ::CartesianEmbedding, h::T, ::Val{D}) where {T,D} =
+    ntuple(d -> T(bounds(grid, d)[1]) - h, Val(D))
+
+# A point on a sphere of radius `ρ` has every Cartesian component in `[-ρ, ρ]`.
+@inline _embedded_floor(grid, e::ArcEmbedding, h::T, ::Val{D}) where {T,D} =
+    ntuple(_ -> -T(e.radius) - h, Val(D))
+
+@inline _embedded_floor(grid, ::ChordEmbedding, h::T, ::Val{D}) where {T,D} =
+    ntuple(_ -> -_ambient_bound(grid) - h, Val(D))
+
+"""
+    _ambient_bound(grid) -> T
+
+The largest `|x|`, `|y|` or `|z|` any of this grid's cells can embed to.
+"""
+@inline function _ambient_bound(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
+    # Beyond the surface the third direction is the absolute radius, so the outermost one bounds it.
+    length(coordinates(grid)) ≥ 3 || return T(Geometry.radius(grid_geometry(grid)))
+    lo, hi = bounds(grid, 3)
+    return max(abs(T(lo)), abs(T(hi)))
+end
+
+@inline function _ambient_bound(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
+    geo = grid_geometry(grid)
+    a = T(Geometry.semimajor_axis(geo))
+    length(coordinates(grid)) ≥ 3 || return a
+    lo, hi = bounds(grid, 3)          # geodetic height, which offsets the surface
+    return a + max(abs(T(lo)), abs(T(hi)))
 end
 
 # Cartesian directions wrap with the grid; every other embedding is closed by its own transform.
@@ -127,18 +204,19 @@ end
 # A wrapping direction's width is the period divided by a whole number of bins, not `h` itself: binning
 # by `h` and then reducing mod `nbins` would fold a partial bin onto bin zero, and the span a query walks
 # would no longer be a lattice neighbourhood.
-function _cell_lattice(grid, pts::AbstractMatrix{T}, ::CartesianEmbedding, h::T, ::Val{D}) where {T,D}
+function _cell_lattice(grid, ::CartesianEmbedding, h::T, ::Val{D}) where {T,D}
     wrap = ntuple(d -> isperiodic(grid, d), Val(D))
     nbins = ntuple(Val(D)) do d
         wrap[d] ? max(1, Base.unsafe_trunc(Int, floor(T(period(grid, d)) / h))) : 0
     end
     hd = ntuple(d -> wrap[d] ? T(period(grid, d)) / nbins[d] : h, Val(D))
-    lo = ntuple(d -> wrap[d] ? T(origin(grid, d)) : T(minimum(view(pts, d, :))) - h, Val(D))
+    floor_ = _embedded_floor(grid, CartesianEmbedding(), h, Val(D))
+    lo = ntuple(d -> wrap[d] ? T(origin(grid, d)) : floor_[d], Val(D))
     return wrap, nbins, lo, hd
 end
 
-function _cell_lattice(_grid, pts::AbstractMatrix{T}, ::AbstractEmbedding, h::T, ::Val{D}) where {T,D}
-    lo = ntuple(d -> T(minimum(view(pts, d, :))) - h, Val(D))
+function _cell_lattice(grid, embedding::AbstractEmbedding, h::T, ::Val{D}) where {T,D}
+    lo = _embedded_floor(grid, embedding, h, Val(D))
     return ntuple(_ -> false, Val(D)), ntuple(_ -> 0, Val(D)), lo, ntuple(_ -> h, Val(D))
 end
 
@@ -155,8 +233,7 @@ deduplicate the periodic images it searches over.
 function fold_candidates end
 
 function fold_candidates(f::F, acc, ix::CellListIndex{D,T}, grid, I, r) where {F,D,T}
-    lin = I isa Integer ? Int(I) : LinearIndices(size(mask(grid)))[CartesianIndex(I)]
-    return fold_candidates_at(f, acc, ix, ntuple(d -> @inbounds(ix.pts[d, lin]), Val(D)), r, nothing)
+    return fold_candidates_at(f, acc, ix, map(T, embedded_at(grid, I)), r, nothing)
 end
 
 """
@@ -189,7 +266,7 @@ function fold_candidates_at(f::F, acc, ix::CellListIndex{D,T}, q::NTuple{D,T}, r
     # cheaper and bounded. Without this a query at 10× the bin side costs `10^D` times its own answer,
     # and an index built for one radius and queried at a far larger one degenerates without limit.
     if _window_bins(reach) > nbucket
-        @inbounds for k in Base.OneTo(size(ix.pts, 2))
+        @inbounds for k in Base.OneTo(ix.n)
             acc = f(acc, k)
         end
         return acc
@@ -201,9 +278,11 @@ function fold_candidates_at(f::F, acc, ix::CellListIndex{D,T}, q::NTuple{D,T}, r
         end
         bucket = _bin_hash(b, nbucket)
         for t in ix.starts[bucket]:(ix.starts[bucket + 1] - 1)
-            k = ix.items[t]
-            _bin_at(ix, k) == b || continue     # a hash collision, not a member of this bin
-            acc = f(acc, k)
+            # A bucket is a hash of a bin and two bins can share one, so the bin decides membership.
+            # It is stored alongside the item, which is what keeps this an integer compare rather than
+            # a coordinate lookup and `D` divisions.
+            ix.bins[t] == b || continue
+            acc = f(acc, ix.items[t])
         end
     end
     return acc

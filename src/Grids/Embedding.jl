@@ -62,6 +62,29 @@ end
 end
 
 """
+    embedding_of(grid) -> AbstractEmbedding
+
+The Euclidean space this grid's cell centres sit in, and therefore what a physical radius means there.
+
+Named separately from [`embedded_points`](@ref) because an index that streams the centres still has to
+know the space before it reads the first one.
+"""
+function embedding_of end
+
+@inline embedding_of(grid::AbstractGrid{G}) where {G<:Geometry.AbstractCartesianGeometry} =
+    CartesianEmbedding()
+
+# `(λ, φ, r)` carries its own radius, so the metric there IS the Euclidean chord; on the surface it is
+# the great-circle arc, and a radius has to be converted to the chord it subtends.
+@inline function embedding_of(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
+    return length(coordinates(grid)) ≥ 3 ? ChordEmbedding() :
+           ArcEmbedding(T(Geometry.radius(grid_geometry(grid))))
+end
+
+@inline embedding_of(grid::AbstractGrid{G}) where {G<:Geometry.AbstractEllipsoidalGeometry} =
+    ChordEmbedding()
+
+"""
     embedded_radius(embedding, r) -> T
 
 A physical radius as a radius in the embedding.
@@ -151,17 +174,23 @@ path — the guarantee that an indexed query and a scan return the same cells re
 """
 function embedded_points end
 
-function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractCartesianGeometry,T}
+function embedded_points(
+    grid::AbstractGrid{G,T}; ghosts::Bool = true,
+) where {G<:Geometry.AbstractCartesianGeometry,T}
     raw, D = _grid_points(grid)
     per = ntuple(d -> isperiodic(grid, d), D)
     prd = ntuple(d -> T(period(grid, d)), D)
-    pts, ng = any(per) ? _ghost_points(raw, per, prd) : (raw, 1)
-    return pts, ng, CartesianEmbedding()
+    # Images exist for an index that cannot wrap. One that wraps its own lattice asks for none, and so
+    # never allocates the `3^d` replication only to discard it.
+    pts, ng = (ghosts && any(per)) ? _ghost_points(raw, per, prd) : (raw, 1)
+    return pts, ng, embedding_of(grid)
 end
 
 # `spherical_to_cartesian` rather than the formula written again: at `(λ, φ, r)` the metric IS the
 # Euclidean chord of this embedding. Longitude needs no ghost images — `λ` and `λ+2π` embed together.
-function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
+function embedded_points(
+    grid::AbstractGrid{G,T}; ghosts::Bool = true,
+) where {G<:Geometry.AbstractSphericalGeometry,T}
     geo = grid_geometry(grid)
     raw, D = _grid_points(grid)
     pts = Matrix{T}(undef, 3, size(raw, 2))
@@ -169,10 +198,12 @@ function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSph
         c = Geometry.spherical_to_cartesian(geo, ntuple(d -> raw[d, k], D))
         pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
     end
-    return pts, 1, D ≥ 3 ? ChordEmbedding() : ArcEmbedding(T(Geometry.radius(geo)))
+    return pts, 1, embedding_of(grid)
 end
 
-function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
+function embedded_points(
+    grid::AbstractGrid{G,T}; ghosts::Bool = true,
+) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
     geo = grid_geometry(grid)
     raw, D = _grid_points(grid)
     pts = Matrix{T}(undef, 3, size(raw, 2))
@@ -180,5 +211,5 @@ function embedded_points(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractEll
         c = Geometry.geodetic_to_cartesian(geo, ntuple(d -> raw[d, k], D))
         pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
     end
-    return pts, 1, ChordEmbedding()
+    return pts, 1, embedding_of(grid)
 end
