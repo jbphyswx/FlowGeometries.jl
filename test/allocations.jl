@@ -76,6 +76,10 @@ q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; 
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
+q_conn(g, r, s)          = FG.Connectivity.nneighbors_within(g, 12, 9; ball = r,
+                              reach = FG.Connectivity.Connected(), scratch = s)
+q_connf(g, r, s)         = FG.Connectivity.nneighbors_within(g, 7; ball = r,
+                              reach = FG.Connectivity.Connected(), scratch = s)
 
 # The per-grid-shape sweep. `axes = false` for a layout whose coordinates are a formula: the spacing
 # accessors are an axis notion, and such a layout holds no axes to answer them from.

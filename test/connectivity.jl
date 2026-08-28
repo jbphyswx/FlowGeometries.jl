@@ -1681,3 +1681,79 @@ Test.@testset "A prefix scan and an index reduction are execution primitives" be
     # `op` is applied left to right from `init`, so a non-commutative one is still well defined.
     Test.@test E.reduce_indices(string, *, "", 4, nothing) == "1234"
 end
+
+Test.@testset "A Connected query reuses its buffers, and works on every adjacency" begin
+    C = FG.Connectivity
+    GD = FG.Grids
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    S = FG.Stencils
+
+    # The ball is sorted so membership is a binary search; both arrays move together, so each cell's
+    # distance stays with it. Empty, short, long, duplicated and negative all go through the same sort.
+    for m in (0, 1, 2, 5, 15, 16, 17, 100, 1000)
+        perm = sortperm(rand(m))
+        idxs = collect(1:m)[perm]
+        ds = (3.0 .* collect(1:m))[perm]
+        C._sort_ball!(idxs, ds)
+        Test.@test issorted(idxs)
+        Test.@test all(ds[t] ≈ 3.0 * idxs[t] for t in 1:m)
+    end
+    for _ in 1:50
+        m = rand(0:60)
+        idxs = rand(-5:5, m)
+        ds = 7.0 .* idxs .+ 0.5
+        C._sort_ball!(idxs, ds)
+        Test.@test issorted(idxs)
+        Test.@test all(ds[t] ≈ 7.0 * idxs[t] + 0.5 for t in 1:m)
+    end
+
+    # A wall spanning the grid: cells below it are inside the ball and unreachable, so Connected is a
+    # strict subset. A partial wall the ball can walk around would prove nothing.
+    cart = GE.CartesianGeometry()
+    sph = GE.SphericalGeometry()
+    msk = trues(24, 20)
+    msk[:, 8] .= false
+    g = GD.StructuredGrid(cart, 0.0:1.0:23.0, 0.0:1.0:19.0, msk)
+    ball = 6.0
+    conn = sort(C.neighbors_within(g, 12, 9; ball = ball, reach = C.Connected()))
+    full = sort(C.neighbors_within(g, 12, 9; ball = ball))
+    Test.@test issubset(conn, full)
+    Test.@test length(conn) < length(full)
+    Test.@test all(Tuple(CartesianIndices((24, 20))[k])[2] > 8 for k in conn)
+
+    # The scratch changes what is allocated, never what is returned — including on a second use.
+    let s = C.connected_scratch()
+        for sc in (nothing, C.ball_scratch(), s, s)
+            Test.@test sort(C.neighbors_within(g, 12, 9; ball = ball, reach = C.Connected(),
+                                               scratch = sc)) == conn
+            Test.@test C.nneighbors_within(g, 12, 9; ball = ball, reach = C.Connected(),
+                                           scratch = sc) == length(conn)
+        end
+    end
+
+    # Arithmetic adjacency: `Connected` had no walk for a formula layout at all, and every one of them
+    # has to answer it now.
+    for gg in (GD.HEALPixGrid(sph, 4), GD.CubedSphereGrid(sph, 4),
+               GD.IcosahedralGrid(sph, 3), GD.YinYangGrid(sph, 8, 6),
+               GD.RingGrid(sph, SS.OctahedralGaussianSampling(8)))
+        r = 3.0e6
+        a = sort(C.neighbors_within(gg, 7; ball = r, reach = C.Connected()))
+        b = sort(C.neighbors_within(gg, 7; ball = r, reach = C.Connected(),
+                                    scratch = C.connected_scratch()))
+        Test.@test a == b
+        Test.@test issubset(a, sort(C.neighbors_within(gg, 7; ball = r)))
+        Test.@test 7 ∉ a                      # the seed is not its own neighbour
+        # A stencil has no meaning where the adjacency is arithmetic, and that is refused.
+        Test.@test_throws ArgumentError C.nneighbors_within(gg, 7; ball = r,
+                                                            reach = C.Connected(S.Moore(1)))
+    end
+
+    # With a scratch the query allocates nothing, which is what its `Unrestricted` sibling already did.
+    let s = C.connected_scratch(), hp = GD.HEALPixGrid(sph, 4), s2 = C.connected_scratch()
+        Test.@test _alloc(q_conn, g, ball, s) == 0
+        Test.@test _alloc(q_connf, hp, 3.0e6, s2) == 0
+        # …and without one it still answers, just at a cost
+        Test.@test _alloc(q_conn, g, ball, nothing) > 0
+    end
+end
