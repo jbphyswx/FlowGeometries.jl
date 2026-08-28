@@ -5,7 +5,14 @@
 """
     build_connectivity(grid; stencil=Axial(1), active_only=true) -> CSRConnectivity
 
-Materialize CSR adjacency. Unstructured wraps existing buffers without re-validation.
+Materialize CSR adjacency.
+
+Which builder runs is [`Grids.adjacency_source`](@ref), the trait the per-cell neighbour queries resolve
+through, so a layout gets this by declaring how its adjacency is defined and nothing else:
+[`Grids.IndexStencilNeighbors`](@ref) ranges the stencil over an index space,
+[`Grids.FormulaNeighbors`](@ref) evaluates the arithmetic per cell, and
+[`Grids.StoredMeshNeighbors`](@ref) wraps the mesh's own buffers without re-validating them. `stencil`
+reaches only the first — the other two have no offsets to range over.
 
 For adjacency by physical distance rather than by stencil, see [`build_connectivity_within`](@ref).
 """
@@ -14,7 +21,7 @@ function build_connectivity end
 # A fully active mesh's stored buffers already are the answer, so they are wrapped rather than copied.
 # A mask makes them a superset, and `active_only` means what it means everywhere else here.
 function build_connectivity(
-    grid::Grids.AbstractUnstructuredGrid; active_only::Bool = true, _...,
+    grid::Grids.AbstractGrid, ::Grids.StoredMeshNeighbors; active_only::Bool = true, _...,
 )
     msk = Grids.mask(grid)
     (!active_only || msk isa Grids.AllActive) &&
@@ -33,8 +40,13 @@ function build_connectivity(
     return csr_connectivity(nbrs, ptr; validate = false)
 end
 
+# Which builder runs is `Grids.adjacency_source`, the same trait the per-cell queries resolve through.
+function build_connectivity(grid::Grids.AbstractGrid; kwargs...)
+    return build_connectivity(grid, Grids.adjacency_source(grid); kwargs...)
+end
+
 function build_connectivity(
-    grid::Grids.StructuredGrid;
+    grid::Grids.AbstractGrid, ::Grids.IndexStencilNeighbors;
     stencil = Stencils.Axial(1), active_only::Bool = true, backend = nothing,
 )
     return _build_connectivity_topology(
@@ -50,45 +62,15 @@ Materialize the CSR adjacency of every pair of cells within `ball` of each other
 
 Symmetric by construction, since the metric is.
 
-On the architectures with no separable axes to bound a window with — curvilinear and node grids — the
-default `topology` is [`indexed`](@ref) when `NearestNeighbors` is loaded, making the build
-`O(n log n)` rather than `O(n²)`; pass `topology = MetricTopology(grid)` for the scanning build.
+On the architectures with no separable axes to bound a window with the default `topology` carries a cell
+list, making the build `O(n)` per row rather than `O(n)` per cell; pass `topology = MetricTopology(grid)`
+for the scanning build, or an [`indexed`](@ref) topology for the k-d tree.
 
 Rows are balls, i.e. [`Unrestricted`](@ref), and there is no [`Connected`](@ref) form: reachability
 within one cell's ball is not a symmetric relation — a bridge cell can lie in one ball and not the
 other — so such a graph would not be an adjacency.
 """
 function build_connectivity_within end
-
-# The same count → prefix-scan → fill shape as the stencil builder: both passes write only slots the
-# cell owns, so they chunk without coordination.
-function build_connectivity_within(
-    grid::Grids.StructuredGrid{T, G,N}; ball, active_only::Bool = true, backend = nothing,
-) where {G,T,N}
-    sz = Grids.size_tuple(grid)
-    n = prod(sz)
-    ci = CartesianIndices(sz)
-    deg = zeros(Int, n)
-    mt = MetricTopology(grid)     # a grid invariant: built once, not once per row
-    Execution.run_chunks(n, backend) do rng
-        @inbounds for k in rng
-            deg[k] = _within_scan(nothing, grid, Tuple(ci[k]), ball, active_only, mt)
-        end
-    end
-    ptr = Vector{Int}(undef, n + 1)
-    ptr[1] = 1
-    @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + deg[i]
-    end
-    nbrs = Vector{Int}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend) do rng
-        @inbounds for k in rng
-            deg[k] == 0 && continue
-            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Tuple(ci[k]), ball, active_only, mt)
-        end
-    end
-    return csr_connectivity(nbrs, ptr; validate = false)
-end
 
 function build_connectivity(
     t::IndexTopology;
@@ -153,24 +135,16 @@ function _build_connectivity_topology(
     return csr_connectivity(nbrs, ptr; validate = false)
 end
 
-# A curvilinear grid's connectivity is its index topology's, exactly as a structured grid's is —
-# neighbors never consult coordinates, so the N = 2 case needs no separate implementation.
-function build_connectivity(
-    grid::Grids.CurvilinearGrid;
-    stencil = Stencils.Axial(1), active_only::Bool = true, backend = nothing,
-)
-    return _build_connectivity_topology(
-        IndexTopology(grid), _stencil_val(stencil), active_only; backend = backend,
-    )
-end
-
 # A sweep is where an index pays for itself — it amortizes over `n` rows, where a single query would
 # pay `O(n log n)` to save one `O(n)` scan. So this builds one by default when one can be built, which
 # turns the whole build from `O(n²)` into `O(n log n)`. `topology` overrides that either way.
 #
-# `default_sweep_topology` is not a silent fallback: with no extension loaded there is no index to
-# have, and the unindexed topology computes the same rows.
-default_sweep_topology(grid::Grids.StructuredGrid, _ball, _active_only::Bool = true) =
+# Which default applies is `Grids.candidate_source`: a separable window needs no index to be `O(1)` per
+# row, and everything else amortizes one.
+default_sweep_topology(grid::Grids.AbstractGrid, ball, active_only::Bool = true) =
+    default_sweep_topology(grid, ball, active_only, Grids.candidate_source(grid))
+
+default_sweep_topology(grid, _ball, _active_only::Bool, ::Grids.SeparableWindow) =
     MetricTopology(grid)
 
 # A cell list, not a tree: it needs no package, it builds and queries faster here (2.75 ms and 1.08 µs
@@ -179,23 +153,29 @@ default_sweep_topology(grid::Grids.StructuredGrid, _ball, _active_only::Bool = t
 #
 # The sweep's own `active_only` is passed on, so a sweep over the active region indexes that region and
 # no more.
-default_sweep_topology(grid::Grids.AbstractGrid, ball, active_only::Bool = true) =
+default_sweep_topology(grid, ball, active_only::Bool, ::Grids.IndexedCandidates) =
     MetricTopology(grid; index = Grids.cell_list(grid; ball = _ball_radius(ball),
                                                  active_only = active_only))
 
+# The same count → prefix-scan → fill shape as the stencil builder: both cell passes write only slots
+# their own cell owns, so they chunk without coordination.
+#
+# One body for every layout. How a cell is named is `Grids.cell_address`, what bounds the candidates is
+# the topology, and `_within_scan` takes the same arguments on both — a separable window ignores the
+# scratch buffer it is handed.
 function build_connectivity_within(
-    grid::Grids.CurvilinearGrid; ball, active_only::Bool = true, backend = nothing,
+    grid::Grids.AbstractGrid; ball, active_only::Bool = true, backend = nothing,
     topology = default_sweep_topology(grid, ball, active_only),
 )
-    sz = Grids.size_tuple(grid)
-    n = prod(sz)
-    ci = CartesianIndices(sz)
+    cs = Grids.cells(grid)
+    n = length(cs)
     deg = zeros(Int, n)
     # One candidate buffer per chunk, since the topology is shared read-only across them.
     Execution.run_chunks(n, backend) do rng
         s = ball_scratch()
         @inbounds for k in rng
-            deg[k] = _within_scan(nothing, grid, Tuple(ci[k]), ball, active_only, topology, s)
+            deg[k] = _within_scan(nothing, grid, Grids.cell_at(grid, cs[k]), ball,
+                                  active_only, topology, s)
         end
     end
     ptr = Vector{Int}(undef, n + 1)
@@ -208,37 +188,8 @@ function build_connectivity_within(
         s = ball_scratch()
         @inbounds for k in rng
             deg[k] == 0 && continue
-            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Tuple(ci[k]), ball,
-                         active_only, topology, s)
-        end
-    end
-    return csr_connectivity(nbrs, ptr; validate = false)
-end
-
-function build_connectivity_within(
-    grid::Grids.UnstructuredGrid; ball, active_only::Bool = true, backend = nothing,
-    topology = default_sweep_topology(grid, ball, active_only),
-)
-    n = length(Grids.mask(grid))
-    deg = zeros(Int, n)
-    Execution.run_chunks(n, backend) do rng
-        s = ball_scratch()
-        @inbounds for k in rng
-            deg[k] = _within_scan(nothing, grid, k, ball, active_only, topology, s)
-        end
-    end
-    ptr = Vector{Int}(undef, n + 1)
-    ptr[1] = 1
-    @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + deg[i]
-    end
-    nbrs = Vector{Int}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend) do rng
-        s = ball_scratch()
-        @inbounds for k in rng
-            deg[k] == 0 && continue
-            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, k, ball,
-                         active_only, topology, s)
+            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Grids.cell_at(grid, cs[k]),
+                         ball, active_only, topology, s)
         end
     end
     return csr_connectivity(nbrs, ptr; validate = false)

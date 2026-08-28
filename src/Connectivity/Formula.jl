@@ -82,6 +82,46 @@ function _neighbors!(
     return m
 end
 
+function build_connectivity end
+
+"""
+    build_connectivity(grid; active_only = true) -> CSRConnectivity
+
+The adjacency of a layout whose neighbours are arithmetic, materialized.
+
+Count, scan, fill — the same three passes the index-stencil builder makes, and for the same reason: both
+cell passes write only slots their own cell owns, so they carry no running offset and need no
+coordination. A stencil does not enter, arithmetic adjacency having no offsets to range over.
+"""
+function build_connectivity(
+    grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true, backend = nothing,
+)
+    n = length(Grids.mask(grid))
+    deg = zeros(Int, n)
+    Execution.run_indices(n, backend) do k
+        @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
+    end
+    ptr = Vector{Int}(undef, n + 1)
+    ptr[1] = 1
+    @inbounds for i in 1:n
+        ptr[i + 1] = ptr[i] + deg[i]
+    end
+    nbrs = Vector{Int}(undef, ptr[end] - 1)
+    Execution.run_indices(n, backend) do k
+        @inbounds begin
+            ids, m = _formula_ids(grid, k, active_only)
+            slot = ptr[k]
+            for t in 1:m
+                j = ids[t]
+                active_only && !Grids.isactive(grid, j) && continue
+                nbrs[slot] = j
+                slot += 1
+            end
+        end
+    end
+    return csr_connectivity(nbrs, ptr; validate = false)
+end
+
 # ---- HEALPix ----------------------------------------------------------------
 
 # Eight compass directions, of which the eight pixels at a face corner have only seven.
@@ -91,4 +131,57 @@ end
     ids, n = healpix_neighbor_ids(Grids.nside(grid), Int(i) - 1)
     # The pixel walk speaks 0-based ids; a cell here is 1-based.
     return (ntuple(t -> @inbounds(t ≤ n ? ids[t] + 1 : 0), Val(8)), n)
+end
+
+# ---- Ring grids -------------------------------------------------------------
+
+# Two along the ring and two on each adjacent one.
+@inline Grids.max_neighbors(::Grids.RingGrid) = 6
+
+# Appends `id` unless it is the cell itself or already present. The tuple is six wide and lives on the
+# stack, so the scan is six compares and no memory.
+@inline function _push_unique(ids::NTuple{K,Int}, n::Int, self::Int, id::Int) where {K}
+    id == self && return (ids, n)
+    @inbounds for t in 1:n
+        ids[t] == id && return (ids, n)
+    end
+    return (Base.setindex(ids, id, n + 1), n + 1)
+end
+
+"""
+    Grids.formula_neighbors(grid::RingGrid, i)
+
+A ring grid's adjacency: the two points either side along the ring, wrapping in longitude, and on each
+adjacent ring the two points whose longitudes straddle this one's.
+
+The straddling pair comes from proportional position, `⌊(j−1)·nlon[r′]/nlon[r]⌋` and its successor. Where
+adjacent rings differ in width this relation is directed — a wide ring's point can straddle a narrow
+ring's point that does not straddle it back — so the graph is not symmetric in general. It is symmetric
+whenever the two rings have equal counts, which is most of a Gaussian grid's interior.
+
+Duplicates are dropped, so a ring holding one or two points reports fewer than the six a wide ring does.
+"""
+@inline function Grids.formula_neighbors(grid::Grids.RingGrid, i::Integer)
+    ic = Int(i)
+    r = Grids.ring_of(grid, ic)
+    nring = Grids.nrings(grid)
+    m = Grids.nlon_in_ring(grid, r)
+    base = first(Grids.ring_range(grid, r)) - 1
+    j = ic - base                                    # 1-based position along the ring
+
+    ids = ntuple(_ -> 0, Val(6))
+    n = 0
+    # Along the ring, wrapping: `mod1` folds both ends onto the seam.
+    ids, n = _push_unique(ids, n, ic, base + mod1(j - 1, m))
+    ids, n = _push_unique(ids, n, ic, base + mod1(j + 1, m))
+    # The straddling pair on each adjacent ring.
+    for rr in (r - 1, r + 1)
+        (1 ≤ rr ≤ nring) || continue
+        mm = Grids.nlon_in_ring(grid, rr)
+        bb = first(Grids.ring_range(grid, rr)) - 1
+        p = fld((j - 1) * mm, m)                     # 0-based position on the adjacent ring
+        ids, n = _push_unique(ids, n, ic, bb + mod1(p + 1, mm))
+        ids, n = _push_unique(ids, n, ic, bb + mod1(p + 2, mm))
+    end
+    return (ids, n)
 end

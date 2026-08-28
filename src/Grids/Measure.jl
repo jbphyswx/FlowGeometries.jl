@@ -157,6 +157,45 @@ genuinely required; [`measure`](@ref) already indexes and broadcasts.
 measure_array(grid::AbstractGrid) = collect(measure(grid))
 
 """
+    RingwiseVector(value, offset)
+
+The cell measure of a ring grid, stored as its per-ring values rather than materialized.
+
+Every cell of an iso-latitude ring has the same area, so `npoints` entries carry only `nrings` numbers
+— `O(√npoints)`. A genuine `AbstractVector`: indexing, broadcasting and `collect` behave as for the
+dense equivalent.
+
+`sum` is specialized to `Σᵣ nlonᵣ·valueᵣ`, which is `O(nrings)` rather than `O(npoints)`.
+"""
+struct RingwiseVector{T,V<:AbstractVector{T},O<:AbstractVector{Int}} <: AbstractVector{T}
+    value::V     # one per ring
+    offset::O    # points before each ring; length nrings + 1
+end
+
+@inline Base.size(v::RingwiseVector) = (last(v.offset),)
+Base.IndexStyle(::Type{<:RingwiseVector}) = IndexLinear()
+
+@inline function Base.getindex(v::RingwiseVector, i::Int)
+    @boundscheck checkbounds(v, i)
+    return @inbounds v.value[searchsortedlast(v.offset, i - 1)]
+end
+
+@inline function Base.sum(v::RingwiseVector{T}) where {T}
+    s = zero(T)
+    @inbounds for r in eachindex(v.value)
+        s += T(v.offset[r + 1] - v.offset[r]) * v.value[r]
+    end
+    return s
+end
+
+@inline Base.minimum(v::RingwiseVector) = minimum(v.value)
+@inline Base.maximum(v::RingwiseVector) = maximum(v.value)
+@inline Base.extrema(v::RingwiseVector) = extrema(v.value)
+
+Base.show(io::IO, v::RingwiseVector{T}) where {T} =
+    print(io, "RingwiseVector{", T, "}(", length(v.value), " rings, ", length(v), " cells)")
+
+"""
     AllActive(size)
 
 The mask of a grid where every cell participates, stored as its size alone. `getindex` is a

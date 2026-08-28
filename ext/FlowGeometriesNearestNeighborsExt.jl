@@ -206,7 +206,7 @@ Grids.has_spatial_index(::_IndexableGrid) = true
 function Grids.spatial_index(grid::_IndexableGrid)
     pts, ng, embedding = Grids.embedded_points(grid)
     T = eltype(pts)
-    D = length(Grids.coordinates(grid))
+    D = Grids.ncoordinates(grid)
     minper = ng == 1 ? T(Inf) :
         minimum(T(Grids.isperiodic(grid, d) ? Grids.period(grid, d) : Inf) for d in 1:D)
     return BallIndex(NearestNeighbors.KDTree(pts), pts, size(pts, 2) ÷ ng, embedding, minper)
