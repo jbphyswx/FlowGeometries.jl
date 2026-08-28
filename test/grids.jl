@@ -1267,3 +1267,81 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
         Test.@test Base.summarysize(g) < 1000
     end
 end
+
+Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    D = FG.Discretization
+    C, F = D.Center(), D.Face()
+    cart = GE.CartesianGeometry{Float64}()
+
+    # A bounded direction of N cells carries N+1 faces; a wrapping one carries N, its last face being
+    # its first, and storing both would be a column of duplicated degrees of freedom.
+    sg = GD.StaggeredGrid(cart, collect(0.0:1.0:5.0), collect(0.0:2.0:6.0))
+    Test.@test GD.size_tuple(GD.center_grid(sg)) == (6, 4)
+    Test.@test GD.size_tuple(GD.grid_at(sg, (C, C))) == (6, 4)
+    Test.@test GD.size_tuple(GD.grid_at(sg, (F, C))) == (7, 4)
+    Test.@test GD.size_tuple(GD.grid_at(sg, (C, F))) == (6, 5)
+    Test.@test GD.size_tuple(GD.grid_at(sg, (F, F))) == (7, 5)
+    Test.@test GD.grid_at(sg, 1) isa GD.StructuredGrid      # an ordinary grid, so everything applies
+    Test.@test GD.size_tuple(GD.grid_at(sg, 1)) == (7, 4)
+    Test.@test GD.locations(sg) == ((F, C), (C, F))
+    Test.@test GD.center_location(sg) == (C, C)
+
+    let sph = GE.SphericalGeometry(6.371e6),
+        λ = collect(range(0, 2π; length = 13)[1:12]),
+        φ = collect(range(-1.2, 1.2; length = 9))
+        sp = GD.StaggeredGrid(sph, λ, φ)
+        Test.@test GD.size_tuple(GD.grid_at(sp, (F, C))) == (12, 9)   # wraps: 12 faces, not 13
+        Test.@test GD.size_tuple(GD.grid_at(sp, (C, F))) == (12, 10)
+        # The staggered grids keep the mesh's topology, so a query on one wraps as the mesh does.
+        Test.@test GD.isperiodic(GD.grid_at(sp, (F, C)), 1)
+        Test.@test GD.period(GD.grid_at(sp, (F, C)), 1) ≈ 2π
+    end
+
+    # The face samples ARE the cell boundaries, on a stretched mesh as much as a uniform one.
+    let x = [0.0, 1.0, 3.0, 6.0, 10.0], y = collect(0.0:2.0:6.0)
+        s = GD.StaggeredGrid(cart, x, y)
+        fx = GD.axis_at(s, 1, F)
+        Test.@test collect(fx) == collect(D.faces(x))
+        Test.@test all(fx[i] == (x[i - 1] + x[i]) / 2 for i in 2:length(x))
+        Test.@test fx[1] == x[1] - (x[2] - x[1]) / 2
+        Test.@test fx[end] == x[end] + (x[end] - x[end - 1]) / 2
+        Test.@test all(GD.coords(GD.grid_at(s, (F, C)), i, j) == (x = fx[i], y = y[j])
+                       for i in 1:6, j in 1:4)
+    end
+
+    # A uniform mesh must not LOOK stretched once staggered: every method that dispatches on spacing
+    # reads the type, so a face axis that lost the guarantee would silently take the slow path.
+    for xs in (0.0:0.5:5.0, FG.Axes.UniformAxis(0.0, 0.5, 11), range(0.0, 5.0; length = 11))
+        s = GD.StaggeredGrid(cart, xs, 0.0:1.0:3.0)
+        Test.@test FG.Axes.isuniform(GD.axis_at(s, 1, F))
+        Test.@test FG.Axes.spacing(GD.axis_at(s, 1, F)) ≈ 0.5
+        Test.@test GD.isuniform(GD.grid_at(s, (F, C)), 1)
+    end
+
+    # A mask is given over the CENTRES, and a staggered point is active where every centre it is built
+    # from is — the finite-volume rule, so a face between an active and an inactive cell is a boundary
+    # rather than a free value.
+    let mk = trues(5, 4)
+        mk[3, 2] = false
+        s = GD.StaggeredGrid(GD.StructuredGrid(cart, collect(0.0:1.0:4.0), collect(0.0:1.0:3.0), mk))
+        gu, gv, gz = GD.grid_at(s, (F, C)), GD.grid_at(s, (C, F)), GD.grid_at(s, (F, F))
+        Test.@test !GD.isactive(gu, 3, 2) && !GD.isactive(gu, 4, 2)   # the two u-faces of that cell
+        Test.@test GD.isactive(gu, 2, 2) && GD.isactive(gu, 5, 2)
+        Test.@test !GD.isactive(gv, 3, 2) && !GD.isactive(gv, 3, 3)   # its two v-faces
+        Test.@test count(!, GD.mask(gu)) == 2 && count(!, GD.mask(gv)) == 2
+        Test.@test count(!, GD.mask(gz)) == 4                          # its four corners
+    end
+    # An all-active mesh stays all-active, and stores only a size at every location.
+    Test.@test GD.mask(GD.grid_at(sg, (F, F))) isa GD.AllActive
+
+    # Three directions, where the velocity locations are U, V and W.
+    let s = GD.StaggeredGrid(cart, collect(0.0:1.0:3.0), collect(0.0:1.0:2.0), collect(0.0:1.0:1.0))
+        Test.@test GD.size_tuple(GD.grid_at(s, 1)) == (5, 3, 2)
+        Test.@test GD.size_tuple(GD.grid_at(s, 2)) == (4, 4, 2)
+        Test.@test GD.size_tuple(GD.grid_at(s, 3)) == (4, 3, 3)
+        Test.@test GD.locations(s) == ((F, C, C), (C, F, C), (C, C, F))
+        Test.@test occursin("StaggeredGrid", sprint(show, s))
+    end
+end

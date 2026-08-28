@@ -11,6 +11,7 @@ using ..SphericalSampling: SphericalSampling
 include("Grids/Interface.jl")
 include("Grids/Measure.jl")
 include("Grids/Structured.jl")
+include("Grids/Staggered.jl")
 include("Grids/Curvilinear.jl")
 include("Grids/Unstructured.jl")
 include("Grids/HEALPix.jl")

@@ -50,6 +50,9 @@ q_ltb(geo, p)            = FG.Geometry.local_tangent_basis(geo, p)
 q_c2g(geo, v)            = FG.Geometry.cartesian_to_geodetic(geo, v)
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
 q_gradient_t!(outs, f, plan) = FG.Operators.gradient!(outs, f, plan)
+q_stag_grad!(outs, f, sg) = FG.Operators.gradient!(outs, f, sg)
+q_stag_div!(out, us, sg)  = FG.Operators.divergence!(out, us, sg)
+q_stag_curl!(o, u1, u2, sg) = FG.Operators.curl!(o, u1, u2, sg)
 q_locdisp(geo, c, n)     = FG.Geometry.local_displacement(geo, c, n)
 q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
@@ -1272,4 +1275,42 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
         Test.@test a1 == 0
         Test.@test a8 == a1                     # nothing scales with the batch
     end
+end
+
+Test.@testset "The staggered operators allocate nothing" begin
+    GD = FG.Grids
+    O = FG.Operators
+    D = FG.Discretization
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    C, Fa = D.Center(), D.Face()
+    x = collect(range(0.0, 4.0; length = 21))
+    y = collect(range(0.0, 3.0; length = 16))
+    sg = GD.StaggeredGrid(cart, x, y)
+    f = [3.0a - 2.0b for a in x, b in y]
+    fx = GD.axis_at(sg, 1, Fa)
+    fy = GD.axis_at(sg, 2, Fa)
+    u = [2.0a for a in fx, _ in y]
+    v = [3.0b for _ in x, b in fy]
+    g1 = similar(u); g2 = similar(v)
+    dv = similar(f)
+    z = zeros(length(fx), length(fy))
+    # Warm each, then measure: the per-point work is scale factors and one difference, and the
+    # per-direction loop is a tuple over a `Val`, so nothing here belongs on the heap.
+    O.gradient!((g1, g2), f, sg)
+    O.divergence!(dv, (u, v), sg)
+    O.curl!(z, u, v, sg)
+    Test.@test _alloc(q_stag_grad!, (g1, g2), f, sg) == 0
+    Test.@test _alloc(q_stag_div!, dv, (u, v), sg) == 0
+    Test.@test _alloc(q_stag_curl!, z, u, v, sg) == 0
+
+    # …on a sphere too, where the scale factors are trigonometry rather than ones.
+    sph = FG.Geometry.SphericalGeometry(6.371e6)
+    λ = collect(range(0, 2π; length = 25)[1:24])
+    φ = collect(range(-1.2, 1.2; length = 13))
+    sp = GD.StaggeredGrid(sph, λ, φ)
+    su = zeros(length(GD.axis_at(sp, 1, Fa)), length(φ))
+    sv = zeros(length(λ), length(GD.axis_at(sp, 2, Fa)))
+    sd = zeros(length(λ), length(φ))
+    O.divergence!(sd, (su, sv), sp)
+    Test.@test _alloc(q_stag_div!, sd, (su, sv), sp) == 0
 end

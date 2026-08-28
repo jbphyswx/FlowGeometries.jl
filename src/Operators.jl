@@ -16,9 +16,6 @@ using ..Connectivity: Connectivity
 # and reasoned about without a field in hand, and it is why this module loads last: a field operation
 # needs the grid types, and the grid modules need the weights.
 #
-# What is deliberately NOT here: an operator that requires a result location and a boundary-condition
-# policy — a staggered difference, a divergence, a curl — which the caller assembles from these weights
-# and the metric factors, because only they can choose those conventions.
 
 include("Operators/Policies.jl")
 include("Operators/StencilApply.jl")
@@ -28,5 +25,6 @@ include("Operators/Interpolate.jl")
 include("Operators/Gradient.jl")
 include("Operators/Structured.jl")
 include("Operators/Scattered.jl")
+include("Operators/Staggered.jl")
 
 end # module Operators

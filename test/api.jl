@@ -307,7 +307,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
     NOT_CHECKED_BECAUSE = Set(Iterators.flatten((
         # types and traits
         [:AbstractGrid, :AbstractStructuredGrid, :AbstractCurvilinearGrid, :AbstractUnstructuredGrid,
-         :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :AbstractTopology, :Bounded, :Periodic,
+         :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :StaggeredGrid,
+         :AbstractTopology, :Bounded, :Periodic,
          :AllActive, :SeparableMeasure, :SlabMeasure, :PoleRotation, :AbstractImageConvention,
          :AbstractReach,
          :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
@@ -327,6 +328,9 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :structured_grid,
          :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
          :interpolate,
+         # staggered: a whole-array sweep, or a grid built at a location
+         :center_grid, :grid_at, :axis_at, :locations, :location_at, :center_location,
+         :divergence, :divergence!, :curl, :curl!, :gradient,
          :corners, :corner_coords, :has_corners, :neighbor_nbrs, :distance, :embedded_points,
          :cell_list,
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,

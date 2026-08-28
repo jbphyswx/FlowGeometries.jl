@@ -125,12 +125,31 @@ FG.Geometry.scale_factors(geo, point)    # (R cosφ, R) on a sphere
 D.apply_stencil!(out, field, grid, 1; order = 1, nodes = 5)   # along one direction
 ```
 
-`apply_stencil!` is the one function that touches a field, and only along a single direction with the
-result left where the input was — a case whose conventions are all already fixed: nothing to stagger,
-the stencil shifts inward at a bounded end and wraps on a periodic one, so no halo either. Anything
-that genuinely needs a result location and a boundary-condition policy — a staggered difference, a
-divergence, a curl — is a short call at the call site from these weights and metric terms, and is not
-imposed here.
+`apply_stencil!` touches a field along a single direction with the result left where the input was — a
+case whose conventions are all already fixed: nothing to stagger, the stencil shifts inward at a
+bounded end and wraps on a periodic one, so no halo either.
+
+## Staggered operators
+
+A `StaggeredGrid` is one rectilinear mesh read at any Arakawa C location — the tracer at cell centres,
+each velocity component on the faces it crosses, the vorticity at the corner. Every location is an
+ordinary `StructuredGrid`, so everything above applies at each of them unchanged.
+
+```julia
+sg = FG.Grids.StaggeredGrid(geo, λ, φ)
+FG.Grids.grid_at(sg, 1)                  # the u-location grid, as a StructuredGrid
+u1, u2 = FG.Operators.gradient(f, sg)    # centres → faces
+FG.Operators.divergence((u1, u2), sg)    # faces  → centres
+FG.Operators.curl(u1, u2, sg)            # faces  → corners
+```
+
+These are the orthogonal-curvilinear forms built from the geometry's own `scale_factors`, so the same
+call is `∂/∂x` on a plane and `(1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]` on a sphere. Each is a single
+difference across one cell evaluated where the result lives, so the divergence telescopes exactly and
+the curl of a discrete gradient is zero to round-off, not merely small.
+
+The boundary condition is still the caller's: a face with a cell on one side only has no difference
+across it, so it is written `masked` rather than given an invented value.
 
 ## Mask topology
 

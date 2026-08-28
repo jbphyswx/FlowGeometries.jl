@@ -1671,3 +1671,121 @@ Test.@testset "The ! forms write into the caller's buffers and allocate nothing"
     Test.@test (Test.@inferred D.interpolation_weights(collect(1.0:5.0), 2.4)) isa
                Tuple{Int,Tuple{Float64,Float64}}
 end
+
+Test.@testset "Staggered gradient, divergence and curl" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    O = FG.Operators
+    D = FG.Discretization
+    C, F = D.Center(), D.Face()
+    cart = GE.CartesianGeometry{Float64}()
+
+    # Sample an analytic function at a location's own points.
+    smp(sg, loc, f) = [f(ntuple(e -> GD.axis_at(sg, e, loc[e])[I[e]], ndims(sg))...)
+                       for I in CartesianIndices(ntuple(e -> length(GD.axis_at(sg, e, loc[e])),
+                                                        ndims(sg)))]
+
+    x = collect(range(0.0, 4.0; length = 21))
+    y = collect(range(0.0, 3.0; length = 16))
+    sg = GD.StaggeredGrid(cart, x, y)
+
+    # Each component is ONE difference across ONE cell, so a linear field is differentiated exactly.
+    f = smp(sg, (C, C), (a, b) -> 3.0a - 2.0b + 7.0)
+    g1, g2 = O.gradient(f, sg)
+    Test.@test maximum(abs.(g1[2:(end - 1), :] .- 3.0)) < 1e-12
+    Test.@test maximum(abs.(g2[:, 2:(end - 1)] .+ 2.0)) < 1e-12
+    # An outer face of a bounded direction has a cell on one side only, so there is no difference
+    # across it. It is where a boundary condition goes, and none is invented.
+    Test.@test all(isnan, g1[1, :]) && all(isnan, g1[end, :])
+    Test.@test all(isnan, g2[:, 1]) && all(isnan, g2[:, end])
+    Test.@test all(iszero, O.gradient(f, sg; masked = 0.0)[1][1, :])
+
+    u = smp(sg, (F, C), (a, b) -> 2.0a + 0.5b)
+    v = smp(sg, (C, F), (a, b) -> -0.25a + 3.0b)
+    Test.@test maximum(abs.(O.divergence((u, v), sg) .- 5.0)) < 1e-11
+    Test.@test maximum(abs.(O.curl(u, v, sg)[2:(end - 1), 2:(end - 1)] .+ 0.75)) < 1e-11
+
+    # The curl of a discrete gradient is zero to round-off, not merely small: both are the same
+    # one-cell differences, so they cancel identically rather than to truncation order.
+    let ψ = smp(sg, (C, C), (a, b) -> sin(1.3a) * cos(0.9b))
+        p1, p2 = O.gradient(ψ, sg; masked = 0.0)
+        z = O.curl(p1, p2, sg; masked = 0.0)
+        Test.@test maximum(abs.(z[2:(end - 1), 2:(end - 1)])) < 1e-10
+    end
+
+    # A stretched mesh and a DESCENDING one: the signed gaps keep the derivative's sense either way.
+    let xs = cumsum(vcat(0.0, 0.1 .+ 0.05 .* (1:19))), ys = collect(range(6.0, 0.0; length = 16))
+        s = GD.StaggeredGrid(cart, xs, ys)
+        ff = smp(s, (C, C), (a, b) -> 3.0a - 2.0b + 7.0)
+        h1, h2 = O.gradient(ff, s)
+        Test.@test maximum(abs.(h1[2:(end - 1), :] .- 3.0)) < 1e-11
+        Test.@test maximum(abs.(h2[:, 2:(end - 1)] .+ 2.0)) < 1e-11
+        uu = smp(s, (F, C), (a, b) -> 2.0a + 0.5b)
+        vv = smp(s, (C, F), (a, b) -> -0.25a + 3.0b)
+        Test.@test maximum(abs.(O.divergence((uu, vv), s) .- 5.0)) < 1e-10
+    end
+
+    # On a sphere the same call is the metric form, built from the geometry's own scale factors:
+    # ∇·u = (1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]. Gated by CONVERGENCE — second order — rather than
+    # by a tolerance on one resolution, which would not distinguish it from a wrong constant factor.
+    let R = 6.371e6, sph = GE.SphericalGeometry(R)
+        errs = map((24, 48, 96)) do nlon
+            λs = collect(range(0, 2π; length = nlon + 1)[1:nlon])
+            φs = collect(range(-1.3, 1.3; length = nlon ÷ 2))
+            s = GD.StaggeredGrid(sph, λs, φs)
+            dv = O.divergence((smp(s, (F, C), (l, p) -> sin(l) * cos(p)),
+                               smp(s, (C, F), (l, p) -> 0.0)), s)
+            want = smp(s, (C, C), (l, p) -> cos(l) / R)
+            return maximum(abs.(dv .- want)) / maximum(abs.(want))
+        end
+        Test.@test errs[3] < 1e-2
+        Test.@test errs[1] / errs[2] > 3.5 && errs[2] / errs[3] > 3.5
+        # The meridional term carries the cosφ inside the derivative; get that wrong and this diverges.
+        errs2 = map((24, 48, 96)) do nlon
+            λs = collect(range(0, 2π; length = nlon + 1)[1:nlon])
+            φs = collect(range(-1.3, 1.3; length = nlon ÷ 2))
+            s = GD.StaggeredGrid(sph, λs, φs)
+            dv = O.divergence((smp(s, (F, C), (l, p) -> 0.0),
+                               smp(s, (C, F), (l, p) -> sin(p))), s)
+            want = smp(s, (C, C), (l, p) -> cos(2p) / (R * cos(p)))
+            return maximum(abs.(dv .- want)) / maximum(abs.(want))
+        end
+        Test.@test errs2[1] / errs2[2] > 3.5 && errs2[2] / errs2[3] > 3.5
+    end
+
+    # Discretely conservative: the divergence is the net flux through a cell's own faces over its own
+    # volume, so neighbouring cells' shared faces cancel EXACTLY and a wrapping domain integrates to
+    # zero — to round-off, not to truncation order.
+    let sph = GE.SphericalGeometry(6.371e6),
+        λs = collect(range(0, 2π; length = 41)[1:40]),
+        φs = collect(range(-1.4, 1.4; length = 25))
+        s = GD.StaggeredGrid(sph, λs, φs)
+        ctr = GD.center_grid(s)
+        dv = O.divergence((smp(s, (F, C), (l, p) -> sin(3l) * cos(p) + 0.3),
+                           smp(s, (C, F), (l, p) -> 0.0)), s)
+        tot = sum(dv[i, j] * GD.measure(ctr, i, j) for i in 1:40, j in 1:25)
+        scale = sum(abs(dv[i, j]) * GD.measure(ctr, i, j) for i in 1:40, j in 1:25)
+        Test.@test abs(tot) < 1e-10 * scale
+        # A meridional flux vanishing at both edges likewise integrates to nothing.
+        dv2 = O.divergence((smp(s, (F, C), (l, p) -> 0.0),
+                            smp(s, (C, F), (l, p) -> cos(l) * (p - φs[1]) * (p - φs[end]))), s)
+        t2 = sum(dv2[i, j] * GD.measure(ctr, i, j) for i in 1:40, j in 1:25)
+        s2 = sum(abs(dv2[i, j]) * GD.measure(ctr, i, j) for i in 1:40, j in 1:25)
+        Test.@test abs(t2) < 1e-10 * s2
+    end
+
+    # A hole takes with it every value that depended on it, and nothing else.
+    let mk = trues(21, 16)
+        mk[10, 8] = false
+        s = GD.StaggeredGrid(GD.StructuredGrid(cart, x, y, mk))
+        dv = O.divergence((u, v), s)
+        Test.@test isnan(dv[10, 8])
+        Test.@test isnan(dv[9, 8]) && isnan(dv[11, 8]) && isnan(dv[10, 7]) && isnan(dv[10, 9])
+        Test.@test !isnan(dv[12, 8]) && !isnan(dv[10, 10])
+        gm = O.gradient(f, s)[1]
+        Test.@test isnan(gm[10, 8]) && isnan(gm[11, 8]) && !isnan(gm[9, 8])
+    end
+
+    Test.@test_throws DimensionMismatch O.divergence!(zeros(3, 3), (u, v), sg)
+    Test.@test_throws DimensionMismatch O.gradient!((zeros(3, 3), zeros(3, 3)), f, sg)
+end
