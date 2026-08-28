@@ -2799,11 +2799,27 @@ The CSR adjacency arrays: the flat neighbour indices, and the per-node offsets i
 @inline neighbor_ptr(grid::UnstructuredGrid) = getfield(grid, :neighbor_ptr)
 
 """
-    neighbors(grid::UnstructuredGrid, idx::Integer) -> AbstractVector{<:Integer}
+    neighbors(grid, I...; stencil = Stencils.Axial(1), active_only = true)
 
-Neighbor node indices of node `idx`, as a zero-copy view into the CSR-flattened adjacency storage.
+The neighbours of cell `I`, as a lazy sequence of linear indices that allocates nothing.
+
+Where they come from is the layout's [`adjacency_source`](@ref): index-space offsets, which is what
+`stencil` selects among, or the mesh's own stored incidence, which no stencil ranges over.
+
+`active_only` holds either way — a masked cell has no neighbours, and a masked cell is not one. See
+[`incident_nodes`](@ref) for the unfiltered storage behind a stored graph.
 """
-@inline function neighbors(grid::UnstructuredGrid, idx::Integer)
+function neighbors end
+
+"""
+    incident_nodes(grid, idx::Integer) -> AbstractVector{<:Integer}
+
+The nodes stored as incident to node `idx`, as a zero-copy view into the CSR adjacency.
+
+Storage, not a query: it reports what the mesh holds, with no regard for the mask. `neighbors` is the
+query, and it honours `active_only` on every layout.
+"""
+@inline function incident_nodes(grid::AbstractUnstructuredGrid, idx::Integer)
     ptr = neighbor_ptr(grid)
     @inbounds lo = ptr[idx]
     @inbounds hi = ptr[idx+1] - 1

@@ -303,7 +303,10 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
          :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
          :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
-         :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan, :StencilScratch],
+         :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan, :StencilScratch,
+         :MeshNeighbors, :AbstractCellAddress, :CartesianCells, :FlatCells,
+         :AbstractAdjacency, :IndexStencilNeighbors, :FormulaNeighbors, :StoredMeshNeighbors,
+         :AbstractCandidateSource, :SeparableWindow, :IndexedCandidates],
         # bulk or one-off operations, not per-cell hot paths
         [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
          :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
@@ -312,7 +315,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
          :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
          :interpolate,
-         :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list],
+         :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list,
+         :incident_nodes, :cell_address, :adjacency_source, :candidate_source],
     # allocating forms, whose whole job is to return a fresh array
     [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,
      :centers, :faces, :nodes, :cell_widths],

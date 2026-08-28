@@ -198,21 +198,69 @@ end
 
 # ---- Adjacency read from stored incidence ------------------------------------
 #
-# A stored graph is the mesh's own neighbour relation, so a stencil does not enter it.
+# A stored graph is the mesh's own neighbour relation, so a stencil does not enter it. `active_only`
+# does, on the same rule the offset walk keeps: a masked cell has no neighbours, and a masked neighbour
+# is not one. `Grids.incident_nodes` is the unfiltered storage underneath.
 
-@inline _nneighbors(grid, i::Int, _sten, _active_only, ::Grids.StoredMeshNeighbors) =
-    length(Grids.neighbors(grid, i))
+"""
+    MeshNeighbors{GR}
 
-@inline _neighbors(grid, i::Int, _sten, _active_only, ::Grids.StoredMeshNeighbors) =
-    Grids.neighbors(grid, i)
+Lazy neighbour sequence of one node of a stored-incidence layout: iterating it walks the node's CSR
+block and yields each active neighbour.
 
-function _neighbors!(out::AbstractVector{<:Integer}, grid, i::Int, _sten, _active_only,
+The counterpart of [`StencilNeighbors`](@ref), and lazy for the same reason — a traversal over every
+node allocates nothing, where a freshly filtered `Vector` per node would cost one allocation each.
+"""
+struct MeshNeighbors{GR}
+    grid::GR
+    node::Int
+    active_only::Bool
+end
+
+Base.IteratorSize(::Type{<:MeshNeighbors}) = Base.HasLength()
+Base.IteratorEltype(::Type{<:MeshNeighbors}) = Base.HasEltype()
+Base.eltype(::Type{<:MeshNeighbors}) = Int
+Base.length(m::MeshNeighbors) =
+    _nneighbors(m.grid, m.node, nothing, m.active_only, Grids.StoredMeshNeighbors())
+
+@inline function Base.iterate(m::MeshNeighbors, k::Int = 0)
+    # A masked node has no neighbours at all, matching the offset walk.
+    (k == 0 && m.active_only && !Grids.isactive(m.grid, m.node)) && return nothing
+    nbr = Grids.incident_nodes(m.grid, m.node)
+    @inbounds while k < length(nbr)
+        k += 1
+        j = Int(nbr[k])
+        m.active_only && !Grids.isactive(m.grid, j) && continue
+        return j, k
+    end
+    return nothing
+end
+
+@inline function _nneighbors(grid, i::Int, _sten, active_only::Bool, ::Grids.StoredMeshNeighbors)
+    nbr = Grids.incident_nodes(grid, i)
+    active_only || return length(nbr)
+    Grids.isactive(grid, i) || return 0
+    n = 0
+    @inbounds for k in eachindex(nbr)
+        Grids.isactive(grid, Int(nbr[k])) && (n += 1)
+    end
+    return n
+end
+
+@inline _neighbors(grid, i::Int, _sten, active_only::Bool, ::Grids.StoredMeshNeighbors) =
+    MeshNeighbors(grid, i, active_only)
+
+function _neighbors!(out::AbstractVector{<:Integer}, grid, i::Int, _sten, active_only::Bool,
                      ::Grids.StoredMeshNeighbors)
-    nbr = Grids.neighbors(grid, i)
-    n = length(nbr)
-    n ≤ length(out) || throw(ArgumentError("out too short (need ≥ $n)"))
-    @inbounds for k in 1:n
-        out[k] = nbr[k]
+    nbr = Grids.incident_nodes(grid, i)
+    (active_only && !Grids.isactive(grid, i)) && return 0
+    n = 0
+    @inbounds for k in eachindex(nbr)
+        j = Int(nbr[k])
+        active_only && !Grids.isactive(grid, j) && continue
+        n += 1
+        n ≤ length(out) || throw(ArgumentError("out too short (need ≥ $n)"))
+        out[n] = j
     end
     return n
 end
@@ -2110,8 +2158,27 @@ For adjacency by physical distance rather than by stencil, see [`build_connectiv
 """
 function build_connectivity end
 
-build_connectivity(grid::Grids.UnstructuredGrid; _...) =
-    csr_connectivity(Grids.neighbor_nbrs(grid), Grids.neighbor_ptr(grid); validate = false)
+# A fully active mesh's stored buffers already are the answer, so they are wrapped rather than copied.
+# A mask makes them a superset, and `active_only` means what it means everywhere else here.
+function build_connectivity(
+    grid::Grids.AbstractUnstructuredGrid; active_only::Bool = true, _...,
+)
+    msk = Grids.mask(grid)
+    (!active_only || msk isa Grids.AllActive) &&
+        return csr_connectivity(Grids.neighbor_nbrs(grid), Grids.neighbor_ptr(grid); validate = false)
+    n = length(msk)
+    ptr = Vector{Int}(undef, n + 1)
+    nbrs = Int[]
+    sizehint!(nbrs, length(Grids.neighbor_nbrs(grid)))
+    @inbounds ptr[1] = 1
+    @inbounds for i in 1:n
+        for j in Grids.neighbors(grid, i; active_only = true)
+            push!(nbrs, j)
+        end
+        ptr[i + 1] = length(nbrs) + 1
+    end
+    return csr_connectivity(nbrs, ptr; validate = false)
+end
 
 function build_connectivity(
     grid::Grids.StructuredGrid;
