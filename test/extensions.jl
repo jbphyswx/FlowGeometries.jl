@@ -90,6 +90,43 @@ Test.@testset "Threading is opt-in and changes no result" begin
                    FG.Connectivity.build_connectivity(hp; backend = CB.ThreadedBackend()).nbrs
     end
 
+    # A batched sweep is ONE launch over the whole field, batch axes included — so it must agree with
+    # differencing each slice on its own, not merely with the host.
+    let cpu = KernelAbstractions.CPU(), nx = 12, ny = 8, nb = 3
+        ax = range(0.0, 1.0; length = nx)
+        fld = reshape(collect(Float64, 1:(nx * ny * nb)), nx, ny, nb) ./ (nx * ny * nb)
+        for k in (3, 5, 8), dim in (1, 2)
+            iw = FG.Discretization.axis_stencils(dim == 1 ? ax :
+                                                 range(0.0, 2.0; length = ny), 1, k)
+            dim == 2 && k > ny && continue
+            batched = fill(NaN, nx, ny, nb)
+            FG.Operators.apply_stencil!(batched, fld, iw..., dim; backend = cpu)
+            for b in 1:nb
+                slice = fill(NaN, nx, ny)
+                FG.Operators.apply_stencil!(slice, fld[:, :, b], iw..., dim; backend = cpu)
+                Test.@test isequal(batched[:, :, b], slice)
+            end
+            # …and the host agrees with it cell for cell.
+            host = fill(NaN, nx, ny, nb)
+            FG.Operators.apply_stencil!(host, fld, iw..., dim)
+            Test.@test isequal(host, batched)
+        end
+    end
+
+    # A node count above the specialized set still runs, on both paths, and still agrees.
+    let cpu = KernelAbstractions.CPU(), n = 20
+        ax = range(0.0, 1.0; length = n)
+        fld = [sin(3a) * b for a in ax, b in 1:6]
+        for k in (8, 10, 11, 13)
+            iw = FG.Discretization.axis_stencils(ax, 1, k)
+            h = fill(NaN, n, 6)
+            d = fill(NaN, n, 6)
+            FG.Operators.apply_stencil!(h, fld, iw..., 1)
+            FG.Operators.apply_stencil!(d, fld, iw..., 1; backend = cpu)
+            Test.@test isequal(h, d)
+        end
+    end
+
     # A grid reduction runs per index where the candidates need no buffer, so it reaches a device too.
     let gs = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), 0.0:1.0:19.0, 0.0:1.0:19.0)
         base = FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, gs; ball = 2.5)

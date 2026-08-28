@@ -308,14 +308,28 @@ function apply_stencil!(
             end
         end
     end
-    sz = size(field)
-    ci = CartesianIndices(sz)
-    # Over the WHOLE field, batch axes included: that is what makes a batched sweep one launch over
-    # `prod(spatial) * prod(batch)` work items rather than one launch per slice.
+    # The differenced direction and the node count are resolved ONCE, before the launch, for the same
+    # reason the host sweep resolves them once per sweep: they are properties of the weight set, not of
+    # the cell, and a `Val` built inside the body would cost more than it saves.
     vm = _mask_rank(mask, Val(N))
+    return _dispatch_dim(Int(dim), vm) do vdim
+        _dispatch_nodes(k) do vk
+            _launch_stencil!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm,
+                             backend)
+        end
+    end
+end
+
+# Over the WHOLE field, batch axes included: that is what makes a batched sweep one launch over
+# `prod(spatial) * prod(batch)` work items rather than one launch per slice.
+function _launch_stencil!(
+    out::AbstractArray{S,N}, field, indices, weights, mask, masked, ::Val{dim}, nodes, ::Val{N},
+    ::Val{M}, backend,
+) where {S,N,dim,M}
+    ci = CartesianIndices(size(field))
     Execution.run_indices(length(ci), backend) do lin
-        _stencil_cell!(out, field, indices, weights, Int(dim), mask, masked, k,
-                       Tuple(@inbounds ci[lin]), (@inbounds ci[lin]), vm)
+        _stencil_cell!(out, field, indices, weights, Val(dim), mask, masked, nodes,
+                       Tuple(@inbounds ci[lin]), (@inbounds ci[lin]), Val(M))
     end
     return out
 end
@@ -614,10 +628,25 @@ end
 
 # One output cell, written from its own inputs only, so the loop above is index-parallel and the same
 # body serves a host loop and a device launch.
+"""
+    _nodecount(nodes) -> Int
+
+The node count, from either a `Val` or a plain `Int`.
+
+One body then serves both: with a `Val` the trip count is a literal, so the loop unrolls and the
+weights reach registers; with an `Int` it is an ordinary loop, which is what a node count above the
+specialized set gets. Writing the loop twice would be two copies of the same arithmetic to keep in step.
+"""
+@inline _nodecount(::Val{k}) where {k} = k
+@inline _nodecount(k::Int) = k
+
+# One cell, by its own index and nothing else — the body a launch runs. `dim` and the node count arrive
+# as type parameters, so the index construction folds and the node loop unrolls: resolved as runtime
+# values, `d == dim` is a comparison per node per cell and the loop has no known trip count.
 @inline function _stencil_cell!(
-    out::AbstractArray{S,N}, field, indices, weights, dim::Int, mask, masked, k::Int,
+    out::AbstractArray{S,N}, field, indices, weights, ::Val{dim}, mask, masked, nodes,
     I::NTuple{N,Int}, ci, ::Val{M},
-) where {S,N,M}
+) where {S,N,M,dim}
     @inbounds begin
         if mask !== nothing && !mask[_spatial(I, Val(M))...]
             out[ci] = masked
@@ -626,7 +655,7 @@ end
         j = I[dim]
         acc = zero(S)
         blocked = false
-        for q in 1:k
+        for q in 1:_nodecount(nodes)
             J = ntuple(d -> d == dim ? Int(indices[j, q]) : I[d], Val(N))
             if mask !== nothing && !mask[_spatial(J, Val(M))...]
                 blocked = true
