@@ -664,11 +664,98 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     end
 
     Test.@test plan.names == (:x, :y)
+    Test.@test O.ncomponents(plan) == 2
     Test.@test_throws DimensionMismatch O.gradient!(zeros(3), zeros(3), zeros(3), plan)
-    # The tangent plane is two-dimensional, so a 3-coordinate grid is refused rather than guessed.
-    let g3 = GD.UnstructuredGrid(cart, (rand(6), rand(6), rand(6)), trues(6); k = 3,
-                                 areas = ones(6))
-        Test.@test_throws ArgumentError O.gradient_plan(g3)
+
+    # Three coordinates resolve three directions, on the local frame rather than a tangent plane.
+    let m = 4, np = 4^3
+        xs = [1.0 * (i - 1) for k in 1:m for j in 1:m for i in 1:m]
+        ys = [1.0 * (j - 1) for k in 1:m for j in 1:m for i in 1:m]
+        zs = [1.0 * (k - 1) for k in 1:m for j in 1:m for i in 1:m]
+        g3 = GD.UnstructuredGrid(cart, (xs, ys, zs), trues(np); k = 6, areas = ones(np))
+        p3 = O.gradient_plan(g3)
+        Test.@test O.ncomponents(p3) == 3
+        Test.@test p3.names == (:x, :y, :z)
+        α, β, γ = 2.0, -3.0, 0.5
+        f3 = α .* xs .+ β .* ys .+ γ .* zs .+ 7.0
+        u1 = zeros(np); u2 = zeros(np); u3 = zeros(np)
+        O.gradient!(u1, u2, u3, f3, p3)
+        # Interior nodes, whose six nearest neighbours span all three directions.
+        lin = LinearIndices((m, m, m))
+        int3 = [lin[i, j, k] for k in 2:(m - 1), j in 2:(m - 1), i in 2:(m - 1)]
+        Test.@test all(abs(u1[t] - α) < 1e-10 && abs(u2[t] - β) < 1e-10 && abs(u3[t] - γ) < 1e-10
+                       for t in int3)
+        # The tuple form is the same call, and the positional one forwards to it.
+        v1 = zeros(np); v2 = zeros(np); v3 = zeros(np)
+        O.gradient!((v1, v2, v3), f3, p3)
+        Test.@test v1 == u1 && v2 == u2 && v3 == u3
+
+        # Rank deficiency in 3-D: every neighbour in one plane leaves the normal component
+        # undetermined by the data, so it is zeroed rather than produced by a nudged inverse.
+        xp = [1.0 * i for j in 1:4 for i in 1:4]
+        yp = [1.0 * j for j in 1:4 for i in 1:4]
+        gp = GD.UnstructuredGrid(cart, (xp, yp, zeros(16)), trues(16); k = 4, areas = ones(16))
+        w1 = zeros(16); w2 = zeros(16); w3 = zeros(16)
+        O.gradient!(w1, w2, w3, 3.0 .* xp .- 2.0 .* yp, O.gradient_plan(gp))
+        lin2 = LinearIndices((4, 4))
+        Test.@test all(abs(w1[lin2[i, j]] - 3.0) < 1e-10 && abs(w2[lin2[i, j]] + 2.0) < 1e-10
+                       for j in 2:3, i in 2:3)
+        Test.@test all(iszero, w3)
+    end
+
+    # A fourth coordinate has no fixed-size solve behind it, so it is refused rather than guessed.
+    let g4 = GD.UnstructuredGrid(cart, (rand(8), rand(8), rand(8), rand(8)), trues(8); k = 4,
+                                 areas = ones(8))
+        Test.@test_throws ArgumentError O.gradient_plan(g4)
+    end
+end
+
+Test.@testset "The symmetric pseudo-inverse satisfies the Moore-Penrose conditions" begin
+    O = FG.Operators
+    # `_sympinv3` is closed form and eigenvector-free, on the grounds that a pseudo-inverse of a
+    # symmetric matrix is a polynomial in it. What makes that valid is exactly these four identities,
+    # so they are what gets asserted — at every rank, the rank-deficient cases being the reason a
+    # pseudo-inverse exists at all.
+    mul3(A, B) = ntuple(i -> ntuple(j -> sum(A[i][k] * B[k][j] for k in 1:3), Val(3)), Val(3))
+    transp(A) = ntuple(i -> ntuple(j -> A[j][i], Val(3)), Val(3))
+    maxdiff(A, B) = maximum(abs(A[i][j] - B[i][j]) for i in 1:3, j in 1:3)
+    maxabs(A) = maximum(abs(A[i][j]) for i in 1:3, j in 1:3)
+    gram(vs) = ntuple(i -> ntuple(j -> sum(v[i] * v[j] for v in vs; init = 0.0), Val(3)), Val(3))
+
+    for (nm, vs) in (
+        ("rank 3", [(1.0, 0.0, 0.0), (0.3, 1.0, 0.0), (-0.2, 0.4, 1.0), (1.0, 1.0, 1.0)]),
+        ("rank 3 skew", [(3.0, 1.0, 0.2), (0.1, 2.0, -0.4), (0.0, 0.05, 0.5)]),
+        ("rank 3 near-degenerate", [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0 + 1e-9)]),
+        ("rank 2 coplanar", [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)]),
+        ("rank 2 tilted", [(1.0, 1.0, 1.0), (1.0, -1.0, 0.0)]),
+        ("rank 1 collinear", [(0.6, 0.8, 0.0), (1.2, 1.6, 0.0)]),
+        ("rank 0", Tuple{Float64,Float64,Float64}[]),
+        ("isotropic", [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]),
+    )
+        A = gram(vs)
+        tol = max(A[1][1] + A[2][2] + A[3][3], 1.0) * sqrt(eps(Float64))
+        P = O._sympinv3(A, tol)
+        AP = mul3(A, P)
+        PA = mul3(P, A)
+        Test.@test maxdiff(mul3(AP, A), A) < 1e-9 * max(maxabs(A), 1.0)          # A A⁺ A = A
+        Test.@test maxdiff(mul3(PA, P), P) < 1e-9 * max(maxabs(P), 1.0)          # A⁺ A A⁺ = A⁺
+        Test.@test maxdiff(AP, transp(AP)) < 1e-12                               # A A⁺ symmetric
+        Test.@test maxdiff(PA, transp(PA)) < 1e-12                               # A⁺ A symmetric
+        # A⁺ must annihilate the null space rather than invent a direction the data never spanned.
+        for v in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+            Av = ntuple(i -> sum(A[i][j] * v[j] for j in 1:3), Val(3))
+            if sqrt(sum(abs2, Av)) < 1e-12
+                Pv = ntuple(i -> sum(P[i][j] * v[j] for j in 1:3), Val(3))
+                Test.@test sqrt(sum(abs2, Pv)) < 1e-9
+            end
+        end
+    end
+    # `D = 2` goes through the 2×2 closed form unchanged, which is what keeps its results identical.
+    let A = ((4.0, 1.0), (1.0, 9.0))
+        P = O._sympinv(A, 1e-12)
+        Test.@test P[1][2] == P[2][1]
+        Test.@test all(abs(sum(A[i][k] * P[k][j] for k in 1:2) - (i == j ? 1.0 : 0.0)) < 1e-12
+                       for i in 1:2, j in 1:2)
     end
 end
 

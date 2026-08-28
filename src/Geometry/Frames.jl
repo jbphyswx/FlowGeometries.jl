@@ -296,6 +296,45 @@ end
     )
 end
 
+"""
+    local_displacement(geo, center, neighbor) -> NamedTuple
+
+`neighbor`'s displacement from `center`, resolved on the local coordinate frame at `center`, one
+component per coordinate — the quantity a least-squares fit differences against.
+
+Two coordinates is [`project_to_tangent_plane`](@ref), which this calls: a surface has a tangent plane
+and the displacement lies in it. Three is the same ambient chord on the full local frame — `(x, y, z)`
+on the plane, and eastward/northward/outward on a sphere or spheroid, the third direction being the
+normal [`unit_vector`](@ref) gives.
+"""
+@inline local_displacement(geo::AbstractGeometry, center, neighbor) =
+    _local_displacement(geo, as_ntuple(center), as_ntuple(neighbor))
+
+@inline _local_displacement(geo::AbstractGeometry, c::NTuple{2,Real}, nb::NTuple{2,Real}) =
+    _project_to_tangent_plane(geo, c, nb)
+
+@inline function _local_displacement(
+    ::AbstractCartesianGeometry{T}, c::NTuple{3,Real}, nb::NTuple{3,Real},
+) where {T}
+    cx, cy, cz = _at(T, c)
+    nx, ny, nz = _at(T, nb)
+    return (; x = nx - cx, y = ny - cy, z = nz - cz)
+end
+
+@inline function _local_displacement(
+    geo::AbstractLonLatGeometry{T}, c::NTuple{3,Real}, nb::NTuple{3,Real},
+) where {T}
+    cc = _at(T, c)
+    Pc = _embed(geo, cc)
+    Pn = _embed(geo, _at(T, nb))
+    dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
+    êλ, êφ, êr = _enu_frame(geo, cc[1], cc[2])
+    return build_point(NamedTuple, point_names(geo, Val(3)),
+                       (dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
+                        dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
+                        dx * êr[1] + dy * êr[2] + dz * êr[3]))
+end
+
 # ---------------------------------------------------------------------------
 # Metric scale factors
 # ---------------------------------------------------------------------------

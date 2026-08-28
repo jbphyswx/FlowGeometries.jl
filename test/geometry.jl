@@ -472,6 +472,32 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
     Test.@test G.embed(G.SphericalGeometry(2.0), (0.0,)) === (2.0, 0.0, 0.0)
     Test.@test G.embed(G.SpheroidGeometry(3.0, 0.2), (0.0,)) === (3.0, 0.0, 0.0)
     Test.@test G.distance(G.SpheroidGeometry(3.0, 0.2), (0.0,), (π / 2,)) ≈ 3.0 * π / 2
+
+    # `local_displacement` at two coordinates IS the tangent-plane projection, not a second route to
+    # the same number — so the least-squares gradient it feeds is unchanged where it already worked.
+    for geo in (sph, spd), λ in (-2.0, 0.3, 2.8), φ in (-1.2, 0.0, 0.75)
+        Test.@test G.local_displacement(geo, (λ, φ), (λ + 1e-4, φ - 2e-4)) ===
+                   G.project_to_tangent_plane(geo, (λ, φ), (λ + 1e-4, φ - 2e-4))
+    end
+    # At three it is the same chord on the full frame, the third direction being the outward normal.
+    Test.@test G.local_displacement(G.CartesianGeometry(), (1.0, 2.0, 3.0), (1.5, 2.25, 2.0)) ===
+               (x = 0.5, y = 0.25, z = -1.0)
+    let R = 6.371e6
+        # A pure radial step is exactly that, with no eastward or northward part.
+        Δr = G.local_displacement(sph, (0.4, 0.6, R), (0.4, 0.6, R + 1000.0))
+        Test.@test keys(Δr) == (:λ, :φ, :r)
+        Test.@test abs(Δr.r - 1000.0) < 1e-6
+        Test.@test abs(Δr.λ) < 1e-6 && abs(Δr.φ) < 1e-6
+        # A small eastward step lies along ê_λ, with arc length r·cosφ·Δλ.
+        Δe = G.local_displacement(sph, (0.4, 0.6, R), (0.4 + 1e-7, 0.6, R))
+        Test.@test Δe.λ ≈ R * cos(0.6) * 1e-7 rtol = 1e-6
+        Test.@test abs(Δe.φ) < 1e-3 * abs(Δe.λ) && abs(Δe.r) < 1e-3 * abs(Δe.λ)
+        # And on a spheroid the third component is height above the ellipsoid.
+        Δh = G.local_displacement(spd, (0.4, 0.6, 0.0), (0.4, 0.6, 500.0))
+        Test.@test keys(Δh) == (:λ, :φ, :h)
+        Test.@test abs(Δh.h - 500.0) < 1e-6
+        Test.@test abs(Δh.λ) < 1e-6 && abs(Δh.φ) < 1e-6
+    end
 end
 
 Test.@testset "cartesian_to_geodetic inverts geodetic_to_cartesian" begin

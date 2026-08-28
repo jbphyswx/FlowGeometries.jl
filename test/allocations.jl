@@ -49,6 +49,8 @@ q_proj(geo, c, n)        = FG.Geometry.project_to_tangent_plane(geo, c, n)
 q_ltb(geo, p)            = FG.Geometry.local_tangent_basis(geo, p)
 q_c2g(geo, v)            = FG.Geometry.cartesian_to_geodetic(geo, v)
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
+q_gradient_t!(outs, f, plan) = FG.Operators.gradient!(outs, f, plan)
+q_locdisp(geo, c, n)     = FG.Geometry.local_displacement(geo, c, n)
 q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
 q_tbl_sc!(o, f, g, iw, d, sc) = FG.Operators.apply_stencil!(
@@ -523,8 +525,13 @@ Test.@testset "Point handling allocates nothing" begin
         Test.@test _alloc(q_ltb, geo, c2) == 0
         Test.@test _alloc(q_vfc, geo, vv, c2) == 0
         Test.@test _alloc(q_tensor_local, geo, τ6, c2) == 0
+        # The displacement at both widths: two components in a tangent plane, three on the frame.
+        Test.@test _alloc(q_locdisp, geo, c2, n2) == 0
+        Test.@test _alloc(q_locdisp, geo, (0.4, 0.6, 6.4e6), (0.41, 0.61, 6.5e6)) == 0
     end
     Test.@test _alloc(q_c2g, spgeo, p3) == 0
+    Test.@test _alloc(q_locdisp, FG.Geometry.CartesianGeometry(), (1.0, 2.0, 3.0),
+                      (1.5, 2.5, 3.5)) == 0
 end
 
 Test.@testset "Rotating a point set in place allocates nothing" begin
@@ -1208,6 +1215,20 @@ Test.@testset "Applying a gradient plan allocates nothing" begin
     let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
         O.gradient!(g1, g2, f, plan)
         Test.@test _alloc(q_gradient!, g1, g2, f, plan) == 0
+        Test.@test _alloc(q_gradient_t!, (g1, g2), f, plan) == 0
+    end
+    # And at three directions, where the per-direction accumulator is a tuple: written as a local it
+    # would be both reassigned each step and captured by the unrolling closure, which boxes.
+    let m = 4, np = 4^3
+        xs = [1.0 * (i - 1) for k in 1:m for j in 1:m for i in 1:m]
+        ys = [1.0 * (j - 1) for k in 1:m for j in 1:m for i in 1:m]
+        zs = [1.0 * (k - 1) for k in 1:m for j in 1:m for i in 1:m]
+        g3d = GD.UnstructuredGrid(cart, (xs, ys, zs), trues(np); k = 6, areas = ones(np))
+        p3 = O.gradient_plan(g3d)
+        f3 = 2.0 .* xs .- 3.0 .* ys .+ 0.5 .* zs
+        u1 = zeros(np); u2 = zeros(np); u3 = zeros(np)
+        O.gradient!(u1, u2, u3, f3, p3)
+        Test.@test _alloc(q_gradient_t!, (u1, u2, u3), f3, p3) == 0
     end
 end
 
