@@ -207,7 +207,7 @@ The largest `|x|`, `|y|` or `|z|` any of this grid's cells can embed to.
 """
 @inline function _ambient_bound(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
     # Beyond the surface the third direction is the absolute radius, so the outermost one bounds it.
-    length(coordinates(grid)) ≥ 3 || return T(Geometry.radius(grid_geometry(grid)))
+    ncoordinates(grid) ≥ 3 || return T(Geometry.radius(grid_geometry(grid)))
     lo, hi = bounds(grid, 3)
     return max(abs(T(lo)), abs(T(hi)))
 end
@@ -215,7 +215,7 @@ end
 @inline function _ambient_bound(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
     geo = grid_geometry(grid)
     a = T(Geometry.semimajor_axis(geo))
-    length(coordinates(grid)) ≥ 3 || return a
+    ncoordinates(grid) ≥ 3 || return a
     lo, hi = bounds(grid, 3)          # geodetic height, which offsets the surface
     return a + max(abs(T(lo)), abs(T(hi)))
 end

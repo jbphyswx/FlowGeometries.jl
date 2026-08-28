@@ -23,9 +23,9 @@ function gradient_plan(
     grid::Grids.AbstractGrid{G,T}; stencil = Stencils.Axial(1), active_only::Bool = true,
     conn = nothing,
 ) where {G,T}
-    length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
+    Grids.ncoordinates(grid) == 2 || throw(ArgumentError(
         "a least-squares gradient is built in the tangent plane, so it needs a 2-coordinate grid; " *
-        "got $(length(Grids.coordinates(grid)))",
+        "got $(Grids.ncoordinates(grid))",
     ))
     # `build_connectivity` already resolves this per architecture: an index-space stencil on a
     # curvilinear grid, the stored adjacency on a node set, which ignores the stencil.
@@ -88,9 +88,9 @@ function _interp_scattered(
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,D}
     policy isa ShiftWithinRun && _interp_mask_error(policy)
-    length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
+    Grids.ncoordinates(grid) == 2 || throw(ArgumentError(
         "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
-        "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
+        "2-coordinate grid; got $(Grids.ncoordinates(grid))",
     ))
     n = length(Grids.mask(grid))
     length(field) == n || throw(DimensionMismatch(
@@ -202,9 +202,9 @@ function interpolate!(
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,D}
     policy isa ShiftWithinRun && _interp_mask_error(policy)
-    length(Grids.coordinates(grid)) == 2 || throw(ArgumentError(
+    Grids.ncoordinates(grid) == 2 || throw(ArgumentError(
         "interpolation off a rectilinear grid is fitted in the tangent plane, so it needs a " *
-        "2-coordinate grid; got $(length(Grids.coordinates(grid)))",
+        "2-coordinate grid; got $(Grids.ncoordinates(grid))",
     ))
     n = length(Grids.mask(grid))
     (length(field) % n == 0) || throw(DimensionMismatch(

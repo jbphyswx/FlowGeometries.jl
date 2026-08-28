@@ -157,7 +157,7 @@ end
 # Over the COORDINATE directions, which on a node set is not the index dimension: `size_tuple` there
 # counts nodes, so using it would leave every direction but the first out of the diagonal.
 @inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G,T}
-    D = length(Grids.coordinates(grid))
+    D = Grids.ncoordinates(grid)
     s = zero(T)
     for d in 1:D
         e = T(Grids.extent(grid, d))

@@ -97,8 +97,33 @@ struct IndexStencilNeighbors <: AbstractAdjacency end
 
 Neighbours are closed-form arithmetic on the cell id, with no graph and no coordinates stored: a
 pixelization's face tables, a ring grid's in-ring and adjacent-ring maps, a panel seam.
+
+A layout with this trait supplies [`formula_neighbors`](@ref).
 """
 struct FormulaNeighbors <: AbstractAdjacency end
+
+"""
+    formula_neighbors(grid, cell) -> (ids::NTuple{K,Int}, n)
+
+A cell's neighbours as linear indices, in the first `n` entries of a fixed-width tuple, where `K` is
+[`max_neighbors`](@ref)`(grid)`.
+
+A tuple rather than a buffer because it is a stack value: a traversal over every cell of a layout whose
+adjacency is arithmetic then allocates nothing at all, and needs no scratch to be threaded through. `n`
+varies where a layout has singular cells — a HEALPix pixel at a face corner has seven neighbours, not
+eight.
+
+The one method a [`FormulaNeighbors`](@ref) layout supplies.
+"""
+function formula_neighbors end
+
+"""
+    max_neighbors(grid) -> Int
+
+The widest neighbour count any cell of `grid` can have, as a compile-time constant. It fixes the tuple
+width [`formula_neighbors`](@ref) returns.
+"""
+function max_neighbors end
 
 """
     StoredMeshNeighbors()
@@ -184,6 +209,40 @@ See also [`axis`](@ref) (the rectilinear spelling), [`coords`](@ref) (a single p
 """
 @inline coordinates(grid::AbstractGrid) = getfield(grid, :coordinates)
 @inline coordinates(grid::AbstractGrid, d::Integer) = @inbounds coordinates(grid)[d]
+
+"""
+    materialize(grid) -> NTuple{D,Vector}
+
+Every cell's coordinates, as one dense vector per direction.
+
+The explicit way to ask a layout whose coordinates are a formula for them as data — for writing a file,
+or handing them to something that takes point clouds. It is `D·n` numbers, which is what the layout
+exists not to store, so it is a call and never a default.
+"""
+function materialize(grid::AbstractGrid{G,T}) where {G,T}
+    D = ncoordinates(grid)
+    n = length(mask(grid))
+    out = ntuple(_ -> Vector{T}(undef, n), D)
+    @inbounds for c in cells(grid)
+        cell = cell_at(grid, c)
+        k = _linear_of(grid, cell)
+        p = _cell_coords(grid, cell)
+        for d in 1:D
+            out[d][k] = p[d]
+        end
+    end
+    return out
+end
+
+"""
+    ncoordinates(grid) -> Int
+
+How many coordinate directions a cell of `grid` has — `2` for `(λ, φ)`, `3` for `(x, y, z)`.
+
+Separate from counting `coordinates(grid)` because a layout whose coordinates are a formula stores no
+arrays to count, and answers this from its parameters instead.
+"""
+@inline ncoordinates(grid::AbstractGrid) = length(coordinates(grid))
 
 """
     axis(grid::AbstractStructuredGrid, d::Integer) -> AbstractVector
@@ -349,7 +408,7 @@ end
 The grid's coordinate names, from its geometry: `(:x, :y[, :z])` or `(:λ, :φ[, :r])`.
 """
 @inline coordinate_names(grid::AbstractGrid) =
-    Geometry.point_names(grid_geometry(grid), Val(length(coordinates(grid))))
+    Geometry.point_names(grid_geometry(grid), Val(ncoordinates(grid)))
 
 # Geometry-correct named access (`grid.x` / `grid.λ`), resolved from `coordinate_names`. A name that
 # does not belong to this geometry is a `FieldError`, not a silent alias for the wrong quantity.

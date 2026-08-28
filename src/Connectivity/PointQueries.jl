@@ -233,7 +233,7 @@ end
 # Elsewhere there are no axes to locate along, so the scale comes from the mean cell rather than the
 # one the point fell in. Only the starting radius depends on it; the doubling reaches the rest.
 @inline function _knn_seed_radius_at(grid::Grids.AbstractGrid{G,T}, p, k::Int) where {G,T}
-    D = length(Grids.coordinates(grid))
+    D = Grids.ncoordinates(grid)
     ncell = length(Grids.mask(grid))
     vol = one(T)
     for d in 1:D

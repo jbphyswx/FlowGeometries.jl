@@ -83,7 +83,7 @@ MetricTopology(grid::Grids.AbstractGrid; index = nothing) =
     MetricTopology(grid, index, Grids.candidate_source(grid))
 
 function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.SeparableWindow) where {G,T}
-    N = length(Grids.coordinates(grid))
+    N = Grids.ncoordinates(grid)
     steps = ntuple(d -> _min_step_scan(grid, d), Val(N))
     m3 = N ≥ 3 ? T(Grids.bounds(grid, 3)[1]) : zero(T)
     return MetricTopology{N,T,typeof(index)}(steps, m3, index)
@@ -91,7 +91,7 @@ end
 
 # With no separable axes there is no step bound to carry, and the topology exists to hold the index.
 function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.IndexedCandidates) where {G,T}
-    N = length(Grids.coordinates(grid))
+    N = Grids.ncoordinates(grid)
     return MetricTopology{N,T,typeof(index)}(ntuple(_ -> zero(T), Val(N)), zero(T), index)
 end
 

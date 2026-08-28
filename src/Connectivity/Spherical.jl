@@ -377,27 +377,28 @@ const _HP_NB_SWAP = (
 )
 
 """
-    healpix_neighbors!(out, nside, ipix0) -> n_written
+    _fold_healpix_neighbors(f, acc, nside, ipix0) -> acc
 
-RING-scheme topological neighbors of 0-based pixel `ipix0`. Writes up to 8 0-based neighbor indices
-into `out`, skipping the neighbors that do not exist at the eight singular pixels.
-Order: SW, W, NW, N, NE, E, SE, S.
+Thread `acc = f(acc, ipix)` over the RING-scheme topological neighbours of 0-based pixel `ipix0`, in the
+order SW, W, NW, N, NE, E, SE, S, skipping the ones that do not exist at the eight singular pixels.
+
+The walk itself, so the buffer form and the tuple form are the same arithmetic rather than two copies of
+it. The accumulator is threaded as a value, which is what lets the tuple form build its result on the
+stack.
 """
-function healpix_neighbors!(out::AbstractVector{<:Integer}, nside::Integer, ipix0::Integer)
+@inline function _fold_healpix_neighbors(f::F, acc, nside::Integer, ipix0::Integer) where {F}
     nside = Int(nside)
     pix = Int(ipix0)
     npix = 12 * nside * nside
     (0 ≤ pix < npix) || throw(ArgumentError("HEALPix pixel $pix out of range 0:$(npix - 1)"))
-    length(out) ≥ 8 || throw(ArgumentError("out must have length ≥ 8"))
     ix, iy, face_num = SphericalSampling._hp_ring2xyf(nside, pix)
     nsm1 = nside - 1
-    k = 0
     if (ix > 0) && (ix < nsm1) && (iy > 0) && (iy < nsm1)
         @inbounds for m in _HP_NB_ORDER
-            k += 1
-            out[k] = SphericalSampling._hp_xyf2ring(nside, ix + _HP_NB_X[m], iy + _HP_NB_Y[m], face_num)
+            acc = f(acc, SphericalSampling._hp_xyf2ring(nside, ix + _HP_NB_X[m], iy + _HP_NB_Y[m],
+                                                        face_num))
         end
-        return k
+        return acc
     end
     @inbounds for i in _HP_NB_ORDER
         x = ix + _HP_NB_X[i]
@@ -413,19 +414,46 @@ function healpix_neighbors!(out::AbstractVector{<:Integer}, nside::Integer, ipix
         elseif y ≥ nside
             y -= nside; nbnum += 3
         end
-        f = _HP_NB_FACE[nbnum + 1][face_num + 1]
-        if f ≥ 0
+        f_ = _HP_NB_FACE[nbnum + 1][face_num + 1]
+        if f_ ≥ 0
             bits = _HP_NB_SWAP[nbnum + 1][(face_num >> 2) + 1]
             (bits & 1) != 0 && (x = nside - x - 1)
             (bits & 2) != 0 && (y = nside - y - 1)
             if (bits & 4) != 0
                 x, y = y, x
             end
-            k += 1
-            out[k] = SphericalSampling._hp_xyf2ring(nside, x, y, f)
+            acc = f(acc, SphericalSampling._hp_xyf2ring(nside, x, y, f_))
         end
     end
-    return k
+    return acc
+end
+
+"""
+    healpix_neighbors!(out, nside, ipix0) -> n_written
+
+RING-scheme topological neighbors of 0-based pixel `ipix0`. Writes up to 8 0-based neighbor indices
+into `out`, skipping the neighbors that do not exist at the eight singular pixels.
+Order: SW, W, NW, N, NE, E, SE, S.
+"""
+function healpix_neighbors!(out::AbstractVector{<:Integer}, nside::Integer, ipix0::Integer)
+    length(out) ≥ 8 || throw(ArgumentError("out must have length ≥ 8"))
+    return _fold_healpix_neighbors(0, nside, ipix0) do k, ipix
+        m = k + 1
+        @inbounds out[m] = ipix
+        return m
+    end
+end
+
+"""
+    healpix_neighbor_ids(nside, ipix0) -> (NTuple{8,Int}, n)
+
+[`healpix_neighbors!`](@ref) into a stack tuple: the `n` neighbours in the first `n` entries, still
+0-based. Nothing is allocated, so a traversal over every pixel holds no buffer.
+"""
+@inline function healpix_neighbor_ids(nside::Integer, ipix0::Integer)
+    return _fold_healpix_neighbors((ntuple(_ -> 0, Val(8)), 0), nside, ipix0) do (ids, k), ipix
+        return (Base.setindex(ids, ipix, k + 1), k + 1)
+    end
 end
 
 function healpix_neighbors(nside::Integer, ipix0::Integer)

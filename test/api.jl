@@ -317,7 +317,9 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :interpolate,
          :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list,
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
-         :sampling, :rebuild],
+         :sampling, :rebuild, :ncoordinates, :materialize, :cells, :cell_at, :embedded_at,
+         :embedding_of, :max_neighbors, :formula_neighbors, :nside, :scheme, :npixels,
+         :HEALPixGrid, :FormulaNeighborSeq],
     # allocating forms, whose whole job is to return a fresh array
     [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,
      :centers, :faces, :nodes, :cell_widths],

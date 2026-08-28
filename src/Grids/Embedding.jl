@@ -77,7 +77,7 @@ function embedding_of end
 # `(λ, φ, r)` carries its own radius, so the metric there IS the Euclidean chord; on the surface it is
 # the great-circle arc, and a radius has to be converted to the chord it subtends.
 @inline function embedding_of(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
-    return length(coordinates(grid)) ≥ 3 ? ChordEmbedding() :
+    return ncoordinates(grid) ≥ 3 ? ChordEmbedding() :
            ArcEmbedding(T(Geometry.radius(grid_geometry(grid))))
 end
 

@@ -57,7 +57,7 @@ than failing frames down in `_raw_coords` on an arity the caller never chose.
 @inline _cell_indices(_grid, i::Integer, ::FlatCells) = (Int(i),)
 
 _cell_indices(grid, c, ::CartesianCells) = throw(ArgumentError(
-    "a cell of $(nameof(typeof(grid))) is named by $(length(coordinates(grid))) indices, " *
+    "a cell of $(nameof(typeof(grid))) is named by $(ncoordinates(grid)) indices, " *
     "not by a $(typeof(c))",
 ))
 _cell_indices(grid, c, ::FlatCells) = throw(ArgumentError(
