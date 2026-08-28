@@ -118,6 +118,56 @@ function _gradient_plan(
     return GradientPlan(ptr, nbr, coef, Geometry.point_names(geo, Val(D)))
 end
 
+"""
+    _bary_weights(grid, geo, p0, nearest, active_only) -> (a, b, c, (w₁, w₂, w₃))
+
+The cell of the grid's [`Grids.CellMesh`](@ref) containing `p0`, and the barycentric weights of `p0`
+in it. `a == 0` where there is none — outside the mesh, or against an inactive node.
+
+Only the cells incident on `nearest` are tried, and that is exhaustive rather than a heuristic: `p0`
+lies in the Voronoi cell of its nearest node, and in a Delaunay triangulation that region is covered by
+the triangles incident on that node.
+
+The weights are computed in the tangent plane AT `p0`, where the three vertices sit at their
+[`Geometry.local_displacement`](@ref)s and `p0` itself is the origin.
+"""
+@inline function _bary_weights(
+    grid, geo, p0::NTuple{2,T}, nearest::Int, active_only::Bool,
+) where {T}
+    mesh = Grids.cell_mesh(grid)
+    msk = Grids.mask(grid)
+    z = (zero(T), zero(T), zero(T))
+    mesh === nothing && return (0, 0, 0, z)
+    (1 ≤ nearest ≤ length(mesh.node_ptr) - 1) || return (0, 0, 0, z)
+    # A vertex a hair outside is still in: the test decides a boundary shared by two cells, and a
+    # query exactly on an edge must land in one of them rather than in neither.
+    tol = -sqrt(eps(T))
+    @inbounds for cc in Grids.node_cells(mesh, nearest)
+        nds = Grids.cell_nodes(mesh, Int(cc))
+        length(nds) == 3 || continue
+        a, b, c = Int(nds[1]), Int(nds[2]), Int(nds[3])
+        active_only && !(msk[a] && msk[b] && msk[c]) && continue
+        Δa = Geometry.local_displacement(geo, p0, Grids._raw_coords(grid, a))
+        Δb = Geometry.local_displacement(geo, p0, Grids._raw_coords(grid, b))
+        Δc = Geometry.local_displacement(geo, p0, Grids._raw_coords(grid, c))
+        a1, a2 = T(Δa[1]), T(Δa[2])
+        b1, b2 = T(Δb[1]), T(Δb[2])
+        c1, c2 = T(Δc[1]), T(Δc[2])
+        det = (b2 - c2) * (a1 - c1) + (c1 - b1) * (a2 - c2)
+        iszero(det) && continue                       # a degenerate cell spans no area
+        w1 = ((b2 - c2) * (-c1) + (c1 - b1) * (-c2)) / det
+        w2 = ((c2 - a2) * (-c1) + (a1 - c1) * (-c2)) / det
+        w3 = one(T) - w1 - w2
+        (w1 ≥ tol && w2 ≥ tol && w3 ≥ tol) && return (a, b, c, (w1, w2, w3))
+    end
+    return (0, 0, 0, z)
+end
+
+# `f` at the query point from the cell containing it: exact for a field linear in the tangent plane,
+# and three reads rather than a least-squares solve over a neighbourhood.
+@inline _bary_value(field::AbstractArray, off::Int, a::Int, b::Int, c::Int, w::NTuple{3,T}) where {T} =
+    @inbounds T(field[off + a]) * w[1] + T(field[off + b]) * w[2] + T(field[off + c]) * w[3]
+
 # The scalar fit: one value per cell in, one value out. Reached through the rank-matched methods below,
 # which is what keeps `interpolate` type-stable — a scalar for an unbatched field, a vector for a
 # batched one, decided by the rank rather than by a length at run time.
@@ -151,6 +201,10 @@ function _interp_scattered(
                                  scratch = scratch)
         n_in > length(idx) && return masked
     end
+    # Where the grid carries its cells, the containing one gives the answer exactly, from three
+    # values. `k_nearest` returns nearest first, which is the node whose incident cells to search.
+    a, b, c, w = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
+    a == 0 || return _bary_value(field, 0, a, b, c, w)
     return _scattered_fit(field, grid, geo, p0, idx, 0, masked)
 end
 
@@ -270,6 +324,15 @@ function interpolate!(
             fill!(out, masked)
             return out
         end
+    end
+    # The cell and its weights are a property of the POINT, so they are solved once and applied to
+    # every batch element — the same structure the k-d tree query above already has.
+    ba, bb, bc, bw = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
+    if ba != 0
+        @inbounds for b in 1:nb
+            out[b] = _bary_value(field, (b - 1) * n, ba, bb, bc, bw)
+        end
+        return out
     end
     @inbounds for b in 1:nb
         out[b] = _scattered_fit(field, grid, geo, p0, idx, (b - 1) * n, masked)

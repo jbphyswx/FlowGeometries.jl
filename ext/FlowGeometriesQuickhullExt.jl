@@ -28,7 +28,7 @@ end
 
 @inline _dot3(a::NTuple{3,T}, b::NTuple{3,T}) where {T} = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
 
-function Grids._voronoi_areas(
+function Grids._voronoi_tessellation(
     geo::Geometry.AbstractSphericalGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
 ) where {T<:AbstractFloat}
     N = length(x)
@@ -123,7 +123,18 @@ function Grids._voronoi_areas(
         end
         areas[i] = Geometry.radius(geo)^2 * A
     end
-    return areas
+    # The hull's facets ARE the mesh's cells and `ptr`/`adj` is already the node→cell transpose, both
+    # built above for the areas. 
+    cell_ptr = Vector{Int}(undef, nf + 1)
+    cell_nodes = Vector{Int}(undef, 3 * nf)
+    @inbounds for fi in 1:nf
+        cell_ptr[fi] = 3 * (fi - 1) + 1
+        cell_nodes[3 * (fi - 1) + 1] = fv[1, fi]
+        cell_nodes[3 * (fi - 1) + 2] = fv[2, fi]
+        cell_nodes[3 * (fi - 1) + 3] = fv[3, fi]
+    end
+    @inbounds cell_ptr[nf + 1] = 3 * nf + 1
+    return areas, Grids.CellMesh(cell_ptr, cell_nodes, ptr, adj)
 end
 
 end # module

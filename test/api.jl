@@ -334,6 +334,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :corners, :corner_coords, :has_corners, :neighbor_nbrs, :distance, :embedded_points,
          :cell_list,
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
+         :CellMesh, :cell_mesh, :has_cell_mesh, :ncells, :cell_nodes, :node_cells,
          :sampling, :rebuild, :ncoordinates, :ncomponents, :materialize, :cells, :cell_at, :embedded_at,
          :embedding_of, :max_neighbors, :formula_neighbors, :nside, :scheme, :npixels,
          :HEALPixGrid, :RingGrid, :RingwiseVector, :FormulaNeighborSeq, :ring_of,

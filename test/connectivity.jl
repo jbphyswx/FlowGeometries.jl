@@ -1780,3 +1780,83 @@ Test.@testset "A Connected query reuses its buffers, and works on every adjacenc
         Test.@test _alloc(q_conn, g, ball, nothing) > 0
     end
 end
+
+Test.@testset "A node set keeps the cells its tessellation built, and interpolates in them" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    O = FG.Operators
+    cart = GE.CartesianGeometry{Float64}()
+
+    # Node→node adjacency says which nodes are linked; only the CELLS say which nodes bound a face,
+    # and the tessellation that computed the Voronoi areas has already built them.
+    xs = Float64[]; ys = Float64[]
+    for j in 0:6, i in 0:6
+        push!(xs, i + 0.17 * sin(3.0 * (i + 2j)))
+        push!(ys, j + 0.13 * cos(2.0 * (i - j)))
+    end
+    np = length(xs)
+    g = GD.UnstructuredGrid(cart, (xs, ys), trues(np); k = 6)
+    Test.@test GD.has_cell_mesh(g)
+    m = GD.cell_mesh(g)
+    Test.@test all(length(GD.cell_nodes(m, c)) == 3 for c in 1:GD.ncells(m))
+    # The two directions are exact transposes of each other.
+    Test.@test all(c in GD.node_cells(m, Int(v))
+                   for c in 1:GD.ncells(m) for v in GD.cell_nodes(m, c))
+    Test.@test sum(length(GD.node_cells(m, i)) for i in 1:np) == length(m.cell_nodes)
+    # The cells TILE the region: their areas sum to what the Voronoi cells sum to.
+    tri_area = sum(1:GD.ncells(m)) do c
+        a, b, d = GD.cell_nodes(m, c)
+        abs((xs[b] - xs[a]) * (ys[d] - ys[a]) - (xs[d] - xs[a]) * (ys[b] - ys[a])) / 2
+    end
+    Test.@test tri_area ≈ sum(GD.measure(g)) rtol = 1e-10
+
+    # Interpolation is then the containing cell's barycentric combination — EXACT for a linear field,
+    # where a least-squares fit over a neighbourhood is only close.
+    α, β, γ = 2.5, -1.75, 4.0
+    f = α .* xs .+ β .* ys .+ γ
+    probes = [(qx, qy) for qx in 1.0:0.37:5.0 for qy in 1.0:0.41:5.0]
+    vals = [O.interpolate(f, g, q) for q in probes]
+    Test.@test count(!isnan, vals) > 50
+    Test.@test all(abs(v - (α * q[1] + β * q[2] + γ)) < 1e-12
+                   for (v, q) in zip(vals, probes) if !isnan(v))
+    # A query AT a node is that node's value.
+    Test.@test all(abs(O.interpolate(f, g, (xs[i], ys[i])) - f[i]) < 1e-10 for i in (1, 17, 25, np))
+    # A batched field solves the cell once and applies it to every element.
+    let out = zeros(3), q = (3.1, 2.2)
+        O.interpolate!(out, vcat(f, 2 .* f, -f), g, q)
+        v = O.interpolate(f, g, q)
+        Test.@test abs(out[1] - v) < 1e-12 && abs(out[2] - 2v) < 1e-12 && abs(out[3] + v) < 1e-12
+    end
+
+    # On a sphere the cells come from the hull of the unit-vector embedding, which is the spherical
+    # Delaunay triangulation: a closed one has exactly 2n-4 of them.
+    let R = 6.371e6, sph = GE.SphericalGeometry(R), nn = 200
+        λ = [mod(k * 2.399963229728653, 2π) for k in 1:nn]
+        φ = [asin(2 * (k - 0.5) / nn - 1) for k in 1:nn]
+        gs = GD.UnstructuredGrid(sph, (λ, φ), trues(nn); k = 6)
+        ms = GD.cell_mesh(gs)
+        Test.@test GD.ncells(ms) == 2nn - 4
+        Test.@test all(length(GD.node_cells(ms, i)) ≥ 3 for i in 1:nn)
+        Test.@test sum(GD.measure(gs)) ≈ 4π * R^2 rtol = 1e-9
+        # Exact for a field linear in the tangent plane AT the query point, which is where the
+        # barycentric combination is taken.
+        for q in ((0.4, 0.3), (2.0, -0.6), (5.5, 0.9))
+            a, b, c0 = 3.0e-6, -1.5e-6, 7.0
+            ff = [(Δ = GE.local_displacement(sph, q, (λ[t], φ[t])); c0 + a * Δ.λ + b * Δ.φ)
+                  for t in eachindex(λ)]
+            Test.@test abs(O.interpolate(ff, gs, q) - c0) < 1e-9
+        end
+    end
+
+    # A grid handed its own areas has no tessellation to take cells from, and one handed its adjacency
+    # directly has none either. Both say so rather than inventing a triangulation.
+    Test.@test GD.cell_mesh(GD.UnstructuredGrid(cart, (xs, ys), trues(np); k = 3,
+                                                areas = ones(np))) === nothing
+    Test.@test GD.cell_mesh(GD.UnstructuredGrid(cart, (xs, ys), ones(np), trues(np))) === nothing
+    Test.@test !GD.has_cell_mesh(GD.StructuredGrid(cart, collect(0.0:1.0:3.0), collect(0.0:1.0:3.0)))
+    Test.@test !GD.has_cell_mesh(GD.HEALPixGrid(2))
+    # …and the mesh survives a rebuild, being one of the grid's fields.
+    Test.@test GD.ncells(GD.cell_mesh(GD.rebuild(g, (; measure = collect(GD.measure(g)))))) ==
+               GD.ncells(m)
+    Test.@test occursin("CellMesh", sprint(show, m))
+end

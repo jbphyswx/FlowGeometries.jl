@@ -25,6 +25,12 @@ Adapt.adapt_structure(to, m::Grids.SlabMeasure) =
 
 Adapt.adapt_structure(::Any, m::Grids.AllActive) = m
 
+# A `CellMesh` is four index arrays; adapting it moves those.
+Adapt.adapt_structure(to, m::Grids.CellMesh) = Grids.CellMesh(
+    Adapt.adapt(to, m.cell_ptr), Adapt.adapt(to, m.cell_nodes),
+    Adapt.adapt(to, m.node_ptr), Adapt.adapt(to, m.node_cells),
+)
+
 # An unindexed `MetricTopology` is isbits and travels as-is. One carrying a spatial index does not: a
 # k-d tree is a host structure, so it is refused rather than dropped, which would leave the device with
 # a topology that silently scans.
@@ -47,7 +53,7 @@ Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 # period, the sampling tag, a resolution parameter and the per-axis reductions are immutable scalars or
 # tuples of them, and travel unchanged. So a layout is adapted by what it holds, whether that is a
 # coordinate tuple, four ring vectors or a single integer.
-@inline _is_adaptable(v) = v isa AbstractArray
+@inline _is_adaptable(v) = v isa AbstractArray || v isa Grids.CellMesh
 @inline _is_adaptable(v::Tuple) = !isempty(v) && all(x -> x isa AbstractArray, v)
 
 function Adapt.adapt_structure(to, grid::Grids.AbstractGrid)

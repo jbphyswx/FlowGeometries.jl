@@ -422,27 +422,35 @@ end
 index_within(index, grid, I, r) = index_within!(Int[], index, grid, I, r)
 
 """
-    _voronoi_areas(geometry, x, y) -> Vector{T}
+    _voronoi_tessellation(geometry, x, y) -> (areas, mesh::CellMesh)
 
 Extension hook: exact per-node Voronoi-cell area from a Delaunay/convex-hull tessellation of the node
-coordinates. Dispatched on the geometry type (each needs a different tessellation library): overridden
-for `CartesianGeometry` by a consumer DelaunayTriangulation extension (load
-`using DelaunayTriangulation`, planar Voronoi clipped to the point set's convex hull) and for
-`SphericalGeometry` by a consumer Quickhull extension (load `using Quickhull`, spherical
-Voronoi from the dual of the 3D convex hull of the unit-sphere embedding).
+coordinates, AND the triangulation it came from. Dispatched on the geometry type (each needs a
+different tessellation library): overridden for `CartesianGeometry` by a consumer
+DelaunayTriangulation extension (load `using DelaunayTriangulation`, planar Voronoi clipped to the
+point set's convex hull) and for `SphericalGeometry` by a consumer Quickhull extension (load
+`using Quickhull`, spherical Voronoi from the dual of the 3D convex hull of the unit-sphere embedding).
 """
-function _voronoi_areas(geometry::Geometry.AbstractCartesianGeometry, x::AbstractVector, y::AbstractVector)
+function _voronoi_tessellation(::Geometry.AbstractCartesianGeometry, x::AbstractVector, y::AbstractVector)
     throw(ArgumentError(
         "Cartesian Voronoi-cell areas require DelaunayTriangulation.jl — run `using DelaunayTriangulation` " *
         "(or supply `areas` explicitly to the `UnstructuredGrid` constructor).",
     ))
 end
-function _voronoi_areas(geometry::Geometry.AbstractSphericalGeometry, x::AbstractVector, y::AbstractVector)
+function _voronoi_tessellation(::Geometry.AbstractSphericalGeometry, x::AbstractVector, y::AbstractVector)
     throw(ArgumentError(
         "Spherical Voronoi-cell areas for an arbitrary point set require Quickhull.jl — run " *
         "`using Quickhull` (or supply `areas` explicitly to the `UnstructuredGrid` constructor).",
     ))
 end
+
+"""
+    _voronoi_areas(geometry, x, y) -> Vector{T}
+
+The areas alone, for a caller with no use for the cells — see [`_voronoi_tessellation`](@ref).
+"""
+_voronoi_areas(geometry, x::AbstractVector, y::AbstractVector) =
+    first(_voronoi_tessellation(geometry, x, y))
 
 """
     UnstructuredGrid(geometry, x, y, mask; k=6, radius=nothing, areas=nothing)
@@ -482,17 +490,21 @@ function UnstructuredGrid(
     # Voronoi tessellation is a 2-D algorithm (planar Delaunay / spherical convex hull), so past two
     # directions the control volumes are the caller's to supply — the neighbour search is not, and is
     # built for any `N` above.
-    areas_T = if areas !== nothing
-        _to_axis(T, areas)
+    # The tessellation returns the cells it built as well as the areas it derived from them, and the
+    # grid keeps both. Supplying `areas` skips the tessellation
+    areas_T, mesh = if areas !== nothing
+        (_to_axis(T, areas), nothing)
     elseif N == 2
-        _voronoi_areas(geometry, c[1], c[2])
+        a, m = _voronoi_tessellation(geometry, c[1], c[2])
+        (_to_axis(T, a), m)
     else
         throw(ArgumentError(
             "a $N-direction node grid has no control volumes to derive: the Voronoi tessellation " *
             "behind them is a 2-D algorithm (planar Delaunay / spherical convex hull). Pass `areas`.",
         ))
     end
-    return UnstructuredGrid(geometry, c, areas_T, mask, nbrs, ptr; periodic = per, period = prd)
+    return UnstructuredGrid(geometry, c, areas_T, mask, nbrs, ptr;
+                            periodic = per, period = prd, mesh = mesh)
 end
 
 """

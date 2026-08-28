@@ -1,4 +1,97 @@
 # ---------------------------------------------------------------------------
+# Cell incidence
+# ---------------------------------------------------------------------------
+
+"""
+    CellMesh(cell_ptr, cell_nodes, node_ptr, node_cells)
+    CellMesh(cell_ptr, cell_nodes, nnodes)
+
+A node set's CELLS, and the nodes each one joins — both directions, each as CSR.
+
+Node→node adjacency says which nodes are linked; it does not say which nodes bound a face. Only the
+cells do, and they are what an area, a flux through an edge, or an interpolation inside a triangle is
+defined on. A triangulation is what produces them, and the tessellation that computes a node set's
+Voronoi areas has already built one: this is that mesh, kept rather than discarded.
+
+- `cell_nodes[cell_ptr[c] : cell_ptr[c+1]-1]` are the nodes of cell `c`, in order around it
+- `node_cells[node_ptr[i] : node_ptr[i+1]-1]` are the cells incident on node `i`
+
+Both are `O(n)`: a triangulation of `n` nodes has about `2n` triangles and `6n` entries either way.
+The second is the transpose of the first and the two-argument form builds it.
+
+The cells are a triangulation or the caller's own. They are NOT a `k`-nearest graph: that is not
+planar, not symmetric once truncated, and its "cells" do not tile anything, so every quantity defined
+on a cell would be defined on a fiction.
+"""
+struct CellMesh{VI<:AbstractVector{<:Integer},VP<:AbstractVector{<:Integer}}
+    cell_ptr::VP
+    cell_nodes::VI
+    node_ptr::VP
+    node_cells::VI
+end
+
+function CellMesh(cell_ptr::AbstractVector{<:Integer}, cell_nodes::AbstractVector{<:Integer},
+                  nnodes::Integer)
+    nc = length(cell_ptr) - 1
+    nc ≥ 0 || throw(ArgumentError("cell_ptr must have length ncells+1; got $(length(cell_ptr))"))
+    n = Int(nnodes)
+    I = eltype(cell_nodes)
+    # Count, scan, place: the transpose of a CSR without materializing a pair per entry.
+    node_ptr = similar(cell_ptr, n + 1)
+    fill!(node_ptr, 0)
+    @inbounds for k in eachindex(cell_nodes)
+        v = Int(cell_nodes[k])
+        1 ≤ v ≤ n || throw(ArgumentError("cell_nodes holds node $v, outside 1:$n"))
+        node_ptr[v + 1] += 1
+    end
+    @inbounds node_ptr[1] = 1
+    @inbounds for i in 1:n
+        node_ptr[i + 1] += node_ptr[i]
+    end
+    node_cells = similar(cell_nodes, Int(node_ptr[end]) - 1)
+    cursor = copy(node_ptr)
+    @inbounds for c in 1:nc
+        for k in cell_ptr[c]:(cell_ptr[c + 1] - 1)
+            v = Int(cell_nodes[k])
+            node_cells[cursor[v]] = I(c)
+            cursor[v] += 1
+        end
+    end
+    return CellMesh(cell_ptr, cell_nodes, node_ptr, node_cells)
+end
+
+"""
+    ncells(mesh) -> Int
+
+How many cells the mesh has.
+"""
+@inline ncells(m::CellMesh) = length(m.cell_ptr) - 1
+
+"""
+    cell_nodes(mesh, c) -> AbstractVector{<:Integer}
+
+The nodes of cell `c`, in order around it, as a view into the mesh's own storage.
+"""
+@inline function cell_nodes(m::CellMesh, c::Integer)
+    @boundscheck (1 ≤ c ≤ ncells(m)) || throw(BoundsError(m, c))
+    @inbounds return view(m.cell_nodes, Int(m.cell_ptr[c]):(Int(m.cell_ptr[c + 1]) - 1))
+end
+
+"""
+    node_cells(mesh, i) -> AbstractVector{<:Integer}
+
+The cells incident on node `i`, as a view into the mesh's own storage.
+"""
+@inline function node_cells(m::CellMesh, i::Integer)
+    @boundscheck (1 ≤ i ≤ length(m.node_ptr) - 1) || throw(BoundsError(m, i))
+    @inbounds return view(m.node_cells, Int(m.node_ptr[i]):(Int(m.node_ptr[i + 1]) - 1))
+end
+
+Base.show(io::IO, m::CellMesh) =
+    print(io, "CellMesh(", ncells(m), " cells, ", length(m.node_ptr) - 1, " nodes, ",
+          length(m.cell_nodes), " incidences)")
+
+# ---------------------------------------------------------------------------
 # Unstructured Grid
 # ---------------------------------------------------------------------------
 
@@ -37,6 +130,7 @@ struct UnstructuredGrid{
     TP<:NTuple{N,AbstractTopology},
     VN<:AbstractVector{<:Integer},
     VP<:AbstractVector{<:Integer},
+    MH<:Union{Nothing,CellMesh},
 } <: AbstractUnstructuredGrid{G, T}
     geometry::G
     coordinates::C     # node coordinate vector per direction (Nnodes)
@@ -47,15 +141,34 @@ struct UnstructuredGrid{
     topology::TP       # per-direction closure of the enclosing domain (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
     stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined for scattered nodes
+    mesh::MH           # the cells, where a triangulation produced them; see `CellMesh`
 end
 
 @inline _from_fields(
     ::Type{<:UnstructuredGrid},
     geometry::G, coordinates::C, measure::VA, mask::B, neighbor_nbrs::VN, neighbor_ptr::VP,
-    topology::TP, period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}},
-) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP} =
-    UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP}(geometry, coordinates, measure, mask, neighbor_nbrs,
-                                            neighbor_ptr, topology, period, stats)
+    topology::TP, period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}}, mesh::MH,
+) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP,MH} =
+    UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP,MH}(geometry, coordinates, measure, mask, neighbor_nbrs,
+                                               neighbor_ptr, topology, period, stats, mesh)
+
+"""
+    cell_mesh(grid) -> CellMesh | Nothing
+
+The grid's [`CellMesh`](@ref), or `nothing` where it has none.
+
+A node set built by tessellation keeps the cells that tessellation produced; one given its adjacency
+directly has only that adjacency, and no cells to speak of unless it is handed some.
+"""
+@inline cell_mesh(grid::UnstructuredGrid) = getfield(grid, :mesh)
+@inline cell_mesh(::AbstractGrid) = nothing
+
+"""
+    has_cell_mesh(grid) -> Bool
+
+Whether [`cell_mesh`](@ref) has cells to give — what the operators that need a cell dispatch on.
+"""
+@inline has_cell_mesh(grid) = cell_mesh(grid) !== nothing
 
 @inline topology(grid::UnstructuredGrid) = getfield(grid, :topology)
 
@@ -79,7 +192,7 @@ except on a sphere, where longitude wraps at 2π by construction and is the defa
 function UnstructuredGrid(
     geometry::G, coords::NTuple{N,AbstractVector}, measure::AbstractVector,
     mask::AbstractVector{Bool} = AllActive((length(first(coords)),)), nbrs = nothing, ptr = nothing;
-    periodic = nothing, period = nothing,
+    periodic = nothing, period = nothing, mesh::Union{Nothing,CellMesh} = nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     c = ntuple(d -> _to_axis(T, coords[d]), N)
     n = length(c[1])
@@ -98,9 +211,12 @@ function UnstructuredGrid(
     ))
     per, prd = _node_periodicity(geometry, Val(N), periodic, period)
     m = _to_axis(T, measure)
+    mesh === nothing || length(mesh.node_ptr) == n + 1 || throw(ArgumentError(
+        "the mesh is over $(length(mesh.node_ptr) - 1) nodes and the grid has $n",
+    ))
     return UnstructuredGrid{
-        T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p),
-    }(geometry, c, m, mask, nb, p, per, prd, ntuple(d -> _axis_stats(c[d]), Val(N)))
+        T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p), typeof(mesh),
+    }(geometry, c, m, mask, nb, p, per, prd, ntuple(d -> _axis_stats(c[d]), Val(N)), mesh)
 end
 
 # Two-direction convenience forms. Node coordinates are all `AbstractVector`s, so — unlike a
