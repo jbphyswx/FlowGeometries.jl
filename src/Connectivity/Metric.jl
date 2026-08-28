@@ -97,6 +97,17 @@ end
 
 @inline _min_step(mt::MetricTopology, d::Int) = @inbounds mt.steps[d]
 
+# An index built over the active region alone is a superset of the ACTIVE ball. A query wanting masked
+# cells needs one built over every cell, and gets an error instead of a short answer.
+@inline _check_index_covers(_index, _active_only::Bool) = nothing
+@inline function _check_index_covers(ix::Grids.CellListIndex, active_only::Bool)
+    (active_only || !ix.active_only) || throw(ArgumentError(
+        "this index was built with `active_only = true`, so it holds no masked cell and cannot answer " *
+        "a query for one. Build it with `cell_list(grid; ball, active_only = false)`.",
+    ))
+    return nothing
+end
+
 """
     indexed(grid) -> MetricTopology
 
@@ -810,6 +821,7 @@ end
         "`images = $(images)` needs a separable periodic direction; $(nameof(typeof(grid))) visits " *
         "each cell once, so use NearestImage()",
     ))
+    _check_index_covers(mt.index, active_only)
     Grids._cell_checkbounds(grid, I)
     (active_only && !Grids._cell_active(grid, I)) && return init
     geo = Grids.grid_geometry(grid)

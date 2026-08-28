@@ -170,17 +170,22 @@ end
 #
 # `default_sweep_topology` is not a silent fallback: with no extension loaded there is no index to
 # have, and the unindexed topology computes the same rows.
-default_sweep_topology(grid::Grids.StructuredGrid, _ball) = MetricTopology(grid)
+default_sweep_topology(grid::Grids.StructuredGrid, _ball, _active_only::Bool = true) =
+    MetricTopology(grid)
 
 # A cell list, not a tree: it needs no package, it builds and queries faster here (2.75 ms and 1.08 µs
 # at 65k cells, against 8.95 ms and 1.25 µs), and it enumerates through a fold, so the sweep holds no
 # candidate buffer. `indexed(grid)` is still there for the tree.
-default_sweep_topology(grid::Grids.AbstractGrid, ball) =
-    MetricTopology(grid; index = Grids.cell_list(grid; ball = _ball_radius(ball)))
+#
+# The sweep's own `active_only` is passed on, so a sweep over the active region indexes that region and
+# no more.
+default_sweep_topology(grid::Grids.AbstractGrid, ball, active_only::Bool = true) =
+    MetricTopology(grid; index = Grids.cell_list(grid; ball = _ball_radius(ball),
+                                                 active_only = active_only))
 
 function build_connectivity_within(
     grid::Grids.CurvilinearGrid; ball, active_only::Bool = true, backend = nothing,
-    topology = default_sweep_topology(grid, ball),
+    topology = default_sweep_topology(grid, ball, active_only),
 )
     sz = Grids.size_tuple(grid)
     n = prod(sz)
@@ -212,7 +217,7 @@ end
 
 function build_connectivity_within(
     grid::Grids.UnstructuredGrid; ball, active_only::Bool = true, backend = nothing,
-    topology = default_sweep_topology(grid, ball),
+    topology = default_sweep_topology(grid, ball, active_only),
 )
     n = length(Grids.mask(grid))
     deg = zeros(Int, n)

@@ -32,6 +32,7 @@ struct CellListIndex{D,T<:AbstractFloat,E<:AbstractEmbedding,VI<:AbstractVector{
     items::VI               # point ids, grouped by bucket
     bins::VB                # each item's bin, in the same order — see `fold_candidates_at`
     embedding::E
+    active_only::Bool       # masked cells were left out; see `cell_list`
 end
 
 @inline _nbuckets(ix::CellListIndex) = length(ix.starts) - 1
@@ -59,6 +60,16 @@ they are how a layout is walked without knowing how it names a cell — see [`ce
 @inline cell_at(_grid, k::Integer, ::FlatCells) = Int(k)
 
 @inline first_cell(grid::AbstractGrid) = cell_at(grid, first(cells(grid)))
+
+"""
+    _linear_of(grid, cell) -> Int
+
+The linear index a cell reports as, and the inverse of [`_cell_from_linear`](@ref).
+"""
+@inline _linear_of(grid::AbstractGrid, cell) = _linear_of(grid, cell, cell_address(grid))
+@inline _linear_of(grid, I::Tuple, ::CartesianCells) =
+    @inbounds LinearIndices(size_tuple(grid))[I...]
+@inline _linear_of(_grid, k::Integer, ::FlatCells) = Int(k)
 
 # Bins in a query window, saturating: a radius far wider than the bin side gives a per-direction reach
 # whose plain product overflows `Int` and would wrap to a small — or negative — number.
@@ -97,8 +108,12 @@ end
 
 Build a [`CellListIndex`](@ref) over `grid`'s cell centres, binned at side `ball` — the radius you mean
 to query at. Needs no external package.
+
+`active_only` leaves masked cells out, so a mostly-masked grid — a basin, a catchment — is indexed at
+the size of its active region rather than of its bounding box. The index records the choice, and a
+query that asks to see masked cells raises against one built this way.
 """
-function cell_list(grid::AbstractGrid{G,T}; ball::Real) where {G,T}
+function cell_list(grid::AbstractGrid{G,T}; ball::Real, active_only::Bool = true) where {G,T}
     h = T(ball)
     h > 0 || throw(ArgumentError("the bin side must be positive, got $ball"))
     embedding = embedding_of(grid)
@@ -108,7 +123,7 @@ function cell_list(grid::AbstractGrid{G,T}; ball::Real) where {G,T}
     # it inline leaves the whole construction loop dynamically dispatched — measured at 34 MiB and
     # 196 ms for 65k points, against 3 ms once the dimension is a type.
     D = length(embedded_at(grid, first_cell(grid)))
-    return _build_cell_list(grid, embedding, hemb, Val(D))
+    return _build_cell_list(grid, embedding, hemb, active_only, Val(D))
 end
 
 # Streamed: a cell's position is read from the grid three times rather than materialized once into a
@@ -116,11 +131,11 @@ end
 # formula, where holding them would reintroduce exactly the array the layout exists to avoid — and on a
 # node set it is a read of vectors that already exist.
 function _build_cell_list(
-    grid, embedding::E, hemb::T, ::Val{D},
+    grid, embedding::E, hemb::T, active_only::Bool, ::Val{D},
 ) where {T,E<:AbstractEmbedding,D}
-    cs = cells(grid)
-    n = length(cs)
     wrap, nbins, lo, hd = _cell_lattice(grid, embedding, hemb, Val(D))
+    everything = !active_only || mask(grid) isa AllActive
+    n = everything ? length(cells(grid)) : count(mask(grid))
 
     @inline function binof(c)
         x = map(T, embedded_at(grid, cell_at(grid, c)))
@@ -133,7 +148,13 @@ function _build_cell_list(
     nbucket = max(1, nextpow(2, max(n, 1)))
     counts = zeros(Int, nbucket + 1)
     cellbin = Vector{NTuple{D,Int}}(undef, n)
-    @inbounds for (k, c) in enumerate(cs)
+    ids = Vector{Int}(undef, n)
+    k = 0
+    @inbounds for c in cells(grid)
+        cell = cell_at(grid, c)
+        (everything || _cell_active(grid, cell)) || continue
+        k += 1
+        ids[k] = _linear_of(grid, cell)
         cellbin[k] = binof(c)
         counts[_bin_hash(cellbin[k], nbucket) + 1] += 1
     end
@@ -147,12 +168,12 @@ function _build_cell_list(
     bins = Vector{NTuple{D,Int}}(undef, n)
     @inbounds for k in 1:n
         b = _bin_hash(cellbin[k], nbucket)
-        items[cursor[b]] = k
+        items[cursor[b]] = ids[k]
         bins[cursor[b]] = cellbin[k]      # parallel to `items`, so a walk reads both contiguously
         cursor[b] += 1
     end
     return CellListIndex{D,T,E,Vector{Int},Vector{NTuple{D,Int}}}(
-        n, lo, hd, nbins, wrap, starts, items, bins, embedding,
+        n, lo, hd, nbins, wrap, starts, items, bins, embedding, active_only,
     )
 end
 
@@ -266,8 +287,10 @@ function fold_candidates_at(f::F, acc, ix::CellListIndex{D,T}, q::NTuple{D,T}, r
     # cheaper and bounded. Without this a query at 10× the bin side costs `10^D` times its own answer,
     # and an index built for one radius and queried at a far larger one degenerates without limit.
     if _window_bins(reach) > nbucket
-        @inbounds for k in Base.OneTo(ix.n)
-            acc = f(acc, k)
+        # Every indexed cell is a candidate. That is `items`, not `1:n`: a masked grid indexes a subset,
+        # and `items` holds the ids it kept.
+        @inbounds for t in eachindex(ix.items)
+            acc = f(acc, ix.items[t])
         end
         return acc
     end

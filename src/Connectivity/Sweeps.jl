@@ -36,7 +36,7 @@ answer as the serial default rather than one that depends on scheduling.
 function mapreduce_within(
     f::F, op::O, init, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
-    self::Bool = false, topology = default_sweep_topology(grid, ball),
+    self::Bool = false, topology = default_sweep_topology(grid, ball, active_only),
     reach::AbstractReach = Unrestricted(), backend = nothing,
 ) where {F,O}
     _check_sweep_images(grid, images)
@@ -67,7 +67,7 @@ determined by `I` — the same contract the connectivity builders keep.
 function foreach_within(
     f::F, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
-    self::Bool = false, topology = default_sweep_topology(grid, ball),
+    self::Bool = false, topology = default_sweep_topology(grid, ball, active_only),
     reach::AbstractReach = Unrestricted(), backend = nothing,
 ) where {F}
     _check_sweep_images(grid, images)

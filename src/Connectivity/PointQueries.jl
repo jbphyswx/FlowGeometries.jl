@@ -75,6 +75,7 @@ function _fold_at_scattered(
     f::F, init, grid::Grids.AbstractGrid{G,T}, p0::NTuple{D,T}, ball, active_only::Bool,
     mt::MetricTopology, scratch, sz,
 ) where {F,G,T,D}
+    _check_index_covers(mt.index, active_only)
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
     prd = map(T, _wrap_lengths(grid, Val(D)))
