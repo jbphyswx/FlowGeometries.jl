@@ -256,7 +256,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :radius, :semimajor_axis, :semiminor_axis, :flattening, :eccentricity²,
         :meridional_radius, :prime_vertical_radius, :as_ntuple, :as_tensor6, :point_names,
         :named_point, :area_element, :volume_element, :spherical_to_cartesian,
-        :cartesian_to_spherical, :geodetic_to_cartesian, :unit_vector, :local_tangent_basis,
+        :cartesian_to_spherical, :geodetic_to_cartesian, :cartesian_to_geodetic, :embed,
+        :unit_vector, :local_tangent_basis,
         :project_to_tangent_plane, :nonuniform_first_derivative, :vector_to_cartesian,
         :vector_from_cartesian, :tensor_to_local, :tensor_from_local, :spherical_excess,
         :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
@@ -272,7 +273,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
     GEOMETRY_NOT_CHECKED = Set(Iterators.flatten((
         # geometry, axis, stencil and sampling TYPES
         [:AbstractGeometry, :AbstractCartesianGeometry, :AbstractSphericalGeometry,
-         :AbstractEllipsoidalGeometry, :CartesianGeometry, :SphericalGeometry, :SpheroidGeometry,
+         :AbstractEllipsoidalGeometry, :AbstractLonLatGeometry,
+         :CartesianGeometry, :SphericalGeometry, :SpheroidGeometry,
          :AbstractUniformAxis, :UniformAxis, :ConstantVector, :UniformSpacing, :NonuniformSpacing,
          :AbstractStencil, :Axial, :VonNeumann, :Moore, :Diagonal, :Anisotropic, :Custom,
          :Vertex, :CellRadius, :MetricBall,

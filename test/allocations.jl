@@ -44,6 +44,10 @@ q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
 q_uvec(p)                = FG.Geometry.unit_vector(Float64, p)
 q_s2c(geo, p)            = FG.Geometry.spherical_to_cartesian(geo, p)
 q_vfc(geo, v, p)         = FG.Geometry.vector_from_cartesian(geo, v, p[1], p[2])
+q_embed(geo, p)          = FG.Geometry.embed(geo, p)
+q_proj(geo, c, n)        = FG.Geometry.project_to_tangent_plane(geo, c, n)
+q_ltb(geo, p)            = FG.Geometry.local_tangent_basis(geo, p)
+q_c2g(geo, v)            = FG.Geometry.cartesian_to_geodetic(geo, v)
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
 q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
@@ -507,6 +511,20 @@ Test.@testset "Point handling allocates nothing" begin
     Test.@test _alloc(q_uvec, vp) == 0
     Test.@test _alloc(q_s2c, sgeo, vp) == 0
     Test.@test _alloc(q_vfc, sgeo, vv, vp) == 0
+
+    # The two primitives and everything routed through them, on both hierarchies. A spheroid pays no
+    # more than a sphere: the frame is the same arithmetic and the position is one more division.
+    spgeo = FG.Geometry.SpheroidGeometry()
+    c2, n2, p3 = (0.4, 0.6), (0.41, 0.61), (4.0e6, 1.0e6, 4.5e6)
+    τ6 = (0.3, -1.1, 2.0, 0.7, -0.2, 1.4)
+    for geo in (sgeo, spgeo)
+        Test.@test _alloc(q_embed, geo, c2) == 0
+        Test.@test _alloc(q_proj, geo, c2, n2) == 0
+        Test.@test _alloc(q_ltb, geo, c2) == 0
+        Test.@test _alloc(q_vfc, geo, vv, c2) == 0
+        Test.@test _alloc(q_tensor_local, geo, τ6, c2) == 0
+    end
+    Test.@test _alloc(q_c2g, spgeo, p3) == 0
 end
 
 Test.@testset "Rotating a point set in place allocates nothing" begin

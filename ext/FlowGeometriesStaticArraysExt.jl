@@ -91,7 +91,7 @@ end
 end
 
 @inline function Geometry.local_tangent_basis(
-    ::Type{S}, ::Geometry.AbstractSphericalGeometry{T}, p::SA.StaticVector{2},
+    ::Type{S}, ::Geometry.AbstractLonLatGeometry{T}, p::SA.StaticVector{2},
 ) where {T<:AbstractFloat, S<:SA.StaticVector}
     sinλ, cosλ = sincos(T(p[1]))
     sinφ, cosφ = sincos(T(p[2]))
@@ -106,11 +106,11 @@ end
 end
 
 @inline function Geometry.project_to_tangent_plane(
-    ::Type{S}, geo::Geometry.AbstractSphericalGeometry{T},
+    ::Type{S}, geo::Geometry.AbstractLonLatGeometry{T},
     center::SA.StaticVector{2}, neighbor::SA.StaticVector{2},
 ) where {T<:AbstractFloat, S<:SA.StaticVector}
-    Pc = Geometry.spherical_to_cartesian(SA.SVector{3,T}, geo, center)
-    Pn = Geometry.spherical_to_cartesian(SA.SVector{3,T}, geo, neighbor)
+    Pc = Geometry.embed(SA.SVector{3,T}, geo, center)
+    Pn = Geometry.embed(SA.SVector{3,T}, geo, neighbor)
     chord = Pn - Pc
     ê = Geometry.local_tangent_basis(SA.SVector{3,T}, geo, center)
     return S((_dot3(chord, ê.λ), _dot3(chord, ê.φ)))

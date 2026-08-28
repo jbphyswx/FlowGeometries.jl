@@ -1,43 +1,81 @@
 # ---------------------------------------------------------------------------
-# Spherical vector fields ↔ Cartesian
+# The local frame at (λ, φ), and the rotations written against it
 # ---------------------------------------------------------------------------
-# Orthonormal frame at (λ, φ): ê_λ (∂/∂λ), ê_φ (∂/∂φ), ê_r (radial). Same directions
+# Orthonormal frame at (λ, φ): ê_λ (∂/∂λ), ê_φ (∂/∂φ), ê_r (outward normal). Same directions
 # as geographic east / north / up — named for the polar coordinates used everywhere else.
+
+"""
+    AbstractLonLatGeometry{T}
+
+The geometries whose coordinates are `(λ, φ, …)` about a polar axis:
+[`AbstractSphericalGeometry`](@ref) and [`AbstractEllipsoidalGeometry`](@ref).
+
+They share their local frame. On an oblate spheroid the GEODETIC latitude is defined by the surface
+normal, `n̂ = (cosφ·cosλ, cosφ·sinλ, sinφ)`, and the parallel through a point is a circle in a plane of
+constant `z`, so `ê_λ = (-sinλ, cosλ, 0)` and `ê_φ = n̂ × ê_λ` — the sphere's three vectors at the same
+`(λ, φ)`. Every frame rotation here is therefore one implementation for both hierarchies. What does
+differ is the POSITION a `(λ, φ)` sits at, which is [`embed`](@ref)'s business, and the physical length
+of a unit coordinate step, which is [`scale_factors`](@ref)'.
+
+A `Union` rather than a common supertype: an ellipsoid is not a sphere, and must not inherit the area
+identities — `4πR²/n`, spherical excess — that hold only on one. That is why the two hierarchies are
+siblings, and this names exactly the part they do share.
+"""
+const AbstractLonLatGeometry{T} =
+    Union{AbstractSphericalGeometry{T},AbstractEllipsoidalGeometry{T}}
+
+"""
+    _enu_frame(geo, λ, φ) -> (ê_λ, ê_φ, ê_r)
+
+The local east/north/up triad at `(λ, φ)` in ambient Cartesian components.
+
+The one definition of the frame, so a vector rotation, a tensor rotation and a tangent-plane projection
+cannot drift apart. [`local_tangent_basis`](@ref) is its first two vectors under their coordinate names.
+"""
+@inline function _enu_frame(::AbstractLonLatGeometry{T}, λ::Real, φ::Real) where {T}
+    sinλ, cosλ = sincos(convert(T, λ))
+    sinφ, cosφ = sincos(convert(T, φ))
+    return ((-sinλ, cosλ, zero(T)),
+            (-sinφ * cosλ, -sinφ * sinλ, cosφ),
+            (cosφ * cosλ, cosφ * sinλ, sinφ))
+end
 
 """
     vector_to_cartesian(geo, u_λ, u_φ, u_r, λ, φ) -> NamedTuple{(:x,:y,:z)}
     vector_to_cartesian(geo, u_λ, u_φ, λ, φ) -> NamedTuple{(:x,:y,:z)}
     vector_to_cartesian(S, geo, args...) -> S
 
-Map the components of a vector given in the local spherical basis at `(λ, φ)` into the Cartesian
-basis. This transforms VECTOR COMPONENTS at a point, not a position — see
-[`spherical_to_cartesian`](@ref) for positions. The 2-component form assumes `u_r = 0`.
+Map the components of a vector given in the local `(ê_λ, ê_φ, ê_r)` basis at `(λ, φ)` into the ambient
+Cartesian basis. This transforms VECTOR COMPONENTS at a point, not a position — see [`embed`](@ref) for
+positions. The 2-component form assumes `u_r = 0`.
+
+A rotation of the frame and nothing else, so it is one and the same on a sphere and on a spheroid — see
+[`AbstractLonLatGeometry`](@ref).
 """
 @inline function vector_to_cartesian(
-    ::AbstractSphericalGeometry{T},
+    geo::AbstractLonLatGeometry{T},
     u_λ::Real, u_φ::Real, u_r::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
     uλ = convert(T, u_λ)
     uφ = convert(T, u_φ)
     ur = convert(T, u_r)
-    λT = convert(T, λ)
-    φT = convert(T, φ)
-    sinλ, cosλ = sin(λT), cos(λT)
-    sinφ, cosφ = sin(φT), cos(φT)
+    êλ, êφ, êr = _enu_frame(geo, λ, φ)
+    # `ê_λ` has no `z` component, the parallel lying in a plane of constant `z`, so that term is
+    # omitted rather than multiplied by a zero.
     return (;
-        x = uλ * (-sinλ) + uφ * (-sinφ * cosλ) + ur * (cosφ * cosλ),
-        y = uλ * cosλ    + uφ * (-sinφ * sinλ) + ur * (cosφ * sinλ),
-        z =                uφ * cosφ           + ur * sinφ,
+        x = uλ * êλ[1] + uφ * êφ[1] + ur * êr[1],
+        y = uλ * êλ[2] + uφ * êφ[2] + ur * êr[2],
+        z =              uφ * êφ[3] + ur * êr[3],
     )
 end
 
 @inline function vector_to_cartesian(
-    geo::AbstractSphericalGeometry{T}, u_λ::Real, u_φ::Real, λ::Real, φ::Real,
+    geo::AbstractLonLatGeometry{T}, u_λ::Real, u_φ::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
     return vector_to_cartesian(geo, u_λ, u_φ, zero(T), λ, φ)
 end
 
-@inline vector_to_cartesian(::Type{S}, geo::AbstractSphericalGeometry, args::Vararg{Real}) where {S} =
+@inline vector_to_cartesian(::Type{S}, geo::AbstractLonLatGeometry, args::Vararg{Real}) where {S} =
     build_point(S, (:x, :y, :z), Tuple(vector_to_cartesian(geo, args...)))
 
 """
@@ -45,33 +83,33 @@ end
     vector_from_cartesian(geo, v, λ, φ) -> NamedTuple{(:λ,:φ,:r)}
     vector_from_cartesian(S, geo, args...) -> S
 
-Map Cartesian velocity `(ux, uy, uz)` at `(λ, φ)` into spherical components
-`(λ = u_λ, φ = u_φ, r = u_r)`. `v` may be any 3-component point representation.
+Map an ambient Cartesian vector `(ux, uy, uz)` at `(λ, φ)` into local components
+`(λ = u_λ, φ = u_φ, r = u_r)` — eastward, northward, and along the outward normal. `v` may be any
+3-component representation. The inverse of [`vector_to_cartesian`](@ref), and like it the same on a
+sphere and on a spheroid.
 """
 @inline function vector_from_cartesian(
-    ::AbstractSphericalGeometry{T},
+    geo::AbstractLonLatGeometry{T},
     ux::Real, uy::Real, uz::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
     uxT = convert(T, ux)
     uyT = convert(T, uy)
     uzT = convert(T, uz)
-    λT = convert(T, λ)
-    φT = convert(T, φ)
-    sinλ, cosλ = sin(λT), cos(λT)
-    sinφ, cosφ = sin(φT), cos(φT)
+    êλ, êφ, êr = _enu_frame(geo, λ, φ)
+    # `ê_λ` has no `z` component, so `uz` does not enter the eastward projection.
     return (;
-        λ = uxT * (-sinλ) + uyT * cosλ,
-        φ = uxT * (-sinφ * cosλ) + uyT * (-sinφ * sinλ) + uzT * cosφ,
-        r = uxT * (cosφ * cosλ)  + uyT * (cosφ * sinλ)  + uzT * sinφ,
+        λ = uxT * êλ[1] + uyT * êλ[2],
+        φ = uxT * êφ[1] + uyT * êφ[2] + uzT * êφ[3],
+        r = uxT * êr[1] + uyT * êr[2] + uzT * êr[3],
     )
 end
 
-@inline function vector_from_cartesian(geo::AbstractSphericalGeometry, v, λ::Real, φ::Real)
+@inline function vector_from_cartesian(geo::AbstractLonLatGeometry, v, λ::Real, φ::Real)
     ux, uy, uz = _xyz(v)
     return vector_from_cartesian(geo, ux, uy, uz, λ, φ)
 end
 
-@inline vector_from_cartesian(::Type{S}, geo::AbstractSphericalGeometry, args...) where {S} =
+@inline vector_from_cartesian(::Type{S}, geo::AbstractLonLatGeometry, args...) where {S} =
     build_point(S, (:λ, :φ, :r), Tuple(vector_from_cartesian(geo, args...)))
 
 # `vᵀ τ w` for a symmetric `τ` given by its six independent components. Written out rather than looped
@@ -97,19 +135,19 @@ The rank-1 counterpart is [`vector_from_cartesian`](@ref); between them they cov
 field anyone rotates — a stress, a strain rate, a covariance, a subfilter flux. `τ` may be given as the
 six independent components or as any 6-component representation, in the order above.
 
-`R` is the same basis [`local_tangent_basis`](@ref) defines, so the two cannot drift apart.
+`R` is the same basis [`local_tangent_basis`](@ref) defines, so the two cannot drift apart — and being
+a rotation of the frame alone, it holds on a spheroid as it does on a sphere.
 """
 @inline function tensor_to_local(
-    ::AbstractSphericalGeometry{T},
+    geo::AbstractLonLatGeometry{T},
     τxx::Real, τyy::Real, τzz::Real, τxy::Real, τxz::Real, τyz::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
     xx, yy, zz = convert(T, τxx), convert(T, τyy), convert(T, τzz)
     xy, xz, yz = convert(T, τxy), convert(T, τxz), convert(T, τyz)
-    sinλ, cosλ = sincos(convert(T, λ))
-    sinφ, cosφ = sincos(convert(T, φ))
-    a1, a2, a3 = -sinλ, cosλ, zero(T)                       # ê_λ
-    b1, b2, b3 = -sinφ * cosλ, -sinφ * sinλ, cosφ           # ê_φ
-    c1, c2, c3 = cosφ * cosλ, cosφ * sinλ, sinφ             # ê_r
+    ê = _enu_frame(geo, λ, φ)
+    a1, a2, a3 = ê[1]                                       # ê_λ
+    b1, b2, b3 = ê[2]                                       # ê_φ
+    c1, c2, c3 = ê[3]                                       # ê_r
     return (;
         λλ = _quad(xx, yy, zz, xy, xz, yz, a1, a2, a3, a1, a2, a3),
         φφ = _quad(xx, yy, zz, xy, xz, yz, b1, b2, b3, b1, b2, b3),
@@ -120,12 +158,12 @@ six independent components or as any 6-component representation, in the order ab
     )
 end
 
-@inline function tensor_to_local(geo::AbstractSphericalGeometry, τ, λ::Real, φ::Real)
+@inline function tensor_to_local(geo::AbstractLonLatGeometry, τ, λ::Real, φ::Real)
     xx, yy, zz, xy, xz, yz = as_tensor6(τ)
     return tensor_to_local(geo, xx, yy, zz, xy, xz, yz, λ, φ)
 end
 
-@inline tensor_to_local(::Type{S}, geo::AbstractSphericalGeometry, args...) where {S} =
+@inline tensor_to_local(::Type{S}, geo::AbstractLonLatGeometry, args...) where {S} =
     build_point(S, (:λλ, :φφ, :rr, :λφ, :λr, :φr), Tuple(tensor_to_local(geo, args...)))
 
 """
@@ -137,17 +175,16 @@ The inverse of [`tensor_to_local`](@ref): `τ = Rᵀ τ' R`, returning the ambie
 `(; xx, yy, zz, xy, xz, yz)`. Composing the two in either order is the identity.
 """
 @inline function tensor_from_local(
-    ::AbstractSphericalGeometry{T},
+    geo::AbstractLonLatGeometry{T},
     τλλ::Real, τφφ::Real, τrr::Real, τλφ::Real, τλr::Real, τφr::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
     ll, ff, rr = convert(T, τλλ), convert(T, τφφ), convert(T, τrr)
     lf, lr, fr = convert(T, τλφ), convert(T, τλr), convert(T, τφr)
-    sinλ, cosλ = sincos(convert(T, λ))
-    sinφ, cosφ = sincos(convert(T, φ))
+    êλ, êφ, êr = _enu_frame(geo, λ, φ)
     # The COLUMNS of `R`, which are the rows of `Rᵀ`, so the same contraction serves both directions.
-    u1, u2, u3 = -sinλ, -sinφ * cosλ, cosφ * cosλ
-    v1, v2, v3 = cosλ, -sinφ * sinλ, cosφ * sinλ
-    w1, w2, w3 = zero(T), cosφ, sinφ
+    u1, u2, u3 = êλ[1], êφ[1], êr[1]
+    v1, v2, v3 = êλ[2], êφ[2], êr[2]
+    w1, w2, w3 = êλ[3], êφ[3], êr[3]
     return (;
         xx = _quad(ll, ff, rr, lf, lr, fr, u1, u2, u3, u1, u2, u3),
         yy = _quad(ll, ff, rr, lf, lr, fr, v1, v2, v3, v1, v2, v3),
@@ -158,12 +195,12 @@ The inverse of [`tensor_to_local`](@ref): `τ = Rᵀ τ' R`, returning the ambie
     )
 end
 
-@inline function tensor_from_local(geo::AbstractSphericalGeometry, τ, λ::Real, φ::Real)
+@inline function tensor_from_local(geo::AbstractLonLatGeometry, τ, λ::Real, φ::Real)
     ll, ff, rr, lf, lr, fr = as_tensor6(τ)
     return tensor_from_local(geo, ll, ff, rr, lf, lr, fr, λ, φ)
 end
 
-@inline tensor_from_local(::Type{S}, geo::AbstractSphericalGeometry, args...) where {S} =
+@inline tensor_from_local(::Type{S}, geo::AbstractLonLatGeometry, args...) where {S} =
     build_point(S, (:xx, :yy, :zz, :xy, :xz, :yz), Tuple(tensor_from_local(geo, args...)))
 
 """
@@ -191,7 +228,8 @@ end
 
 Coordinate-aligned unit vectors at `coords`, in the ambient Cartesian frame:
 - Cartesian: `(; x = ê_x, y = ê_y)`, 2-component
-- Spherical: `(; λ = ê_λ, φ = ê_φ)`, 3-component
+- Spherical and spheroidal: `(; λ = ê_λ, φ = ê_φ)`, 3-component — the eastward and northward tangents,
+  which are the same triad on either (see [`AbstractLonLatGeometry`](@ref))
 
 The basis vectors themselves are `Tuple`s by default; pass a leading `S` to get them as `SVector`s
 (or any other representation) so they can be used with vector arithmetic directly.
@@ -206,22 +244,22 @@ end
     return (; x = (one(T), zero(T)), y = (zero(T), one(T)))
 end
 
-@inline function _local_tangent_basis(::AbstractSphericalGeometry{T}, coords::Tuple{Real,Real}) where {T}
-    λ, φ = _at(T, coords)
-    sinλ, cosλ = sincos(λ)
-    sinφ, cosφ = sincos(φ)
-    return (;
-        λ = (-sinλ, cosλ, zero(T)),
-        φ = (-sinφ * cosλ, -sinφ * sinλ, cosφ),
-    )
+@inline function _local_tangent_basis(geo::AbstractLonLatGeometry{T}, coords::Tuple{Real,Real}) where {T}
+    êλ, êφ, _ = _enu_frame(geo, coords[1], coords[2])
+    return (; λ = êλ, φ = êφ)
 end
 
 """
     project_to_tangent_plane(geo, center, neighbor) -> NamedTuple
     project_to_tangent_plane(S, geo, center, neighbor) -> S
 
-Tangent-plane displacement of `neighbor` relative to `center` along the local
-coordinate basis from [`local_tangent_basis`](@ref).
+Tangent-plane displacement of `neighbor` relative to `center` along the local coordinate basis from
+[`local_tangent_basis`](@ref): the ambient chord between the two [`embed`](@ref)ded positions, resolved
+on that basis.
+
+This is what a least-squares gradient and a scattered interpolation are built on, so both work on any
+geometry supplying those two primitives — a spheroid included, where the chord runs between geodetic
+positions and the basis is the same triad.
 """
 @inline project_to_tangent_plane(geo::AbstractGeometry, center, neighbor) =
     _project_to_tangent_plane(geo, as_ntuple(center), as_ntuple(neighbor))
@@ -239,16 +277,17 @@ end
     return (; x = nx - cx, y = ny - cy)
 end
 
+# Written against [`embed`](@ref) and the frame, so it holds on a sphere and on a spheroid alike: the
+# chord between the two ambient positions, resolved on the tangent basis at the centre. Only where each
+# `(λ, φ)` SITS differs between the two.
 @inline function _project_to_tangent_plane(
-    geo::AbstractSphericalGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
+    geo::AbstractLonLatGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
 ) where {T}
     c = _at(T, center)
-    Pc = _spherical_to_cartesian(geo, c)
-    Pn = _spherical_to_cartesian(geo, _at(T, neighbor))
-    dx = Pn.x - Pc.x; dy = Pn.y - Pc.y; dz = Pn.z - Pc.z
-    ê = _local_tangent_basis(geo, c)
-    êλ = ê.λ
-    êφ = ê.φ
+    Pc = _embed(geo, c)
+    Pn = _embed(geo, _at(T, neighbor))
+    dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
+    êλ, êφ, _ = _enu_frame(geo, c[1], c[2])
     # Written out rather than `sum(dr[i] * ê[i] for i in 1:3)`: the generator indexes the tuple with
     # a loop variable, which does not unroll, and measured ~5× slower than the unrolled contraction.
     return (;

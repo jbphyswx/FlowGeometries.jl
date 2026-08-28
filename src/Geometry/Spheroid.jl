@@ -46,10 +46,14 @@ are `(λ, φ, h)`, with `h` the height above the ellipsoid — not an absolute r
 spherical third direction is.
 
 Rectilinear grids and the index-space connectivity built on them work as they do for a sphere; the
-samplings are purely angular and so carry over unchanged. The spherical *area* routines
-(`unstructured_grid`'s Voronoi areas, the cell areas behind `spherical_grid`) do not: they are built on
-spherical excess and `4πR²/n`, which are sphere identities, so they stay restricted to
-[`AbstractSphericalGeometry`](@ref) rather than silently returning sphere areas for an ellipsoid.
+samplings are purely angular and so carry over unchanged. So does everything written against the two
+primitives [`embed`](@ref) and [`local_tangent_basis`](@ref) — the local frame, the vector and tensor
+rotations, the tangent-plane projection, and therefore the least-squares gradient and the scattered
+interpolation. See [`AbstractLonLatGeometry`](@ref) for why the frame is shared.
+
+The spherical *area* routines do not: `unstructured_grid`'s Voronoi areas and the cell areas behind
+`spherical_grid` are built on spherical excess and `4πR²/n`, which are sphere identities. They stay
+restricted to [`AbstractSphericalGeometry`](@ref) rather than returning sphere areas for an ellipsoid.
 """
 struct SpheroidGeometry{T<:AbstractFloat} <: AbstractEllipsoidalGeometry{T}
     a::T
@@ -259,6 +263,88 @@ end
     Nφ = prime_vertical_radius(g, φ)
     return (; x = (Nφ + h) * cosφ * cosλ, y = (Nφ + h) * cosφ * sinλ,
               z = (Nφ * (one(T) - eccentricity²(g)) + h) * sinφ)
+end
+
+# A lone `(λ,)` is a point on the equator, the circle of radius `a` — the convention [`distance`](@ref)
+# uses for one coordinate.
+@inline function _geodetic_to_cartesian(
+    g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real},
+) where {T}
+    sinλ, cosλ = sincos(convert(T, p[1]))
+    a = semimajor_axis(g)
+    return (; x = a * cosλ, y = a * sinλ, z = zero(T))
+end
+
+@inline _embed(g::AbstractEllipsoidalGeometry, p::Tuple) = Tuple(_geodetic_to_cartesian(g, p))
+
+"""
+    cartesian_to_geodetic(geo, xyz) -> NamedTuple{(:λ,:φ,:h)}
+    cartesian_to_geodetic(S, geo, xyz) -> S
+
+Inverse of [`geodetic_to_cartesian`](@ref): Earth-centred Cartesian to geodetic `(λ, φ, h)` with
+`λ ∈ (-π, π]`, `φ` the geodetic latitude in `[-π/2, π/2]`, and `h` the height above the ellipsoid.
+
+Unlike the spherical inverse this is not closed-form — geodetic latitude satisfies a quartic — so it is
+solved by Newton's method on
+
+    tan φ = z(N+h) / (p(N(1-e²)+h)),   p = √(x²+y²)
+
+with `h = p·cosφ + z·sinφ − a√(1-e²sin²φ)` substituted each step, which is exact for any `φ` and stays
+finite at the poles where `p/cosφ − N` does not. Convergence is quadratic and reaches `eps(T)` in three
+or four steps at terrestrial flattening. On the polar axis `λ = 0` and the latitude is `±π/2` exactly.
+
+The foot of the normal is unique for any point outside the ellipsoid's evolute — every position on or
+above the surface, and far below it. Deep inside, near the centre, a point has several feet and no
+preferred one; the centre itself is reported as `(0, 0, -a)`, the same convention
+[`cartesian_to_spherical`](@ref) uses at the origin.
+"""
+@inline cartesian_to_geodetic(geo::AbstractEllipsoidalGeometry, xyz) =
+    _cartesian_to_geodetic(geo, _xyz(xyz))
+
+@inline cartesian_to_geodetic(::Type{S}, geo::AbstractEllipsoidalGeometry, xyz) where {S} =
+    build_point(S, (:λ, :φ, :h), Tuple(cartesian_to_geodetic(geo, xyz)))
+
+function _cartesian_to_geodetic(
+    g::AbstractEllipsoidalGeometry{T}, xyz::Tuple{Real,Real,Real},
+    tol = max(T(1e-14), eps(T))
+) where {T}
+    x, y, z = _at(T, xyz)
+    a = semimajor_axis(g)
+    e² = eccentricity²(g)
+    p = sqrt(x * x + y * y)
+    λ = atan(y, x)
+    # The centre has no normal to stand on. It also has to be taken out before the loop: there
+    # `N(1-e²)+h` is negative, so `p·(N(1-e²)+h)` is a NEGATIVE zero, and `atan(+0, -0)` is `π`.
+    (iszero(p) && iszero(z)) && return (; λ = zero(T), φ = zero(T), h = -a)
+    # `atan(z, (1-e²)p)` is the latitude of the point's reduced (parametric) position, which is within
+    # `f` of the geodetic one — one Newton step of the loop below then already carries most of the way.
+    φ = atan(z, (one(T) - e²) * p)
+    h = zero(T)
+   
+    converged = false
+    for _ in 1:20
+        sinφ, cosφ = sincos(φ)
+        W = sqrt(one(T) - e² * sinφ * sinφ)
+        N = a / W
+        h = p * cosφ + z * sinφ - a * W
+        φnext = atan(z * (N + h), p * (N * (one(T) - e²) + h))
+        if abs(φnext - φ) < tol
+            φ = φnext
+            converged = true
+            break
+        end
+        φ = φnext
+    end
+    if !converged
+        throw(ErrorException(
+            "the geodetic latitude of ($x, $y, $z) did not converge on a spheroid of a = $a, " *
+            "f = $(flattening(g))",
+        ))
+    end
+    # One last evaluation, so `h` belongs to the `φ` returned rather than to the step before it.
+    sinφ, cosφ = sincos(φ)
+    h = p * cosφ + z * sinφ - a * sqrt(one(T) - e² * sinφ * sinφ)
+    return (; λ = λ, φ = φ, h = h)
 end
 
 # One coordinate is a point on the equator, a circle of radius `a`: the distance is the shorter arc —

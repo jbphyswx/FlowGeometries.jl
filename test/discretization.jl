@@ -635,6 +635,34 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
                        for i in 1:n, j in 1:n if mk[i, j])
     end
 
+    # A spheroid. The projection is written against `embed` and the local frame rather than against the
+    # sphere's formulas, so the least-squares gradient and the scattered fit hold there too: the frame
+    # is the sphere's at the same (λ, φ), the positions each (λ, φ) sits at are not.
+    let spd = GE.SpheroidGeometry(), nx = 7, ny = 6, np = 7 * 6
+        λs = [0.4 + 0.01 * (i - 1) for j in 1:ny for i in 1:nx]
+        φs = [0.6 + 0.011 * (j - 1) for j in 1:ny for i in 1:nx]
+        sg = GD.UnstructuredGrid(spd, (λs, φs), trues(np); k = 6, areas = ones(np))
+        sp = O.gradient_plan(sg)
+        Test.@test sp.names == (:λ, :φ)
+        i0 = 3 + nx * 2
+        p0 = (λs[i0], φs[i0])
+        α, β = 3.5, -1.25
+        # Linear in the tangent plane AT `i0`, which is where exactness is claimed: a field linear in
+        # one cell's plane is not linear in another's, the surface being curved.
+        fs = [(Δ = GE.project_to_tangent_plane(spd, p0, (λs[j], φs[j])); 10.0 + α * Δ.λ + β * Δ.φ)
+              for j in 1:np]
+        s1 = zeros(np); s2 = zeros(np)
+        O.gradient!(s1, s2, fs, sp)
+        Test.@test abs(s1[i0] - α) < 1e-9 * abs(α)
+        Test.@test abs(s2[i0] - β) < 1e-9 * abs(β)
+        # Scattered interpolation is the same projection under a 3-parameter fit, so its constant term
+        # recovers the value at the query point exactly.
+        q = (0.4 + 0.025, 0.6 + 0.0275)
+        fq = [(Δ = GE.project_to_tangent_plane(spd, q, (λs[j], φs[j])); -4.0 + α * Δ.λ + β * Δ.φ)
+              for j in 1:np]
+        Test.@test abs(O.interpolate(fq, sg, q; k = 8) + 4.0) < 1e-8
+    end
+
     Test.@test plan.names == (:x, :y)
     Test.@test_throws DimensionMismatch O.gradient!(zeros(3), zeros(3), zeros(3), plan)
     # The tangent plane is two-dimensional, so a 3-coordinate grid is refused rather than guessed.

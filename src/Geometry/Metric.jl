@@ -105,6 +105,7 @@ is built from `vals` alone, covering `Tuple`, `NTuple{N,T}`, `Vector{T}`, `SVect
 @inline build_point(::Type{S}, ::NTuple{N,Symbol}, vals::NTuple{N,Any}) where {N,S} = S(vals...)
 
 """Component names of an ambient-frame vector (as returned by [`local_tangent_basis`](@ref))."""
+@inline _ambient_names(::Val{1}) = (:x,)
 @inline _ambient_names(::Val{2}) = (:x, :y)
 @inline _ambient_names(::Val{3}) = (:x, :y, :z)
 
@@ -263,6 +264,16 @@ end
     return (; x = R * cosφ * cosλ, y = R * cosφ * sinλ, z = R * sinφ)
 end
 
+# A lone `(λ,)` is a point on the equator, the circle of radius `R` — the convention [`distance`](@ref)
+# uses for one coordinate.
+@inline function _spherical_to_cartesian(
+    geo::AbstractSphericalGeometry{T}, coords::Tuple{Real},
+) where {T}
+    sinλ, cosλ = sincos(convert(T, coords[1]))
+    R = radius(geo)
+    return (; x = R * cosλ, y = R * sinλ, z = zero(T))
+end
+
 """
     cartesian_to_spherical(geo, xyz) -> NamedTuple{(:λ,:φ,:r)}
     cartesian_to_spherical(S, geo, xyz) -> S
@@ -284,6 +295,40 @@ Inverse of [`spherical_to_cartesian`](@ref): Cartesian `(x, y, z)` to `(λ, φ, 
     iszero(r) && return (; λ = zero(T), φ = zero(T), r = r)
     return (; λ = atan(y, x), φ = asin(clamp(z / r, -one(T), one(T))), r = r)
 end
+
+# ---------------------------------------------------------------------------
+# The ambient Cartesian space
+# ---------------------------------------------------------------------------
+
+"""
+    embed(geo, coords) -> NTuple{D,T}
+    embed(S, geo, coords) -> S
+
+A point's position in the ambient Cartesian space this metric is realized in: the coordinates
+themselves on the plane, the point on the sphere of [`radius`](@ref) `R`, the Earth-centred position of
+a geodetic `(λ, φ[, h])` on a spheroid.
+
+One of the two primitives the metric-independent constructions here are written against; the other is
+[`local_tangent_basis`](@ref). A straight-line displacement, a chord distance, a tangent-plane
+projection and a least-squares gradient need a position and a frame and nothing else, so each is
+written once and serves every geometry supplying those two.
+
+This is the ambient position, always. What a spatial index searches is a separate question — an index
+may scale a sphere's surface coordinates to make an arc comparable to a chord, which is
+[`FlowGeometries.Grids.embed_point`](@ref) and its [`FlowGeometries.Grids.AbstractEmbedding`](@ref).
+"""
+function embed end
+
+@inline embed(geo::AbstractGeometry, coords) = _embed(geo, as_ntuple(coords))
+
+@inline function embed(::Type{S}, geo::AbstractGeometry, coords) where {S}
+    v = embed(geo, coords)
+    return build_point(S, _ambient_names(Val(length(v))), v)
+end
+
+@inline _embed(::AbstractCartesianGeometry{T}, p::Tuple{Vararg{Real,N}}) where {T,N} = _at(T, p)
+
+@inline _embed(geo::AbstractSphericalGeometry, p::Tuple) = Tuple(_spherical_to_cartesian(geo, p))
 
 # ---------------------------------------------------------------------------
 # Area Elements

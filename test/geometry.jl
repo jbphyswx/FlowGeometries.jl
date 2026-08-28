@@ -409,6 +409,111 @@ Test.@testset "Oblate spheroid geometry" begin
                (G.meridional_radius(g, 0.4) + 100.0) * 1e-3 * 1e-3 * 2.0
 end
 
+Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
+    G = FG.Geometry
+    spd = G.SpheroidGeometry()
+    a, b = G.semimajor_axis(spd), G.semiminor_axis(spd)
+
+    for λ in (-3.0, -0.7, 0.0, 1.2, 3.1), φ in (-1.5, -1.0, -0.3, 0.0, 0.4, 1.1, 1.5)
+        êλ, êφ, êr = G._enu_frame(spd, λ, φ)
+        # Orthonormal, and identical to the sphere's triad at the same (λ, φ) — the claim the shared
+        # implementation rests on.
+        for (u, v) in ((êλ, êφ), (êλ, êr), (êφ, êr))
+            Test.@test abs(sum(u .* v)) < 1e-14
+            Test.@test abs(sqrt(sum(abs2, u)) - 1) < 1e-14
+        end
+        Test.@test G._enu_frame(G.SphericalGeometry(), λ, φ) === (êλ, êφ, êr)
+
+        # ê_r is the ELLIPSOID's normal: ∇(x²/a² + y²/a² + z²/b²) at the surface point, normalized.
+        # This is what makes the geodetic latitude the right angle to build the frame from.
+        P = G.embed(spd, (λ, φ))
+        ∇ = (2P[1] / a^2, 2P[2] / a^2, 2P[3] / b^2)
+        Test.@test maximum(abs.(êr .- ∇ ./ sqrt(sum(abs2, ∇)))) < 1e-14
+
+        # And the tangents are the coordinate derivatives of the SURFACE, with the curvature radii as
+        # their lengths — the property that ties the frame to `scale_factors`.
+        h = 1e-7
+        dφ = (G.embed(spd, (λ, φ + h)) .- G.embed(spd, (λ, φ - h))) ./ (2h)
+        Test.@test maximum(abs.(dφ ./ sqrt(sum(abs2, dφ)) .- êφ)) < 1e-7
+        Test.@test sqrt(sum(abs2, dφ)) ≈ G.meridional_radius(spd, φ) rtol = 1e-7
+        dλ = (G.embed(spd, (λ + h, φ)) .- G.embed(spd, (λ - h, φ))) ./ (2h)
+        if sqrt(sum(abs2, dλ)) > 1e-6                     # degenerate at the pole, where λ is not a direction
+            Test.@test maximum(abs.(dλ ./ sqrt(sum(abs2, dλ)) .- êλ)) < 1e-8
+            Test.@test sqrt(sum(abs2, dλ)) ≈ G.prime_vertical_radius(spd, φ) * cos(φ) rtol = 1e-7
+        end
+    end
+
+    # The rotations are the frame and nothing else, so they invert on either geometry.
+    τ = (0.3, -1.1, 2.0, 0.7, -0.2, 1.4)
+    for geo in (G.SphericalGeometry(6.371e6), spd), λ in (-2.0, 0.3, 2.8), φ in (-1.2, 0.0, 0.75)
+        u = (1.7, -0.9, 0.4)
+        c = G.vector_to_cartesian(geo, u..., λ, φ)
+        Test.@test maximum(abs.(Tuple(G.vector_from_cartesian(geo, Tuple(c), λ, φ)) .- u)) < 1e-12
+        t = G.tensor_to_local(geo, τ, λ, φ)
+        Test.@test maximum(abs.(Tuple(G.tensor_from_local(geo, Tuple(t), λ, φ)) .- τ)) < 1e-12
+        # `local_tangent_basis` is the frame's first two vectors, so they cannot drift apart.
+        ê = G.local_tangent_basis(geo, (λ, φ))
+        Test.@test (ê.λ, ê.φ) === G._enu_frame(geo, λ, φ)[1:2]
+    end
+
+    # `embed` on a sphere is `spherical_to_cartesian`, bit for bit — the primitive replaced the call,
+    # it did not re-derive the formula.
+    sph = G.SphericalGeometry(6.371e6)
+    for λ in (-2.9, 0.0, 0.6, 2.7), φ in (-1.4, 0.0, 0.9)
+        Test.@test G.embed(sph, (λ, φ)) === Tuple(G.spherical_to_cartesian(sph, (λ, φ)))
+        Test.@test G.embed(sph, (λ, φ, 1.0)) === Tuple(G.spherical_to_cartesian(sph, (λ, φ, 1.0)))
+        Test.@test G.embed(spd, (λ, φ)) === Tuple(G.geodetic_to_cartesian(spd, (λ, φ)))
+    end
+    Test.@test G.embed(G.CartesianGeometry(), (1.0, 2.0)) === (1.0, 2.0)
+    Test.@test G.embed(G.CartesianGeometry(), (1, 2, 3)) === (1.0, 2.0, 3.0)
+    Test.@test G.embed(Tuple, sph, (0.0, 0.0)) === (6.371e6, 0.0, 0.0)
+    Test.@test G.embed(NamedTuple, sph, (0.0, 0.0)) === (x = 6.371e6, y = 0.0, z = 0.0)
+    # A lone (λ,) is the equator, the circle whose radius the one-coordinate `distance` uses.
+    Test.@test G.embed(G.SphericalGeometry(2.0), (0.0,)) === (2.0, 0.0, 0.0)
+    Test.@test G.embed(G.SpheroidGeometry(3.0, 0.2), (0.0,)) === (3.0, 0.0, 0.0)
+    Test.@test G.distance(G.SpheroidGeometry(3.0, 0.2), (0.0,), (π / 2,)) ≈ 3.0 * π / 2
+end
+
+Test.@testset "cartesian_to_geodetic inverts geodetic_to_cartesian" begin
+    G = FG.Geometry
+    for spd in (G.SpheroidGeometry(), G.SpheroidGeometry(6378137.0, 0.0), G.SpheroidGeometry(1.0, 0.3))
+        a = G.semimajor_axis(spd)
+        for λ in (-3.14, -1.0, 0.0, 0.9, 3.0), φ in (-1.5707, -1.2, -0.4, 0.0, 0.5, 1.3, 1.5707),
+            hh in (-0.02a, 0.0, 0.001a, 0.5a)
+            P = G.geodetic_to_cartesian(spd, (λ, φ, hh))
+            r = G.cartesian_to_geodetic(spd, (P.x, P.y, P.z))
+            Q = G.geodetic_to_cartesian(spd, (r.λ, r.φ, r.h))
+            # The POSITION is what the inverse is for; a longitude is ill-conditioned at the pole and a
+            # latitude there is not what the round trip is claiming.
+            Test.@test sqrt((Q.x - P.x)^2 + (Q.y - P.y)^2 + (Q.z - P.z)^2) / a < 1e-14
+            Test.@test abs(r.h - hh) / a < 1e-13
+        end
+    end
+    spd = G.SpheroidGeometry()
+    b = G.semiminor_axis(spd)
+    # On the polar axis the latitude is exact and the height is the distance along it.
+    north = G.cartesian_to_geodetic(spd, (0.0, 0.0, b + 1000.0))
+    Test.@test north.λ == 0.0
+    Test.@test north.φ ≈ π / 2 atol = 1e-12
+    Test.@test north.h ≈ 1000.0 atol = 1e-8
+    south = G.cartesian_to_geodetic(spd, (0.0, 0.0, -b))
+    Test.@test south.φ ≈ -π / 2 atol = 1e-12
+    Test.@test abs(south.h) < 1e-8
+    # The centre has no normal to stand on, and is reported the way the origin is on a sphere.
+    Test.@test G.cartesian_to_geodetic(spd, (0.0, 0.0, 0.0)) ===
+               (λ = 0.0, φ = 0.0, h = -G.semimajor_axis(spd))
+    # A point well inside still has a genuine foot of the normal.
+    for z in (-0.9b, -0.3b, 0.3b, 0.9b), p in (1.0, 0.05 * G.semimajor_axis(spd))
+        r = G.cartesian_to_geodetic(spd, (p, 0.0, z))
+        Q = G.geodetic_to_cartesian(spd, (r.λ, r.φ, r.h))
+        Test.@test sqrt((Q.x - p)^2 + Q.y^2 + (Q.z - z)^2) / G.semimajor_axis(spd) < 1e-13
+    end
+    # The representation escape, as everywhere else.
+    Test.@test G.cartesian_to_geodetic(Tuple, spd, (0.0, 0.0, b)) ===
+               Tuple(G.cartesian_to_geodetic(spd, (0.0, 0.0, b)))
+    Test.@test_throws ArgumentError G.cartesian_to_geodetic(spd, (1.0, 2.0))
+end
+
 Test.@testset "A spheroid drives the grid stack in every dimension" begin
     GE = FG.Geometry
     geo = GE.SpheroidGeometry()
@@ -468,6 +573,32 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
 
     Test.@test FG.Connectivity.nneighbors(g2, 1, 3) == 4       # wraps in λ
     Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(g2)) > 0
+
+    # The spatial index embeds geodetic coordinates as an ECEF chord, which UNDER-estimates the
+    # geodesic, so a ball query over-returns and the caller's own `distance` trims it. It must
+    # therefore agree with a brute-force geodesic scan exactly, not to a tolerance — and a ball too
+    # small to reach anything must come back empty rather than leak an untrimmed chord candidate.
+    let gb = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 25)[1:24]),
+                                     collect(range(-1.2, 1.2; length = 13)))
+        for (ci, r) in (((5, 6), 1.0e6), ((5, 6), 3.0e6), ((1, 1), 2.0e6), ((24, 13), 2.0e6))
+            p0 = FG.Grids.coords(Tuple, gb, ci...)
+            want = count(GE.distance(geo, p0, FG.Grids.coords(Tuple, gb, i, j)) ≤ r
+                         for j in 1:13, i in 1:24 if (i, j) != ci)
+            Test.@test FG.Connectivity.nneighbors_within(gb, ci...; ball = r) == want
+        end
+    end
+
+    # A node set on a spheroid builds its own k-d-tree adjacency, which the throwing fallback used to
+    # refuse: the construction path goes through the same `embed` the index does.
+    let λn = [0.3 * i for i in 0:19], φn = [0.2 * sin(3.0i) for i in 0:19]
+        gu = FG.Grids.UnstructuredGrid(geo, (λn, φn), trues(20); k = 4, areas = ones(20))
+        for i in 1:20
+            pi_ = GE.embed(geo, (λn[i], φn[i]))
+            d = sort([(sqrt(sum(abs2, GE.embed(geo, (λn[j], φn[j])) .- pi_)), j)
+                      for j in 1:20 if j != i])
+            Test.@test sort(collect(FG.Grids.neighbors(gu, i))) == sort([j for (_, j) in d[1:4]])
+        end
+    end
 
     # A degenerate angular direction drops the differential that no longer exists, so a transect
     # measures arc length rather than an area with a placeholder in it.

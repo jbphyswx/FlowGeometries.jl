@@ -138,38 +138,30 @@ function Grids._build_kdtree_neighbors(
                                 _csr_from_radius(all_pts, T(radius), ng)
 end
 
-# `(λ, φ)` embeds on the unit sphere and `(λ, φ, r)` at its own radius: nearest-by-chord is then
-# nearest-by-great-circle, and longitude wraps for free because λ and λ+2π embed to the same point —
-# so no ghost images are needed in either case.
+# A `(λ, φ, …)` node set goes through `Geometry.embed`, so this is the same space
+# `Grids.embedded_points` produces and the one radius conversion below serves every case. On a sphere
+# nearest-by-chord is nearest-by-great-circle; on a spheroid the chord is at most the geodesic, so the
+# query over-returns and the caller's distance gate trims it. Longitude wraps for free either way — λ
+# and λ+2π embed to the same point — so no ghost images are needed.
 function Grids._build_kdtree_neighbors(
-    geo::Geometry.AbstractSphericalGeometry{T}, coords::NTuple{D,AbstractVector{T}};
+    geo::Geometry.AbstractLonLatGeometry{T}, coords::NTuple{D,AbstractVector{T}};
     k::Integer = 6, radius::Union{Nothing,Real} = nothing,
     periodic::NTuple{D,Bool} = ntuple(d -> d == 1, Val(D)),
     period = ntuple(d -> d == 1 ? T(2π) : zero(T), Val(D)),
 ) where {D, T<:AbstractFloat}
     D == 2 || D == 3 || throw(ArgumentError(
-        "a spherical node set is `(λ, φ)` or `(λ, φ, r)`; got $D coordinate vectors",
+        "a node set on this geometry is `(λ, φ)` or `(λ, φ, third)`; got $D coordinate vectors",
     ))
-    λ, φ = coords[1], coords[2]
-    n = length(λ)
-    pts = similar(λ, T, 3, n)
-    # At the reference radius, not the unit sphere, so this is the same space `Grids.embedded_points`
-    # produces and the one radius conversion below serves both. Scaling leaves the knn ordering alone.
-    R = T(Geometry.radius(geo))
-    emb = if D == 2
-        @views pts[1, :] .= R .* cos.(φ) .* cos.(λ)
-        @views pts[2, :] .= R .* cos.(φ) .* sin.(λ)
-        @views pts[3, :] .= R .* sin.(φ)
-        Grids.ArcEmbedding(R)
-    else
-        r = coords[3]
-        @views pts[1, :] .= r .* cos.(φ) .* cos.(λ)
-        @views pts[2, :] .= r .* cos.(φ) .* sin.(λ)
-        @views pts[3, :] .= r .* sin.(φ)
-        Grids.ChordEmbedding()
+    n = length(coords[1])
+    pts = similar(coords[1], T, 3, n)
+    @inbounds for i in 1:n
+        p = Geometry.embed(geo, ntuple(d -> coords[d][i], Val(D)))
+        pts[1, i] = p[1]
+        pts[2, i] = p[2]
+        pts[3, i] = p[3]
     end
     radius === nothing && return _csr_from_knn(pts, k)
-    return _csr_from_radius(pts, Grids.embedded_radius(emb, T(radius)))
+    return _csr_from_radius(pts, Grids.embedded_radius(Grids._embedding_for(geo, D), T(radius)))
 end
 
 # ---------------------------------------------------------------------------

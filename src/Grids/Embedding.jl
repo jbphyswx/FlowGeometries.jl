@@ -48,18 +48,8 @@ so a query seeded by a point searches the space the index was built in.
 """
 function embed_point end
 
-@inline embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G<:Geometry.AbstractCartesianGeometry,T,D} =
-    ntuple(d -> T(p[d]), Val(D))
-
-@inline function embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G<:Geometry.AbstractSphericalGeometry,T,D}
-    c = Geometry.spherical_to_cartesian(grid_geometry(grid), p)
-    return (T(c.x), T(c.y), T(c.z))
-end
-
-@inline function embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G<:Geometry.AbstractEllipsoidalGeometry,T,D}
-    c = Geometry.geodetic_to_cartesian(grid_geometry(grid), p)
-    return (T(c.x), T(c.y), T(c.z))
-end
+@inline embed_point(grid::AbstractGrid{G,T}, p::NTuple{D,Real}) where {G,T,D} =
+    Geometry.embed(grid_geometry(grid), p)
 
 """
     embedding_of(grid) -> AbstractEmbedding
@@ -71,18 +61,28 @@ know the space before it reads the first one.
 """
 function embedding_of end
 
-@inline embedding_of(grid::AbstractGrid{G}) where {G<:Geometry.AbstractCartesianGeometry} =
-    CartesianEmbedding()
+@inline embedding_of(grid::AbstractGrid) =
+    _embedding_for(grid_geometry(grid), ncoordinates(grid))
+
+"""
+    _embedding_for(geo, ncoords) -> AbstractEmbedding
+
+The space a geometry's `ncoords`-coordinate points sit in. [`embedding_of`](@ref) is this for a grid,
+which knows its own coordinate count; a caller holding loose coordinate vectors states it.
+
+One definition, so an index built from a grid and one built from bare coordinates convert a radius the
+same way rather than by two implementations agreeing.
+"""
+@inline _embedding_for(::Geometry.AbstractCartesianGeometry, ::Integer) = CartesianEmbedding()
 
 # `(λ, φ, r)` carries its own radius, so the metric there IS the Euclidean chord; on the surface it is
 # the great-circle arc, and a radius has to be converted to the chord it subtends.
-@inline function embedding_of(grid::AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
-    return ncoordinates(grid) ≥ 3 ? ChordEmbedding() :
-           ArcEmbedding(T(Geometry.radius(grid_geometry(grid))))
-end
+@inline _embedding_for(geo::Geometry.AbstractSphericalGeometry{T}, ncoords::Integer) where {T} =
+    ncoords ≥ 3 ? ChordEmbedding() : ArcEmbedding(T(Geometry.radius(geo)))
 
-@inline embedding_of(grid::AbstractGrid{G}) where {G<:Geometry.AbstractEllipsoidalGeometry} =
-    ChordEmbedding()
+# Geodetic coordinates always: the ECEF chord is at most the geodesic, so a chord query over-returns
+# and the caller's own distance gate trims it. Height enters the position, never the radius.
+@inline _embedding_for(::Geometry.AbstractEllipsoidalGeometry, ::Integer) = ChordEmbedding()
 
 """
     embedded_radius(embedding, r) -> T
@@ -186,30 +186,17 @@ function embedded_points(
     return pts, ng, embedding_of(grid)
 end
 
-# `spherical_to_cartesian` rather than the formula written again: at `(λ, φ, r)` the metric IS the
-# Euclidean chord of this embedding. Longitude needs no ghost images — `λ` and `λ+2π` embed together.
+# `Geometry.embed` rather than either formula written again, so a cell centre reaches the index through
+# the same map as a query point. Longitude needs no ghost images — `λ` and `λ+2π` embed together.
 function embedded_points(
     grid::AbstractGrid{G,T}; ghosts::Bool = true,
-) where {G<:Geometry.AbstractSphericalGeometry,T}
+) where {G<:Geometry.AbstractLonLatGeometry,T}
     geo = grid_geometry(grid)
     raw, D = _grid_points(grid)
     pts = Matrix{T}(undef, 3, size(raw, 2))
     @inbounds for k in axes(raw, 2)
-        c = Geometry.spherical_to_cartesian(geo, ntuple(d -> raw[d, k], D))
-        pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
-    end
-    return pts, 1, embedding_of(grid)
-end
-
-function embedded_points(
-    grid::AbstractGrid{G,T}; ghosts::Bool = true,
-) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
-    geo = grid_geometry(grid)
-    raw, D = _grid_points(grid)
-    pts = Matrix{T}(undef, 3, size(raw, 2))
-    @inbounds for k in axes(raw, 2)
-        c = Geometry.geodetic_to_cartesian(geo, ntuple(d -> raw[d, k], D))
-        pts[1, k] = c.x; pts[2, k] = c.y; pts[3, k] = c.z
+        c = Geometry.embed(geo, ntuple(d -> raw[d, k], D))
+        pts[1, k] = c[1]; pts[2, k] = c[2]; pts[3, k] = c[3]
     end
     return pts, 1, embedding_of(grid)
 end
