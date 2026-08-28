@@ -290,7 +290,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         [:spherical_axes!, :spherical_points!, :spherical_quadrature!, :latitude_weights!,
          :icosahedral_vertices!, :cubed_sphere_points!, :yin_yang_panels!],
         # take a function and run it; cost is the body's, not theirs
-        [:run_chunks, :run_indices, :map_chunks],
+        [:run_chunks, :run_indices, :map_chunks, :reduce_indices, :exclusive_scan!],
         # builds a NamedTuple from names given at runtime, so the caller chooses the cost
         [:build_point],
     )))

@@ -97,6 +97,20 @@ end
 
 @inline _min_step(mt::MetricTopology, d::Int) = @inbounds mt.steps[d]
 
+"""
+    _buffered_candidates(index) -> Bool
+
+Whether an index has to materialize a candidate list to be queried.
+
+A cell list folds its bins directly and a bare scan has nothing to buffer, so both answer a query with
+no per-task storage — which is what lets a sweep over them run per index, on a device included. A tree
+deduplicates the periodic images it searches over, so it needs a buffer and its sweep needs chunks to
+give each task one.
+"""
+@inline _buffered_candidates(::Nothing) = false
+@inline _buffered_candidates(::Grids.CellListIndex) = false
+@inline _buffered_candidates(_index) = true
+
 # An index built over the active region alone is a superset of the ACTIVE ball. A query wanting masked
 # cells needs one built over every cell, and gets an error instead of a short answer.
 @inline _check_index_covers(_index, _active_only::Bool) = nothing

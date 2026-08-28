@@ -44,8 +44,13 @@ run_chunks(f::F, n::Integer, ::Nothing) where {F} = (n > 0 && f(1:Int(n)); nothi
 
 Apply `f(range)` over a partition of `1:n` and collect one result per chunk, for a bulk operation that
 reduces rather than writes. The caller combines them, so `f` needs no lock and the combining order is the
-caller's to fix — which is what keeps a threaded reduction bit-identical to a serial one when the
-operation is associative but not commutative.
+caller's to fix — which is what keeps a threaded reduction independent of scheduling when the operation
+is associative but not commutative.
+
+`f` is called at least once, on an empty range when `n == 0`: a reduction has to produce a value, where
+[`run_chunks`](@ref) has nothing to write and so does not call `f` at all. Being callable on an empty
+range is therefore part of the contract, and it is also how the result's element type is known before the
+chunks run.
 """
 map_chunks(f::F, n::Integer, ::Nothing) where {F} = [f(1:Int(n))]
 
@@ -79,6 +84,53 @@ function run_indices(f::F, n::Integer, ::Nothing) where {F}
         f(i)
     end
     return nothing
+end
+
+"""
+    reduce_indices(f, op, init, n, backend)
+
+Reduce `f(i)` over `i in 1:n` with `op`, under the execution policy `backend` names.
+
+The per-index counterpart of [`_reduce_chunks`](@ref), and the reduction a device can run: `f` reads
+index `i` and nothing else, so the work splits without a chunk body. Every integral, norm and count over
+a grid goes through this.
+
+`init` must be `op`'s identity. It seeds each partial as well as the whole, which is what lets the
+partials be combined in any grouping — and the grouping does depend on the partition, so the result is
+deterministic and independent of scheduling rather than equal to the serial fold bit for bit. `op` must
+be associative.
+"""
+function reduce_indices(f::F, op::O, init, n::Integer, ::Nothing) where {F,O}
+    acc = init
+    @inbounds for i in 1:Int(n)
+        acc = op(acc, f(i))
+    end
+    return acc
+end
+
+"""
+    exclusive_scan!(out, counts, backend = nothing; init = 1) -> out
+
+Write the exclusive prefix sums of `counts` into `out`, which is one element longer: `out[1] = init` and
+`out[i+1] = out[i] + counts[i]`.
+
+This is a CSR offset array — `out[k]` is where row `k` starts and `out[end] - init` is the total — which
+is what every connectivity builder here needs between its counting pass and its filling pass. Under a
+threaded `backend` it is two passes over `counts` plus a serial scan of one sum per chunk.
+"""
+function exclusive_scan!(
+    out::AbstractVector, counts::AbstractVector, ::Nothing = nothing; init::Integer = 1,
+)
+    length(out) == length(counts) + 1 || throw(DimensionMismatch(
+        "out must be one longer than counts: got $(length(out)) and $(length(counts))",
+    ))
+    acc = convert(eltype(out), init)
+    @inbounds out[1] = acc
+    @inbounds for i in eachindex(counts)
+        acc += counts[i]
+        out[i + 1] = acc
+    end
+    return out
 end
 
 end # module Execution

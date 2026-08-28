@@ -101,11 +101,7 @@ function build_connectivity(
     Execution.run_indices(n, backend) do k
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
-    ptr = Vector{Int}(undef, n + 1)
-    ptr[1] = 1
-    @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + deg[i]
-    end
+    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, backend)
     nbrs = Vector{Int}(undef, ptr[end] - 1)
     Execution.run_indices(n, backend) do k
         @inbounds begin

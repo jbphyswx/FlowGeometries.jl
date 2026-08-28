@@ -65,11 +65,7 @@ function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = n
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
         end
     end
-    ptr = Vector{Int}(undef, n + 1)
-    @inbounds ptr[1] = 1
-    @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + deg[i]
-    end
+    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, backend)
     nbrs = Vector{Int}(undef, ptr[end] - 1)
     Execution.run_chunks(n, backend) do rng
         buf = Vector{Int}(undef, maxdeg)

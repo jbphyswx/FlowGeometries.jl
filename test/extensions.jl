@@ -42,6 +42,64 @@ Test.@testset "Threading is opt-in and changes no result" begin
     FG.Execution.run_chunks(17, nothing) do r; push!(seen, r); end
     Test.@test seen == [1:17]
 
+    # The empty-input contract, which the two shapes answer differently on purpose: a write loop has
+    # nothing to write, and a reduction still has to produce a value.
+    ran = Ref(0)
+    FG.Execution.run_chunks(0, nothing) do r; ran[] += 1; end
+    Test.@test ran[] == 0
+    Test.@test FG.Execution.map_chunks(r -> length(r), 0, nothing) == [0]
+    Test.@test FG.Execution.map_chunks(r -> length(r), 0, CB.ThreadedBackend()) == [0]
+
+    # A threaded reduction collects into a CONCRETE vector: the partials are the reduction's own
+    # values, and boxing each of them is paid on a path whose serial form allocates nothing.
+    let out = FG.Execution.map_chunks(r -> sum(r), 1000, CB.ThreadedBackend())
+        Test.@test isconcretetype(eltype(out))
+        Test.@test sum(out) == sum(1:1000)
+    end
+
+    # `exclusive_scan!` is exact, so the threaded form has to equal the serial one entry for entry.
+    for n in (0, 1, 7, 1000, 65_536)
+        counts = rand(0:9, n)
+        want = FG.Execution.exclusive_scan!(Vector{Int}(undef, n + 1), counts)
+        for b in (CB.SerialBackend(), CB.ThreadedBackend())
+            Test.@test FG.Execution.exclusive_scan!(Vector{Int}(undef, n + 1), counts, b) == want
+        end
+    end
+
+    # …and so is an integer reduction, on every policy including the device one.
+    for n in (0, 1, 13, 10_000)
+        want = sum(i * i for i in 1:n; init = 0)
+        for b in (nothing, CB.SerialBackend(), CB.ThreadedBackend(), KernelAbstractions.CPU())
+            Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, b) == want
+        end
+    end
+
+    # A CSR build goes through the scan, so it must stay bit-identical under threading.
+    let sph = FG.Geometry.SphericalGeometry(), cart = FG.Geometry.CartesianGeometry()
+        for gg in (FG.Grids.StructuredGrid(cart, 0.0:1.0:9.0, 0.0:1.0:9.0),
+                   FG.Grids.HEALPixGrid(sph, 4), FG.Grids.CubedSphereGrid(sph, 4),
+                   FG.Grids.IcosahedralGrid(sph, 3),
+                   FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(8)))
+            a = FG.Connectivity.build_connectivity(gg)
+            b = FG.Connectivity.build_connectivity(gg; backend = CB.ThreadedBackend())
+            Test.@test a.ptr == b.ptr
+            Test.@test a.nbrs == b.nbrs
+        end
+        hp = FG.SphericalSampling.HEALPixSampling(4)
+        Test.@test FG.Connectivity.build_connectivity(hp).nbrs ==
+                   FG.Connectivity.build_connectivity(hp; backend = CB.ThreadedBackend()).nbrs
+    end
+
+    # A grid reduction runs per index where the candidates need no buffer, so it reaches a device too.
+    let gs = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), 0.0:1.0:19.0, 0.0:1.0:19.0)
+        base = FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, gs; ball = 2.5)
+        Test.@test base > 0
+        for b in (CB.SerialBackend(), CB.ThreadedBackend(), KernelAbstractions.CPU())
+            Test.@test FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, gs;
+                                                        ball = 2.5, backend = b) == base
+        end
+    end
+
     # Every threaded kernel must be bit-identical to serial, not merely close.
     geo = FG.Geometry.SphericalGeometry()
     thr = CB.ThreadedBackend()

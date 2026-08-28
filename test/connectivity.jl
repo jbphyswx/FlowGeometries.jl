@@ -1633,3 +1633,51 @@ Test.@testset "An index records its mask policy, and a sweep passes its own" beg
         Test.@test C.default_sweep_topology(g, 1.5e6, true).index isa GD.CellListIndex
     end
 end
+
+Test.@testset "A stencil's count and reach are properties of its shape" begin
+    S = FG.Stencils
+    # Both are generated for the built-in shapes, so they must still equal the offset walk they replace
+    # — on every shape, at every dimension.
+    for N in (1, 2, 3, 4)
+        for st in (S.Axial(1), S.Axial(3), S.VonNeumann(2), S.Moore(1), S.Moore(2),
+                   S.Diagonal(1), S.Anisotropic((3, 1, 2, 1)[1:N]))
+            offs = S.offsets(st, Val(N))
+            Test.@test S.nstencil(st, Val(N)) == length(offs)
+            Test.@test S.reach(st, Val(N)) == ntuple(d -> maximum(abs(o[d]) for o in offs), N)
+        end
+        # A caller's own shape answers by the same generic route.
+        Test.@test S.nstencil(Upwind(2), Val(N)) == length(S.offsets(Upwind(2), Val(N)))
+        Test.@test S.reach(Upwind(2), Val(N)) ==
+                   ntuple(d -> maximum(abs(o[d]) for o in S.offsets(Upwind(2), Val(N))), N)
+    end
+    # The widest built-in: the answers are literals, so neither needs the 2400-offset tuple.
+    Test.@test S.nstencil(S.Moore(3), Val(4)) == 2400
+    Test.@test S.reach(S.Moore(3), Val(4)) == (3, 3, 3, 3)
+    Test.@test (Test.@inferred S.reach(S.Moore(3), Val(4))) isa NTuple{4,Int}
+end
+
+Test.@testset "A prefix scan and an index reduction are execution primitives" begin
+    E = FG.Execution
+    # The scan is what every CSR builder uses between counting and filling, so it has to be exact.
+    for n in (0, 1, 7, 1000, 65_536)
+        counts = rand(0:9, n)
+        want = Vector{Int}(undef, n + 1)
+        want[1] = 1
+        for i in 1:n
+            want[i + 1] = want[i] + counts[i]
+        end
+        Test.@test E.exclusive_scan!(Vector{Int}(undef, n + 1), counts) == want
+        Test.@test E.exclusive_scan!(Vector{Int}(undef, n + 1), counts)[end] - 1 == sum(counts)
+        # `init` moves the whole array, which is what a caller indexing from zero needs.
+        Test.@test E.exclusive_scan!(Vector{Int}(undef, n + 1), counts; init = 0) == want .- 1
+    end
+    Test.@test_throws DimensionMismatch E.exclusive_scan!(Vector{Int}(undef, 3), [1, 2, 3])
+
+    # The reduction is the per-index form, so it is the one a device can run.
+    for n in (0, 1, 13, 10_000)
+        Test.@test E.reduce_indices(i -> i * i, +, 0, n, nothing) ==
+                   sum(i * i for i in 1:n; init = 0)
+    end
+    # `op` is applied left to right from `init`, so a non-commutative one is still well defined.
+    Test.@test E.reduce_indices(string, *, "", 4, nothing) == "1234"
+end

@@ -112,11 +112,7 @@ function _build_connectivity_topology(
             end
         end
     end
-    ptr = Vector{Int}(undef, n + 1)
-    ptr[1] = 1
-    @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + deg[i]
-    end
+    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, backend)
     nbrs = Vector{Int}(undef, ptr[end] - 1)
     Execution.run_indices(n, backend) do k
         @inbounds begin
@@ -158,8 +154,27 @@ default_sweep_topology(grid, ball, active_only::Bool, ::Grids.IndexedCandidates)
     MetricTopology(grid; index = Grids.cell_list(grid; ball = _ball_radius(ball),
                                                  active_only = active_only))
 
+# One cell pass. Which form it takes is [`_buffered_candidates`](@ref) — per index where the candidates
+# need no storage, per chunk where each task needs its own buffer — and the choice folds away, being a
+# property of the topology's type. `body(k, scratch)` handles cell `k`.
+@inline function _within_pass(body::F, n::Int, topology::MetricTopology, backend) where {F}
+    if _buffered_candidates(topology.index)
+        Execution.run_chunks(n, backend) do rng
+            s = ball_scratch()
+            @inbounds for k in rng
+                body(k, s)
+            end
+        end
+    else
+        Execution.run_indices(n, backend) do k
+            body(k, nothing)
+        end
+    end
+    return nothing
+end
+
 # The same count → prefix-scan → fill shape as the stencil builder: both cell passes write only slots
-# their own cell owns, so they chunk without coordination.
+# their own cell owns, so they parallelize without coordination.
 #
 # One body for every layout. How a cell is named is `Grids.cell_address`, what bounds the candidates is
 # the topology, and `_within_scan` takes the same arguments on every layout — `scratch` reaches a
@@ -171,27 +186,19 @@ function build_connectivity_within(
     cs = Grids.cells(grid)
     n = length(cs)
     deg = zeros(Int, n)
-    # One candidate buffer per chunk, since the topology is shared read-only across them.
-    Execution.run_chunks(n, backend) do rng
-        s = ball_scratch()
-        @inbounds for k in rng
-            deg[k] = _within_scan(nothing, grid, Grids.cell_at(grid, cs[k]), ball,
-                                  active_only, topology, s)
-        end
+    _within_pass(n, topology, backend) do k, s
+        @inbounds deg[k] = _within_scan(nothing, grid, Grids.cell_at(grid, cs[k]), ball,
+                                        active_only, topology, s)
+        return nothing
     end
-    ptr = Vector{Int}(undef, n + 1)
-    ptr[1] = 1
-    @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + deg[i]
-    end
+    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, backend)
     nbrs = Vector{Int}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend) do rng
-        s = ball_scratch()
-        @inbounds for k in rng
-            deg[k] == 0 && continue
+    _within_pass(n, topology, backend) do k, s
+        @inbounds if deg[k] != 0
             _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid, Grids.cell_at(grid, cs[k]),
                          ball, active_only, topology, s)
         end
+        return nothing
     end
     return csr_connectivity(nbrs, ptr; validate = false)
 end

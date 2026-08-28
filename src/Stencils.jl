@@ -274,6 +274,10 @@ How many offsets the stencil has in `N` dimensions — the buffer length a `neig
 """
 @inline nstencil(s::AbstractStencil, ::Val{N}) where {N} = length(offsets(s, Val(N)))
 
+# Both counts below are properties of the SHAPE, so for the shapes defined here they are literals: the
+# offset list exists at generation time, and neither answer needs it to reach inference as a value.
+@generated nstencil(s::_BuiltinStencil, ::Val{N}) where {N} = length(_offset_list(s, N))
+
 """
     reach(stencil, Val(N)) -> NTuple{N,Int}
 
@@ -283,6 +287,12 @@ halo width a traversal must leave, and the window a distance query has to scan.
 @inline function reach(s::AbstractStencil, ::Val{N}) where {N}
     offs = offsets(s, Val(N))
     return ntuple(d -> maximum(o -> abs(o[d]), offs), Val(N))
+end
+
+@generated function reach(s::_BuiltinStencil, ::Val{N}) where {N}
+    offs = _offset_list(s, N)
+    r = ntuple(d -> maximum(abs(o[d]) for o in offs), N)
+    return :($(r))
 end
 
 # ---------------------------------------------------------------------------

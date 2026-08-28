@@ -30,8 +30,12 @@ cells — above all the spatial index, which is what makes the sweep `O(n log n)
 curvilinear or node grid. Writing the loop by hand gets the topology for free, since that is `O(1)`, but
 not the index; measured at 9× on a 9 216-cell curvilinear grid.
 
-`op` must be associative; chunks are reduced in index order, so a threaded `backend` gives the same
-answer as the serial default rather than one that depends on scheduling.
+`op` must be associative and `init` its identity; partials are combined in cell order, so the answer is
+deterministic and independent of scheduling rather than dependent on how the work was split.
+
+Which form the reduction takes is [`_buffered_candidates`](@ref), as for [`foreach_within`](@ref): where
+the candidates need no per-task buffer this is [`Execution.reduce_indices`](@ref), so a grid integral runs
+wherever that does — a device included.
 """
 function mapreduce_within(
     f::F, op::O, init, grid::Grids.AbstractGrid;
@@ -42,16 +46,26 @@ function mapreduce_within(
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
     n = length(cells)
-    return Execution._reduce_chunks(op, n, backend) do rng
-        acc = init
-        s = ball_scratch()
-        @inbounds for t in rng
-            I = _sweep_index(grid, cells[t])
-            acc = _route_fold(acc, reach, grid, I, ball, images, active_only, self, topology, s) do a, J, d
-                return op(a, f(I, J, d))
+    if _buffered_candidates(topology.index)
+        return Execution._reduce_chunks(op, n, backend) do rng
+            acc = init
+            s = ball_scratch()
+            @inbounds for t in rng
+                I = _sweep_index(grid, cells[t])
+                acc = _route_fold(acc, reach, grid, I, ball, images, active_only, self,
+                                  topology, s) do a, J, d
+                    return op(a, f(I, J, d))
+                end
             end
+            return acc
         end
-        return acc
+    end
+    return Execution.reduce_indices(op, init, n, backend) do t
+        I = _sweep_index(grid, @inbounds cells[t])
+        return _route_fold(init, reach, grid, I, ball, images, active_only, self,
+                           topology, nothing) do a, J, d
+            return op(a, f(I, J, d))
+        end
     end
 end
 
@@ -76,12 +90,12 @@ function foreach_within(
     return nothing
 end
 
-# Without an index there is no candidate buffer to own, so the sweep is one body per cell and runs
-# wherever `run_indices` runs — a device included. With one, each task needs its own buffer, which only
-# the chunked form can give it.
+# Which form a sweep takes is [`_buffered_candidates`](@ref): a separable window and a cell list both
+# enumerate without storage, so the sweep is one body per cell and runs wherever `run_indices` runs — a
+# device included. A tree needs a buffer per task, which only the chunked form can give it.
 function _sweep_cells_with(
     f::F, grid, cells, ball, images, active_only, self,
-    topology::MetricTopology{N,T,Nothing}, reach, backend,
+    topology::MetricTopology{N,T,<:Union{Nothing,Grids.CellListIndex}}, reach, backend,
 ) where {F,N,T}
     Execution.run_indices(length(cells), backend) do t
         I = _sweep_index(grid, @inbounds cells[t])

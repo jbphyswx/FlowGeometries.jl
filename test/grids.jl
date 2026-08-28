@@ -621,6 +621,7 @@ end
 
 Test.@testset "Mask topology: interior, boundary, components and holes" begin
     C = FG.Connectivity
+    S = FG.Stencils
     geo = FG.Geometry.CartesianGeometry()
     m = trues(9, 9)
     m[4:6, 4:6] .= false      # an enclosed block
@@ -631,11 +632,21 @@ Test.@testset "Mask topology: interior, boundary, components and holes" begin
     Test.@test ncomp == 1                       # the active region is one piece
     Test.@test all(labels[ci] == 0 for ci in CartesianIndices(m) if !m[ci])
     Test.@test all(labels[ci] == 1 for ci in CartesianIndices(m) if m[ci])
-    # Interior and boundary partition the active cells.
+    # Interior and boundary partition the active cells, on every stencil and under any backend.
     int = C.interior(g)
     bnd = C.boundary_cells(g)
     Test.@test count(int) + count(bnd) == count(m)
     Test.@test !any(int .& bnd)
+    for st in (S.Axial(1), S.Moore(1), S.VonNeumann(2))
+        i2 = C.interior(g; stencil = st)
+        b2 = C.boundary_cells(g; stencil = st)
+        Test.@test count(i2) + count(b2) == count(m)
+        Test.@test !any(i2 .& b2)
+        # Every active cell is one or the other, and no inactive cell is either.
+        Test.@test all(m[ci] == (i2[ci] | b2[ci]) for ci in CartesianIndices(m))
+        # `boundary_cells` is one pass now; it must still be exactly the active non-interior cells.
+        Test.@test b2 == [m[ci] & !i2[ci] for ci in CartesianIndices(m)]
+    end
     Test.@test all(!int[ci] for ci in CartesianIndices(m) if !m[ci])
     Test.@test !int[1, 5]                       # a domain edge is not interior
     Test.@test int[3, 3]
