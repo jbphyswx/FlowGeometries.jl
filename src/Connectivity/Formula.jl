@@ -191,6 +191,42 @@ is the standard Yin–Yang discrete topology.
     return (ids, m)
 end
 
+# ---- Icosahedral geodesic ---------------------------------------------------
+
+# Six lattice directions. The twelve base corners reach five, which is what makes them pentagons.
+@inline Grids.max_neighbors(::Grids.IcosahedralGrid) = 6
+
+const _ICO_LATTICE_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1))
+
+"""
+    Grids.formula_neighbors(grid::IcosahedralGrid, id)
+
+A geodesic vertex's neighbours: the six barycentric lattice steps, taken on every face the vertex sits
+on and resolved back to global ids.
+
+A vertex on a macro-edge or at a corner sits on several faces, and the steps along a shared edge land on
+the same vertex from each of them, so the duplicates are dropped. What survives is five neighbours at a
+corner and six everywhere else.
+"""
+@inline function Grids.formula_neighbors(grid::Grids.IcosahedralGrid, id::Integer)
+    ν = Grids.frequency(grid)
+    k = Int(id)
+    occ, nocc = SphericalSampling._ico_occurrences(k, ν)
+    ids = ntuple(_ -> 0, Val(6))
+    n = 0
+    @inbounds for t in 1:nocc
+        fc, i, j = occ[t]
+        for s in 1:6
+            δ = _ICO_LATTICE_STEPS[s]
+            a = i + δ[1]
+            b = j + δ[2]
+            (a ≥ 0 && b ≥ 0 && a + b ≤ ν) || continue
+            ids, n = _push_unique(ids, n, k, SphericalSampling._ico_lattice_id(fc, a, b, ν))
+        end
+    end
+    return (ids, n)
+end
+
 # ---- Ring grids -------------------------------------------------------------
 
 # Two along the ring and two on each adjacent one.

@@ -821,6 +821,7 @@ Test.@testset "The per-point kernels outside Grids allocate nothing either" begi
         ("rotate",                   _alloc(GE.rotate, rot, 0.5, 0.6)),
         ("unrotate",                 _alloc(GE.unrotate, rot, 0.5, 0.6)),
         ("similar_geometry",         _alloc(GE.similar_geometry, Float32, sph)),
+        ("similar_rotation",         _alloc(GE.similar_rotation, Float32, rot)),
         ("float_type",               _alloc(GE.float_type, sph)),
         ("Axes.spacing_trait",       _alloc(A.spacing_trait, u)),
         ("Axes.wrap_sign",           _alloc(A.wrap_sign, v)),

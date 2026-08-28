@@ -427,6 +427,172 @@ end
     return 12 + (e - 1) * (ν - 1) + s
 end
 
+# ---- The numbering read backwards ------------------------------------------
+#
+# `_ico_node_id` maps a face's barycentric lattice node to a global id. Going the other way is what a
+# layout needs: a vertex id alone has to give its position, its neighbours and its dual area, none of
+# which may build the mesh. The numbering is by topology, so the inverse is arithmetic — and a vertex
+# sits on 1, 2 or 5 faces depending on which entity owns it, so it has that many lattice positions.
+
+"""
+    _ico_lattice_id(f, i, j, ν) -> Int
+
+[`_ico_node_id`](@ref) with the load-time constants supplied: the global id of face `f`'s barycentric
+lattice node `(i, j)`.
+"""
+@inline _ico_lattice_id(f::Int, i::Int, j::Int, ν::Int) = _ico_node_id(
+    f, @inbounds(_ICOSAHEDRON_FACES[f]), i, j, ν, _ICOSAHEDRON_EDGE_INDEX,
+    ((ν - 1) * (ν - 2)) ÷ 2, 12 + 30 * (ν - 1),
+)
+
+"""
+    _ico_decode(id, ν) -> (kind, a, b)
+
+Which entity owns vertex `id`: `kind = 1` a corner (`a` the corner, `b` unused), `2` a macro-edge
+interior (`a` the edge, `b` its position from the edge's low corner), `3` a face interior (`a` the face,
+`b` its position in the face's own lattice walk).
+"""
+@inline function _ico_decode(id::Int, ν::Int)
+    id ≤ 12 && return (1, id, 0)
+    nedge = 30 * (ν - 1)
+    if id ≤ 12 + nedge
+        q, r = divrem(id - 13, ν - 1)
+        return (2, q + 1, r + 1)
+    end
+    nint = ((ν - 1) * (ν - 2)) ÷ 2
+    q, r = divrem(id - 13 - nedge, nint)
+    return (3, q + 1, r + 1)
+end
+
+"""
+    _ico_face_ij(k, ν) -> (i, j)
+
+The face-interior lattice node whose position in the walk `for i in 1:(ν-1), j in 1:(ν-1-i)` is `k`.
+
+Row `i` of the walk holds `ν-1-i` nodes, so the nodes before it number
+`S(i-1) = (i-1)(ν-1) - (i-1)i/2`. Then `m = i-1` is the largest value with `S(m) < k`, and
+`j = k - S(m)`. `S(m) < k` rearranges to `m² - m(2ν-3) + 2k > 0`, so the smaller root of that quadratic
+brackets `m`; its floor is taken and then corrected either way, which makes the answer exact rather than
+a bet on the square root's last bit.
+"""
+@inline function _ico_face_ij(k::Int, ν::Int)
+    S(m) = m * (ν - 1) - (m * (m + 1)) ÷ 2
+    b = 2 * ν - 3
+    m = Int(floor((b - sqrt(max(0.0, Float64(b * b - 8 * k)))) / 2))
+    m = max(0, min(m, ν - 2))
+    while m > 0 && S(m) ≥ k
+        m -= 1
+    end
+    while m < ν - 2 && S(m + 1) < k
+        m += 1
+    end
+    return (m + 1, k - S(m))
+end
+
+"""
+    _ico_occurrences(id, ν) -> (NTuple{5,NTuple{3,Int}}, n)
+
+Every `(face, i, j)` lattice position vertex `id` occupies, in the first `n` entries. A face interior
+has one, a macro-edge interior two, a corner five — which is why a geodesic sphere has twelve
+pentagons.
+"""
+@inline function _ico_occurrences(id::Int, ν::Int)
+    kind, a, b = _ico_decode(id, ν)
+    out = ntuple(_ -> (0, 0, 0), Val(5))
+    if kind == 3
+        i, j = _ico_face_ij(b, ν)
+        return (Base.setindex(out, (a, i, j), 1), 1)
+    elseif kind == 1
+        n = 0
+        @inbounds for (f, slot) in _ICO_CORNER_FACES[a]
+            n += 1
+            ij = slot == 1 ? (0, 0) : (slot == 2 ? (ν, 0) : (0, ν))
+            out = Base.setindex(out, (f, ij[1], ij[2]), n)
+        end
+        return (out, n)
+    end
+    lo, _ = @inbounds _ICOSAHEDRON_MACRO_EDGES[a]
+    n = 0
+    @inbounds for (f, slot) in _ICO_EDGE_FACES[a]
+        face = _ICOSAHEDRON_FACES[f]
+        u = slot == 1 ? face[1] : (slot == 2 ? face[1] : face[2])
+        t = (u == lo) ? b : (ν - b)          # position from this side's own first corner
+        ij = slot == 1 ? (t, 0) : (slot == 2 ? (0, t) : (ν - t, t))
+        n += 1
+        out = Base.setindex(out, (f, ij[1], ij[2]), n)
+    end
+    return (out, n)
+end
+
+"""
+    _ico_vertex_dir(::Type{T}, id, ν) -> NTuple{3,T}
+
+Vertex `id`'s unit direction, from the entity that owns it: a base corner, a normalized point along a
+macro-edge, or a normalized barycentric combination on a face. The same expressions
+[`icosahedral_vertices!`](@ref) writes, one vertex at a time.
+"""
+@inline function _ico_vertex_dir(::Type{T}, id::Int, ν::Int) where {T<:AbstractFloat}
+    base = _icosahedron_base(T)
+    kind, a, b = _ico_decode(id, ν)
+    if kind == 1
+        return @inbounds base[a]
+    elseif kind == 2
+        lo, hi = @inbounds _ICOSAHEDRON_MACRO_EDGES[a]
+        P = @inbounds base[lo]
+        Q = @inbounds base[hi]
+        α = T(ν - b) / T(ν)
+        β = T(b) / T(ν)
+        return _ico_norm3((α * P[1] + β * Q[1], α * P[2] + β * Q[2], α * P[3] + β * Q[3]))
+    end
+    i, j = _ico_face_ij(b, ν)
+    ia, ib, ic = @inbounds _ICOSAHEDRON_FACES[a]
+    A = @inbounds base[ia]
+    B = @inbounds base[ib]
+    C = @inbounds base[ic]
+    w = T(ν - i - j) / T(ν)
+    u = T(i) / T(ν)
+    v = T(j) / T(ν)
+    return _ico_norm3((w * A[1] + u * B[1] + v * C[1],
+                       w * A[2] + u * B[2] + v * C[2],
+                       w * A[3] + u * B[3] + v * C[3]))
+end
+
+@inline _ico_norm3(p::NTuple{3,T}) where {T} =
+    (r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3]); (p[1] / r, p[2] / r, p[3] / r))
+
+"""
+    _ico_fold_incident_triangles(f, acc, i, j, face, ν) -> acc
+
+Thread `acc = f(acc, other1, other2)` over the triangles of one face that contain lattice node
+`(i, j)`, `other1` and `other2` being the other two vertices' ids.
+
+A triangle belongs to exactly one face, so folding over each of a vertex's occurrences visits each
+incident triangle once. The two lattice orientations give up to three triangles each.
+"""
+@inline function _ico_fold_incident_triangles(
+    f::F, acc, fc::Int, i::Int, j::Int, ν::Int,
+) where {F}
+    idof(a, b) = _ico_lattice_id(fc, a, b, ν)
+    # Upward triangles {(a,b), (a+1,b), (a,b+1)} whose base is at, below or left of `(i, j)`.
+    for (a, b) in ((i, j), (i - 1, j), (i, j - 1))
+        (a ≥ 0 && b ≥ 0 && a + b < ν) || continue
+        v0 = idof(a, b); v1 = idof(a + 1, b); v2 = idof(a, b + 1)
+        o1, o2 = _ico_others(v0, v1, v2, idof(i, j))
+        acc = f(acc, o1, o2)
+    end
+    # Downward triangles {(a+1,b), (a,b+1), (a+1,b+1)}.
+    for (a, b) in ((i - 1, j), (i, j - 1), (i - 1, j - 1))
+        (a ≥ 0 && b ≥ 0 && a + b < ν - 1) || continue
+        v0 = idof(a + 1, b); v1 = idof(a, b + 1); v2 = idof(a + 1, b + 1)
+        o1, o2 = _ico_others(v0, v1, v2, idof(i, j))
+        acc = f(acc, o1, o2)
+    end
+    return acc
+end
+
+@inline _ico_others(v0::Int, v1::Int, v2::Int, self::Int) =
+    v0 == self ? (v1, v2) : (v1 == self ? (v0, v2) : (v0, v1))
+
 """
     _put_lonlat!(λ, φ, v, p, T)
 
@@ -538,6 +704,26 @@ const _ICOSAHEDRON_EDGE_INDEX = let m = zeros(Int, 12, 12)
         m[lo, hi] = e
     end
     m
+end
+
+# Which faces meet at each corner and along each macro-edge, and where the entity sits in the face's
+# own `(A, B, C)`. Both are properties of the base icosahedron, so they are resolved once at load.
+const _ICO_CORNER_FACES = let t = ntuple(_ -> NTuple{2,Int}[], 12)
+    for (f, face) in enumerate(_ICOSAHEDRON_FACES), (slot, v) in enumerate(face)
+        push!(t[v], (f, slot))
+    end
+    Tuple(map(Tuple, t))
+end
+
+# Slot 1 = the (A, B) side, 2 = (A, C), 3 = (B, C).
+const _ICO_EDGE_FACES = let t = [NTuple{2,Int}[] for _ in 1:30]
+    for (f, (a, b, c)) in enumerate(_ICOSAHEDRON_FACES)
+        for (slot, (u, v)) in enumerate(((a, b), (a, c), (b, c)))
+            lo, hi = minmax(u, v)
+            push!(t[_ICOSAHEDRON_EDGE_INDEX[lo, hi]], (f, slot))
+        end
+    end
+    Tuple(map(Tuple, t))
 end
 
 function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, s::IcosahedralSampling) where {T<:AbstractFloat}

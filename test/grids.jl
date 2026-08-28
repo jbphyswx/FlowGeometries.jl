@@ -89,7 +89,8 @@ Test.@testset "Coordinate names follow the geometry, never stand in for each oth
     nx, ny = 4, 3
     xm = [Float64(i) for i in 1:nx, j in 1:ny]
     ym = [Float64(j) for i in 1:nx, j in 1:ny]
-    cv = FG.Grids.CurvilinearGrid(sgeom, deg2rad.(xm), deg2rad.(ym), trues(nx, ny))
+    cv = FG.Grids.CurvilinearGrid(sgeom, deg2rad.(xm), deg2rad.(ym), trues(nx, ny);
+                                  keep_corners = true)
     Test.@test FG.Grids.coordinate_names(cv) == (:λ, :φ)
     Test.@test cv.λ === FG.Grids.coordinates(cv, 1)
     Test.@test_throws FieldError cv.x
@@ -462,7 +463,7 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     # 2-D still derives its corner areas: a uniform 1.0 × 0.5 mesh has exactly that cell area.
     X2 = [x for x in 0.0:1.0:4.0, _ in 0.0:0.5:2.0]
     Y2 = [y for _ in 0.0:1.0:4.0, y in 0.0:0.5:2.0]
-    g2 = GR.CurvilinearGrid(geo, X2, Y2, trues(5, 5))
+    g2 = GR.CurvilinearGrid(geo, X2, Y2, trues(5, 5); keep_corners = true)
     Test.@test all(≈(0.5), GR.measure(g2))
     Test.@test GR.coords(g2, 2, 3) == (x = 1.0, y = 1.0)
     # The reconstructed corners sit exactly a half-cell outside the outermost centres.
@@ -475,7 +476,7 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     # quietly producing a number from a 2-D formula.
     Test.@test_throws ArgumentError GR.CurvilinearGrid(geo, X3, Y3, Z3, trues(4, 3, 2))
     vol = fill(1.0 * 2.0 * 0.5, 4, 3, 2)
-    g3 = GR.CurvilinearGrid(geo, X3, Y3, Z3, vol, trues(4, 3, 2))
+    g3 = GR.CurvilinearGrid(geo, X3, Y3, Z3, vol, trues(4, 3, 2); keep_corners = true)
     Test.@test size(g3) == (4, 3, 2) && ndims(g3) == 3
     Test.@test GR.coordinate_names(g3) == (:x, :y, :z)
     Test.@test GR.coords(g3, 2, 3, 2) == (x = 1.0, y = 4.0, z = 0.5)
@@ -1085,5 +1086,173 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
             # An index over a layout that stores nothing must not re-densify it into one.
             Test.@test Base.summarysize(g) < 1000
         end
+    end
+end
+
+Test.@testset "Cell vertices are kept when asked for, and the measure is the same either way" begin
+    GR = FG.Grids
+    geo = FG.Geometry.CartesianGeometry()
+    n = 60
+    X = [1.0i + 0.1sin(0.3j) for i in 1:n, j in 1:n]
+    Y = [1.0j + 0.1cos(0.2i) for i in 1:n, j in 1:n]
+    m = trues(n, n)
+
+    lean = GR.CurvilinearGrid(geo, X, Y, m)
+    full = GR.CurvilinearGrid(geo, X, Y, m; keep_corners = true)
+
+    # The vertices are input to the area kernel, so the measure is identical whether or not they are
+    # kept — bit for bit, since it is the same kernel on the same arrays.
+    Test.@test GR.measure(lean) == GR.measure(full)
+    Test.@test all(isequal(GR.measure(lean)[i], GR.measure(full)[i]) for i in eachindex(m))
+
+    # Keeping them costs two arrays one larger in each direction; dropping them is about a third off.
+    Test.@test !GR.has_corners(lean)
+    Test.@test GR.has_corners(full)
+    Test.@test Base.summarysize(lean) < 0.72 * Base.summarysize(full)
+    Test.@test_throws ArgumentError GR.corners(lean)
+    Test.@test_throws ArgumentError GR.corner_coords(lean, 1, 1)
+    Test.@test size(GR.corners(full, 1)) == (n + 1, n + 1)
+
+    # Supplying them keeps them without asking: they are the caller's own arrays.
+    kc = (GR._centers_to_corners(X), GR._centers_to_corners(Y))
+    given = GR.CurvilinearGrid(geo, X, Y, m; corners = kc)
+    Test.@test GR.has_corners(given)
+    Test.@test GR.corners(given, 1) == kc[1]
+    Test.@test GR.measure(given) == GR.measure(lean)
+
+    # A grid given its own measure derives no vertices at all, so a single cell is constructible.
+    one_cell = GR.CurvilinearGrid(geo, fill(0.0, 1, 1), fill(0.0, 1, 1), fill(2.5, 1, 1),
+                                  trues(1, 1))
+    Test.@test GR.measure(one_cell, 1, 1) == 2.5
+    Test.@test !GR.has_corners(one_cell)
+    # …and asking for them on a grid too small to reconstruct them says so.
+    Test.@test_throws ArgumentError GR.CurvilinearGrid(geo, fill(0.0, 1, 1), fill(0.0, 1, 1),
+                                                       fill(2.5, 1, 1), trues(1, 1);
+                                                       keep_corners = true)
+
+    # A node set with no adjacency states that in one number rather than n+1 copies of it.
+    un = GR.UnstructuredGrid(geo, (collect(1.0:1.0:500.0), collect(1.0:1.0:500.0)),
+                             ones(500), trues(500))
+    Test.@test GR.neighbor_ptr(un) isa FG.Axes.ConstantVector
+    Test.@test length(GR.neighbor_ptr(un)) == 501
+    Test.@test all(isempty(GR.incident_nodes(un, i)) for i in 1:500)
+    Test.@test all(FG.Connectivity.nneighbors(un, i) == 0 for i in 1:500)
+    Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(un)) == 0
+    withptr = GR.UnstructuredGrid(geo, (collect(1.0:1.0:500.0), collect(1.0:1.0:500.0)),
+                                  ones(500), trues(500), Int[], ones(Int, 501))
+    Test.@test Base.summarysize(un) < Base.summarysize(withptr)
+end
+
+Test.@testset "The icosahedral geodesic is a layout, read out of its own numbering" begin
+    G = FG.Grids
+    C = FG.Connectivity
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    geo = GE.SphericalGeometry()
+    R = GE.radius(geo)
+
+    Test.@testset "storage is independent of frequency" begin
+        sizes = [Base.summarysize(G.IcosahedralGrid(geo, ν)) for ν in (1, 8, 64, 512)]
+        Test.@test allequal(sizes)
+        Test.@test length(G.IcosahedralGrid(geo, 512)) == 10 * 512^2 + 2
+        Test.@test G.frequency(G.IcosahedralGrid(geo, 37)) == 37
+        Test.@test_throws ArgumentError G.IcosahedralGrid(geo, 0)
+    end
+
+    # The mesh builder is the reference for all three: it walks the entities in id order, where the
+    # layout reads a single id backwards.
+    for ν in (1, 2, 3, 4, 8)
+        g = G.IcosahedralGrid(geo, ν)
+        mesh = SS.icosahedral_mesh(ν)
+        n = length(g)
+        Test.@test n == length(mesh.λ)
+
+        Test.@testset "ν = $ν: coords, adjacency and dual areas" begin
+            # Bit-identical: the same expressions on the same entity.
+            for k in 1:n
+                c = G.coords(g, k)
+                Test.@test c.λ == mesh.λ[k]
+                Test.@test c.φ == mesh.φ[k]
+            end
+            λ, φ = G.materialize(g)
+            Test.@test λ == mesh.λ
+            Test.@test φ == mesh.φ
+
+            # Adjacency is the mesh's own undirected edge list.
+            ref = [Int[] for _ in 1:n]
+            for (a, b) in mesh.edges
+                push!(ref[a], b)
+                push!(ref[b], a)
+            end
+            for k in 1:n
+                nb = sort(collect(G.neighbors(g, k)))
+                Test.@test nb == sort(unique(ref[k]))
+                Test.@test !(k in nb)
+                Test.@test length(nb) ≤ G.max_neighbors(g)
+            end
+            conn = C.build_connectivity(g)
+            Test.@test C.is_symmetric_adjacency(conn)
+            for k in 1:n
+                Test.@test sort(collect(G.neighbors(conn, k))) == sort(collect(G.neighbors(g, k)))
+            end
+
+            # Exactly twelve pentagons — the base icosahedron's corners — and hexagons elsewhere.
+            deg = [C.nneighbors(g, k) for k in 1:n]
+            Test.@test count(==(5), deg) == 12
+            Test.@test count(==(6), deg) == n - 12
+            Test.@test all(k -> C.nneighbors(g, k) == 5, 1:12)
+
+            # The per-vertex fan and the accumulating pass over all triangles are the same dual.
+            aref = C._icosahedral_dual_areas(geo, mesh.verts, mesh.triangles, n)
+            m = G.measure(g)
+            Test.@test m isa G.GridMeasure
+            for k in 1:n
+                Test.@test m[k] ≈ aref[k] rtol = 1e-12
+            end
+            Test.@test all(>(0), m)
+            Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-14
+            Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
+            # A pentagon is the smallest cell on the mesh.
+            ν ≥ 4 && Test.@test maximum(m[k] for k in 1:12) < minimum(m[k] for k in 13:n)
+        end
+    end
+
+    Test.@testset "traits, mask, width and rebuild" begin
+        g = G.IcosahedralGrid(geo, 4)
+        Test.@test G.cell_address(g) === G.FlatCells()
+        Test.@test G.adjacency_source(g) === G.FormulaNeighbors()
+        Test.@test G.candidate_source(g) === G.IndexedCandidates()
+        Test.@test G.ncoordinates(g) == 2
+        Test.@test_throws ArgumentError G.coordinates(g)
+        Test.@test_throws ArgumentError C.IndexTopology(g)
+
+        n = length(g)
+        msk = trues(n); msk[7] = false
+        gm = G.rebuild(g, (mask = msk,))
+        Test.@test gm isa G.IcosahedralGrid
+        Test.@test !G.isactive(gm, 7)
+        Test.@test C.nneighbors(gm, 7) == 0
+        Test.@test !(7 in collect(G.neighbors(gm, 8)))
+        Test.@test G.coords(gm, 20) == G.coords(g, 20)
+
+        for W in (Float64, Float32)
+            gw = G.IcosahedralGrid(GE.SphericalGeometry(W(6.371e6)), 4)
+            Test.@test eltype(gw) === W
+            Test.@test G.coords(gw, 7).λ isa W
+            Test.@test G.measure(gw, 7) isa W
+        end
+    end
+
+    Test.@testset "distance queries agree with a scan" begin
+        g = G.IcosahedralGrid(geo, 4)
+        n = length(g)
+        r = 1.5e6
+        for i in (1, 13, n ÷ 2, n)
+            ref = sort([j for j in 1:n if j != i && GE.distance(g, i, j) ≤ r])
+            Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
+            mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
+            Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
+        end
+        Test.@test Base.summarysize(g) < 1000
     end
 end

@@ -50,23 +50,19 @@ end
 
 Build CSR for `n` nodes whose degree is bounded by `maxdeg`. `emit!(buf, lo, i)` writes node `i`'s
 candidate neighbors into `buf[lo+1 : lo+maxdeg]` and returns how many it wrote; duplicates, self and
-out-of-range entries are removed here. `emit!` must touch only that slice and carry no state
-between calls — nodes are emitted concurrently under a threaded `backend`.
+out-of-range entries are removed here. `emit!` must touch only its own slice, and it is called twice per
+node — once to count the row, once to fill it — so it must be a pure function of `i`.
 
-Candidates land in one `n*maxdeg` block that is then compacted in place down to the exact CSR — one
-allocation for the neighbor list, one for the offsets.
+Count, scan, fill. The scratch is one `maxdeg` buffer per task, and both node passes write only slots
+their own node owns, so both parallelize under a threaded `backend`.
 """
 function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = nothing) where {F}
     n = Int(n); maxdeg = Int(maxdeg)
-    buf = Vector{Int}(undef, n * maxdeg)
     deg = Vector{Int}(undef, n)
-    # Emit and dedup in parallel: each node owns the block `[(i-1)·maxdeg, i·maxdeg)` and nothing
-    # else, so `emit!` must likewise keep no state across calls.
     Execution.run_chunks(n, backend) do rng
+        buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
-            lo = (i - 1) * maxdeg
-            m = emit!(buf, lo, i)
-            deg[i] = _sort_unique_filter!(buf, lo, m, i, n)
+            deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
         end
     end
     ptr = Vector{Int}(undef, n + 1)
@@ -74,25 +70,18 @@ function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = n
     @inbounds for i in 1:n
         ptr[i + 1] = ptr[i] + deg[i]
     end
-    # Compact in place. The destination never overtakes the source: the first `i-1` degrees sum to at
-    # most `(i-1)*maxdeg`, which is exactly where row `i`'s candidates start.
-    #
-    # This pass stays SERIAL. Row `j`'s destination can fall inside row `i`'s source block for some
-    # `i < j`, so running rows concurrently would let one row's write land on another's unread
-    # candidates. It is a compacting move over `nedges` entries, against an emit pass that does the
-    # trigonometry and the dedup.
-    @inbounds for i in 1:n
-        src = (i - 1) * maxdeg
-        dst = ptr[i] - 1
-        d = ptr[i + 1] - ptr[i]
-        if dst != src
+    nbrs = Vector{Int}(undef, ptr[end] - 1)
+    Execution.run_chunks(n, backend) do rng
+        buf = Vector{Int}(undef, maxdeg)
+        @inbounds for i in rng
+            d = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
+            slot = ptr[i] - 1
             for k in 1:d
-                buf[dst + k] = buf[src + k]
+                nbrs[slot + k] = buf[k]
             end
         end
     end
-    resize!(buf, ptr[end] - 1)
-    return csr_connectivity(buf, ptr; validate = false)
+    return csr_connectivity(nbrs, ptr; validate = false)
 end
 
 """

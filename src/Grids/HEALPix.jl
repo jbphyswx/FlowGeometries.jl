@@ -48,6 +48,7 @@ end
 HEALPixGrid(nside::Integer; kwargs...) = HEALPixGrid(Geometry.SphericalGeometry(), nside; kwargs...)
 
 @inline _from_fields(
+    ::Type{<:HEALPixGrid},
     geometry::G, nside::Int, scheme::S, mask::B,
 ) where {T,G<:Geometry.AbstractSphericalGeometry{T},S,B} =
     HEALPixGrid{T,G,S,B}(geometry, nside, scheme, mask)

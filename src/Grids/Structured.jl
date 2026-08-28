@@ -115,7 +115,7 @@ reconstruction elsewhere spelling out a parameter list that no longer matches.
     isempty(unknown) || throw(ArgumentError(
         "$(nameof(G)) has no field $(join(unknown, ", ")); it has $(join(fieldnames(G), ", "))",
     ))
-    return _from_fields(map(n -> get(fields, n, getfield(grid, n)), fieldnames(G))...)
+    return _from_fields(G, map(n -> get(fields, n, getfield(grid, n)), fieldnames(G))...)
 end
 
 # Every type parameter is determined by the field types, so these re-derive the whole list from the
@@ -123,7 +123,13 @@ end
 # storage change is exactly what alters them. One line per layout, beside the struct it mirrors, so a
 # field added to one cannot leave a stale parameter list somewhere that loads only with a weak
 # dependency.
+#
+# The leading argument is the grid's own type, and it serves only to name the layout — two layouts can
+# hold the same field types, a geometry and a resolution parameter and a mask. The parameter list below
+# is built from the types of the field VALUES, since a field whose type changed is the reason to rebuild
+# in the first place.
 @inline _from_fields(
+    ::Type{<:StructuredGrid},
     geometry::G, coordinates::C, measure::AT, mask::BT, topology::TP, period::NTuple{N,T},
     sampling::S, stats::NTuple{N,AxisStats{T}},
 ) where {T,G<:Geometry.AbstractGeometry{T},N,S,TP,C,AT,BT} =

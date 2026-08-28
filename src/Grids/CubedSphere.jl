@@ -46,6 +46,7 @@ CubedSphereGrid(n::Integer; kwargs...) =
     CubedSphereGrid(Geometry.SphericalGeometry(), n; kwargs...)
 
 @inline _from_fields(
+    ::Type{<:CubedSphereGrid},
     geometry::G, n::Int, mask::B,
 ) where {T,G<:Geometry.AbstractSphericalGeometry{T},B} =
     CubedSphereGrid{T,G,B}(geometry, n, mask)

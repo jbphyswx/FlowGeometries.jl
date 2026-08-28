@@ -50,6 +50,7 @@ struct UnstructuredGrid{
 end
 
 @inline _from_fields(
+    ::Type{<:UnstructuredGrid},
     geometry::G, coordinates::C, measure::VA, mask::B, neighbor_nbrs::VN, neighbor_ptr::VP,
     topology::TP, period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}},
 ) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP} =
@@ -87,8 +88,10 @@ function UnstructuredGrid(
     ))
     length(mask) == n || throw(ArgumentError("coordinates and mask must have the same length"))
     length(measure) == n || throw(ArgumentError("coordinates and measure must have the same length"))
-    # No CSR pair given: every node reports zero neighbours, which `ptr` all-ones expresses.
-    p = ptr === nothing ? ones(Int, n + 1) : ptr
+    # No CSR pair given: every node reports zero neighbours, which is `ptr` all-ones — and a constant
+    # vector says that in one number rather than `n + 1` copies of it. `neighbors` reads it through the
+    # same `ptr[i]:ptr[i+1]-1` slice and gets an empty range.
+    p = ptr === nothing ? Axes.ConstantVector(1, n + 1) : ptr
     nb = ptr === nothing ? Int[] : nbrs
     length(p) == n + 1 || throw(ArgumentError(
         "neighbor_ptr must have length Nnodes+1 = $(n + 1); got $(length(p))",

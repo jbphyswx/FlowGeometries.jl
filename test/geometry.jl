@@ -505,4 +505,27 @@ Test.@testset "Pole rotation" begin
     # The identity rotation leaves the frame alone.
     idr = G.PoleRotation(0.0, π / 2)
     Test.@test all(isapprox.(G.rotate(idr, 1.2, 0.4), (1.2, 0.4); atol = 1e-12))
+
+    # The tilt is a property of the frame, resolved once and carried on the rotation.
+    Test.@test rot.sinθ ≈ sin(0.3 - π / 2) && rot.cosθ ≈ cos(0.3 - π / 2)
+    Test.@test isbits(rot)
+
+    # `similar_rotation` re-resolves the tilt at the new width rather than rounding the old one.
+    r32 = G.similar_rotation(Float32, rot)
+    Test.@test r32 isa G.PoleRotation{Float32}
+    Test.@test r32.sinθ === sin(Float32(0.3) - Float32(π) / 2)
+    Test.@test G.similar_rotation(Float64, rot) === rot
+
+    # A point set comes back at its own width: a Float32 cloud is not silently widened by a
+    # Float64 frame, and the values match the scalar form at that width.
+    λ32 = Float32[0.2, 1.1, 4.0]
+    φ32 = Float32[0.1, -0.4, 0.9]
+    o32λ, o32φ = G.rotate(rot, λ32, φ32)
+    Test.@test eltype(o32λ) === eltype(o32φ) === Float32
+    Test.@test all(o32λ[i] === G.rotate(r32, λ32[i], φ32[i])[1] for i in eachindex(λ32))
+    λ64, φ64 = Float64.(λ32), Float64.(φ32)
+    Test.@test eltype(first(G.rotate(rot, λ64, φ64))) === Float64
+    # The in-place form writes into the caller's own arrays, so their width is theirs.
+    G.rotate!(λ32, φ32, rot)
+    Test.@test eltype(λ32) === Float32
 end

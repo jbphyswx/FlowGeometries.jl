@@ -81,6 +81,7 @@ RingGrid(sampling::SphericalSampling.AbstractReducedGaussianSampling; kwargs...)
     RingGrid(Geometry.SphericalGeometry(), sampling; kwargs...)
 
 @inline _from_fields(
+    ::Type{<:RingGrid},
     geometry::G, latitudes::VT, nlon::VI, offset::VI, ring_area::VT, mask::B,
 ) where {T,G<:Geometry.AbstractSphericalGeometry{T},VT<:AbstractVector{T},VI,B} =
     RingGrid{T,G,VT,VI,B}(geometry, latitudes, nlon, offset, ring_area, mask)

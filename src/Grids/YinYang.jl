@@ -53,6 +53,7 @@ YinYangGrid(nlon::Integer, nlat::Integer; kwargs...) =
     YinYangGrid(Geometry.SphericalGeometry(), nlon, nlat; kwargs...)
 
 @inline _from_fields(
+    ::Type{<:YinYangGrid},
     geometry::G, nlon::Int, nlat::Int, mask::B,
 ) where {T,G<:Geometry.AbstractSphericalGeometry{T},B} =
     YinYangGrid{T,G,B}(geometry, nlon, nlat, mask)

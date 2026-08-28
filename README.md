@@ -8,7 +8,7 @@ Coordinate metrics, spherical samplings, and grid types — with a **dependency-
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
 
-Fourteen samplings, seven grid layouts, three metrics — chosen independently of each other, in
+Fourteen samplings, eight grid layouts, three metrics — chosen independently of each other, in
 any number of dimensions. Spatial search, tessellation, sparse output, static vectors, FFT-based
 quadrature, device transfer and threading all arrive through package extensions, so you pay for
 exactly what you load.
@@ -191,7 +191,7 @@ a curvilinear grid needs no separate implementation from a structured one.
 | Layout | How connectivity is obtained |
 |--------|------------------------------|
 | `StructuredGrid` / `CurvilinearGrid` | Index stencil (`Axial`/`VonNeumann`/`Moore`/`Diagonal`/`Anisotropic`/`Custom`, any radius, any `N`) + per-axis topology |
-| `HEALPixGrid` / `CubedSphereGrid` / `YinYangGrid` / `RingGrid` | Closed-form arithmetic on the cell id — face tables, the gnomonic seam fold, panel-local offsets, ring straddling |
+| `HEALPixGrid` / `CubedSphereGrid` / `YinYangGrid` / `IcosahedralGrid` / `RingGrid` | Closed-form arithmetic on the cell id — face tables, the gnomonic seam fold, panel-local offsets, geodesic lattice steps, ring straddling |
 | `UnstructuredGrid` | CSR stored on the grid |
 | Tensor-product samplings (GL, CC, DH, MW, lat–lon) | `build_connectivity(sampling, nlat)` — no grid is built |
 | Cubed sphere | `build_connectivity(CubedSphereSampling(), n)` — 6 panels + gnomonic seams |

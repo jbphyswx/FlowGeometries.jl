@@ -3,14 +3,16 @@
 # ---------------------------------------------------------------------------
 
 """
-    CurvilinearGrid{T, G, N, TP, C, MA, B}
+    CurvilinearGrid{T, G, N, TP, C, KC, MA, B}
 
 Curvilinear grid whose cell-center coordinates are `N`-dimensional arrays (e.g. an orthogonal
-curvilinear mesh). `coordinates` holds one `N`-D cell-center array per direction and `corners` the
-matching cell-vertex arrays, each one larger in every direction.
+curvilinear mesh). `coordinates` holds one `N`-D cell-center array per direction.
 
-At `N = 2` the cell `measure` is computed from those corners as the exact quadrilateral area rather
-than by a cell-center spacing approximation. In any other dimension the measure is the caller's to
+At `N = 2` the cell `measure` is the exact quadrilateral area through the cell's four vertices. Those
+vertex arrays are what `corners` holds, one per direction and one larger in every direction. They are
+retained when the caller supplies them or asks for them with `keep_corners = true`, and are otherwise
+construction input to the area kernel alone — so `corners` is `nothing` on a grid built from centres,
+and [`has_corners`](@ref) reports which. In any dimension other than 2 the measure is the caller's to
 supply: the corner-area kernel is a genuinely 2-D algorithm, not a 2-D special case of an N-D one.
 
 # Type parameters
@@ -18,8 +20,8 @@ supply: the corner-area kernel is a genuinely 2-D algorithm, not a 2-D special c
   a type error, not a silent promotion) — hence `T` precedes `G` (Julia forbids the forward
   reference `G<:AbstractGeometry{T}, T` needed to keep the `{G,T}` order).
 - `N`: number of coordinate directions.
-- `C`: tuple type shared by the center and corner coordinate arrays — a mesh's own coordinate arrays
-  are legitimately almost always the same concrete type.
+- `C`: tuple type of the center coordinate arrays.
+- `KC`: tuple type of the cell-vertex arrays, or `Nothing` where they were not retained.
 - `MA`: array type of the derived `measure` field — independent of `C`, since it is a computed field
   with no reason to match the coordinate arrays' storage type.
 - `B`: array type of the active `mask`.
@@ -30,12 +32,13 @@ struct CurvilinearGrid{
     N,
     TP<:NTuple{N,AbstractTopology},
     C<:NTuple{N,AbstractArray{T,N}},
+    KC<:Union{Nothing,NTuple{N,AbstractArray{T,N}}},
     MA<:AbstractArray{T,N},
     B<:AbstractArray{Bool,N},
 } <: AbstractCurvilinearGrid{G, T}
     geometry::G
     coordinates::C            # cell-center coordinate array per direction
-    corners::C                # cell-vertex coordinate array per direction, one larger in each
+    corners::KC               # cell-vertex arrays, one larger in each direction, or `nothing`
     measure::MA               # cell measure
     mask::B                   # active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
@@ -44,11 +47,12 @@ struct CurvilinearGrid{
 end
 
 @inline _from_fields(
-    geometry::G, coordinates::C, corners::C, measure::MA, mask::B, topology::TP,
+    ::Type{<:CurvilinearGrid},
+    geometry::G, coordinates::C, corners::KC, measure::MA, mask::B, topology::TP,
     period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}},
-) where {T,G<:Geometry.AbstractGeometry{T},N,TP,C,MA,B} =
-    CurvilinearGrid{T,G,N,TP,C,MA,B}(geometry, coordinates, corners, measure, mask, topology,
-                                     period, stats)
+) where {T,G<:Geometry.AbstractGeometry{T},N,TP,C,KC,MA,B} =
+    CurvilinearGrid{T,G,N,TP,C,KC,MA,B}(geometry, coordinates, corners, measure, mask, topology,
+                                        period, stats)
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
 @inline period(grid::CurvilinearGrid, d::Integer) =
@@ -68,9 +72,27 @@ end
 
 The cell-vertex coordinate arrays — one larger than [`coordinates`](@ref) in every direction, and in
 the same direction order.
+
+Available on a grid that was given them or built with `keep_corners = true`; see
+[`has_corners`](@ref).
 """
-@inline corners(grid::CurvilinearGrid) = getfield(grid, :corners)
+@inline corners(grid::CurvilinearGrid) = _held_corners(getfield(grid, :corners))
 @inline corners(grid::CurvilinearGrid, d::Integer) = @inbounds corners(grid)[d]
+
+@inline _held_corners(kc::Tuple) = kc
+_held_corners(::Nothing) = throw(ArgumentError(
+    "this CurvilinearGrid holds no cell-vertex arrays: they were construction input to the cell-area " *
+    "kernel. Rebuild it with `keep_corners = true`, or pass `corners` explicitly.",
+))
+
+"""
+    has_corners(grid) -> Bool
+
+Whether `grid` retained its cell-vertex arrays, and so can answer [`corners`](@ref) and
+[`corner_coords`](@ref).
+"""
+@inline has_corners(grid::CurvilinearGrid) = getfield(grid, :corners) !== nothing
+@inline has_corners(::AbstractGrid) = false
 
 """
     corner_coords(grid::CurvilinearGrid, I...) -> NamedTuple
@@ -248,6 +270,10 @@ Pass `corners` (a tuple of arrays, each one larger than the centers in every dir
 cell vertices, e.g. from the source mesh's own vertex grid; otherwise they are reconstructed from the
 centers per direction (see [`_centers_to_corners`](@ref)), which requires at least 2 cells across.
 
+Corners supplied this way are kept on the grid, and reconstructed ones are input to the area kernel —
+pass `keep_corners = true` to keep those too, at one array per direction. Reconstruction happens only
+where something needs it, so a grid given its own `measure` derives none.
+
 `periodic` is a `Bool` (applied to direction 1) or an `NTuple{N,Bool}`. When omitted, direction-1
 periodicity is auto-detected the same way as [`StructuredGrid`](@ref) (full-circle spherical
 longitude), and every other direction is bounded.
@@ -287,7 +313,7 @@ _curvilinear_grid(
 
 function _curvilinear_grid(
     geometry::G, coords::NTuple{N,AbstractArray}, measure_pos, mask::AbstractArray{Bool,N};
-    corners = nothing, measure = nothing,
+    corners = nothing, measure = nothing, keep_corners::Bool = false,
     x_corner = nothing, y_corner = nothing,
     topology = nothing, period = nothing, periodic = nothing, backend = nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
@@ -304,7 +330,12 @@ function _curvilinear_grid(
 
     given_corners = corners === nothing && N == 2 && !(x_corner === nothing && y_corner === nothing) ?
         (x_corner, y_corner) : corners
-    kc = if given_corners === nothing
+    m = measure_pos === nothing ? measure : measure_pos
+    # Vertex arrays are derived only where something asks for them: the area kernel, or the caller.
+    want_kc = given_corners !== nothing || keep_corners || (m === nothing && N == 2)
+    kc = if !want_kc
+        nothing
+    elseif given_corners === nothing
         ntuple(d -> _centers_to_corners(centers[d]), Val(N))
     else
         length(given_corners) == N || throw(ArgumentError(
@@ -321,7 +352,6 @@ function _curvilinear_grid(
         end
     end
 
-    m = measure_pos === nothing ? measure : measure_pos
     meas = if m !== nothing
         size(m) == size(mask) || throw(ArgumentError(
             "measure size $(size(m)) does not match the coordinate arrays' $(size(mask))",
@@ -339,8 +369,12 @@ function _curvilinear_grid(
 
     tp = _curvilinear_topology(geometry, centers[1], topology === nothing ? periodic : topology)
     prd = _curvilinear_periods(geometry, centers, tp, period)
-    return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(meas), typeof(mask)}(
-        geometry, centers, kc, meas, mask, tp, prd,
+    # The caller's own vertex arrays are theirs to keep; ones derived here are the area kernel's input,
+    # and are retained on request.
+    held = (given_corners !== nothing || keep_corners) ? kc : nothing
+    return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(held), typeof(meas),
+                           typeof(mask)}(
+        geometry, centers, held, meas, mask, tp, prd,
         ntuple(d -> _axis_stats(centers[d]), Val(N)),
     )
 end
@@ -377,7 +411,8 @@ function _reframe(
     corners = ([_first(a, b) for a in fλ, b in fφ], [_second(a, b) for a in fλ, b in fφ])
     tp = topology(grid)
     msk = mask(grid)
-    return CurvilinearGrid{T, G, 2, typeof(tp), typeof(centers), Matrix{T}, typeof(msk)}(
+    return CurvilinearGrid{T, G, 2, typeof(tp), typeof(centers), typeof(corners), Matrix{T},
+                           typeof(msk)}(
         grid_geometry(grid), centers, corners, measure_array(grid), msk, tp,
         (period(grid, 1), period(grid, 2)),
         ntuple(d -> _axis_stats(centers[d]), Val(2)),

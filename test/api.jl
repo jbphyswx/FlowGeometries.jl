@@ -19,7 +19,7 @@ Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
     nx, ny = 4, 3
     xm = [Float64(i) for i in 1:nx, j in 1:ny]
     ym = [Float64(j) for i in 1:nx, j in 1:ny]
-    cv = FG.Grids.CurvilinearGrid(geom, xm, ym, trues(nx, ny))
+    cv = FG.Grids.CurvilinearGrid(geom, xm, ym, trues(nx, ny); keep_corners = true)
     Test.@test_throws BoundsError FG.Grids.coords(cv, nx + 1, 1)
     Test.@test_throws BoundsError FG.Grids.corner_coords(cv, nx + 3, 1)
     Test.@test_throws BoundsError FG.Grids.measure(cv, 1, ny + 1)
@@ -258,7 +258,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :project_to_tangent_plane, :nonuniform_first_derivative, :vector_to_cartesian,
         :vector_from_cartesian, :tensor_to_local, :tensor_from_local, :spherical_excess,
         :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
-        :similar_geometry, :float_type,
+        :similar_geometry, :float_type, :similar_rotation,
         :spacing_trait, :similar_axis, :uniform_axis, :wrap_sign,
         :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets,
         :bandlimit, :nlat_for_bandlimit, :nlon_for_nlat, :npoints, :nrings, :axes_lengths,
@@ -318,12 +318,13 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :structured_grid,
          :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
          :interpolate,
-         :corners, :corner_coords, :neighbor_nbrs, :distance, :embedded_points, :cell_list,
+         :corners, :corner_coords, :has_corners, :neighbor_nbrs, :distance, :embedded_points,
+         :cell_list,
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
          :sampling, :rebuild, :ncoordinates, :materialize, :cells, :cell_at, :embedded_at,
          :embedding_of, :max_neighbors, :formula_neighbors, :nside, :scheme, :npixels,
          :HEALPixGrid, :RingGrid, :RingwiseVector, :FormulaNeighborSeq, :ring_of,
-         :CubedSphereGrid, :YinYangGrid, :GridMeasure,
+         :CubedSphereGrid, :YinYangGrid, :IcosahedralGrid, :GridMeasure, :frequency,
          :npanels, :panel_size, :panel_shape, :panel_cell, :cell_id],
     # allocating forms, whose whole job is to return a fresh array
     [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,

@@ -29,11 +29,12 @@ and an activity mask.
 | `HEALPixGrid` | none — `(nside, pixel)` arithmetic | the HEALPix pixelization |
 | `CubedSphereGrid` | none — `(n, cell)` arithmetic | the gnomonic cubed sphere |
 | `YinYangGrid` | none — `(nlon, nlat, cell)` arithmetic | Kageyama–Sato overset panels |
+| `IcosahedralGrid` | none — `(ν, id)` arithmetic | geodesic, 12 pentagons |
 | `RingGrid` | one value per *ring* | reduced Gaussian, octahedral |
-| `UnstructuredGrid` | one value per node, plus CSR neighbours | icosahedral, scattered |
+| `UnstructuredGrid` | one value per node, plus CSR neighbours | scattered points, an arbitrary mesh |
 
 The first two store coordinates because a warped mesh's are arbitrary; the last stores them because a
-node set's are the caller's. The four in between store none, or `O(√n)`: a cell's position, its
+node set's are the caller's. The five in between store none, or `O(√n)`: a cell's position, its
 neighbours and its area are closed-form in the layout's parameters, so they hold those parameters
 instead. `HEALPixGrid` is the same size at `nside = 1024` — 12.6 million pixels — as at `nside = 1`. Ask
 for the dense cloud with [`Grids.materialize`](@ref) when something outside needs it.
@@ -49,6 +50,7 @@ g    = FG.Grids.HEALPixGrid(16)
 rg   = FG.Grids.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(64))
 cs   = FG.Grids.CubedSphereGrid(24)
 yy   = FG.Grids.YinYangGrid(32, 22)
+ico  = FG.Grids.IcosahedralGrid(16)
 
 # Or directly, in any number of dimensions; the mask is optional
 sg  = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), λaxis, φaxis, mask)
@@ -151,9 +153,8 @@ When every cell participates the mask is `AllActive`, which stores its size and 
 
 ## Curvilinear corners
 
-`CurvilinearGrid` stores cell-vertex arrays as well as centres, and computes exact quadrilateral
-areas from them — the spherical excess of the two triangles through the four corner directions on a
-sphere, the shoelace area on a plane.
+`CurvilinearGrid`'s exact quadrilateral cell area comes from its cell vertices — the spherical excess of
+the two triangles through the four corner directions on a sphere, the shoelace area on a plane.
 
 ```@example grids
 cg2 = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask; x_corner = λc, y_corner = φc)
@@ -162,6 +163,17 @@ size(FG.Grids.corners(cg2, 1)), FG.Grids.corner_coords(cg2, i, j)
 
 Supply `x_corner`/`y_corner` when your source model ships its own cell-vertex grid; otherwise they
 are reconstructed from the centres, which needs at least a 2×2 grid.
+
+Vertices you supply are kept on the grid. Reconstructed ones are input to the area kernel, and are kept
+only if you ask — one array per direction, one larger in every direction:
+
+```@example grids
+lean = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask)
+full = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask; keep_corners = true)
+FG.Grids.has_corners(lean), FG.Grids.has_corners(full),
+    FG.Grids.measure(lean) == FG.Grids.measure(full),
+    round(Base.summarysize(lean) / Base.summarysize(full); digits = 2)
+```
 
 A curvilinear grid takes any number of directions — one `N`-D array each, `mask` last. Beyond 2-D the
 cell measure is yours to pass: the corner-area kernel is an exact-quadrilateral algorithm, not the 2-D
@@ -206,7 +218,7 @@ a min/max ratio of 0.52).
 | `CubedSphereGrid` | exact solid angle of the cell's own gnomonic rectangle |
 | `YinYangGrid` | lat–lon patch area, `R²Δλ·2sin(Δφ/2)·cosφ` |
 | `RingGrid` | `R²·(2π/nlonᵣ)·wᵣ` from the ring's Gaussian weight |
-| icosahedral | true dual-cell areas, from the mesh's own triangulation |
+| `IcosahedralGrid` | the spherical Voronoi dual, from the vertex's own incident triangles |
 | arbitrary points | Voronoi areas, via the Quickhull or DelaunayTriangulation extension |
 
 ![Cell area relative to the mean](assets/cell_areas.png)
