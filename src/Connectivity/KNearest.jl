@@ -56,7 +56,8 @@ end
 # A radius to start the search from: the cell's own size scaled to hold roughly `k` of them. Too small
 # only costs a doubling, and the doubling is what makes the result independent of the guess.
 #
-# The root is over the COORDINATE directions
+# The root is over the COORDINATE directions, which is what turns a measure into a length: a spherical
+# cell's measure is an area and its square root a distance, whatever the rank of the index space.
 @inline function _knn_seed_radius(grid::Grids.AbstractGrid{G,T}, I, k::Int) where {G,T}
     D = Grids.ncoordinates(grid)
     m = T(Grids.measure(grid, I...))
@@ -142,8 +143,8 @@ end
 @inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
     return T(π) * T(Geometry.semimajor_axis(Grids.grid_geometry(grid)))
 end
-# Over the COORDINATE directions, which on a node set is not the index dimension: `size_tuple` there
-# counts nodes, so using it would leave every direction but the first out of the diagonal.
+# The diagonal of the coordinate extents, so every coordinate direction contributes: on a node set
+# `size_tuple` counts nodes, and the coordinate count is what spans the domain.
 @inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G,T}
     D = Grids.ncoordinates(grid)
     s = zero(T)

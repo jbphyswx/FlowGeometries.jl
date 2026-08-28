@@ -7,19 +7,17 @@
 
 The HEALPix pixelization as a grid: `12·nside²` equal-area pixels on `4·nside − 1` iso-latitude rings.
 
-It stores `nside`, the scheme, the geometry and the mask — and nothing else. A pixel's coordinates, its
-neighbours and its area are each closed-form in `(nside, pixel)`, so the grid holds the parameters of
-that arithmetic rather than its results: `Base.summarysize` is the same at `nside = 64` as at
-`nside = 1024`, where a node set of the same resolution stores three arrays of 12.6 million entries.
+It stores `nside`, the scheme, the geometry and the mask. A pixel's coordinates, its neighbours and its
+area are each closed-form in `(nside, pixel)`, so those four fields are the whole grid:
+`Base.summarysize` is the same at `nside = 1024` — 12.6 million pixels — as at `nside = 1`.
 
-The pixels are not a tensor product — `nlon` varies by ring — so this is neither a `StructuredGrid` nor
-anything with separable axes. It is a layout in its own right, and answers the three traits a
-neighbourhood algorithm asks of one: cells are [`FlatCells`](@ref) (a pixel is one id),
-adjacency is [`FormulaNeighbors`](@ref) (the face tables of Górski et al.), and a distance query
-enumerates through [`IndexedCandidates`](@ref).
+`nlon` varies by ring, so this is a layout of its own, and it answers the three traits a neighbourhood
+algorithm asks of one: cells are [`FlatCells`](@ref) (a pixel is one id), adjacency is
+[`FormulaNeighbors`](@ref) (the face tables of Górski et al.), and a distance query enumerates through
+[`IndexedCandidates`](@ref).
 
-Coordinates are `(λ, φ)`. There are no coordinate ARRAYS, so `coordinates` raises and
-[`coords`](@ref)`(grid, i)` is how a pixel's position is read.
+Coordinates are `(λ, φ)`: [`coords`](@ref)`(grid, i)` reads one pixel, and [`materialize`](@ref) gives
+the whole cloud as dense vectors.
 """
 struct HEALPixGrid{
     T<:AbstractFloat,
@@ -101,11 +99,6 @@ coordinates(grid::HEALPixGrid) = throw(ArgumentError(
 # The pixelization covers the whole sphere, so both spans are known without reading a pixel.
 @inline bounds(grid::HEALPixGrid{T}, d::Integer) where {T} =
     _checked_direction((1, 2), d) == 1 ? (zero(T), T(2π)) : (-T(π) / 2, T(π) / 2)
-@inline function extent(grid::HEALPixGrid, d::Integer)
-    lo, hi = bounds(grid, d)
-    return hi - lo
-end
-
 @inline origin(grid::HEALPixGrid, d::Integer) = bounds(grid, d)[1]
 
 # ---- measure ----------------------------------------------------------------
@@ -118,9 +111,9 @@ end
 
 # ---- materialization --------------------------------------------------------
 
-# The whole cloud as a ring walk: colatitude is constant along a ring, so this costs `4·nside − 1`
-# `acos` calls where the generic per-cell path costs one per pixel. Only the RING ordering has this
-# shape — under `Nested` a ring's pixels are not contiguous, so that scheme takes the generic path.
+# The whole cloud as a ring walk, costing `4·nside − 1` `acos` calls: colatitude is constant along a
+# ring. The RING ordering is what makes a ring's pixels contiguous, so it is the scheme this serves; the
+# generic per-cell path covers `Nested`.
 function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Ring}) where {T,G}
     n = npixels(grid)
     p = SphericalSampling.spherical_points!(

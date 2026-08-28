@@ -95,12 +95,15 @@ end
 
 # A cheap integer mix. Only the bucket assignment depends on it: a collision costs a few extra items to
 # skip, never a wrong answer, because the bin coordinate is compared before a point is emitted.
+#
+# `nbucket` is a power of two — `_build_cell_list` takes it from `nextpow` and a query reads back the same
+# count — so the reduction is a mask. 
 @inline function _bin_hash(b::NTuple{D,Int}, nbucket::Int) where {D}
     h = UInt(0x9e3779b97f4a7c15)
     @inbounds for d in 1:D
         h = (h ⊻ (reinterpret(UInt, b[d] * 0x27220a95) + 0x165667b19e3779f9 + (h << 6) + (h >> 2)))
     end
-    return Int(h % UInt(nbucket)) + 1
+    return Int(h & UInt(nbucket - 1)) + 1
 end
 
 """
@@ -109,13 +112,12 @@ end
 Build a [`CellListIndex`](@ref) over `grid`'s cell centres, binned at side `ball` — the radius you mean
 to query at. Needs no external package.
 
-`active_only = true` leaves masked cells out, so a mostly-masked grid — a basin, a catchment — is
-indexed at the size of its active region rather than of its bounding box. It is not the default because
-such an index answers only queries at that same policy: it holds no masked cell, so a query asking to
-see one raises rather than returning a short answer. The default covers every cell and therefore serves
-both policies, an `active_only = true` query filtering what it is handed.
+The default indexes every cell, which serves a query at either mask policy: an `active_only = true`
+query filters what it is handed.
 
-Where the policy is known — a sweep, which passes its own — narrowing is worth asking for.
+`active_only = true` indexes the active region alone, sizing a mostly-masked grid — a basin, a
+catchment — by that region. Such an index answers queries at that same policy, and raises for one
+asking to see a masked cell. Ask for it where the policy is fixed, as a sweep does.
 """
 function cell_list(grid::AbstractGrid{G,T}; ball::Real, active_only::Bool = false) where {G,T}
     h = T(ball)
@@ -130,10 +132,8 @@ function cell_list(grid::AbstractGrid{G,T}; ball::Real, active_only::Bool = fals
     return _build_cell_list(grid, embedding, hemb, active_only, Val(D))
 end
 
-# Streamed: a cell's position is read from the grid three times rather than materialized once into a
-# `D × n` matrix. That is what keeps the index `O(n)` integers on a layout whose coordinates are a
-# formula, where holding them would reintroduce exactly the array the layout exists to avoid — and on a
-# node set it is a read of vectors that already exist.
+# Streamed: each pass reads a cell's position from the grid. The index is then `O(n)` integers on every
+# layout — arithmetic in registers where the coordinates are a formula, a vector read where they are data.
 function _build_cell_list(
     grid, embedding::E, hemb::T, active_only::Bool, ::Val{D},
 ) where {T,E<:AbstractEmbedding,D}
@@ -226,9 +226,8 @@ end
 
 # Cartesian directions wrap with the grid; every other embedding is closed by its own transform.
 #
-# A wrapping direction's width is the period divided by a whole number of bins, not `h` itself: binning
-# by `h` and then reducing mod `nbins` would fold a partial bin onto bin zero, and the span a query walks
-# would no longer be a lattice neighbourhood.
+# A wrapping direction's bin width divides its period into a whole number of bins, so the bin indices
+# form a closed lattice and the span a query walks is a lattice neighbourhood.
 function _cell_lattice(grid, ::CartesianEmbedding, h::T, ::Val{D}) where {T,D}
     wrap = ntuple(d -> isperiodic(grid, d), Val(D))
     nbins = ntuple(Val(D)) do d

@@ -125,9 +125,14 @@ Test.@testset "Spherical sampling connectivity" begin
     Test.@test _symmetric(ic2)
     Test.@test _min_degree(ic2, 5)
 
-    ug = FG.Connectivity.unstructured_grid(FG.SphericalSampling.CubedSphereSampling(), 3)
-    Test.@test ug isa FG.Grids.UnstructuredGrid
-    Test.@test length(FG.Grids.neighbors(ug, 1)) == FG.Connectivity.nneighbors(FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), 3), 1)
+    # The sampling-level builder and the layout describe the same graph, cell for cell.
+    cs = FG.Grids.CubedSphereGrid(3)
+    csconn = FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), 3)
+    Test.@test FG.Connectivity.nnodes(csconn) == length(cs)
+    for k in 1:length(cs)
+        Test.@test sort(collect(FG.Grids.neighbors(csconn, k))) ==
+                   sort(collect(FG.Grids.neighbors(cs, k)))
+    end
 end
 
 Test.@testset "Connectivity is built into contiguous CSR, not per-node vectors" begin
@@ -147,7 +152,7 @@ Test.@testset "Connectivity is built into contiguous CSR, not per-node vectors" 
     Test.@test FG.Connectivity.nedges(c1) == 2 * length(unique(map(e -> minmax(e[1], e[2]), mesh.edges)))
 end
 
-Test.@testset "Default node areas follow the sampling's equal-area trait" begin
+Test.@testset "Node-set cell areas are the sampling's own tessellation" begin
     using Quickhull: Quickhull
     R = 6.371e6
     geo = FG.Geometry.SphericalGeometry(R)
@@ -159,9 +164,10 @@ Test.@testset "Default node areas follow the sampling's equal-area trait" begin
     Test.@test all(≈(tot / length(ah)), ah)
     Test.@test sum(ah) ≈ tot rtol = 1e-12
 
-    # NOT equal-area: a uniform default would be silently wrong, so real dual areas are used.
-    for g in (FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(4); geometry = geo),
-              FG.Connectivity.unstructured_grid(FG.SphericalSampling.CubedSphereSampling(), 8; geometry = geo))
+    # A geodesic's dual cells are genuinely non-uniform, so a uniform `4πR²/N` would be silently
+    # wrong: the real dual areas are what it is built with.
+    let g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(4);
+                                              geometry = geo)
         a = FG.Grids.measure(g)
         Test.@test sum(a) ≈ tot rtol = 1e-8      # still tiles the sphere exactly
         Test.@test all(>(0), a)                   # no degenerate zero-area cells

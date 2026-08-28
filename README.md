@@ -8,7 +8,7 @@ Coordinate metrics, spherical samplings, and grid types — with a **dependency-
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
 
-Fourteen samplings, three grid architectures, three metrics — chosen independently of each other, in
+Fourteen samplings, seven grid layouts, three metrics — chosen independently of each other, in
 any number of dimensions. Spatial search, tessellation, sparse output, static vectors, FFT-based
 quadrature, device transfer and threading all arrive through package extensions, so you pay for
 exactly what you load.
@@ -144,13 +144,15 @@ FG.Connectivity.count_holes(grid)     # enclosed inactive regions; wrapping chan
 
 ![Cell area relative to the mean](docs/src/assets/cell_areas.png)
 
-Every built-in sampling gets true cell areas with **no optional dependency** — spherical excess for
-the cubed sphere, dual-cell areas from the mesh's own triangulation for icosahedral, lat–lon patches
-for Yin–Yang. A uniform `4πR²/N` is exact only for HEALPix (flat colour above); on an icosahedral
-geodesic the largest cell is nearly twice the smallest, so that default would silently corrupt every
-area-weighted integral. The dark spots are the twelve pentagons.
+Every built-in layout gets true cell areas with **no optional dependency** — the exact solid angle of
+its gnomonic rectangle for the cubed sphere, dual-cell areas from the mesh's own triangulation for
+icosahedral, lat–lon patches for Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
+`4πR²/N` is exact only for HEALPix (flat colour above); on an icosahedral geodesic the largest cell is
+nearly twice the smallest, so that default would silently corrupt every area-weighted integral. The dark
+spots are the twelve pentagons.
 
 ```julia
+g = FG.Grids.CubedSphereGrid(24)                                                        # 3456 cells, Σarea = 4πR² exactly
 g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))     # 2562 nodes, Σarea = 4πR² exactly
 ```
 
@@ -189,6 +191,7 @@ a curvilinear grid needs no separate implementation from a structured one.
 | Layout | How connectivity is obtained |
 |--------|------------------------------|
 | `StructuredGrid` / `CurvilinearGrid` | Index stencil (`Axial`/`VonNeumann`/`Moore`/`Diagonal`/`Anisotropic`/`Custom`, any radius, any `N`) + per-axis topology |
+| `HEALPixGrid` / `CubedSphereGrid` / `YinYangGrid` / `RingGrid` | Closed-form arithmetic on the cell id — face tables, the gnomonic seam fold, panel-local offsets, ring straddling |
 | `UnstructuredGrid` | CSR stored on the grid |
 | Tensor-product samplings (GL, CC, DH, MW, lat–lon) | `build_connectivity(sampling, nlat)` — no grid is built |
 | Cubed sphere | `build_connectivity(CubedSphereSampling(), n)` — 6 panels + gnomonic seams |

@@ -91,7 +91,7 @@ The adjacency of a layout whose neighbours are arithmetic, materialized.
 
 Count, scan, fill — the same three passes the index-stencil builder makes, and for the same reason: both
 cell passes write only slots their own cell owns, so they carry no running offset and need no
-coordination. A stencil does not enter, arithmetic adjacency having no offsets to range over.
+coordination. The adjacency is a per-cell formula, so the whole shape it takes is that formula's.
 """
 function build_connectivity(
     grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true, backend = nothing,
@@ -131,6 +131,64 @@ end
     ids, n = healpix_neighbor_ids(Grids.nside(grid), Int(i) - 1)
     # The pixel walk speaks 0-based ids; a cell here is 1-based.
     return (ntuple(t -> @inbounds(t ≤ n ? ids[t] + 1 : 0), Val(8)), n)
+end
+
+# ---- Cubed sphere -----------------------------------------------------------
+
+# Four edge neighbours, on every cell: each of the four offsets crosses at most one panel edge, and every
+# panel edge folds onto another panel.
+@inline Grids.max_neighbors(::Grids.CubedSphereGrid) = 4
+
+const _CUBED_EDGE_OFFSETS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+"""
+    Grids.formula_neighbors(grid::CubedSphereGrid, k)
+
+A cubed-sphere cell's four edge neighbours: the panel-interior offsets where they stay on the panel, and
+[`_cubed_neighbor`](@ref)'s exact seam fold where they cross to another. The fold is derived by matching
+cube coordinates along the shared edge, so a seam neighbour is symmetric.
+"""
+@inline function Grids.formula_neighbors(grid::Grids.CubedSphereGrid, k::Integer)
+    n = Grids.panel_size(grid)
+    f, i, j = SphericalSampling._cubed_unlin(Int(k), n)
+    ids = ntuple(_ -> 0, Val(4))
+    m = 0
+    @inbounds for t in 1:4
+        δ = _CUBED_EDGE_OFFSETS[t]
+        f2, i2, j2 = _cubed_neighbor(f, i, j, δ[1], δ[2], n)
+        f2 == 0 && continue
+        m += 1
+        ids = Base.setindex(ids, SphericalSampling._cubed_lin(f2, i2, j2, n), m)
+    end
+    return (ids, m)
+end
+
+# ---- Yin–Yang ---------------------------------------------------------------
+
+@inline Grids.max_neighbors(::Grids.YinYangGrid) = 4
+
+"""
+    Grids.formula_neighbors(grid::YinYangGrid, k)
+
+A Yin–Yang cell's four edge neighbours WITHIN its own panel. Neither panel wraps and the two are not
+cross-linked, so a cell on a panel edge reports fewer — the panels couple through interpolation, which
+is the standard Yin–Yang discrete topology.
+"""
+@inline function Grids.formula_neighbors(grid::Grids.YinYangGrid, k::Integer)
+    nlon, nlat = Grids.panel_shape(grid)
+    p, i, j = Grids.panel_cell(grid, k)
+    base = (p - 1) * nlon * nlat
+    ids = ntuple(_ -> 0, Val(4))
+    m = 0
+    @inbounds for t in 1:4
+        δ = _CUBED_EDGE_OFFSETS[t]
+        ii = i + δ[1]
+        jj = j + δ[2]
+        (1 ≤ ii ≤ nlon && 1 ≤ jj ≤ nlat) || continue
+        m += 1
+        ids = Base.setindex(ids, base + (jj - 1) * nlon + ii, m)
+    end
+    return (ids, m)
 end
 
 # ---- Ring grids -------------------------------------------------------------

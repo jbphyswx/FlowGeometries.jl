@@ -206,17 +206,6 @@ end
 # Cubed sphere — six panels + gnomonic seam fold
 # ---------------------------------------------------------------------------
 
-@inline function _cubed_lin(f::Int, i::Int, j::Int, n::Int)
-    return (f - 1) * n * n + (j - 1) * n + i
-end
-
-# Inverse of `_cubed_lin`.
-@inline function _cubed_unlin(lin::Int, n::Int)
-    q, r = divrem(lin - 1, n * n)
-    j, i = divrem(r, n)
-    return (q + 1, i + 1, j + 1)
-end
-
 """
 Exact face-neighbor under offset `(di,dj)` for the gnomonic cubed sphere matching
 `SphericalSampling._cubed_face_to_xyz` / `cubed_sphere_points!`.
@@ -284,13 +273,13 @@ function build_connectivity(
     N = 6 * n * n
     nn = n
     return _csr_from_candidates(N, length(offs); backend = backend) do buf, lo, lin
-        f, i, j = _cubed_unlin(lin, nn)
+        f, i, j = SphericalSampling._cubed_unlin(lin, nn)
         m = 0
         @inbounds for δ in offs
             f2, i2, j2 = _cubed_neighbor(f, i, j, δ[1], δ[2], nn)
             f2 == 0 && continue
             m += 1
-            buf[lo + m] = _cubed_lin(f2, i2, j2, nn)
+            buf[lo + m] = SphericalSampling._cubed_lin(f2, i2, j2, nn)
         end
         return m
     end
@@ -505,54 +494,19 @@ end
 """
     unstructured_grid([T], sampling, args...; geometry, areas, mask) -> UnstructuredGrid
 
-Points from `spherical_points` plus exact sampling topology from `build_connectivity`.
-Default cell areas are uniform (`4π R² / N` on a sphere, `1` on Cartesian).
+Points from `spherical_points`, exact sampling topology from `build_connectivity`, and exact cell areas
+from the sampling's own tessellation. Pass `areas` to supply them instead.
 
 `T` is the element type to build in, and defaults to the `geometry`'s own, as for
 [`structured_grid`](@ref).
 
-There is no HEALPix form: the pixelization is a layout, [`Grids.HEALPixGrid`](@ref), whose coordinates,
-adjacency and measure are arithmetic in `(nside, pixel)`. A caller who genuinely wants the dense point
-cloud asks for it with [`Grids.materialize`](@ref).
+The spherical pixelizations are layouts rather than node sets — [`Grids.HEALPixGrid`](@ref),
+[`Grids.CubedSphereGrid`](@ref), [`Grids.YinYangGrid`](@ref), [`Grids.RingGrid`](@ref) — with
+coordinates, adjacency and measure arithmetic in their resolution parameters.
+[`Grids.materialize`](@ref) turns one into the dense point cloud. What is left here is the genuinely
+arbitrary mesh: the icosahedral geodesic, and a caller's own points.
 """
-unstructured_grid(
-    s::SphericalSampling.CubedSphereSampling, n::Integer;
-    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
-) = unstructured_grid(Geometry.float_type(geometry), s, n; geometry = geometry, kwargs...)
-
-function unstructured_grid(
-    ::Type{T},
-    s::SphericalSampling.CubedSphereSampling, n::Integer;
-    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    areas = nothing,
-    mask = nothing,
-) where {T<:AbstractFloat}
-    pts = SphericalSampling.spherical_points(T, s, n)
-    conn = build_connectivity(s, n)
-    geo = Geometry.similar_geometry(T, geometry)
-    return _unstructured_from_points_conn(s, geo, pts.λ, pts.φ, conn; areas = areas, mask = mask)
-end
-
-unstructured_grid(
-    s::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
-    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
-) = unstructured_grid(Geometry.float_type(geometry), s, nlon, nlat; geometry = geometry, kwargs...)
-
-function unstructured_grid(
-    ::Type{T},
-    s::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
-    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
-    areas = nothing,
-    mask = nothing,
-    stencil = Stencils.Axial(1),
-) where {T<:AbstractFloat}
-    pts = SphericalSampling.spherical_points(T, s, nlon, nlat)
-    conn = build_connectivity(s, nlon, nlat; stencil = stencil)
-    geo = Geometry.similar_geometry(T, geometry)
-    # Cell areas need the panel shape, which N = 2·nlon·nlat does not determine.
-    a = areas === nothing ? _yin_yang_areas(geo, nlon, nlat) : areas
-    return _unstructured_from_points_conn(s, geo, pts.λ, pts.φ, conn; areas = a, mask = mask)
-end
+function unstructured_grid end
 
 """
     unstructured_grid(::AbstractScatteredSphericalSampling, λ, φ; geometry, k, radius, areas, mask)
@@ -599,105 +553,8 @@ function unstructured_grid(
     geo = Geometry.similar_geometry(T, geometry)
     a = areas === nothing ?
         _icosahedral_dual_areas(geo, mesh.verts, mesh.triangles, length(mesh.λ)) : areas
-    return _unstructured_from_points_conn(s, geo, mesh.λ, mesh.φ, conn; areas = a, mask = mask)
+    return _unstructured_from_points_conn(geo, mesh.λ, mesh.φ, conn, a; mask = mask)
 end
-
-"""
-    _default_node_areas(sampling, geometry, λ, φ) -> Vector
-
-Cell areas to use when the caller supplies none.
-
-Dispatched on whether the sampling is **equal-area**, because a uniform `4πR²/N` is exact for one
-family and simply wrong for the others: measured, an icosahedral geodesic's dual cells span a
-min/max ratio of 0.69, so a uniform default would silently corrupt every area-weighted integral on
-it. Non-equal-area samplings therefore get their true Voronoi dual areas, or — if the tessellation
-extension is not loaded — the clear error `_voronoi_areas` already raises, rather than a plausible
-wrong number.
-"""
-function _default_node_areas(
-    ::SphericalSampling.AbstractEqualAreaSphericalSampling,
-    geometry::Geometry.AbstractSphericalGeometry{T}, λ::AbstractVector, φ::AbstractVector,
-) where {T<:AbstractFloat}
-    # Equal-area by construction: every cell is exactly the sphere's area over the pixel count.
-    return fill(T(4π) * Geometry.radius(geometry)^2 / T(length(λ)), length(λ))
-end
-
-"""
-    _default_node_areas(::CubedSphereSampling, geometry, λ, φ)
-
-Exact cell areas in closed form. A cubed-sphere cell is the spherical quadrilateral cut by its own
-panel coordinates, so its area is the spherical excess of the two triangles through its four corner
-directions — no tessellation, no convex hull, no optional dependency. The `(n+1)²` corner directions
-per panel are built once and shared by the four cells that meet at each, rather than re-derived per
-cell.
-"""
-function _default_node_areas(
-    ::SphericalSampling.CubedSphereSampling,
-    geometry::Geometry.AbstractSphericalGeometry{T}, λ::AbstractVector, φ::AbstractVector,
-) where {T<:AbstractFloat}
-    N = length(λ)
-    n2, r = divrem(N, 6)
-    r == 0 || throw(DimensionMismatch("a cubed sphere has 6n² nodes; got $N"))
-    n = isqrt(n2)
-    n * n == n2 || throw(DimensionMismatch("a cubed sphere has 6n² nodes; got $N"))
-
-    Δ = T(π) / 2 / T(n)
-    edge = range(-T(π) / 4; step = Δ, length = n + 1)   # cell boundaries, not centres
-    areas = Vector{T}(undef, N)
-    corner = Matrix{NTuple{3,T}}(undef, n + 1, n + 1)
-    R2 = Geometry.radius(geometry)^2
-    @inbounds for f in 1:6
-        for jj in 1:(n + 1), ii in 1:(n + 1)
-            p = SphericalSampling._cubed_face_to_xyz(f, tan(edge[ii]), tan(edge[jj]), T)
-            s = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
-            corner[ii, jj] = (p.x / s, p.y / s, p.z / s)
-        end
-        for j in 1:n, i in 1:n
-            c1 = corner[i, j]; c2 = corner[i + 1, j]
-            c3 = corner[i + 1, j + 1]; c4 = corner[i, j + 1]
-            areas[_cubed_lin(f, i, j, n)] =
-                R2 * (Geometry.spherical_excess(c1, c2, c3) + Geometry.spherical_excess(c1, c3, c4))
-        end
-    end
-    return areas
-end
-
-"""
-    _yin_yang_areas(geometry, nlon, nlat) -> Vector
-
-Exact cell areas in closed form. A Yin–Yang cell is a lat–lon patch in its own panel frame, so it
-integrates to `R² Δλ (sin(φ+Δφ/2) - sin(φ-Δφ/2)) = R² Δλ 2sin(Δφ/2) cos φ` — independent of `λ`, and
-identical on the two panels because yang is a rigid rotation of yin.
-
-Each panel's cells then sum to exactly `√2 (3π/2) R²`, its full `[-3π/4, 3π/4] × [-π/4, π/4]` box.
-The two panels **overlap by construction**, so the areas sum to `3√2 π R²` — 6.07% more than the
-sphere, at every resolution. That excess is the grid's real geometry, not a discretisation error:
-integrating over both panels needs a partition-of-unity weight for the shared region, which is a
-modelling choice the consumer makes on top of these areas.
-"""
-function _yin_yang_areas(
-    geometry::Geometry.AbstractSphericalGeometry{T}, nlon::Integer, nlat::Integer,
-) where {T<:AbstractFloat}
-    nlon = Int(nlon); nlat = Int(nlat)
-    np = nlon * nlat
-    Δλ = (T(3π) / 2) / T(nlon)
-    Δφ = (T(π) / 2) / T(nlat)
-    c = Geometry.radius(geometry)^2 * Δλ * 2 * sin(Δφ / 2)
-    areas = Vector{T}(undef, 2 * np)
-    @inbounds for j in 1:nlat
-        aj = c * cos(-T(π) / 4 + (T(j) - T(0.5)) * Δφ)
-        base = (j - 1) * nlon
-        for i in 1:nlon
-            areas[base + i] = aj
-            areas[np + base + i] = aj
-        end
-    end
-    return areas
-end
-
-_yin_yang_areas(
-    ::Geometry.AbstractCartesianGeometry{T}, nlon::Integer, nlat::Integer,
-) where {T<:AbstractFloat} = ones(T, 2 * Int(nlon) * Int(nlat))
 
 """
     _icosahedral_dual_areas(geometry, verts, triangles, nvert) -> Vector
@@ -744,29 +601,20 @@ _icosahedral_dual_areas(
     ::Geometry.AbstractCartesianGeometry{T}, ::AbstractVector, ::AbstractVector, nvert::Integer,
 ) where {T<:AbstractFloat} = ones(T, Int(nvert))
 
-_default_node_areas(
-    ::SphericalSampling.AbstractSphericalSampling,
-    geometry::Geometry.AbstractSphericalGeometry{T}, λ::AbstractVector, φ::AbstractVector,
-) where {T<:AbstractFloat} = Grids._voronoi_areas(geometry, λ, φ)
-
-_default_node_areas(
-    ::SphericalSampling.AbstractSphericalSampling,
-    ::Geometry.AbstractCartesianGeometry{T}, λ::AbstractVector, ::AbstractVector,
-) where {T<:AbstractFloat} = ones(T, length(λ))
-
+# `areas` is required: a node set's control volumes come from its own tessellation, and each sampling
+# that reaches here computes them in closed form before calling.
 function _unstructured_from_points_conn(
-    sampling::SphericalSampling.AbstractSphericalSampling,
     geometry::Geometry.AbstractGeometry{T},
     λ::AbstractVector,
     φ::AbstractVector,
-    conn::CSRConnectivity;
-    areas = nothing,
+    conn::CSRConnectivity,
+    areas::AbstractVector;
     mask = nothing,
 ) where {T<:AbstractFloat}
     n = length(λ)
     length(φ) == n || throw(DimensionMismatch("λ/φ length mismatch"))
+    length(areas) == n || throw(DimensionMismatch("$(length(areas)) areas for $n points"))
     nnodes(conn) == n || throw(DimensionMismatch("connectivity nnodes=$(nnodes(conn)) ≠ npoints=$n"))
     m = mask === nothing ? Grids.AllActive((n,)) : mask
-    a = areas === nothing ? _default_node_areas(sampling, geometry, λ, φ) : areas
-    return Grids.UnstructuredGrid(geometry, λ, φ, a, m, conn.nbrs, conn.ptr)
+    return Grids.UnstructuredGrid(geometry, λ, φ, areas, m, conn.nbrs, conn.ptr)
 end

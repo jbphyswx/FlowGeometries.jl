@@ -11,8 +11,8 @@ Which builder runs is [`Grids.adjacency_source`](@ref), the trait the per-cell n
 through, so a layout gets this by declaring how its adjacency is defined and nothing else:
 [`Grids.IndexStencilNeighbors`](@ref) ranges the stencil over an index space,
 [`Grids.FormulaNeighbors`](@ref) evaluates the arithmetic per cell, and
-[`Grids.StoredMeshNeighbors`](@ref) wraps the mesh's own buffers without re-validating them. `stencil`
-reaches only the first — the other two have no offsets to range over.
+[`Grids.StoredMeshNeighbors`](@ref) wraps the mesh's own buffers. `stencil` selects among the offsets of
+the first, which is the one whose adjacency is a stencil shape.
 
 For adjacency by physical distance rather than by stencil, see [`build_connectivity_within`](@ref).
 """
@@ -62,9 +62,10 @@ Materialize the CSR adjacency of every pair of cells within `ball` of each other
 
 Symmetric by construction, since the metric is.
 
-On the architectures with no separable axes to bound a window with the default `topology` carries a cell
-list, making the build `O(n)` per row rather than `O(n)` per cell; pass `topology = MetricTopology(grid)`
-for the scanning build, or an [`indexed`](@ref) topology for the k-d tree.
+Where a separable window can bound the candidates the default `topology` needs no index; elsewhere it
+carries a cell list, built once and amortized over the `n` rows, so a row costs `O(log n + m)`. Pass
+`topology = MetricTopology(grid)` for the scanning build, or an [`indexed`](@ref) topology for the k-d
+tree.
 
 Rows are balls, i.e. [`Unrestricted`](@ref), and there is no [`Connected`](@ref) form: reachability
 within one cell's ball is not a symmetric relation — a bridge cell can lie in one ball and not the
@@ -161,8 +162,8 @@ default_sweep_topology(grid, ball, active_only::Bool, ::Grids.IndexedCandidates)
 # their own cell owns, so they chunk without coordination.
 #
 # One body for every layout. How a cell is named is `Grids.cell_address`, what bounds the candidates is
-# the topology, and `_within_scan` takes the same arguments on both — a separable window ignores the
-# scratch buffer it is handed.
+# the topology, and `_within_scan` takes the same arguments on every layout — `scratch` reaches a
+# separable window too, which enumerates without a buffer and leaves it unused.
 function build_connectivity_within(
     grid::Grids.AbstractGrid; ball, active_only::Bool = true, backend = nothing,
     topology = default_sweep_topology(grid, ball, active_only),

@@ -1,6 +1,43 @@
 # ---- Cubed sphere -----------------------------------------------------------
 
 """
+    _cubed_lin(f, i, j, n) -> Int
+    _cubed_unlin(lin, n) -> (f, i, j)
+
+The cubed sphere's cell numbering and its inverse: panel by panel, `i` fastest within a panel. This is
+the order [`cubed_sphere_points!`](@ref) writes, so it is what every consumer of those points indexes by.
+"""
+@inline _cubed_lin(f::Int, i::Int, j::Int, n::Int) = (f - 1) * n * n + (j - 1) * n + i
+
+@inline function _cubed_unlin(lin::Int, n::Int)
+    q, r = divrem(lin - 1, n * n)
+    j, i = divrem(r, n)
+    return (q + 1, i + 1, j + 1)
+end
+
+"""
+    _cubed_cell_angles(::Type{T}, n, i, j) -> (ξ, η)
+
+Panel-local gnomonic angles of cell `(i, j)`'s CENTRE: `ξ = -π/4 + (i - ½)·(π/2)/n`.
+"""
+@inline function _cubed_cell_angles(::Type{T}, n::Int, i::Int, j::Int) where {T<:AbstractFloat}
+    Δ = T(π) / 2 / T(n)
+    return (-T(π) / 4 + (T(i) - T(0.5)) * Δ, -T(π) / 4 + (T(j) - T(0.5)) * Δ)
+end
+
+"""
+    _cubed_cell_edges(::Type{T}, n, i, j) -> (X1, X2, Y1, Y2)
+
+Tangents of cell `(i, j)`'s panel-local BOUNDARY angles, `-π/4 + (i-1)·Δ` and `-π/4 + i·Δ`. These are
+the gnomonic-plane coordinates its area is the solid angle of.
+"""
+@inline function _cubed_cell_edges(::Type{T}, n::Int, i::Int, j::Int) where {T<:AbstractFloat}
+    Δ = T(π) / 2 / T(n)
+    q = -T(π) / 4
+    return (tan(q + T(i - 1) * Δ), tan(q + T(i) * Δ), tan(q + T(j - 1) * Δ), tan(q + T(j) * Δ))
+end
+
+"""
     cubed_sphere_points!(λ, φ, panel, n; backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
 
 Gnomonic cubed-sphere CELL CENTRES into caller-owned buffers of length `6n²`, plus each point's panel
@@ -26,26 +63,34 @@ function cubed_sphere_points!(
     # coincident nodes (degenerate tessellation, zero-area cells). Cell centres give 6n² genuinely
     # distinct points that match the connectivity, and make n=1 (one cell per face, at the face
     # centre) fall out of the formula instead of needing a special case.
-    Δ = T(π) / 2 / T(n)
-    a = range(-T(π) / 4 + Δ / 2; step = Δ, length = n)
     # Each output slot is a pure function of its own linear index, so chunks are independent.
     Execution.run_chunks(N, backend) do rng
         @inbounds for k in rng
-            q, r0 = divrem(k - 1, n * n)
-            j, i = divrem(r0, n)
-            f = q + 1
-            p = _cubed_face_to_xyz(f, tan(a[i + 1]), tan(a[j + 1]), T)
-            r = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
-            x = p.x / r; y = p.y / r; z = p.z / r
-            θ = acos(clamp(z, -one(T), one(T)))
-            ϕ = atan(y, x)
-            ϕ < 0 && (ϕ += T(2π))
-            λ[k] = ϕ
-            φ[k] = geographic_latitude(θ)
+            f, i, j = _cubed_unlin(k, n)
+            λ[k], φ[k] = _cubed_cell_lonlat(T, n, f, i, j)
             _put!(panel, k, f)
         end
     end
     return (; λ, φ, panel)
+end
+
+"""
+    _cubed_cell_lonlat(::Type{T}, n, f, i, j) -> (λ, φ)
+
+Cell `(f, i, j)`'s centre in global `(λ, φ)`: its panel-local angles through the gnomonic map and onto
+the sphere.
+"""
+@inline function _cubed_cell_lonlat(
+    ::Type{T}, n::Int, f::Int, i::Int, j::Int,
+) where {T<:AbstractFloat}
+    ξ, η = _cubed_cell_angles(T, n, i, j)
+    p = _cubed_face_to_xyz(f, tan(ξ), tan(η), T)
+    r = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
+    x = p.x / r; y = p.y / r; z = p.z / r
+    θ = acos(clamp(z, -one(T), one(T)))
+    ϕ = atan(y, x)
+    ϕ < 0 && (ϕ += T(2π))
+    return (ϕ, geographic_latitude(θ))
 end
 
 """
@@ -105,6 +150,38 @@ end
 # ---- Yin–Yang ---------------------------------------------------------------
 
 """
+    _yin_yang_panel_coords(::Type{T}, nlon, nlat, i, j) -> (λ, φ)
+
+Cell `(i, j)`'s centre in a panel's OWN frame, where the panel is the separable lat–lon patch
+`[-3π/4, 3π/4] × [-π/4, π/4]`. For yin this frame is the global one.
+"""
+@inline function _yin_yang_panel_coords(
+    ::Type{T}, nlon::Int, nlat::Int, i::Int, j::Int,
+) where {T<:AbstractFloat}
+    Δλ = (T(3π) / 2) / T(nlon)
+    Δφ = (T(π) / 2) / T(nlat)
+    return (-T(3π) / 4 + (T(i) - T(0.5)) * Δλ, -T(π) / 4 + (T(j) - T(0.5)) * Δφ)
+end
+
+"""
+    _yin_yang_rotate(λ, φ) -> (λ_global, φ_global)
+
+The Kageyama–Sato rotation carrying a panel-frame `(λ, φ)` onto yang's position on the sphere. Yang is
+yin rigidly rotated, so this is the whole difference between the two panels.
+"""
+@inline function _yin_yang_rotate(λ::T, φ::T) where {T<:AbstractFloat}
+    sinφ, cosφ = sincos(φ)
+    sinλ, cosλ = sincos(λ)
+    X = -sinφ
+    Y = cosφ * cosλ
+    Z = -cosφ * sinλ
+    θ = acos(clamp(Z, -one(T), one(T)))
+    ϕ = atan(Y, X)
+    ϕ < 0 && (ϕ += T(2π))
+    return (ϕ, geographic_latitude(θ))
+end
+
+"""
     yin_yang_panels!(λyin, φyin, λyang, φyang, nlon, nlat) -> (; yin, yang)
 
 The two Kageyama–Sato panels. `yin` is a pair of AXES (`nlon` and `nlat` long): in its own frame the
@@ -126,24 +203,15 @@ function yin_yang_panels!(
     # Cell centres, not panel edges: each node carries one cell, so the nlon×nlat cells tile
     # [-3π/4, 3π/4] × [-π/4, π/4] exactly. Sampling the endpoints instead would give the two
     # boundary columns/rows half-width cells while the connectivity still counts them whole.
-    Δλ = (T(3π) / 2) / T(nlon)
-    Δφ = (T(π) / 2) / T(nlat)
     @inbounds for i in 1:nlon
-        λyin[i] = -T(3π) / 4 + (T(i) - T(0.5)) * Δλ
+        λyin[i] = _yin_yang_panel_coords(T, nlon, nlat, i, 1)[1]
     end
     @inbounds for j in 1:nlat
-        φyin[j] = -T(π) / 4 + (T(j) - T(0.5)) * Δφ
+        φyin[j] = _yin_yang_panel_coords(T, nlon, nlat, 1, j)[2]
     end
     @inbounds for j in 1:nlat
-        sinφ, cosφ = sincos(φyin[j])   # constant along the row; hoisted out of the longitude loop
         for i in 1:nlon
-            sinλ, cosλ = sincos(λyin[i])
-            X = -sinφ; Y = cosφ * cosλ; Z = -cosφ * sinλ
-            θ = acos(clamp(Z, -one(T), one(T)))
-            ϕ = atan(Y, X)
-            ϕ < 0 && (ϕ += T(2π))
-            λyang[i, j] = ϕ
-            φyang[i, j] = geographic_latitude(θ)
+            λyang[i, j], φyang[i, j] = _yin_yang_rotate(λyin[i], φyin[j])
         end
     end
     return (; yin = (; λ = λyin, φ = φyin), yang = (; λ = λyang, φ = φyang))

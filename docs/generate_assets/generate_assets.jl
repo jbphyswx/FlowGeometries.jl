@@ -105,7 +105,7 @@ end
 function fig_cell_areas()
     cases = [
         ("HEALPix", FG.Grids.HEALPixGrid(16)),
-        ("Cubed sphere", FG.Connectivity.unstructured_grid(FG.SphericalSampling.CubedSphereSampling(), 24)),
+        ("Cubed sphere", FG.Grids.CubedSphereGrid(24)),
         ("Icosahedral", FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))),
     ]
     fig = CM.Figure(; size = (980, 420))
@@ -236,7 +236,7 @@ function fig_yinyang()
                   title = "The excess does not shrink with resolution")
     ns = [12, 24, 48, 96, 192]
     ratio = map(ns) do n
-        sum(FG.Grids.measure(FG.Connectivity.unstructured_grid(FG.SphericalSampling.YinYangSampling(), n, 2n ÷ 3))) / (4π * R^2)
+        sum(FG.Grids.measure(FG.Grids.YinYangGrid(n, 2n ÷ 3))) / (4π * R^2)
     end
     CM.hlines!(ax2, [3 * sqrt(2) / 4]; color = (:gray, 0.8), linestyle = :dash)
     CM.scatterlines!(ax2, Float64.(ns), ratio; color = :purple, linewidth = 2, markersize = 9)

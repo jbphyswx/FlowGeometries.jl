@@ -10,15 +10,15 @@ Iso-latitude rings whose longitude count varies by ring: the reduced Gaussian fa
 octahedral grid is the operational case.
 
 Storage is `O(nrings) = O(√npoints)` — one latitude, one longitude count, one offset and one cell area
-per ring. A point's longitude is `(j−1)·2π/nlon[r]`, which is arithmetic, and its latitude and area are
-its ring's, so neither is held per point. At `N = 1280` that is four vectors of 2560 entries against
+per ring. A point's longitude is `(j−1)·2π/nlon[r]`, and its latitude and area are its ring's, so all
+three come from the ring's four numbers. At `N = 1280` that is four vectors of 2560 entries, covering
 6.6 million points.
 
 Cells are numbered ring by ring from the north, matching
 [`SphericalSampling.ring_range`](@ref) and the order `spherical_points` writes.
 
-Coordinates are `(λ, φ)`; there are no coordinate ARRAYS, so `coordinates` raises and
-[`coords`](@ref)`(grid, i)` reads one point.
+Coordinates are `(λ, φ)`: [`coords`](@ref)`(grid, i)` reads one point, and [`materialize`](@ref) gives
+the whole cloud as dense vectors.
 """
 struct RingGrid{
     T<:AbstractFloat,
@@ -153,11 +153,6 @@ coordinates(grid::RingGrid) = throw(ArgumentError(
     _checked_direction((1, 2), d) == 1 && return (zero(T), T(2π))
     lat = getfield(grid, :latitudes)
     @inbounds return (min(lat[1], lat[end]), max(lat[1], lat[end]))   # monotone, north to south
-end
-
-@inline function extent(grid::RingGrid, d::Integer)
-    lo, hi = bounds(grid, d)
-    return hi - lo
 end
 
 @inline origin(grid::RingGrid, d::Integer) = bounds(grid, d)[1]

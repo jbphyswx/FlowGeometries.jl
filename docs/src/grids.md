@@ -27,14 +27,16 @@ and an activity mask.
 | `StructuredGrid` | one 1-D axis per direction | rectilinear: lat–lon, any tensor-product sampling |
 | `CurvilinearGrid` | one `N`-D array per direction | logically rectangular, geometrically warped |
 | `HEALPixGrid` | none — `(nside, pixel)` arithmetic | the HEALPix pixelization |
+| `CubedSphereGrid` | none — `(n, cell)` arithmetic | the gnomonic cubed sphere |
+| `YinYangGrid` | none — `(nlon, nlat, cell)` arithmetic | Kageyama–Sato overset panels |
 | `RingGrid` | one value per *ring* | reduced Gaussian, octahedral |
-| `UnstructuredGrid` | one value per node, plus CSR neighbours | icosahedral, cubed sphere, scattered |
+| `UnstructuredGrid` | one value per node, plus CSR neighbours | icosahedral, scattered |
 
 The first two store coordinates because a warped mesh's are arbitrary; the last stores them because a
-node set's are the caller's. The middle two store none: a cell's position, its neighbours and its area
-are closed-form in the layout's parameters, so they hold those parameters instead. `HEALPixGrid` is the
-same size at `nside = 1024` — 12.6 million pixels — as at `nside = 1`. Ask for the dense cloud with
-[`Grids.materialize`](@ref) when something outside needs it.
+node set's are the caller's. The four in between store none, or `O(√n)`: a cell's position, its
+neighbours and its area are closed-form in the layout's parameters, so they hold those parameters
+instead. `HEALPixGrid` is the same size at `nside = 1024` — 12.6 million pixels — as at `nside = 1`. Ask
+for the dense cloud with [`Grids.materialize`](@ref) when something outside needs it.
 
 ## Building one
 
@@ -45,6 +47,8 @@ using FlowGeometries: FlowGeometries as FG
 grid = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 64)
 g    = FG.Grids.HEALPixGrid(16)
 rg   = FG.Grids.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(64))
+cs   = FG.Grids.CubedSphereGrid(24)
+yy   = FG.Grids.YinYangGrid(32, 22)
 
 # Or directly, in any number of dimensions; the mask is optional
 sg  = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), λaxis, φaxis, mask)
@@ -69,6 +73,12 @@ FG.Grids.coords(g, 100), FG.Grids.measure(g, 100), collect(FG.Grids.neighbors(g,
 ```@example grids
 λ, φ = FG.Grids.materialize(g)                     # the dense cloud, asked for explicitly
 length(λ)
+```
+
+```@example grids
+# The panel layouts answer the same way, and `sum(measure)` is the region they tile
+sum(FG.Grids.measure(cs)) / (4π * FG.Geometry.radius(FG.Grids.grid_geometry(cs))^2),
+sum(FG.Grids.measure(yy)) / (4π * FG.Geometry.radius(FG.Grids.grid_geometry(yy))^2)
 ```
 
 ## The common interface
@@ -190,12 +200,13 @@ Cell areas are an exact closed form, dispatched on the sampling — never a unif
 which is right only for equal-area samplings and silently wrong elsewhere (icosahedral dual cells span
 a min/max ratio of 0.52).
 
-| layout / sampling | default areas |
+| layout / sampling | cell areas |
 |---|---|
 | `HEALPixGrid` | uniform `4πR²/N` — exact by construction, and stored as one number |
-| cubed sphere | spherical excess of each cell's own panel quadrilateral |
+| `CubedSphereGrid` | exact solid angle of the cell's own gnomonic rectangle |
+| `YinYangGrid` | lat–lon patch area, `R²Δλ·2sin(Δφ/2)·cosφ` |
+| `RingGrid` | `R²·(2π/nlonᵣ)·wᵣ` from the ring's Gaussian weight |
 | icosahedral | true dual-cell areas, from the mesh's own triangulation |
-| Yin–Yang | lat–lon patch area, `R²Δλ·2sin(Δφ/2)·cosφ` |
 | arbitrary points | Voronoi areas, via the Quickhull or DelaunayTriangulation extension |
 
 ![Cell area relative to the mean](assets/cell_areas.png)
@@ -204,8 +215,8 @@ Only HEALPix is one flat colour. The dark spots on the icosahedral panel are its
 the smallest cells on the mesh, and the reason a uniform default is off by nearly a factor of two
 between the largest and smallest cell there.
 
-All four closed forms sum to `4πR²` to machine precision and need no optional dependency. Pass
-`areas = …` to override any of them.
+Every closed form here sums to `4πR²` to machine precision — with the documented Yin–Yang excess — and
+needs no optional dependency. On the node sets, pass `areas = …` to supply your own.
 
 ![Yin–Yang overlap](assets/yinyang.png)
 

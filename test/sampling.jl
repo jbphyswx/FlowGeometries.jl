@@ -360,7 +360,7 @@ Test.@testset "Yin–Yang cells tile each panel exactly; the overlap is resoluti
     R2 = geo.R^2
     box = sqrt(2.0) * (3π / 2) * R2   # one panel's exact [-3π/4,3π/4] × [-π/4,π/4] area
     for (nlon, nlat) in ((8, 6), (16, 12), (48, 32))
-        g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.YinYangSampling(), nlon, nlat; geometry = geo)
+        g = FG.Grids.YinYangGrid(geo, nlon, nlat)
         a = FG.Grids.measure(g)
         np = nlon * nlat
         Test.@test length(a) == 2np
@@ -374,12 +374,17 @@ Test.@testset "Yin–Yang cells tile each panel exactly; the overlap is resoluti
         Test.@test sum(a) / (4π * R2) ≈ 3 * sqrt(2) / 4 rtol = 1e-14
         # Areas vary as cos φ across the panel, and nowhere degenerate.
         Test.@test all(>(0), a)
-        pts = collect(zip(round.(g.λ; digits = 10), round.(g.φ; digits = 10)))
+        λ, φ = FG.Grids.materialize(g)
+        pts = collect(zip(round.(λ; digits = 10), round.(φ; digits = 10)))
         Test.@test length(unique(pts)) == 2np
+        # The layout's points are the sampling's, cell for cell.
+        ref = FG.SphericalSampling.spherical_points(FG.SphericalSampling.YinYangSampling(), nlon, nlat)
+        Test.@test λ ≈ ref.λ atol = 1e-13
+        Test.@test φ ≈ ref.φ atol = 1e-13
     end
-    Test.@test minimum(FG.Grids.measure(FG.Connectivity.unstructured_grid(FG.SphericalSampling.YinYangSampling(), 192, 128))) /
-               maximum(FG.Grids.measure(FG.Connectivity.unstructured_grid(FG.SphericalSampling.YinYangSampling(), 192, 128))) ≈
-               cos(π / 4) rtol = 1e-2
+    let a = FG.Grids.measure(FG.Grids.YinYangGrid(192, 128))
+        Test.@test minimum(a) / maximum(a) ≈ cos(π / 4) rtol = 1e-2
+    end
 end
 
 Test.@testset "Coarsest cubed sphere (one node per face) is constructible" begin

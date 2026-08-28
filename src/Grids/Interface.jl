@@ -215,9 +215,8 @@ See also [`axis`](@ref) (the rectilinear spelling), [`coords`](@ref) (a single p
 
 Every cell's coordinates, as one dense vector per direction.
 
-The explicit way to ask a layout whose coordinates are a formula for them as data — for writing a file,
-or handing them to something that takes point clouds. It is `D·n` numbers, which is what the layout
-exists not to store, so it is a call and never a default.
+How to ask a layout whose coordinates are a formula for them as data — for writing a file, or handing
+them to something that takes point clouds. It allocates `D·n` numbers, so it is an explicit call.
 """
 function materialize(grid::AbstractGrid{G,T}) where {G,T}
     D = ncoordinates(grid)

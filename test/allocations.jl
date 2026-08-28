@@ -76,8 +76,8 @@ q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; 
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 
-# The per-grid-shape sweep. `axes = false` for a layout that stores no coordinate arrays: the spacing
-# accessors are an axis notion and there are no axes, which the layout says rather than answers.
+# The per-grid-shape sweep. `axes = false` for a layout whose coordinates are a formula: the spacing
+# accessors are an axis notion, and such a layout holds no axes to answer them from.
 function check_shape(label, g, I; axes::Bool = true)
     r = FG.Grids.grid_geometry(g) isa FG.Geometry.AbstractSphericalGeometry ? 6.371e5 : 2.5
     out = Vector{Int}(undef, 64)

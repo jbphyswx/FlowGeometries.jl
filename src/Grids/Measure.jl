@@ -196,6 +196,48 @@ Base.show(io::IO, v::RingwiseVector{T}) where {T} =
     print(io, "RingwiseVector{", T, "}(", length(v.value), " rings, ", length(v), " cells)")
 
 """
+    GridMeasure(grid)
+
+The cell measure of a layout whose measure is a formula, computed per entry and stored nowhere.
+
+A genuine `AbstractVector`: indexing, broadcasting and `collect` behave as for the dense equivalent, and
+`measure(grid, k)` is what an entry is. `sum` goes through [`_total_measure`](@ref), which a layout
+covering a known region answers in `O(1)`.
+"""
+struct GridMeasure{T,G} <: AbstractVector{T}
+    grid::G
+end
+
+GridMeasure(grid::AbstractGrid{G,T}) where {G,T} = GridMeasure{T,typeof(grid)}(grid)
+
+@inline Base.size(m::GridMeasure) = (length(mask(m.grid)),)
+Base.IndexStyle(::Type{<:GridMeasure}) = IndexLinear()
+
+@inline function Base.getindex(m::GridMeasure, i::Int)
+    @boundscheck checkbounds(m, i)
+    return @inbounds measure(m.grid, i)
+end
+
+@inline Base.sum(m::GridMeasure) = _total_measure(m.grid)
+
+Base.show(io::IO, m::GridMeasure{T}) where {T} =
+    print(io, "GridMeasure{", T, "}(", length(m), " cells of ", nameof(typeof(m.grid)), ")")
+
+"""
+    _total_measure(grid) -> T
+
+`sum(measure(grid))`, from whatever the layout knows about the region its cells tile. The fallback adds
+the cells up; a layout tiling the whole sphere returns `4πR²` without visiting one.
+"""
+function _total_measure(grid::AbstractGrid{G,T}) where {G,T}
+    s = zero(T)
+    @inbounds for c in cells(grid)
+        s += measure(grid, _cell_indices(grid, cell_at(grid, c))...)
+    end
+    return s
+end
+
+"""
     AllActive(size)
 
 The mask of a grid where every cell participates, stored as its size alone. `getindex` is a

@@ -35,10 +35,10 @@ Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 # One method for every layout: the array-backed fields are adapted and handed to `Grids.rebuild`, which
 # re-derives the grid's type parameters from what they became.
 #
-# Which fields those are is decided by what they ARE, not by a list of names: an array, or a tuple of
-# them. Geometry, topology, period, the sampling tag, a resolution parameter and the per-axis reductions
-# are immutable scalars or tuples of them, so they fail the test and travel unchanged — and a layout
-# whose storage is four ring vectors rather than a coordinate tuple needs no entry anywhere.
+# Which fields those are is decided structurally: an array, or a tuple of them. Geometry, topology,
+# period, the sampling tag, a resolution parameter and the per-axis reductions are immutable scalars or
+# tuples of them, and travel unchanged. So a layout is adapted by what it holds, whether that is a
+# coordinate tuple, four ring vectors or a single integer.
 @inline _is_adaptable(v) = v isa AbstractArray
 @inline _is_adaptable(v::Tuple) = !isempty(v) && all(x -> x isa AbstractArray, v)
 

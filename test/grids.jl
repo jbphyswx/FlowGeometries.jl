@@ -863,3 +863,227 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         Test.@test G.measure(rg2, 7) == G.measure(rg, 7)
     end
 end
+
+Test.@testset "The panel layouts store their resolution, not their panels" begin
+    G = FG.Grids
+    C = FG.Connectivity
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    geo = GE.SphericalGeometry()
+    R = GE.radius(geo)
+
+    # An independent statement of a gnomonic cell's area: the spherical excess of the two triangles
+    # through its four corner DIRECTIONS. The layout uses the closed-form solid angle instead, so two
+    # different exact formulas have to agree.
+    function cube_area_by_excess(n, f, i, j, R)
+        Δ = π / 2 / n
+        edge(k) = -π / 4 + (k - 1) * Δ
+        dir(a, b) = let p = SS._cubed_face_to_xyz(f, tan(edge(a)), tan(edge(b)), Float64)
+            s = sqrt(p.x^2 + p.y^2 + p.z^2)
+            (p.x / s, p.y / s, p.z / s)
+        end
+        c1 = dir(i, j); c2 = dir(i + 1, j); c3 = dir(i + 1, j + 1); c4 = dir(i, j + 1)
+        return R^2 * (GE.spherical_excess(c1, c2, c3) + GE.spherical_excess(c1, c3, c4))
+    end
+
+    Test.@testset "CubedSphereGrid storage is independent of n" begin
+        sizes = [Base.summarysize(G.CubedSphereGrid(geo, n)) for n in (1, 8, 64, 512)]
+        Test.@test allequal(sizes)
+        Test.@test length(G.CubedSphereGrid(geo, 512)) == 6 * 512^2
+    end
+
+    Test.@testset "Cubed-sphere coords and numbering are the sampling's" begin
+        for n in (1, 2, 3, 8)
+            g = G.CubedSphereGrid(geo, n)
+            p = SS.cubed_sphere_points(n)
+            Test.@test length(g) == length(p.λ)
+            for k in eachindex(p.λ)
+                c = G.coords(g, k)
+                Test.@test c.λ ≈ p.λ[k] atol = 1e-13
+                Test.@test c.φ ≈ p.φ[k] atol = 1e-13
+                f, i, j = G.panel_cell(g, k)
+                Test.@test f == p.panel[k]
+                Test.@test G.cell_id(g, f, i, j) == k
+                Test.@test 1 ≤ i ≤ n && 1 ≤ j ≤ n
+            end
+            λ, φ = G.materialize(g)
+            Test.@test λ ≈ p.λ atol = 1e-13
+            Test.@test φ ≈ p.φ atol = 1e-13
+        end
+    end
+
+    Test.@testset "A gnomonic cell's area is its exact solid angle" begin
+        for n in (1, 2, 3, 8, 16)
+            g = G.CubedSphereGrid(geo, n)
+            m = G.measure(g)
+            Test.@test m isa G.GridMeasure
+            Test.@test length(m) == 6 * n^2
+            for k in 1:length(g)
+                f, i, j = G.panel_cell(g, k)
+                Test.@test m[k] ≈ cube_area_by_excess(n, f, i, j, R) rtol = 1e-12
+                # The six panels are rigid images of one another, so the area is panel-independent.
+                Test.@test m[k] ≈ m[G.cell_id(g, 1, i, j)] rtol = 1e-14
+            end
+            # `sum` is `4πR²` from the fact that the panels tile the sphere; adding the cells up has to
+            # give the same number.
+            Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-14
+            Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
+        end
+    end
+
+    Test.@testset "A seam neighbour is symmetric across all twelve seams" begin
+        for n in (1, 2, 3, 8)
+            g = G.CubedSphereGrid(geo, n)
+            conn = C.build_connectivity(g)
+            Test.@test C.is_symmetric_adjacency(conn)
+            nseam = 0
+            for k in 1:length(g)
+                nb = collect(G.neighbors(g, k))
+                Test.@test allunique(nb)
+                Test.@test !(k in nb)
+                Test.@test length(nb) ≤ G.max_neighbors(g)
+                f, _, _ = G.panel_cell(g, k)
+                for j in nb
+                    # Reciprocity, which is what makes the seam fold a mesh rather than a guess.
+                    Test.@test k in collect(G.neighbors(g, j))
+                    G.panel_cell(g, j)[1] == f || (nseam += 1)
+                end
+                # The CSR agrees with the per-cell query.
+                Test.@test sort(collect(G.neighbors(conn, k))) == sort(nb)
+            end
+            Test.@test nseam > 0                     # seams are actually being crossed
+        end
+        # Only a panel corner loses a neighbour: its diagonal exit belongs to no single panel.
+        g = G.CubedSphereGrid(geo, 4)
+        short = [k for k in 1:length(g) if C.nneighbors(g, k) < 4]
+        Test.@test isempty(short)
+    end
+
+    Test.@testset "YinYangGrid storage is independent of resolution" begin
+        sizes = [Base.summarysize(G.YinYangGrid(geo, nl, nt))
+                 for (nl, nt) in ((4, 3), (32, 22), (192, 128))]
+        Test.@test allequal(sizes)
+        Test.@test length(G.YinYangGrid(geo, 192, 128)) == 2 * 192 * 128
+    end
+
+    Test.@testset "Yin–Yang coords are the panel formula and its rotation" begin
+        for (nlon, nlat) in ((4, 3), (8, 6), (16, 12))
+            g = G.YinYangGrid(geo, nlon, nlat)
+            p = SS.spherical_points(SS.YinYangSampling(), nlon, nlat)
+            np = nlon * nlat
+            Test.@test length(g) == 2np
+            for k in eachindex(p.λ)
+                c = G.coords(g, k)
+                Test.@test c.λ ≈ p.λ[k] atol = 1e-13
+                Test.@test c.φ ≈ p.φ[k] atol = 1e-13
+                pn, i, j = G.panel_cell(g, k)
+                Test.@test pn == (k ≤ np ? 1 : 2)
+                Test.@test G.cell_id(g, pn, i, j) == k
+            end
+            # Yin's own frame is the global one, so its cells are a plain lat–lon patch.
+            Δλ = (3π / 2) / nlon
+            Δφ = (π / 2) / nlat
+            for j in 1:nlat, i in 1:nlon
+                c = G.coords(g, G.cell_id(g, 1, i, j))
+                Test.@test c.λ ≈ -3π / 4 + (i - 0.5) * Δλ atol = 1e-14
+                Test.@test c.φ ≈ -π / 4 + (j - 0.5) * Δφ atol = 1e-14
+            end
+        end
+    end
+
+    Test.@testset "A Yin–Yang cell's area is its row's, and the panels overlap" begin
+        for (nlon, nlat) in ((8, 6), (16, 12), (48, 32))
+            g = G.YinYangGrid(geo, nlon, nlat)
+            m = G.measure(g)
+            np = nlon * nlat
+            Δλ = (3π / 2) / nlon
+            Δφ = (π / 2) / nlat
+            # An independent statement: R²Δλ(sin(φ+Δφ/2) − sin(φ−Δφ/2)).
+            for j in (1, nlat ÷ 2, nlat), i in (1, nlon)
+                φ = -π / 4 + (j - 0.5) * Δφ
+                want = R^2 * Δλ * (sin(φ + Δφ / 2) - sin(φ - Δφ / 2))
+                Test.@test m[G.cell_id(g, 1, i, j)] ≈ want rtol = 1e-13
+                Test.@test m[G.cell_id(g, 2, i, j)] ≈ want rtol = 1e-13
+            end
+            # Independent of longitude, and identical on the two panels.
+            for j in (1, nlat)
+                Test.@test allequal(m[G.cell_id(g, 1, i, j)] for i in 1:nlon)
+                Test.@test m[G.cell_id(g, 1, 1, j)] == m[G.cell_id(g, 2, 1, j)]
+            end
+            # One panel tiles its own box exactly; the two together exceed the sphere by 3√2/4.
+            Test.@test sum(collect(m)[1:np]) ≈ sqrt(2.0) * (3π / 2) * R^2 rtol = 1e-13
+            Test.@test sum(m) / (4π * R^2) ≈ 3 * sqrt(2) / 4 rtol = 1e-13
+            Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-13
+        end
+    end
+
+    Test.@testset "Yin–Yang panels are not cross-linked" begin
+        g = G.YinYangGrid(geo, 8, 6)
+        np = 8 * 6
+        conn = C.build_connectivity(g)
+        Test.@test C.is_symmetric_adjacency(conn)
+        for k in 1:length(g)
+            nb = collect(G.neighbors(g, k))
+            Test.@test allunique(nb)
+            Test.@test !(k in nb)
+            # Every neighbour is on this cell's own panel.
+            Test.@test all(((k ≤ np) == (j ≤ np)) for j in nb)
+            Test.@test 2 ≤ length(nb) ≤ 4           # a panel corner has two, an interior cell four
+            Test.@test sort(collect(G.neighbors(conn, k))) == sort(nb)
+        end
+        # The panel-local graph is the same one the sampling-level builder makes.
+        ref = C.build_connectivity(SS.YinYangSampling(), 8, 6)
+        for k in 1:length(g)
+            Test.@test sort(collect(G.neighbors(ref, k))) == sort(collect(G.neighbors(g, k)))
+        end
+    end
+
+    Test.@testset "The panel layouts answer the traits and refuse coordinate arrays" begin
+        for g in (G.CubedSphereGrid(geo, 4), G.YinYangGrid(geo, 8, 6))
+            Test.@test G.cell_address(g) === G.FlatCells()
+            Test.@test G.adjacency_source(g) === G.FormulaNeighbors()
+            Test.@test G.candidate_source(g) === G.IndexedCandidates()
+            Test.@test G.ncoordinates(g) == 2
+            Test.@test G.npanels(g) == (g isa G.CubedSphereGrid ? 6 : 2)
+            Test.@test_throws ArgumentError G.coordinates(g)
+            Test.@test_throws ArgumentError C.IndexTopology(g)
+        end
+    end
+
+    Test.@testset "The panel layouts honour a mask, a width and a rebuild" begin
+        for (g, ncell) in ((G.CubedSphereGrid(geo, 3), 54), (G.YinYangGrid(geo, 4, 3), 24))
+            Test.@test length(g) == ncell
+            m = trues(ncell); m[4] = false
+            gm = G.rebuild(g, (mask = m,))
+            Test.@test typeof(gm).name === typeof(g).name
+            Test.@test !G.isactive(gm, 4)
+            Test.@test C.nneighbors(gm, 4) == 0
+            Test.@test G.coords(gm, 7) == G.coords(g, 7)
+            Test.@test G.measure(gm, 7) == G.measure(g, 7)
+        end
+        for W in (Float64, Float32)
+            gw = G.CubedSphereGrid(GE.SphericalGeometry(W(6.371e6)), 4)
+            yw = G.YinYangGrid(GE.SphericalGeometry(W(6.371e6)), 8, 6)
+            Test.@test eltype(gw) === eltype(yw) === W
+            Test.@test G.coords(gw, 7).λ isa W
+            Test.@test G.coords(yw, 7).λ isa W
+            Test.@test G.measure(gw, 7) isa W
+            Test.@test G.measure(yw, 7) isa W
+            Test.@test eltype(G.measure(gw)) === W
+        end
+    end
+
+    Test.@testset "The panel layouts' distance queries agree with a scan" begin
+        for (g, r) in ((G.CubedSphereGrid(geo, 4), 2.0e6), (G.YinYangGrid(geo, 8, 6), 1.5e6))
+            n = length(g)
+            for i in (1, 7, n ÷ 2, n)
+                ref = sort([j for j in 1:n if j != i && GE.distance(g, i, j) ≤ r])
+                Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
+                mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
+                Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
+            end
+            # An index over a layout that stores nothing must not re-densify it into one.
+            Test.@test Base.summarysize(g) < 1000
+        end
+    end
+end

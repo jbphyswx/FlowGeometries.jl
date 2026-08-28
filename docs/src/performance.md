@@ -30,9 +30,7 @@ size step:
 | `latitude_weights` Clenshaw–Curtis | 0.02 | 11 | 1.14 |
 | `UnstructuredGrid` k-d tree, 40k | 6.23 | 52 | 1.06 |
 | `build_connectivity` sampling | 91.48 | 9 | 0.93 |
-| `unstructured_grid` cubed sphere | 1.79 | 28 | 1.04 |
 | `unstructured_grid` icosahedral | 4.00 | 80 | 1.04 |
-| `unstructured_grid` Yin–Yang | 3.76 | 41 | 0.98 |
 
 Allocation counts are flat in `n` everywhere. `build_connectivity`'s 91 MiB is the CSR output itself
 for ~2M nodes, not overhead.
