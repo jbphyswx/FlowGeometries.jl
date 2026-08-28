@@ -125,6 +125,14 @@ const PointLike = Union{NamedTuple,AbstractVector{<:Real}}
     as_ntuple(p) -> Tuple
 
 Normalize a point (`Tuple`, `NamedTuple`, or `AbstractVector` of length 1–3) to a plain `Tuple`.
+
+A vector's length is a runtime value, so for one this returns a union of the three tuple widths: the
+width of the result IS the width of the point. Every entry point here reduces a point to a value whose
+type does not depend on that width — `distance` to a scalar, `spherical_to_cartesian` to three
+components — so the union splits across the branch and each infers concretely and allocates nothing.
+
+[`scale_factors`](@ref) is the exception, its result being one factor per direction. Hand it a tuple
+where that matters.
 """
 @inline as_ntuple(p::NamedTuple) = Tuple(p)
 @inline as_ntuple(p::Tuple) = p
@@ -139,6 +147,31 @@ Normalize a point (`Tuple`, `NamedTuple`, or `AbstractVector` of length 1–3) t
     end
     throw(ArgumentError("a point vector must have length 1, 2, or 3"))
 end
+
+"""
+    _lonlat(p) -> (λ, φ)
+    _xyz(v) -> (x, y, z)
+
+A point's components for a consumer that needs a fixed number of them, with the arity checked.
+
+`λ, φ = as_ntuple(p)` does not check it: on a one-component point the destructure reads `p[2]` and
+reports an index out of bounds, when what is wrong is the point. These say so instead, and return a pair
+or a triple whose type does not depend on how many components the point had.
+
+The arity IS the dispatch, so the width that survives is a method signature rather than a comparison
+against `length`, and the tuple is indexed only where it is known wide enough to index.
+"""
+@inline _lonlat(p) = _lonlat(as_ntuple(p))
+@inline _lonlat(q::Tuple{Any,Any,Vararg{Any}}) = (q[1], q[2])
+@inline _lonlat(q::Tuple) = throw(ArgumentError(
+    "this needs a point with a longitude and a latitude; got $(length(q)) component(s)",
+))
+
+@inline _xyz(v) = _xyz(as_ntuple(v))
+@inline _xyz(q::NTuple{3,Any}) = q
+@inline _xyz(q::Tuple) = throw(ArgumentError(
+    "this needs three Cartesian components; got $(length(q))",
+))
 
 """Convert positional point values to the geometry's own float type `T`."""
 @inline _at(::Type{T}, p::Tuple{Vararg{Real,N}}) where {T<:AbstractFloat,N} = convert(NTuple{N,T}, p)

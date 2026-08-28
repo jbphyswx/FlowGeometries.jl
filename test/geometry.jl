@@ -255,6 +255,35 @@ Test.@testset "Requested point representation is honored exactly" begin
     # A velocity may itself be given in any representation.
     Test.@test FG.Geometry.vector_from_cartesian(sgeo, SA.SVector(1.0, 2.0, 3.0), 0.1, 0.2) ===
                FG.Geometry.vector_from_cartesian(sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)
+    Test.@test FG.Geometry.vector_from_cartesian(sgeo, [1.0, 2.0, 3.0], 0.1, 0.2) ===
+               FG.Geometry.vector_from_cartesian(sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)
+    Test.@test FG.Geometry.unit_vector(Float64, [0.1, 0.2]) ===
+               FG.Geometry.unit_vector(Float64, (0.1, 0.2))
+    # A third component is a radius, which a direction does not use.
+    Test.@test FG.Geometry.unit_vector(Float64, [0.1, 0.2, 6.4e6]) ===
+               FG.Geometry.unit_vector(Float64, (0.1, 0.2))
+
+    # A consumer needing a fixed number of components names the one it is missing. Reading past the end
+    # of a short point reports an index, which is not what is wrong with the point.
+    Test.@test_throws ArgumentError FG.Geometry.unit_vector(Float64, [0.1])
+    Test.@test_throws ArgumentError FG.Geometry.unit_vector(Float64, (λ = 0.1,))
+    Test.@test_throws ArgumentError FG.Geometry.vector_from_cartesian(sgeo, [1.0, 2.0], 0.1, 0.2)
+    Test.@test_throws ArgumentError FG.Geometry.vector_from_cartesian(sgeo, (1.0,), 0.1, 0.2)
+    # The width is the whole of what those check. A component outside the numeric domain has the right
+    # width, so the conversion is what judges it, and it names the offending type rather than a count.
+    Test.@test_throws MethodError FG.Geometry.vector_from_cartesian(sgeo, ("a", "b", "c"), 0.1, 0.2)
+    Test.@test_throws MethodError FG.Geometry.unit_vector(Float64, (λ = 0.1, φ = missing))
+
+    # The union of widths costs the caller no inference: each entry point reduces a point to a value
+    # whose type the geometry fixes, never the point's width.
+    vp, vv = [0.1, 0.2], [1.0, 2.0, 3.0]
+    Test.@test Test.@inferred(FG.Geometry.distance(sgeo, vp, vp)) isa Float64
+    Test.@test Test.@inferred(FG.Geometry.triangle_area(sgeo, vp, vp .+ 0.1, vp .+ 0.2)) isa Float64
+    Test.@test Test.@inferred(FG.Geometry.unit_vector(Float64, vp)) isa NTuple{3,Float64}
+    Test.@test Test.@inferred(FG.Geometry.spherical_to_cartesian(sgeo, vp)) isa
+               NamedTuple{(:x, :y, :z),NTuple{3,Float64}}
+    Test.@test Test.@inferred(FG.Geometry.vector_from_cartesian(sgeo, vv, 0.1, 0.2)) isa
+               NamedTuple{(:λ, :φ, :r),NTuple{3,Float64}}
 end
 
 Test.@testset "A pole rotation applies to a point set and to a grid" begin

@@ -41,6 +41,9 @@ q_runreach(m, I, d, i, n, k) = FG.Operators._run_reach(m, I, d, i, n, k, false)
 q_locate_top(g, p, t, s) = FG.Grids.locate(g, p; topology = t, scratch = s)
 q_gap(g, d, i)           = FG.Grids.local_spacing(g, d, i)
 q_tensor_local(geo, t, p) = FG.Geometry.tensor_to_local(geo, t..., p[1], p[2])
+q_uvec(p)                = FG.Geometry.unit_vector(Float64, p)
+q_s2c(geo, p)            = FG.Geometry.spherical_to_cartesian(geo, p)
+q_vfc(geo, v, p)         = FG.Geometry.vector_from_cartesian(geo, v, p[1], p[2])
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
 q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
@@ -496,6 +499,14 @@ Test.@testset "Point handling allocates nothing" begin
     namedtuple_loop(sgrid, sgeo, 2)
     Test.@test @allocated(svec_loop(sgrid, sgeo, 10)) == 0
     Test.@test @allocated(namedtuple_loop(sgrid, sgeo, 10)) == 0
+
+    # A point given as a vector has a runtime width, so it arrives as a union of the widths. Each of
+    # these reduces it to a value the geometry types, so the union splits and nothing is boxed through.
+    vp, vv = [0.1, 0.2], [1.0, 2.0, 3.0]
+    Test.@test _alloc(q_dist, sgeo, vp, vp) == 0
+    Test.@test _alloc(q_uvec, vp) == 0
+    Test.@test _alloc(q_s2c, sgeo, vp) == 0
+    Test.@test _alloc(q_vfc, sgeo, vv, vp) == 0
 end
 
 Test.@testset "Rotating a point set in place allocates nothing" begin

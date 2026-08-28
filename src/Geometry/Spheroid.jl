@@ -168,7 +168,7 @@ is [`spherical_to_cartesian`](@ref) with the radius divided out, as a bare tuple
 spherical-triangle kernels want, computed once per vertex and reused across every triangle sharing it.
 """
 @inline function unit_vector(::Type{T}, p) where {T<:AbstractFloat}
-    λ, φ = as_ntuple(p)
+    λ, φ = _lonlat(p)
     sinλ, cosλ = sincos(T(λ))
     sinφ, cosφ = sincos(T(φ))
     return (cosφ * cosλ, cosφ * sinλ, sinφ)

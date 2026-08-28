@@ -67,7 +67,7 @@ Map Cartesian velocity `(ux, uy, uz)` at `(λ, φ)` into spherical components
 end
 
 @inline function vector_from_cartesian(geo::AbstractSphericalGeometry, v, λ::Real, φ::Real)
-    ux, uy, uz = as_ntuple(v)
+    ux, uy, uz = _xyz(v)
     return vector_from_cartesian(geo, ux, uy, uz, λ, φ)
 end
 
