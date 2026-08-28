@@ -172,7 +172,8 @@ function structured_grid(
     m = mask === nothing ? Grids.AllActive((length(λ), length(φ))) : mask
     # The geometry fixes the width of every coordinate and metric factor, so a grid built at `T`
     # around a geometry of another width comes back promoted to that other width.
-    return Grids.StructuredGrid(Geometry.similar_geometry(T, geometry), λ, φ, m; periodic = periodic)
+    return Grids.StructuredGrid(Geometry.similar_geometry(T, geometry), λ, φ, m;
+                                periodic = periodic, sampling = s)
 end
 
 """

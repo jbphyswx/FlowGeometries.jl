@@ -15,7 +15,7 @@ Supertype for all grid architectures.
 abstract type AbstractGrid{G<:Geometry.AbstractGeometry, T<:AbstractFloat} end
 
 """
-    AbstractStructuredGrid{G,T} <: AbstractGrid{G,T}
+    AbstractStructuredGrid{G, T} <: AbstractGrid{G,T}
 
 Rectilinear grids.  Default: [`StructuredGrid`](@ref).
 """
@@ -776,27 +776,37 @@ function _axis_stats(x::AbstractArray{T}) where {T<:AbstractFloat}
 end
 
 """
-    StructuredGrid{G, T, N, TP, C, AT, BT}
+    StructuredGrid{T, G, N, S, TP, C, AT, BT}
 
 Rectilinear `N`-dimensional grid, for any `N`: one coordinate vector per direction (`coordinates`),
 an N-D cell `measure` (length in 1-D, area in 2-D, volume in 3-D, the N-D measure in general), an N-D
 active `mask`, per-direction `topology`, and the wrap `period` of each periodic direction.
 
-`TP` is the per-direction [`AbstractTopology`](@ref): singletons, so no storage, and readable from
-the type.
-
-`C` is a heterogeneous `NTuple{N,AbstractVector{T}}` — each axis independently keeps whatever
-concrete `AbstractVector{T}` type it was constructed with (an [`Axes.UniformAxis`](@ref), a plain
-`Vector`, a device array, or any other subtype); there is deliberately no shared vector type forcing
-the axes to match. This matters beyond storage: a `UniformAxis`'s type is a compile-time proof of
-constant spacing that [`isuniform`](@ref) and [`spacing`](@ref) read without touching a coordinate,
-and forcing the axes into a common type would destroy it. One axis can be uniform while another is
-stretched.
+# Type parameters
+- `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
+  is a type error rather than a silent promotion — hence `T` precedes `G`, Julia forbidding the
+  forward reference a `{G,T}` order would need. [`CurvilinearGrid`](@ref) and
+  [`UnstructuredGrid`](@ref) carry the same convention.
+- `N`: number of coordinate directions.
+- `S`: the [`SphericalSampling`](@ref) recipe the axes came from, or `Nothing` for axes given directly.
+  A zero-size singleton, so it costs nothing to carry and lets quadrature exactness, the matching
+  latitude weights and a rebuild at another resolution dispatch on which node set this is — none of
+  which the coordinates alone determine. See [`sampling`](@ref).
+- `TP`: the per-direction [`AbstractTopology`](@ref) — singletons, so no storage, readable from the type.
+- `C`: a heterogeneous `NTuple{N,AbstractVector{T}}`. Each axis independently keeps whatever concrete
+  `AbstractVector{T}` type it was constructed with (an [`Axes.UniformAxis`](@ref), a plain `Vector`, a
+  device array, or any other subtype); there is deliberately no shared vector type forcing the axes to
+  match. This matters beyond storage: a `UniformAxis`'s type is a compile-time proof of constant
+  spacing that [`spacing_trait`](@ref) and [`spacing`](@ref) read without touching a coordinate, and
+  forcing the axes into a common type would destroy it. One axis can be uniform while another is
+  stretched.
+- `AT`, `BT`: array types of the derived `measure` and of the active `mask`.
 """
 struct StructuredGrid{
-    G<:Geometry.AbstractGeometry,
     T<:AbstractFloat,
+    G<:Geometry.AbstractGeometry{T},
     N,
+    S,
     TP<:NTuple{N,AbstractTopology},
     C<:NTuple{N,AbstractVector{T}},
     AT<:AbstractArray{T,N},
@@ -808,8 +818,52 @@ struct StructuredGrid{
     mask::BT                  # N-D active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
+    sampling::S               # the node-set recipe, or `nothing`; zero-size where it is one
     stats::NTuple{N,AxisStats{T}}   # reduced once; see AxisStats
 end
+
+"""
+    sampling(grid) -> AbstractSphericalSampling | Nothing
+
+The node-set recipe `grid`'s axes were built from, or `nothing` where they were given directly.
+
+Coordinates do not determine it: Gauss–Legendre and an arbitrary lat–lon grid are the same numbers to
+within round-off, and only the recipe says which quadrature is exact on them. Keeping it means a grid
+can be asked for its matching weights, or rebuilt at another resolution, after construction.
+"""
+@inline sampling(grid::AbstractGrid) = nothing
+@inline sampling(grid::StructuredGrid) = getfield(grid, :sampling)
+
+"""
+    rebuild(grid, fields::NamedTuple) -> grid
+
+`grid` with the named fields replaced, its type parameters re-derived from what the new fields are.
+
+The hook a storage change goes through — moving a grid's arrays to a device, rewrapping them — so that
+one generic method serves every layout and adding a field to one does not silently leave a
+reconstruction elsewhere spelling out a parameter list that no longer matches.
+
+`fields` need only name what changes; everything else is carried over.
+"""
+@inline function rebuild(grid::G, fields::NamedTuple) where {G<:AbstractGrid}
+    unknown = Base.setdiff(keys(fields), fieldnames(G))
+    isempty(unknown) || throw(ArgumentError(
+        "$(nameof(G)) has no field $(join(unknown, ", ")); it has $(join(fieldnames(G), ", "))",
+    ))
+    return _from_fields(map(n -> get(fields, n, getfield(grid, n)), fieldnames(G))...)
+end
+
+# Every type parameter is determined by the field types, so these re-derive the whole list from the
+# values rather than carrying over the ones the old grid happened to have — which is the point, since a
+# storage change is exactly what alters them. One line per layout, beside the struct it mirrors, so a
+# field added to one cannot leave a stale parameter list somewhere that loads only with a weak
+# dependency.
+@inline _from_fields(
+    geometry::G, coordinates::C, measure::AT, mask::BT, topology::TP, period::NTuple{N,T},
+    sampling::S, stats::NTuple{N,AxisStats{T}},
+) where {T,G<:Geometry.AbstractGeometry{T},N,S,TP,C,AT,BT} =
+    StructuredGrid{T,G,N,S,TP,C,AT,BT}(geometry, coordinates, measure, mask, topology, period,
+                                       sampling, stats)
 
 """
     axis_stats(grid) -> NTuple{N,AxisStats}
@@ -858,7 +912,7 @@ end
 
 Positional coordinate values at indices `I`. Internal; prefer [`coords`](@ref).
 """
-@inline function _raw_coords(grid::StructuredGrid{G,T,N}, I::Vararg{Integer,N}) where {G,T,N}
+@inline function _raw_coords(grid::StructuredGrid{T, G,N}, I::Vararg{Integer,N}) where {G,T,N}
     c = coordinates(grid)
     @boundscheck _checkaxes(c, I)
     return ntuple(d -> @inbounds(c[d][I[d]]), Val(N))
@@ -1220,13 +1274,14 @@ function StructuredGrid(
     topology = nothing,
     period = nothing,
     periodic = nothing,
+    sampling = nothing,
 ) where {T<:AbstractFloat}
     axes_in, mask_pos = _split_axes_mask(args)
     mask === nothing || mask_pos === nothing ||
         throw(ArgumentError("mask given both positionally and as a keyword"))
     return _structured_grid(
         geometry, axes_in, mask_pos === nothing ? mask : mask_pos,
-        topology === nothing ? periodic : topology, period,
+        topology === nothing ? periodic : topology, period, sampling,
     )
 end
 
@@ -1241,7 +1296,7 @@ function _split_axes_mask(args::Tuple)
 end
 
 function _structured_grid(
-    geometry::G, axes_in::NTuple{N,AbstractVector}, mask, topo, period,
+    geometry::G, axes_in::NTuple{N,AbstractVector}, mask, topo, period, sampling,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     N ≥ 1 || throw(ArgumentError("a StructuredGrid needs at least one axis"))
     ax = ntuple(d -> _to_axis(T, axes_in[d]), Val(N))
@@ -1269,9 +1324,9 @@ function _structured_grid(
 
     measure = _cell_measure(geometry, ax, period_args)
     stats = ntuple(d -> _axis_stats(ax[d]), Val(N))
-    return StructuredGrid{G, T, N, typeof(tp), typeof(ax), typeof(measure), typeof(m)}(
-        geometry, ax, measure, m, tp, per, stats,
-    )
+    return StructuredGrid{
+        T, G, N, typeof(sampling), typeof(tp), typeof(ax), typeof(measure), typeof(m),
+    }(geometry, ax, measure, m, tp, per, sampling, stats)
 end
 
 # Wrap length per direction; zero where bounded, so it never reads as usable.
@@ -1329,7 +1384,7 @@ periodic direction wraps and an inactive cell is honoured without restating any 
 Only a rectilinear direction has a 1-D axis to difference along, so this is a `StructuredGrid` method.
 """
 function Discretization.apply_stencil!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N},
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     active_only::Bool = true, masked = zero(S), backend = nothing,
     policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
@@ -1347,7 +1402,7 @@ end
 # The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
 # past the last sample the pair is `(n, 1)` across the seam, where `interpolation_weights` alone would
 # clamp and return the endpoint value.
-@inline function _interp_pair(grid::StructuredGrid{G,T,N}, d::Int, v::T) where {G,T,N}
+@inline function _interp_pair(grid::StructuredGrid{T, G,N}, d::Int, v::T) where {G,T,N}
     x = coordinates(grid, d)
     n = length(x)
     n == 1 && return (1, 1, one(T), zero(T))
@@ -1371,7 +1426,7 @@ end
 end
 
 function Discretization.interpolate(
-    field::AbstractArray{S,N}, grid::StructuredGrid{G,T,N}, p::NTuple{N,Real};
+    field::AbstractArray{S,N}, grid::StructuredGrid{T, G,N}, p::NTuple{N,Real};
     active_only::Bool = true, masked = S(NaN),
     policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
 ) where {S,G,T,N}
@@ -1380,7 +1435,7 @@ function Discretization.interpolate(
 end
 
 @inline function _check_interp(
-    field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N}, ::Val{N}, policy,
+    field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N}, ::Val{N}, policy,
 ) where {NA,G,T,N}
     policy isa Discretization.ShiftWithinRun && Discretization._interp_mask_error(policy)
     NA ≥ N || throw(DimensionMismatch("field has $NA axes but the grid has $N"))
@@ -1394,7 +1449,7 @@ end
 # One batch element, at linear offset `off` into the field. The bracketing cell and its weights are a
 # property of the POINT and the grid, so a batched call solves them once and calls this per element.
 function _interp_at(
-    field::AbstractArray{S}, grid::StructuredGrid{G,T,N}, p::NTuple{N,Real}, off::Int,
+    field::AbstractArray{S}, grid::StructuredGrid{T, G,N}, p::NTuple{N,Real}, off::Int,
     active_only::Bool, masked, policy,
 ) where {S,G,T,N}
     prs = ntuple(d -> _interp_pair(grid, d, T(p[d])), Val(N))
@@ -1437,7 +1492,7 @@ The bracketing cell and its `2^N` corner weights depend on the point and the gri
 they are solved once here and applied to every element — less work than one `interpolate` per slice.
 """
 function Discretization.interpolate!(
-    out::AbstractVector{S}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N},
+    out::AbstractVector{S}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
     p::NTuple{N,Real}; active_only::Bool = true, masked = S(NaN),
     policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(),
 ) where {S,G,T,N,NA}
@@ -1460,14 +1515,14 @@ end
 # The allocating form, as everywhere else in the package: `spherical_points!`/`spherical_points`,
 # `latitude_weights!`/`latitude_weights`.
 function Discretization.interpolate(
-    field::AbstractArray{S,NA}, grid::StructuredGrid{G,T,N}, p::NTuple{N,Real}; kwargs...,
+    field::AbstractArray{S,NA}, grid::StructuredGrid{T, G,N}, p::NTuple{N,Real}; kwargs...,
 ) where {S,G,T,N,NA}
     n = prod(size_tuple(grid))
     return Discretization.interpolate!(Vector{S}(undef, length(field) ÷ n), field, grid, p; kwargs...)
 end
 
 function Discretization.derivative!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N},
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     active_only::Bool = true, masked = zero(S), backend = nothing,
     policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
@@ -1483,7 +1538,7 @@ end
 # many leading axes are spatial, and a disagreement THERE is still a mistake and still raises — only
 # extra trailing axes are new.
 @inline function _check_batched(
-    out::AbstractArray{<:Any,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N},
+    out::AbstractArray{<:Any,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
     ::Val{N}, dim::Int,
 ) where {NA,G,T,N}
     NA ≥ N || throw(DimensionMismatch(
@@ -1506,11 +1561,11 @@ end
 # A Cartesian metric is the identity, so the derivative with respect to distance is already the one
 # `apply_stencil!` wrote and there is nothing to divide by.
 @inline _scale_by_metric!(
-    out::AbstractArray{S,NA}, ::StructuredGrid{G,T,N}, ::Int, _masked,
+    out::AbstractArray{S,NA}, ::StructuredGrid{T, G,N}, ::Int, _masked,
 ) where {S,G<:Geometry.AbstractCartesianGeometry,T,N,NA} = out
 
 function _scale_by_metric!(
-    out::AbstractArray{S,NA}, grid::StructuredGrid{G,T,N}, dim::Int, masked,
+    out::AbstractArray{S,NA}, grid::StructuredGrid{T, G,N}, dim::Int, masked,
 ) where {S,G,T,N,NA}
     geo = grid_geometry(grid)
     floor_ = Discretization.metric_floor(geo)
@@ -1583,7 +1638,7 @@ same direction should build it once and hand it to the `(out, field, grid, indic
 form — the `(out, field, grid, dim)` form above rebuilds it on every call.
 """
 function Discretization.axis_stencils(
-    grid::StructuredGrid{G,T,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
+    grid::StructuredGrid{T, G,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     return Discretization.axis_stencils(
@@ -1607,7 +1662,7 @@ This is the form to use in a loop over fields: the table is the same for all of 
 is the one part of the work that does not depend on the field.
 """
 function Discretization.apply_stencil!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N},
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
     policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
@@ -1647,7 +1702,7 @@ end
 above, for the entry point a geometry-aware caller actually uses.
 """
 function Discretization.derivative!(
-    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{G,T,N},
+    out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
     policy::Discretization.AbstractMaskPolicy = Discretization.BlankMasked(), scratch = nothing,
@@ -1702,6 +1757,13 @@ struct CurvilinearGrid{
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
     stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined without axes
 end
+
+@inline _from_fields(
+    geometry::G, coordinates::C, corners::C, measure::MA, mask::B, topology::TP,
+    period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}},
+) where {T,G<:Geometry.AbstractGeometry{T},N,TP,C,MA,B} =
+    CurvilinearGrid{T,G,N,TP,C,MA,B}(geometry, coordinates, corners, measure, mask, topology,
+                                     period, stats)
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
 @inline period(grid::CurvilinearGrid, d::Integer) =
@@ -2020,7 +2082,7 @@ unrotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
     _reframe(Geometry.unrotate, grid, rot)
 
 function _reframe(
-    pointwise::F, grid::StructuredGrid{G,T,2}, rot::Geometry.PoleRotation,
+    pointwise::F, grid::StructuredGrid{T, G,2}, rot::Geometry.PoleRotation,
 ) where {F, T, G<:Geometry.AbstractSphericalGeometry{T}}
     λ, φ = coordinates(grid, 1), coordinates(grid, 2)
     _first(a, b) = T(pointwise(rot, a, b)[1])
@@ -2087,6 +2149,13 @@ struct UnstructuredGrid{
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
     stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined for scattered nodes
 end
+
+@inline _from_fields(
+    geometry::G, coordinates::C, measure::VA, mask::B, neighbor_nbrs::VN, neighbor_ptr::VP,
+    topology::TP, period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}},
+) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP} =
+    UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP}(geometry, coordinates, measure, mask, neighbor_nbrs,
+                                            neighbor_ptr, topology, period, stats)
 
 @inline topology(grid::UnstructuredGrid) = getfield(grid, :topology)
 
@@ -2661,7 +2730,7 @@ the cell a point falls in is a question about the grid rather than about the act
 """
 function locate end
 
-function locate(grid::StructuredGrid{G,T,N}, p::NTuple{N,Real}) where {G,T,N}
+function locate(grid::StructuredGrid{T, G,N}, p::NTuple{N,Real}) where {G,T,N}
     return ntuple(Val(N)) do d
         x = coordinates(grid, d)
         v = T(p[d])

@@ -607,7 +607,7 @@ metric_window(grid::Grids.StructuredGrid, ball::_BallLike) =
     metric_window(grid, ball, MetricTopology(grid))
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball::_BallLike, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, ball::_BallLike, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry,T,N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -615,7 +615,7 @@ function metric_window(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball::_BallLike, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, ball::_BallLike, mt::MetricTopology,
 ) where {G<:Geometry.AbstractSphericalGeometry,T,N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -633,7 +633,7 @@ function metric_window(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball::_BallLike, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, ball::_BallLike, mt::MetricTopology,
 ) where {G<:Geometry.AbstractEllipsoidalGeometry,T,N}
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
@@ -656,7 +656,7 @@ end
 # The smallest `|cos φ|` anywhere on the latitude axis, in `O(1)`. `|cos|` on `[-π/2, π/2]` falls away
 # from the middle in both directions, so over an interval its minimum is at whichever end is farther
 # from the equator — the two stored extremes are enough, and no row is visited.
-@inline function _cos_extreme(grid::Grids.StructuredGrid{G,T,N}, ::Val{N}) where {G,T,N}
+@inline function _cos_extreme(grid::Grids.StructuredGrid{T, G,N}, ::Val{N}) where {G,T,N}
     N ≥ 2 || return one(T)
     lo, hi = Grids.bounds(grid, 2)
     return min(abs(cos(T(lo))), abs(cos(T(hi))))
@@ -938,7 +938,7 @@ handled here once rather than by each caller.
 function metric_band end
 
 function metric_band(
-    grid::Grids.StructuredGrid{G,T,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
+    grid::Grids.StructuredGrid{T, G,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
 ) where {G<:Geometry.AbstractCartesianGeometry,T}
     r = T(_ball_radius(ball))
     d = abs(T(coord_n) - T(coord_t))
@@ -947,7 +947,7 @@ function metric_band(
 end
 
 function metric_band(
-    grid::Grids.StructuredGrid{G,T,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
+    grid::Grids.StructuredGrid{T, G,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
 ) where {G<:Geometry.AbstractSphericalGeometry,T}
     dim == 1 || throw(ArgumentError(
         "a spherical band is solved along longitude; got dim = $dim. The latitude extent at fixed " *
@@ -973,7 +973,7 @@ function metric_band(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -987,7 +987,7 @@ end
 # smallest `cosφ` in the latitude window (`sin(σ/2) ≥ cosφ·sin(|Δλ|/2)` with both endpoint latitudes in
 # that window).
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractSphericalGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -1017,7 +1017,7 @@ end
 #       (|Δφ| ≤ r/M(0) along any path of length ≤ r). 3-D: the chord bound with geocentric radius
 #       ≥ b²/a + hmin and cosψ ≥ cosφ (geocentric latitude is nearer the equator than geodetic).
 function metric_window(
-    grid::Grids.StructuredGrid{G,T,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractEllipsoidalGeometry, T, N}
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
@@ -1143,7 +1143,7 @@ end
 
 # Consecutive images of one cell are `period` apart, which is the relevant step for a direction holding a
 # single sample — there `_min_step` has no interior gap to report.
-@inline function _image_step(grid::Grids.StructuredGrid{G,T}, d::Int, mt::MetricTopology) where {G,T}
+@inline function _image_step(grid::Grids.StructuredGrid{T, G}, d::Int, mt::MetricTopology) where {G,T}
     s = _min_step(mt, d)
     if Grids.isperiodic(grid, d)
         p = T(Grids.period(grid, d))
@@ -1157,7 +1157,7 @@ end
 # turns out, and capping at `n` drops every one of them. So a periodic direction gets the UNCAPPED
 # `ceil(r/s)`; a bounded one is unchanged, its offsets being clipped at the walls anyway.
 function _image_window(
-    grid::Grids.StructuredGrid{G,T,N}, ball, mt::MetricTopology,
+    grid::Grids.StructuredGrid{T, G,N}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -1637,7 +1637,7 @@ function fold_at end
 # A window centred on the point's own cell, widened by how far the point sits from that cell's centre —
 # so the window still covers every cell within `ball` of the point, and stays `O(1)` per direction.
 function fold_at(
-    f::F, init, grid::Grids.StructuredGrid{G,T,N}, p::NTuple{N,Real};
+    f::F, init, grid::Grids.StructuredGrid{T, G,N}, p::NTuple{N,Real};
     ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
 ) where {F,G,T,N}
     geo = Grids.grid_geometry(grid)
@@ -1837,7 +1837,7 @@ end
 
 # The cell the point falls in gives the local cell size to start from, exactly as the cell-seeded form
 # uses its own cell's measure.
-@inline function _knn_seed_radius_at(grid::Grids.StructuredGrid{G,T,N}, p, k::Int) where {G,T,N}
+@inline function _knn_seed_radius_at(grid::Grids.StructuredGrid{T, G,N}, p, k::Int) where {G,T,N}
     sz = Grids.size_tuple(grid)
     raw = Grids.locate(grid, ntuple(d -> T(p[d]), Val(N)))
     return _knn_seed_radius(grid, ntuple(d -> clamp(raw[d], 1, sz[d]), Val(N)), k)
@@ -1969,7 +1969,7 @@ end
 
 # One pair of methods per architecture, each with the arity in the signature: a `Vararg{Integer}` with
 # no length parameter is not specialized on arity and allocates on every call.
-for (GT, NP) in ((:(Grids.StructuredGrid{G,T,N}), true), (:(Grids.CurvilinearGrid{T,G,N}), true))
+for (GT, NP) in ((:(Grids.StructuredGrid{T, G,N}), true), (:(Grids.CurvilinearGrid{T,G,N}), true))
     @eval begin
         function k_nearest!(
             idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::$GT, I::Vararg{Integer,N};
@@ -2210,7 +2210,7 @@ function build_connectivity_within end
 # The same count → prefix-scan → fill shape as the stencil builder: both passes write only slots the
 # cell owns, so they chunk without coordination.
 function build_connectivity_within(
-    grid::Grids.StructuredGrid{G,T,N}; ball, active_only::Bool = true, backend = nothing,
+    grid::Grids.StructuredGrid{T, G,N}; ball, active_only::Bool = true, backend = nothing,
 ) where {G,T,N}
     sz = Grids.size_tuple(grid)
     n = prod(sz)

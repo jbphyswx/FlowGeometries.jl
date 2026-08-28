@@ -32,42 +32,17 @@ Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology) = throw(ArgumentEr
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.UniformAxis) = a
 Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 
-function Adapt.adapt_structure(to, grid::Grids.StructuredGrid{G,T,N}) where {G,T,N}
-    coords = _adapt_tuple(to, Grids.coordinates(grid))
-    measure = Adapt.adapt(to, Grids.measure(grid))
-    mask = Adapt.adapt(to, Grids.mask(grid))
-    tp = Grids.topology(grid)
-    return Grids.StructuredGrid{G,T,N,typeof(tp),typeof(coords),typeof(measure),typeof(mask)}(
-        Grids.grid_geometry(grid), coords, measure, mask, tp, getfield(grid, :period),
-        Grids.axis_stats(grid),
-    )
-end
+# One method for every layout: the array-backed fields are adapted and handed to `Grids.rebuild`, which
+# re-derives the grid's type parameters from what they became. Geometry, topology, period, the sampling
+# tag and the per-axis reductions are immutable scalars and travel unchanged, so none is named here.
+const _ADAPTED = (:coordinates, :corners, :measure, :mask, :neighbor_nbrs, :neighbor_ptr)
 
-function Adapt.adapt_structure(to, grid::Grids.CurvilinearGrid{T,G,N}) where {T,G,N}
-    coords = _adapt_tuple(to, Grids.coordinates(grid))
-    corners = _adapt_tuple(to, getfield(grid, :corners))
-    measure = Adapt.adapt(to, Grids.measure(grid))
-    mask = Adapt.adapt(to, Grids.mask(grid))
-    tp = Grids.topology(grid)
-    return Grids.CurvilinearGrid{T,G,N,typeof(tp),typeof(coords),typeof(measure),typeof(mask)}(
-        Grids.grid_geometry(grid), coords, corners, measure, mask, tp, getfield(grid, :period),
-        Grids.axis_stats(grid),
+function Adapt.adapt_structure(to, grid::Grids.AbstractGrid)
+    changed = NamedTuple(
+        n => (v = getfield(grid, n); v isa Tuple ? _adapt_tuple(to, v) : Adapt.adapt(to, v))
+        for n in _ADAPTED if n in fieldnames(typeof(grid))
     )
-end
-
-function Adapt.adapt_structure(to, grid::Grids.UnstructuredGrid{T,G,N}) where {T,G,N}
-    coords = _adapt_tuple(to, Grids.coordinates(grid))
-    measure = Adapt.adapt(to, Grids.measure(grid))
-    mask = Adapt.adapt(to, Grids.mask(grid))
-    nbrs = Adapt.adapt(to, getfield(grid, :neighbor_nbrs))
-    ptr = Adapt.adapt(to, getfield(grid, :neighbor_ptr))
-    tp = Grids.topology(grid)
-    return Grids.UnstructuredGrid{
-        T,G,N,typeof(coords),typeof(measure),typeof(mask),typeof(tp),typeof(nbrs),typeof(ptr),
-    }(
-        Grids.grid_geometry(grid), coords, measure, mask, nbrs, ptr,
-        tp, getfield(grid, :period), Grids.axis_stats(grid),
-    )
+    return Grids.rebuild(grid, changed)
 end
 
 Adapt.adapt_structure(to, conn::Connectivity.CSRConnectivity) =
