@@ -35,13 +35,19 @@ end
 
 """
     neighbors!(out, grid, I...; stencil=Axial(1), active_only=true) -> n_written
-    nneighbors(grid, I...; …) -> Int
-    Grids.neighbors(grid, I...; …) -> Vector{Int}
 
-Neighbors as linear indices into `grid.mask`. Prefer `neighbors!` on hot paths.
-`stencil` is any [`Stencils.AbstractStencil`](@ref).
+Cell `I`'s neighbors, as linear indices into the grid's mask, written into `out`. This is the form to
+use on a hot path: [`nneighbors`](@ref) counts them without writing, and
+[`Grids.neighbors`](@ref) returns a fresh vector. `stencil` is any
+[`Stencils.AbstractStencil`](@ref).
 """
 function neighbors! end
+
+"""
+    nneighbors(grid, I...; stencil=Axial(1), active_only=true) -> Int
+
+How many neighbors [`neighbors!`](@ref) would write for cell `I`, without writing them.
+"""
 function nneighbors end
 
 # One entry point each, resolved by `Grids.adjacency_source`. The arity stays a type parameter because a

@@ -67,6 +67,12 @@ Which pixel ordering the ids are in — `Ring()` or `Nested()`.
 """
 @inline scheme(grid::HEALPixGrid) = getfield(grid, :scheme)
 
+"""
+    npixels(grid::HEALPixGrid) -> Int
+
+`12·nside²`, the pixelization's own count — which is `length(grid)` whether or not a mask leaves some
+of them inactive.
+"""
 @inline npixels(grid::HEALPixGrid) = SphericalSampling.healpix_npix(nside(grid))
 
 # ---- the three traits -------------------------------------------------------

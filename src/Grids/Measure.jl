@@ -299,12 +299,18 @@ end
 @inline area(grid::AbstractGrid, I::Vararg{Integer}) = measure(grid, I...)
 
 """
+    mask(grid) -> AbstractArray{Bool}
+
+Which cells/nodes participate, as an array over the grid's own shape. Ask
+[`isactive`](@ref) for one cell; this is the whole array, and it is what fixes the grid's `size`.
+"""
+@inline mask(grid::AbstractGrid) = getfield(grid, :mask)
+
+"""
     isactive(grid, I...) -> Bool
 
 Whether cell/node `I` participates (`false` = masked out).
 """
-@inline mask(grid::AbstractGrid) = getfield(grid, :mask)
-
 @inline function isactive(grid::AbstractGrid, I::Vararg{Integer})
     m = mask(grid)
     @boundscheck checkbounds(m, I...)

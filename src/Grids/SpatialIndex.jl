@@ -55,6 +55,12 @@ they are how a layout is walked without knowing how it names a cell — see [`ce
 @inline cells(grid, ::CartesianCells) = CartesianIndices(size_tuple(grid))
 @inline cells(grid, ::FlatCells) = Base.OneTo(length(mask(grid)))
 
+"""
+    cell_at(grid, c)
+
+One element of [`cells`](@ref) as the cell spelling the grid's own entry points take: an index tuple
+where cells are addressed Cartesian-wise, a linear id where they are flat.
+"""
 @inline cell_at(grid::AbstractGrid, c) = cell_at(grid, c, cell_address(grid))
 @inline cell_at(_grid, ci::CartesianIndex, ::CartesianCells) = Tuple(ci)
 @inline cell_at(_grid, k::Integer, ::FlatCells) = Int(k)
