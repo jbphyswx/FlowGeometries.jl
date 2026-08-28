@@ -68,8 +68,19 @@ carries a cell list, built once and amortized over the `n` rows, so a row costs 
 tree.
 
 Rows are balls, i.e. [`Unrestricted`](@ref), and there is no [`Connected`](@ref) form: reachability
-within one cell's ball is not a symmetric relation — a bridge cell can lie in one ball and not the
-other — so such a graph would not be an adjacency.
+within one cell's ball is not a symmetric relation — a bridge cell can lie in one cell's ball and not
+in the other's — so such a graph would not be an adjacency.
+
+# This is for a mesh-degree radius, not a large one
+
+The result is `∑ᵢ degree(i)` integers, and a ball's degree grows with the CUBE (or square) of its
+radius. At a radius of a few cell widths that is mesh-degree adjacency and materializing it is the
+right thing — it is built once and every row read many times. At a radius of tens of widths the degree
+reaches `10³`–`10⁴`, and on a million cells the graph is `10⁹`–`10¹⁰` integers: tens of gigabytes for
+something a query answers without storing.
+
+Ask [`neighbors_within!`](@ref), [`fold_within`](@ref) or [`mapreduce_within`](@ref) instead. Those go
+through the same index and visit the same cells, one row at a time, and never hold more than one row.
 """
 function build_connectivity_within end
 
