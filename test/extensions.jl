@@ -311,6 +311,34 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     # Gauss–Legendre is not an equiangular family, so asking it for one of these says so.
     Test.@test_throws ArgumentError SS.latitude_weights(
         SS.GaussLegendreSampling(), 8; algorithm = SS.Recurrence())
+
+    # The plan is held across calls, so a repeat at the same size does not rebuild it. Asserted as
+    # allocation rather than time: planning allocates and a cache hit does not, which is exact and
+    # carries no machine constant.
+    steady = map((64, 256)) do nlat
+        s = zeros(Float64, nlat)
+        fam = SS.ClosedNodes()
+        first = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
+        again = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
+        third = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
+        Test.@test again < first
+        Test.@test third == again                 # steady state, not a decaying warm-up
+        again
+    end
+    # Four times the latitudes costs the same, so neither the plan nor an `nlat`-sized buffer is
+    # being rebuilt — which a per-call allocation of either would show as a fourfold difference.
+    Test.@test steady[2] == steady[1]
+    # A cached plan and buffer are task-local, so two tasks at the same size do not share a buffer.
+    let nlat = 128
+        here = zeros(Float64, nlat)
+        SS._equiangular_sums!(here, SS.OpenNodes(), nlat, nlat ÷ 2, SS.Transform())
+        there = fetch(Threads.@spawn begin
+            v = zeros(Float64, nlat)
+            SS._equiangular_sums!(v, SS.OpenNodes(), nlat, nlat ÷ 2, SS.Transform())
+            v
+        end)
+        Test.@test all(isequal(a, b) for (a, b) in zip(here, there))
+    end
 end
 
 Test.@testset "Sparse adjacency assembles straight into CSC" begin

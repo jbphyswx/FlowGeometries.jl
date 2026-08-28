@@ -30,16 +30,40 @@ using FlowGeometries.SphericalSampling: SphericalSampling, OpenNodes, ClosedNode
 SphericalSampling._equiangular_algorithm(::Type{T}) where {T<:AbstractFloat} =
     _has_fft(T) ? SphericalSampling.Transform() : SphericalSampling.Recurrence()
 
+"""
+    _sum_plan(T, nlat) -> (plan, buffer)
+
+The in-place length-`nlat` backward transform, and the buffer it was planned against, held across calls.
+
+`bfft!` plans afresh every time, and planning dominates a transform this small — a set of latitude
+weights is built once per grid, so the same `(T, nlat)` recurs. The BUFFER is cached alongside the plan
+rather than allocated per call because an FFTW plan records the alignment of the array it was planned
+for and refuses another.
+
+The cache is TASK-local: a plan and its buffer are mutable state, and two tasks weighting the same
+`nlat` concurrently would otherwise transform into the same array.
+"""
+function _sum_plan(::Type{T}, nlat::Int) where {T<:AbstractFloat}
+    store = get!(() -> Dict{Tuple{DataType,Int},Any}(), task_local_storage(),
+                 :flowgeometries_equiangular_plans)::Dict{Tuple{DataType,Int},Any}
+    entry = get!(store, (T, nlat)) do
+        buf = zeros(Complex{T}, nlat)
+        return (AbstractFFTs.plan_bfft!(buf, 1:1), buf)
+    end
+    return entry[1], entry[2]::Vector{Complex{T}}
+end
+
 function SphericalSampling._equiangular_sums!(
     s::AbstractVector{T}, family::Union{OpenNodes,ClosedNodes}, nlat::Int, nterm::Int,
     ::SphericalSampling.Transform,
 ) where {T<:AbstractFloat}
     length(s) == nlat || throw(DimensionMismatch("s must have length nlat"))
-    d = zeros(Complex{T}, nlat)
+    plan, d = _sum_plan(T, nlat)
+    fill!(d, zero(Complex{T}))
     @inbounds for k in 0:(nterm - 1)
         d[k + 1] = (one(T) / T(2k + 1)) * _twiddle(family, k, nlat, T)
     end
-    D = AbstractFFTs.bfft!(d)
+    D = (plan * d)::Vector{Complex{T}}
     @inbounds for i in 1:nlat
         θi = SphericalSampling._node_theta(family, i, nlat, T)
         s[i] = imag(cis(θi) * D[i])
