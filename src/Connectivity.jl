@@ -435,13 +435,12 @@ end
 # computed ONCE into a `MetricTopology` rather than per query. Called per query it made a stretched-axis
 # ball 53.6× slower than a uniform one at N = 16384, growing without bound, for a window holding the same
 # number of cells either way.
-@inline function _min_step_scan(grid::Grids.StructuredGrid{G,T}, d::Int) where {G,T}
-    st = Grids.axis_stats(grid, d)
-    s = st.min_gap
+@inline function _min_step_scan(grid::Grids.AbstractGrid{G,T}, d::Int) where {G,T}
+    s = T(Grids.minimum_spacing(grid, d))
     if Grids.isperiodic(grid, d)
         p = T(Grids.period(grid, d))
         if @inbounds(Grids.size_tuple(grid)[d]) ≥ 2 && p > 0
-            seam = p - (st.max_value - st.min_value)
+            seam = p - T(Grids.extent(grid, d))
             seam > 0 && (s = min(s, seam))
         end
     end
@@ -476,22 +475,23 @@ struct MetricTopology{N,T,S}
     index::S
 end
 
-function MetricTopology(grid::Grids.StructuredGrid{G,T,N}; index = nothing) where {G,T,N}
+MetricTopology(grid::Grids.AbstractGrid; index = nothing) =
+    MetricTopology(grid, index, Grids.candidate_source(grid))
+
+function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.SeparableWindow) where {G,T}
+    N = length(Grids.coordinates(grid))
     steps = ntuple(d -> _min_step_scan(grid, d), Val(N))
-    m3 = N ≥ 3 ? Grids.axis_stats(grid, 3).min_value : zero(T)
+    m3 = N ≥ 3 ? T(Grids.bounds(grid, 3)[1]) : zero(T)
     return MetricTopology{N,T,typeof(index)}(steps, m3, index)
 end
 
-@inline _min_step(mt::MetricTopology, d::Int) = @inbounds mt.steps[d]
-
-# Curvilinear and node grids have no separable axes, so there is no step bound to carry — the topology
-# exists for them to hold the spatial index.
-function MetricTopology(
-    grid::Union{Grids.CurvilinearGrid{T,G,N},Grids.UnstructuredGrid{T,G,N}};
-    index = nothing,
-) where {T,G,N}
+# With no separable axes there is no step bound to carry, and the topology exists to hold the index.
+function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.IndexedCandidates) where {G,T}
+    N = length(Grids.coordinates(grid))
     return MetricTopology{N,T,typeof(index)}(ntuple(_ -> zero(T), Val(N)), zero(T), index)
 end
+
+@inline _min_step(mt::MetricTopology, d::Int) = @inbounds mt.steps[d]
 
 """
     indexed(grid) -> MetricTopology
@@ -622,8 +622,8 @@ function metric_window(
     wrest = ntuple(d -> _steps(r, _min_step(mt, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
     # The smallest radius anywhere, which is where a given arc spans the least distance.
     ρ = if N ≥ 3
-        st = Grids.axis_stats(grid, 3)
-        min(abs(st.min_value), abs(st.max_value))
+        lo, hi = Grids.bounds(grid, 3)
+        min(abs(T(lo)), abs(T(hi)))
     else
         T(Geometry.radius(Grids.grid_geometry(grid)))
     end
@@ -658,8 +658,8 @@ end
 # from the equator — the two stored extremes are enough, and no row is visited.
 @inline function _cos_extreme(grid::Grids.StructuredGrid{G,T,N}, ::Val{N}) where {G,T,N}
     N ≥ 2 || return one(T)
-    st = Grids.axis_stats(grid, 2)
-    return min(abs(cos(T(st.min_value))), abs(cos(T(st.max_value))))
+    lo, hi = Grids.bounds(grid, 2)
+    return min(abs(cos(T(lo))), abs(cos(T(hi))))
 end
 
 """

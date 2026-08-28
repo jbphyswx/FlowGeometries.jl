@@ -206,13 +206,28 @@ Direction `d`'s coordinate axis. Only rectilinear grids have axes; this is
 # ---------------------------------------------------------------------------
 
 """
+    spacing_trait(grid, ::Val{d}) -> UniformSpacing() | NonuniformSpacing()
+
+Whether direction `d`'s spacing is known from its type, as a value a method can **dispatch** on.
+
+[`isuniform`](@ref) answers the same question, but as a `Bool`, and a `Bool` can only be branched on.
+A kernel that wants the uniform form of an expression — a stencil row that is the same at every
+interior sample, an `O(1)` locate — has to select it by dispatch, which needs the direction in the
+type. Hence the `Val`: it is what makes the answer available where the branch would be too late.
+
+`isuniform(grid, d::Integer)` remains for a direction chosen at run time, where no such selection is
+possible and a value is the only available form.
+"""
+@inline spacing_trait(grid::AbstractGrid, ::Val{d}) where {d} =
+    Axes.spacing_trait(@inbounds coordinates(grid)[d])
+
+"""
     isuniform(grid, d) -> Bool
     isuniform(grid) -> Bool
 
 Whether coordinate direction `d` has constant spacing known from its TYPE (all directions, for the
-no-`d` form). This is the compile-time answer, so it can select a fast path by dispatch rather than
-by a runtime scan — see [`Axes.spacing_trait`](@ref) for the trait it reads and
-No code path inspects coordinate VALUES to decide this; the answer comes from the type alone.
+no-`d` form). No code path inspects coordinate VALUES to decide this; the answer comes from the type
+alone. See [`spacing_trait`](@ref) for the form a method can dispatch on.
 
 A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields, not axes.
 """
@@ -1339,7 +1354,7 @@ end
     if isperiodic(grid, d)
         L = T(period(grid, d))
         if L > 0
-            lo = T(axis_stats(grid, d).min_value)
+            lo = T(bounds(grid, d)[1])
             v = lo + mod(v - lo, L)
             @inbounds x1, xn = T(x[1]), T(x[n])
             asc = xn ≥ x1
@@ -2653,7 +2668,7 @@ function locate(grid::StructuredGrid{G,T,N}, p::NTuple{N,Real}) where {G,T,N}
         per = isperiodic(grid, d)
         if per
             L = T(period(grid, d))
-            lo = axis_stats(grid, d).min_value
+            lo = bounds(grid, d)[1]
             L > 0 && (v = lo + mod(v - lo, L))
         end
         i = Discretization.locate(x, v)
