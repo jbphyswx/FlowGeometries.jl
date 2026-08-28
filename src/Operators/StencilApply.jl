@@ -45,6 +45,12 @@ function apply_stencil!(
         end
         k = min(k, length(x))
     end
+    # A plan under the blanking policy, which is what the register-resident uniform weights need; the
+    # degrading policies rebuild a window from the axis and so want the table.
+    if policy isa BlankMasked || mask === nothing
+        return apply_stencil!(out, field, Discretization.stencil_plan(x, ord, k; period = period),
+                              dim; mask = mask, masked = masked, backend = backend)
+    end
     idx, wts = Discretization.axis_stencils(x, ord, k; period = period)
     return apply_stencil!(out, field, x, idx, wts, dim; order = ord, period = period, mask = mask,
                           masked = masked, backend = backend, policy = policy, scratch = scratch)
@@ -104,10 +110,10 @@ the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
 so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
 one passed here.
 """
-struct StencilScratch{T<:AbstractFloat}
-    w::Vector{T}      # the weights of one rebuilt row
-    c::Matrix{T}      # the Fornberg recursion table
-    n::Vector{T}      # the row's node coordinates, unwrapped across a seam
+struct StencilScratch{T<:AbstractFloat,VT<:AbstractVector{T},MT<:AbstractMatrix{T}}
+    w::VT             # the weights of one rebuilt row
+    c::MT             # the Fornberg recursion table
+    n::VT             # the row's node coordinates, unwrapped across a seam
 end
 
 """
@@ -127,7 +133,9 @@ function stencil_scratch(::Type{T}, order::Integer, nodes::Integer) where {T<:Ab
     m = Int(order)
     k ≥ 1 || throw(ArgumentError("stencil_scratch needs nodes ≥ 1, got $k"))
     m ≥ 0 || throw(ArgumentError("stencil_scratch needs order ≥ 0, got $m"))
-    return StencilScratch{T}(Vector{T}(undef, k), Matrix{T}(undef, k, m + 1), Vector{T}(undef, k))
+    w = Vector{T}(undef, k)
+    c = Matrix{T}(undef, k, m + 1)
+    return StencilScratch{T,typeof(w),typeof(c)}(w, c, Vector{T}(undef, k))
 end
 
 @inline function _fits(s::StencilScratch, k::Int, ord::Int)

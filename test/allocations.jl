@@ -75,6 +75,7 @@ q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; 
 # for, and it is classified as allocating by contract — so measuring it would measure the table.
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
+q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
 
 # The per-grid-shape sweep. `axes = false` for a layout whose coordinates are a formula: the spacing
 # accessors are an axis notion, and such a layout holds no axes to answer them from.
@@ -954,6 +955,26 @@ Test.@testset "A ring is reached in O(1), allocating nothing whatever the grid s
         sc = Vector{Float64}(undef, SS.nrings(s))
         SS.spherical_points!(λ, φ, s; scratch = sc)
         Test.@test _alloc(q_rg_points!, λ, φ, s, sc) == 0
+    end
+end
+
+Test.@testset "A stencil plan's accessors allocate nothing" begin
+    D = FG.Discretization
+    # A plan is read per cell on the paths that do not specialize on its form, so every accessor has to
+    # be free — including `plan_row`, whose two tuples are stack values.
+    for (x, per) in ((range(0.0, 1.0; length = 64), nothing),
+                     (range(0, 2π * (1 - 1 / 64); length = 64), 2π),
+                     (collect(cumsum(fill(0.5, 64))), nothing))
+        for k in (3, 4, 5)
+            pl = D.stencil_plan(x, 1, k)
+            for j in (1, 2, 32, 63, 64)
+                Test.@test _alloc(D.plan_row, pl, j) == 0
+            end
+            Test.@test _alloc(D.nnodes, pl) == 0
+            Test.@test _alloc(D.derivative_order, pl) == 0
+            Test.@test _alloc(D.axis_length, pl) == 0
+            Test.@test (Test.@inferred D.plan_row(pl, 3)) isa Tuple{NTuple{k,Int},NTuple{k,Float64}}
+        end
     end
 end
 

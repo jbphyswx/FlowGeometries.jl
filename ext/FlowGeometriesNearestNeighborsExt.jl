@@ -186,9 +186,9 @@ end
 
 # The embedding is a type parameter, so the radius conversion below resolves at compile time instead of
 # branching on a stored tag once per query.
-struct BallIndex{TR,T,E<:Grids.AbstractEmbedding}
+struct BallIndex{TR,T,MT<:AbstractMatrix{T},E<:Grids.AbstractEmbedding}
     tree::TR
-    pts::Matrix{T}   # the embedded points, reused as query vectors
+    pts::MT          # the embedded points, reused as query vectors
     n::Int           # originals; a ghosted tree holds `n * ng` columns
     embedding::E
     # Shortest nonzero period among the replicated directions, `Inf` where nothing is replicated. Two

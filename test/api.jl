@@ -246,6 +246,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
         :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
         :stencil_scratch, :interpolate!, :healpix_neighbor_ids,
+        :plan_row, :nnodes, :derivative_order, :axis_length,
     ])
 
     # Geometry, Axes and Stencils are per-point kernels almost throughout, so each name below is
@@ -307,6 +308,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
          :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
          :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan, :StencilScratch,
+         :AbstractStencilPlan, :UniformStencilPlan, :TabulatedStencilPlan,
          :MeshNeighbors, :AbstractCellAddress, :CartesianCells, :FlatCells,
          :AbstractAdjacency, :IndexStencilNeighbors, :FormulaNeighbors, :StoredMeshNeighbors,
          :AbstractCandidateSource, :SeparableWindow, :IndexedCandidates],
@@ -331,6 +333,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
      :centers, :faces, :nodes, :cell_widths],
     # grid constructors
     [:structured_grid, :unstructured_grid],
+        # builds a weight set, which is the request
+        [:stencil_plan],
         # extension hooks, which throw until their trigger package is loaded
         [:spatial_index, :index_within!, :has_spatial_index],
         # returns the axis itself, so its type varies by direction: a runtime `d` cannot be stable

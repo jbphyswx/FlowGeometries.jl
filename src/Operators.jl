@@ -22,6 +22,7 @@ using ..Connectivity: Connectivity
 
 include("Operators/Policies.jl")
 include("Operators/StencilApply.jl")
+include("Operators/PlanApply.jl")
 include("Operators/Derivative.jl")
 include("Operators/Interpolate.jl")
 include("Operators/Gradient.jl")

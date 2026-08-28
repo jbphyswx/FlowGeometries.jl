@@ -311,6 +311,26 @@ function Discretization.axis_stencils(
 end
 
 """
+    Discretization.stencil_plan(grid, dim; order=1, nodes=order+1) -> AbstractStencilPlan
+
+[`Discretization.stencil_plan`](@ref) for direction `dim` of `grid`, taking that direction's axis and
+wrap period from the grid.
+
+The form to hold in a loop over fields. Which plan it is follows the axis's own spacing, so a uniform
+direction gets the register-resident weights and a stretched one the table.
+"""
+function Discretization.stencil_plan(
+    grid::Grids.StructuredGrid{T, G,N}, dim::Integer;
+    order::Integer = 1, nodes::Integer = Int(order) + 1,
+) where {G,T,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
+    return Discretization.stencil_plan(
+        Grids.coordinates(grid, dim), order, nodes;
+        period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
+    )
+end
+
+"""
     apply_stencil!(out, field, grid, indices, weights, dim; order=1, active_only=true,
                    masked=zero, policy=BlankMasked(), backend=nothing) -> out
 

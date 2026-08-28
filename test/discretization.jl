@@ -1306,3 +1306,115 @@ Test.@testset "An 8-node stencil keeps its unrolled inner loop" begin
     Test.@test errs[2] < 1e-10
     Test.@test errs[3] < 1e-10
 end
+
+Test.@testset "A held stencil plan is the axis's weights, register-resident where it can be" begin
+    D = FG.Discretization
+    O = FG.Operators
+    A = FG.Axes
+
+    # Which form a plan takes follows the axis's TYPE, never its values: a vector of equally spaced
+    # numbers is still a stretched axis, because nothing in its type says otherwise.
+    for (x, per, uniform) in ((0.0:0.5:10.0, nothing, true),
+                              (range(0, 2π * (1 - 1 / 32); length = 32), 2π, true),
+                              (A.UniformAxis(0.0, 0.25, 40), nothing, true),
+                              (collect(0.0:0.5:19.5), nothing, false),
+                              (collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = 40)))),
+                               nothing, false))
+        pl = D.stencil_plan(x, 1, 5; period = per)
+        Test.@test (pl isa D.UniformStencilPlan) == uniform
+        Test.@test D.axis_length(pl) == length(x)
+        Test.@test D.nnodes(pl) == 5
+        Test.@test D.derivative_order(pl) == 1
+    end
+    # A period that is not the one the spacing implies means the seam is not uniform, so the table is
+    # what describes the axis.
+    Test.@test D.stencil_plan(range(0.0, 1.0; length = 16), 1, 3; period = 99.0) isa
+               D.TabulatedStencilPlan
+
+    # A plan reads exactly the samples the table reads, and its weights are the same numbers to
+    # round-off — the table recomputes each row from its own window, so it carries per-row noise.
+    for (x, per) in ((0.0:0.5:10.0, nothing),
+                     (range(0, 2π * (1 - 1 / 32); length = 32), 2π),
+                     (collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = 40)))), nothing))
+        for (ord, k) in ((1, 3), (1, 4), (1, 5), (2, 5), (3, 6))
+            pl = D.stencil_plan(x, ord, k; period = per)
+            idx, w = D.axis_stencils(x, ord, k; period = per)
+            for j in 1:length(x)
+                nodes, wts = D.plan_row(pl, j)
+                Test.@test collect(nodes) == Int.(idx[j, :])
+                Test.@test all(abs(wts[q] - w[j, q]) / max(abs(w[j, q]), 1) < 1e-11 for q in 1:k)
+            end
+        end
+    end
+
+    # A uniform plan's storage does not depend on the axis length; a tabulated one is O(n·K).
+    su = [Base.summarysize(D.stencil_plan(range(0.0, 1.0; length = m), 1, 5))
+          for m in (64, 256, 1024, 4096)]
+    st = [Base.summarysize(D.stencil_plan(collect(cumsum(fill(1.0, m))), 1, 5))
+          for m in (64, 256, 1024, 4096)]
+    Test.@test allequal(su)
+    Test.@test issorted(st) && st[end] > 20 * st[1]
+
+    # Applying a plan agrees with applying the table, on every shape the sweep splits on: the
+    # differenced direction contiguous or not, masked, batched, wrapping, and an even node count.
+    for (nx, ny, nb) in ((17, 9, 0), (32, 32, 0), (9, 17, 3))
+        for per in (nothing, 2π)
+            ax = per === nothing ? range(0.0, 4.0; length = nx) :
+                                   range(0, 2π * (1 - 1 / nx); length = nx)
+            xs = collect(ax)
+            ys = collect(range(0.0, 2.0; length = ny))
+            fld = nb == 0 ? [sin(a) * cos(b) for a in xs, b in ys] :
+                            [sin(a) * cos(b) + 0.1c for a in xs, b in ys, c in 1:nb]
+            for k in (3, 4, 5), ord in (1, 2)
+                (k ≥ ord + 1 && k ≤ nx) || continue
+                pl = D.stencil_plan(ax, ord, k; period = per)
+                idx, w = D.axis_stencils(ax, ord, k; period = per)
+                o1 = fill(NaN, size(fld))
+                o2 = fill(NaN, size(fld))
+                O.apply_stencil!(o1, fld, pl, 1)
+                O.apply_stencil!(o2, fld, idx, w, 1)
+                Test.@test maximum(abs.(o1 .- o2)) / max(maximum(abs, o2), 1) < 1e-10
+                msk = trues(nx, ny)
+                msk[3, 2] = false
+                msk[nx ÷ 2, ny ÷ 2] = false
+                o3 = fill(NaN, size(fld))
+                o4 = fill(NaN, size(fld))
+                O.apply_stencil!(o3, fld, pl, 1; mask = msk, masked = -7.0)
+                O.apply_stencil!(o4, fld, idx, w, 1; mask = msk, masked = -7.0)
+                # the same cells are blanked, and the rest agree
+                Test.@test (o3 .== -7.0) == (o4 .== -7.0)
+                Test.@test maximum(abs.(o3 .- o4)) / max(maximum(abs, o4), 1) < 1e-10
+            end
+            aly = range(0.0, 2.0; length = ny)
+            o1 = fill(NaN, size(fld))
+            o2 = fill(NaN, size(fld))
+            O.apply_stencil!(o1, fld, D.stencil_plan(aly, 1, 3), 2)
+            O.apply_stencil!(o2, fld, D.axis_stencils(aly, 1, 3)..., 2)
+            Test.@test maximum(abs.(o1 .- o2)) / max(maximum(abs, o2), 1) < 1e-10
+        end
+    end
+
+    # K nodes span degree K−1: exact there, and not above it.
+    xu = collect(range(0.0, 1.0; length = 40))
+    for k in (3, 4, 5, 6)
+        pl = D.stencil_plan(range(0.0, 1.0; length = 40), 1, k)
+        deg = k - 1
+        o = similar(xu)
+        O.apply_stencil!(o, [a^deg for a in xu], pl, 1)
+        Test.@test maximum(abs.(o .- [deg * a^(deg - 1) for a in xu])) < 1e-9
+    end
+
+    # Applying a held plan allocates nothing, which is the point of holding it.
+    let xs = range(0.0, 1.0; length = 64), fld = [sin(20a) * b for a in xs, b in 1:64]
+        out = similar(fld)
+        for k in (3, 4, 5, 7)
+            pl = D.stencil_plan(xs, 1, k)
+            Test.@test _alloc(q_plan!, out, fld, pl, 1) == 0
+            Test.@test _alloc(q_plan!, out, fld, pl, 2) == 0
+        end
+    end
+
+    # A plan describes one axis length, and a field of another is a mistake rather than a wrong answer.
+    Test.@test_throws DimensionMismatch O.apply_stencil!(
+        zeros(8, 4), zeros(8, 4), D.stencil_plan(range(0.0, 1.0; length = 9), 1, 3), 1)
+end
