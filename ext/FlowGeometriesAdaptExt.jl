@@ -17,6 +17,12 @@ using FlowGeometries.Connectivity: Connectivity
 # outer product onto the device. `AllActive` holds only a size, so it is already device-safe.
 Adapt.adapt_structure(to, m::Grids.SeparableMeasure) =
     Grids.SeparableMeasure(_adapt_tuple(to, m.factors))
+
+# Likewise a `SlabMeasure`: the coupled pair is one matrix, and adapting it moves that rather than the
+# `∏ Nᵈ` product it stands for.
+Adapt.adapt_structure(to, m::Grids.SlabMeasure) =
+    Grids.SlabMeasure(Adapt.adapt(to, m.lead), Adapt.adapt(to, m.slab), _adapt_tuple(to, m.rest))
+
 Adapt.adapt_structure(::Any, m::Grids.AllActive) = m
 
 # An unindexed `MetricTopology` is isbits and travels as-is. One carrying a spatial index does not: a

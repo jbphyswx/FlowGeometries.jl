@@ -475,14 +475,15 @@ end
 """
     _cell_measure(geometry, axes, periods)
 
-The grid's stored measure: a [`SeparableMeasure`](@ref) wherever the metric factors, and a dense array
-where it genuinely does not.
+The grid's stored measure: a [`SeparableMeasure`](@ref) wherever the metric factors per axis, and a
+[`SlabMeasure`](@ref) where one pair of directions is coupled and the rest are not.
 """
 _cell_measure(geometry, ax, per) = SeparableMeasure(_measure_factors(geometry, ax, per))
 
 # Geodetic `(λ, φ, h)`: the volume element `(N(φ)+h)cosφ·(M(φ)+h)` offsets BOTH curvature radii by the
-# height, so φ and h are coupled and no product of per-axis factors reproduces it. Stored dense; further
-# directions still enter as plain widths.
+# height, so φ and h are coupled and no product of per-axis factors reproduces it. Longitude enters
+# none of it, so only that PAIR is stored together — see [`SlabMeasure`](@ref). Further directions
+# still enter as plain widths.
 function _cell_measure(
     geometry::G, ax::NTuple{N,AbstractVector{T}}, per::NTuple{N,Union{Nothing,Real}},
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
@@ -492,19 +493,13 @@ function _cell_measure(
     wφ = Discretization.cell_widths(φ, per[2])
     wh = Discretization.cell_widths(h, per[3])
     rest = ntuple(d -> Discretization.cell_widths(ax[d + 3], per[d + 3]), Val(N - 3))
-    dims = ntuple(d -> length(ax[d]), Val(N))
-    out = similar(wλ, T, dims)
-    @inbounds for I in CartesianIndices(dims)
-        i, j, k = I[1], I[2], I[3]
+    slab = similar(wλ, T, (length(φ), length(h)))
+    @inbounds for k in eachindex(h), j in eachindex(φ)
         φj, hk = φ[j], h[k]
-        v = (Geometry.prime_vertical_radius(geometry, φj) + hk) * cos(φj) *
-            (Geometry.meridional_radius(geometry, φj) + hk) * wλ[i] * wφ[j] * wh[k]
-        for d in 1:(N - 3)
-            v *= rest[d][I[d + 3]]
-        end
-        out[I] = v
+        slab[j, k] = (Geometry.prime_vertical_radius(geometry, φj) + hk) * cos(φj) *
+                     (Geometry.meridional_radius(geometry, φj) + hk) * wφ[j] * wh[k]
     end
-    return out
+    return SlabMeasure(wλ, slab, rest)
 end
 
 """

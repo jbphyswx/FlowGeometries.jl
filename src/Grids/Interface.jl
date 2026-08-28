@@ -520,3 +520,62 @@ Base.IndexStyle(::Type{<:SeparableMeasure}) = IndexCartesian()
     @boundscheck checkbounds(m, I...)
     return prod(ntuple(d -> @inbounds(m.factors[d][I[d]]), Val(N)))
 end
+
+"""
+    SlabMeasure(lead, slab, rest)
+
+The cell measure of a rectilinear grid in which ONE pair of directions is coupled and the rest are
+not: `measure[i, j, k, l…] == lead[i] · slab[j, k] · rest[1][l] · …`.
+
+A geodetic `(λ, φ, h)` volume element is `(N(φ)+h)·cosφ·(M(φ)+h)·Δλ·Δφ·Δh`. The height offsets BOTH
+curvature radii, so no product of per-axis factors reproduces it and a
+[`SeparableMeasure`](@ref) cannot hold it — but longitude enters none of it, so only `(φ, h)` need be
+stored together. That is `Nφ·Nh + Nλ + …` numbers where the dense array is `∏ Nᵈ`: at a degree of
+longitude and a hundred levels, a hundred and forty kilobytes rather than fifty megabytes.
+
+`sum` and `extrema` are specialized, on the same argument as the separable case: the whole is a product
+of independent groups, so its total is the product of their totals and its extremes are attained with
+every group at one of its own.
+"""
+struct SlabMeasure{T,N,V<:AbstractVector{T},S<:AbstractMatrix{T},R<:Tuple} <: AbstractArray{T,N}
+    lead::V
+    slab::S
+    rest::R
+end
+
+function SlabMeasure(lead::AbstractVector{T}, slab::AbstractMatrix{T}, rest::Tuple) where {T}
+    N = 3 + length(rest)
+    return SlabMeasure{T,N,typeof(lead),typeof(slab),typeof(rest)}(lead, slab, rest)
+end
+
+@inline Base.size(m::SlabMeasure) = (length(m.lead), size(m.slab)..., map(length, m.rest)...)
+Base.IndexStyle(::Type{<:SlabMeasure}) = IndexCartesian()
+
+@inline function Base.getindex(m::SlabMeasure{T,N}, I::Vararg{Int,N}) where {T,N}
+    @boundscheck checkbounds(m, I...)
+    v = @inbounds m.lead[I[1]] * m.slab[I[2], I[3]]
+    @inbounds for d in 1:(N - 3)
+        v *= m.rest[d][I[d + 3]]
+    end
+    return v
+end
+
+# ∑_{i,j,k} lead_i·slab_jk·… = (∑ lead)·(∑ slab)·∏(∑ rest), which is `O(Nλ + Nφ·Nh + ∑)` rather than
+# `O(∏ Nᵈ)` — the same factorization `SeparableMeasure` uses, with one group of rank two.
+Base.sum(m::SlabMeasure) = sum(m.lead) * sum(m.slab) * prod(sum, m.rest; init = one(eltype(m)))
+
+function Base.extrema(m::SlabMeasure{T}) where {T}
+    isempty(m) && throw(ArgumentError("extrema of an empty SlabMeasure is undefined"))
+    ends = (extrema(m.lead), extrema(m.slab), map(extrema, m.rest)...)
+    K = length(ends)
+    lo = hi = prod(e -> e[1], ends)
+    for corner in 0:(2^K - 1)
+        v = one(T)
+        for g in 1:K
+            v *= ends[g][1 + ((corner >> (g - 1)) & 1)]
+        end
+        v < lo && (lo = v)
+        v > hi && (hi = v)
+    end
+    return (lo, hi)
+end

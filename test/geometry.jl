@@ -652,9 +652,37 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     # A single point has no extent in either direction.
     Test.@test sum(FG.Grids.measure(FG.Grids.StructuredGrid(geo, [0.3], [0.4]))) == 1.0
 
-    # The dense measure is a second storage form, so the accessors around it get their own checks.
-    Test.@test size(FG.Grids.measure_array(g3)) == size(g3)
-    Test.@test sum(FG.Grids.measure(g3)) == sum(FG.Grids.measure_array(g3))
+    # The geodetic volume element couples φ and h — the height offsets both curvature radii — but
+    # longitude enters none of it, so only that PAIR is stored together and the measure is a
+    # `SlabMeasure`, not the `∏ Nᵈ` dense array. It is not per-axis separable and says so.
+    Test.@test FG.Grids.measure(g3) isa FG.Grids.SlabMeasure
+    Test.@test FG.Grids.measure_factors(g3) === nothing
+    let dense = FG.Grids.measure_array(g3)
+        Test.@test size(dense) == size(g3)
+        # Every cell equals the geometry's own element, which is the claim the storage form must keep.
+        wλ8 = FG.Discretization.cell_widths(λ8, 2π)
+        wφ8 = FG.Discretization.cell_widths(φ7, nothing)
+        wh8 = FG.Discretization.cell_widths(h4, nothing)
+        Test.@test all(dense[i, j, k] ≈ GE.volume_element(geo, φ7[j], h4[k], wλ8[i], wφ8[j], wh8[k])
+                       for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8))
+        # `sum` and `extrema` are the factored forms — `O(Nλ + Nφ·Nh)` rather than a pass over the
+        # product — so they agree with the dense reduction to round-off, not bit for bit.
+        Test.@test sum(FG.Grids.measure(g3)) ≈ sum(dense) rtol = 1e-12
+        Test.@test all(isapprox.(extrema(FG.Grids.measure(g3)), extrema(dense); rtol = 1e-12))
+    end
+    # Storage grows like Nφ·Nh + Nλ. Eight times the longitudes leaves the coupled slab alone, where
+    # the dense array would be eight times the size.
+    let base = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 37)[1:36]),
+                                       collect(range(-1.2, 1.2; length = 19)),
+                                       collect(range(0.0, 3000.0; length = 5))),
+        wide = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 289)[1:288]),
+                                       collect(range(-1.2, 1.2; length = 19)),
+                                       collect(range(0.0, 3000.0; length = 5)))
+        sb = Base.summarysize(FG.Grids.measure(base))
+        sw = Base.summarysize(FG.Grids.measure(wide))
+        Test.@test sb < 0.2 * 8 * 36 * 19 * 5          # far under the dense array it stands for
+        Test.@test sw < 3 * sb                          # 8× the longitudes, not 8× the storage
+    end
     Test.@test_throws BoundsError FG.Grids.measure(g3, 99, 1, 1)
     Test.@test_throws BoundsError FG.Grids.coords(g3, 1, 99, 1)
     Test.@test occursin("h ", sprint(show, MIME"text/plain"(), g3))

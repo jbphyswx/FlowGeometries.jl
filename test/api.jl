@@ -307,7 +307,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         # types and traits
         [:AbstractGrid, :AbstractStructuredGrid, :AbstractCurvilinearGrid, :AbstractUnstructuredGrid,
          :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :AbstractTopology, :Bounded, :Periodic,
-         :AllActive, :SeparableMeasure, :PoleRotation, :AbstractImageConvention, :AbstractReach,
+         :AllActive, :SeparableMeasure, :SlabMeasure, :PoleRotation, :AbstractImageConvention,
+         :AbstractReach,
          :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
          :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
          :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
