@@ -75,16 +75,18 @@ function Grids._voronoi_tessellation(
 
     # The triangulation the areas came from, kept rather than discarded. Only the SOLID triangles: a
     # ghost triangle names the boundary rather than a region, and has no node to be a cell of.
-    cell_nodes = Int[]
+    # The narrowest integer that indexes this node set, as the neighbour arrays use.
+    I = N ≤ typemax(Int32) ? Int32 : Int
+    cell_nodes = I[]
     sizehint!(cell_nodes, 3 * DT.num_solid_triangles(tri))
     for τ in DT.each_solid_triangle(tri)
         i, j, k = DT.triangle_vertices(τ)
-        push!(cell_nodes, Int(i), Int(j), Int(k))
+        push!(cell_nodes, I(i), I(j), I(k))
     end
     nc = length(cell_nodes) ÷ 3
-    cell_ptr = Vector{Int}(undef, nc + 1)
+    cell_ptr = Vector{I}(undef, nc + 1)
     @inbounds for c in 1:(nc + 1)
-        cell_ptr[c] = 3 * (c - 1) + 1
+        cell_ptr[c] = I(3 * (c - 1) + 1)
     end
     return areas, Grids.CellMesh(cell_ptr, cell_nodes, N)
 end

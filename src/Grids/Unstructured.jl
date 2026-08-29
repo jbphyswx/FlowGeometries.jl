@@ -172,6 +172,116 @@ Whether [`cell_mesh`](@ref) has cells to give — what the operators that need a
 
 @inline topology(grid::UnstructuredGrid) = getfield(grid, :topology)
 
+# ---------------------------------------------------------------------------
+# Spatial ordering
+# ---------------------------------------------------------------------------
+
+# Interleave the bits of `N` quantized coordinates, low bit first: the Morton (Z-curve) key. Points
+# close in space share a long prefix, so sorting by it puts them close in memory.
+@inline function _morton_key(u::NTuple{N,UInt64}, bits::Int) where {N}
+    key = zero(UInt64)
+    @inbounds for b in 0:(bits - 1), d in 1:N
+        key |= ((u[d] >> b) & one(UInt64)) << (b * N + (d - 1))
+    end
+    return key
+end
+
+"""
+    spatial_order(grid) -> Vector{Int}
+
+A permutation of the grid's nodes along a Morton (Z-order) curve: `perm[k]` is the node that belongs
+in position `k`.
+
+Scattered nodes usually arrive in whatever order they were generated, and a neighbour traversal then
+jumps across the whole array per edge. Along a space-filling curve, neighbours in space are neighbours
+in memory, so `neighbor_nbrs[ptr[i]:ptr[i+1]-1]` reads mostly-adjacent addresses.
+
+The order is a property of the POINTS, not of the order they came in: the same set, differently
+shuffled, sorts to the same sequence. So this repairs an incoherent input order and does not improve
+on one that is already coherent.
+
+This RETURNS the permutation rather than applying it, and construction does not apply it either. The
+node index is the caller's handle on their own data: a grid that quietly renumbered would leave every
+field they hold pointing at the wrong node. Apply it with [`reorder`](@ref) and permute those fields
+the same way.
+"""
+function spatial_order(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
+    n = length(mask(grid))
+    n < 2 && return collect(1:n)
+    # Keyed on the EMBEDDED position, not the raw coordinates: on a sphere longitude wraps, and two
+    # nodes either side of the seam are neighbours in space whose `λ` differ by a whole turn. The
+    # ambient position has no seam, so the curve does not cut there.
+    pts = [embed_point(grid, _raw_coords(grid, i)) for i in 1:n]
+    D = length(first(pts))
+    bits = min(64 ÷ D, 21)
+    span = UInt64(1) << bits - one(UInt64)
+    lo = ntuple(d -> minimum(p[d] for p in pts), D)
+    hi = ntuple(d -> maximum(p[d] for p in pts), D)
+    # A direction of zero extent quantizes to one bucket rather than dividing by nothing.
+    scale = ntuple(d -> hi[d] > lo[d] ? T(span) / T(hi[d] - lo[d]) : zero(T), D)
+    keys = Vector{UInt64}(undef, n)
+    @inbounds for i in 1:n
+        p = pts[i]
+        u = ntuple(d -> UInt64(round(clamp((T(p[d]) - T(lo[d])) * scale[d], zero(T), T(span)))), D)
+        keys[i] = _morton_key(u, bits)
+    end
+    return sortperm(keys)
+end
+
+"""
+    reorder(grid, perm) -> UnstructuredGrid
+
+`grid` with its nodes in the order `perm` gives — coordinates, measure and mask permuted, and the
+adjacency and any [`CellMesh`](@ref) renumbered to match, so every index the grid reports is an index
+into the new order.
+
+Pair it with [`spatial_order`](@ref), and permute your own fields by the same `perm`: `f[perm]` is
+that field on the reordered grid.
+"""
+function reorder(grid::UnstructuredGrid{T,G,N}, perm::AbstractVector{<:Integer}) where {T,G,N}
+    n = length(mask(grid))
+    length(perm) == n || throw(DimensionMismatch(
+        "the permutation has $(length(perm)) entries for a grid of $n nodes",
+    ))
+    inv = zeros(Int, n)
+    @inbounds for k in 1:n
+        p = Int(perm[k])
+        1 ≤ p ≤ n || throw(ArgumentError("the permutation names node $p, outside 1:$n"))
+        inv[p] = k
+    end
+    all(>(0), inv) || throw(ArgumentError("the permutation names a node twice and another not at all"))
+
+    c = coordinates(grid)
+    newc = ntuple(d -> c[d][perm], Val(N))
+    newm = measure(grid)[perm]
+    msk = mask(grid)
+    newmask = msk isa AllActive ? msk : msk[perm]
+
+    optr, onbrs = neighbor_ptr(grid), neighbor_nbrs(grid)
+    I = eltype(onbrs)
+    newptr = similar(optr, n + 1)
+    newnbrs = similar(onbrs, length(onbrs))
+    @inbounds newptr[1] = 1
+    @inbounds for k in 1:n
+        o = Int(perm[k])
+        lo, hi = Int(optr[o]), Int(optr[o + 1]) - 1
+        newptr[k + 1] = newptr[k] + (hi - lo + 1)
+        w = Int(newptr[k]) - 1
+        for t in lo:hi
+            newnbrs[w + t - lo + 1] = I(inv[Int(onbrs[t])])
+        end
+    end
+
+    # The cells keep their own numbering; only the nodes they name change.
+    mh = cell_mesh(grid)
+    newmesh = mh === nothing ? nothing :
+        CellMesh(mh.cell_ptr, map(v -> eltype(mh.cell_nodes)(inv[Int(v)]), mh.cell_nodes), n)
+
+    return UnstructuredGrid(grid_geometry(grid), newc, newm, newmask, newnbrs, newptr;
+                            periodic = topology(grid),
+                            period = ntuple(d -> period(grid, d), Val(N)), mesh = newmesh)
+end
+
 """
     UnstructuredGrid(geometry, coords::Tuple, measure, mask[, neighbor_nbrs, neighbor_ptr]; periodic, period)
     UnstructuredGrid(geometry, x, y, measure, mask[, neighbor_nbrs, neighbor_ptr]; periodic, period)

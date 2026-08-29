@@ -1860,3 +1860,104 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
                GD.ncells(m)
     Test.@test occursin("CellMesh", sprint(show, m))
 end
+
+Test.@testset "A node set can be ordered along a space-filling curve" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    O = FG.Operators
+    cart = GE.CartesianGeometry{Float64}()
+
+    # How far an edge reaches IN MEMORY, which is what the ordering is for. Counted, not timed.
+    stride(g) = begin
+        ptr, nbrs = GD.neighbor_ptr(g), GD.neighbor_nbrs(g)
+        s = 0; m = 0
+        for i in 1:length(GD.mask(g)), t in ptr[i]:(ptr[i + 1] - 1)
+            s += abs(Int(nbrs[t]) - i); m += 1
+        end
+        s / m
+    end
+
+    # A lattice whose nodes ARRIVE scrambled, which is what a real dataset usually looks like. The
+    # points are generated distinctly and then permuted — scrambling the index arithmetic instead
+    # would repeat points, since two residues of the same modulus share a period.
+    mm = 20
+    x0 = [i + 0.13 * sin(3.0 * (i + j)) for j in 0:(mm - 1) for i in 0:(mm - 1)]
+    y0 = [j + 0.11 * cos(2.0 * (i - j)) for j in 0:(mm - 1) for i in 0:(mm - 1)]
+    n = length(x0)
+    shuffle = [mod(97k, n) + 1 for k in 0:(n - 1)]        # a permutation: gcd(97, 400) == 1
+    xs = x0[shuffle]
+    ys = y0[shuffle]
+    Test.@test length(unique(zip(xs, ys))) == n           # genuinely distinct nodes
+    g = GD.UnstructuredGrid(cart, (xs, ys), trues(n); k = 6)
+    perm = GD.spatial_order(g)
+    Test.@test sort(perm) == collect(1:n)
+    g2 = GD.reorder(g, perm)
+    Test.@test stride(g2) < stride(g) / 2
+
+    # The reordered grid is the SAME grid relabelled: node `k` of it is node `perm[k]` of the original,
+    # and the adjacency is renumbered to match rather than merely permuted alongside.
+    inv = zeros(Int, n)
+    for k in 1:n
+        inv[perm[k]] = k
+    end
+    Test.@test all(GD._raw_coords(g2, k) == GD._raw_coords(g, perm[k]) for k in 1:n)
+    Test.@test all(GD.measure(g2, k) == GD.measure(g, perm[k]) for k in 1:n)
+    Test.@test all(sort(collect(GD.neighbors(g2, k))) ==
+                   sort([inv[j] for j in GD.neighbors(g, perm[k])]) for k in 1:n)
+    Test.@test sum(GD.measure(g2)) ≈ sum(GD.measure(g)) rtol = 1e-14
+
+    # So every derived answer is unchanged once the field is permuted the same way — which is why the
+    # permutation is RETURNED rather than applied behind the caller: it is their handle on their data.
+    f = 2.5 .* xs .- 1.75 .* ys .+ 4.0
+    let a1 = zeros(n), b1 = zeros(n), a2 = zeros(n), b2 = zeros(n)
+        O.gradient!(a1, b1, f, O.gradient_plan(g))
+        O.gradient!(a2, b2, f[perm], O.gradient_plan(g2))
+        Test.@test maximum(abs.(a1[perm] .- a2)) < 1e-10
+        Test.@test maximum(abs.(b1[perm] .- b2)) < 1e-10
+    end
+    for q in ((5.2, 7.3), (11.4, 3.1), (15.0, 12.5))
+        v1 = O.interpolate(f, g, q)
+        v2 = O.interpolate(f[perm], g2, q)
+        Test.@test (isnan(v1) && isnan(v2)) || abs(v1 - v2) < 1e-10
+    end
+
+    # The cell mesh comes along, renumbered, and keeps its index width.
+    Test.@test GD.has_cell_mesh(g2)
+    let m1 = GD.cell_mesh(g), m2 = GD.cell_mesh(g2)
+        Test.@test GD.ncells(m2) == GD.ncells(m1)
+        Test.@test all(sort([inv[Int(v)] for v in GD.cell_nodes(m1, c)]) ==
+                       sort([Int(v) for v in GD.cell_nodes(m2, c)]) for c in 1:GD.ncells(m1))
+        Test.@test eltype(m2.cell_nodes) === eltype(m1.cell_nodes)
+    end
+
+    # A mask travels with its node rather than staying at its index.
+    let mk = trues(n)
+        mk[5] = false; mk[123] = false
+        gm = GD.UnstructuredGrid(cart, GD.coordinates(g), collect(GD.measure(g)), mk,
+                                 GD.neighbor_nbrs(g), GD.neighbor_ptr(g))
+        gm2 = GD.reorder(gm, perm)
+        Test.@test !GD.isactive(gm2, inv[5]) && !GD.isactive(gm2, inv[123])
+        Test.@test count(GD.mask(gm2)) == count(GD.mask(gm))
+    end
+
+    # A permutation that is not one is refused rather than silently dropping a node.
+    Test.@test_throws ArgumentError GD.reorder(g, [1; 1; collect(3:n)])
+    Test.@test_throws ArgumentError GD.reorder(g, [0; collect(2:n)])
+    Test.@test_throws DimensionMismatch GD.reorder(g, collect(1:(n - 1)))
+
+    # On a sphere the key is the EMBEDDED position, so the longitude seam does not cut the curve:
+    # the same points, differently shuffled, sort to the same order.
+    let sph = GE.SphericalGeometry(6.371e6), nn = 200
+        λ = [mod(k * 2.399963229728653, 2π) for k in 1:nn]
+        φ = [asin(2 * (k - 0.5) / nn - 1) for k in 1:nn]
+        sh = [mod(97k, nn) + 1 for k in 0:(nn - 1)]
+        ga = GD.UnstructuredGrid(sph, (λ, φ), trues(nn); k = 6)
+        gb = GD.UnstructuredGrid(sph, (λ[sh], φ[sh]), trues(nn); k = 6)
+        # Sorted by the curve, both land on the same sequence of POINTS.
+        pa = GD.spatial_order(ga)
+        pb = GD.spatial_order(gb)
+        Test.@test [λ[i] for i in pa] ≈ [λ[sh][i] for i in pb]
+        Test.@test stride(GD.reorder(gb, pb)) < stride(gb) / 2
+        Test.@test sum(GD.measure(GD.reorder(ga, pa))) ≈ 4π * 6.371e6^2 rtol = 1e-9
+    end
+end

@@ -21,7 +21,9 @@ mapping periodic images back to ORIGINAL indices and dropping self-references an
 can be reached through several images. Nearest-first order is preserved. Returns the new count for
 this node, stopping at `kmax`.
 """
-@inline function _accept_candidates!(nbrs::Vector{Int}, lo::Int, m::Int, cands, i::Int, N::Int, kmax::Int)
+@inline function _accept_candidates!(
+    nbrs::AbstractVector{I}, lo::Int, m::Int, cands, i::Int, N::Int, kmax::Int,
+) where {I<:Integer}
     @inbounds for t in cands
         m == kmax && break
         j = mod1(t, N)          # periodic image → original node
@@ -35,10 +37,21 @@ this node, stopping at `kmax`.
         end
         seen && continue
         m += 1
-        nbrs[lo + m] = j
+        nbrs[lo + m] = I(j)
     end
     return m
 end
+
+"""
+    _index_type(N) -> Type{<:Integer}
+
+The narrowest integer that indexes `N` nodes: `Int32` for anything under two billion of them.
+
+Halves the CSR's memory and the bandwidth every traversal of it costs, and is the width a device
+kernel wants. `UnstructuredGrid` stores its neighbour arrays under free `Integer` type parameters
+precisely so the choice is available here.
+"""
+@inline _index_type(N::Integer) = N ≤ typemax(Int32) ? Int32 : Int
 
 # Queries go one point at a time through `knn!`/`inrange!` into reused buffers; the batch forms
 # return a `Vector{Vector{…}}`, i.e. two heap vectors per query point.
@@ -56,7 +69,8 @@ end
 @inline _qcol(::NearestNeighbors.NNTree{V}, pts::AbstractMatrix, j::Integer) where {V} =
     V(ntuple(d -> @inbounds(pts[d, j]), Val(length(V))))
 
-function _knn_loop!(nbrs::Vector{Int}, ptr::Vector{Int}, tree, pts::AbstractMatrix, N::Int, kq::Int, ask::Int)
+function _knn_loop!(nbrs::AbstractVector{<:Integer}, ptr::AbstractVector{<:Integer}, tree,
+                    pts::AbstractMatrix, N::Int, kq::Int, ask::Int)
     ibuf = Vector{Int}(undef, ask)
     dbuf = Vector{float(eltype(pts))}(undef, ask)   # knn! requires exactly the tree's distance type
     @inbounds ptr[1] = 1
@@ -80,23 +94,24 @@ end
 
 function _csr_from_knn(pts::AbstractMatrix, k::Integer, ng::Int = 1)
     N = size(pts, 2) ÷ ng
+    I = _index_type(N)
     if N < 2
-        return Int[], ones(Int, N + 1)
+        return I[], ones(I, N + 1)
     end
     kq = min(Int(k), N - 1)
     # Ask for enough candidates that `kq` DISTINCT originals survive even when several images of the
     # same node sit closer than the next real neighbor.
     ask = min(kq * ng + 1, size(pts, 2))
     return _knn_loop!(
-        Vector{Int}(undef, N * kq), Vector{Int}(undef, N + 1),
+        Vector{I}(undef, N * kq), Vector{I}(undef, N + 1),
         NearestNeighbors.KDTree(pts), pts, N, kq, ask,
     )
 end
 
-function _radius_loop!(ptr::Vector{Int}, tree, pts::AbstractMatrix, N::Int, r::Real)
+function _radius_loop!(ptr::AbstractVector{I}, tree, pts::AbstractMatrix, N::Int, r::Real) where {I<:Integer}
     # A radius query has no fixed degree bound, so CSR is grown directly rather than sized from a
     # `maximum(length, lists)` pass over materialized lists.
-    nbrs = Int[]
+    nbrs = I[]
     sizehint!(nbrs, 8N)
     cands = Int[]                     # `inrange!` pushes into this; `empty!` keeps the capacity
     @inbounds ptr[1] = 1
@@ -114,10 +129,11 @@ end
 
 function _csr_from_radius(pts::AbstractMatrix, r::Real, ng::Int = 1)
     N = size(pts, 2) ÷ ng
+    I = _index_type(N)
     if N < 2
-        return Int[], ones(Int, N + 1)
+        return I[], ones(I, N + 1)
     end
-    return _radius_loop!(Vector{Int}(undef, N + 1), NearestNeighbors.KDTree(pts), pts, N, r)
+    return _radius_loop!(Vector{I}(undef, N + 1), NearestNeighbors.KDTree(pts), pts, N, r)
 end
 
 # Points go to the tree as a contiguous `D × N` matrix: `KDTree` takes that form directly, and it
