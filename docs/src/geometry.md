@@ -203,8 +203,9 @@ FG.Geometry.rotate!(λs, φs, rot)
 λs
 ```
 
-Rotating a rectilinear spherical grid gives a **curvilinear** one, because that is what it is: only its
-own frame's axes are separable. `unrotate` is the usual direction, taking a rotated-pole grid's
+Rotating a rectilinear spherical grid **warps** it — only its own frame's axes are separable — but that
+warping is a formula, not data. The result keeps the mesh and the rotation and evaluates a cell's
+position where it is asked for. `unrotate` is the usual direction, taking a rotated-pole grid's
 `(λ′, φ′)` axes to the geographic coordinates of each cell.
 
 ```@example geometry
@@ -216,11 +217,19 @@ typeof(grot).name.name, size(grot), FG.Grids.coordinate_names(grot)
 ```
 
 The cell measure carries over *exactly* rather than being recomputed, since a rotation is an isometry of
-the sphere — recomputing from the rotated corners would only add roundoff. The index topology carries
-over too: same mesh, same neighbours, so a direction that wrapped still wraps.
+the sphere — recomputing from the rotated corners would only add roundoff, and here the measure is
+shared outright. The index topology carries over too: same mesh, same neighbours, so a direction that
+wrapped still wraps.
 
 ```@example geometry
 gplain = FG.Grids.StructuredGrid(sph, λr, φr)
 FG.Grids.measure(grot, 3, 4) == FG.Grids.measure(gplain, 3, 4),
 FG.Grids.isperiodic(grot, 1)
+```
+
+So rotating costs one `PoleRotation`, where materializing the warp cost two centre arrays, two corner
+arrays and a dense copy of that measure:
+
+```@example geometry
+Base.summarysize(grot) - Base.summarysize(gplain), sizeof(rot)
 ```

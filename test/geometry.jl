@@ -306,23 +306,36 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test size(GE.rotate!(Λm, [0.1j for _ in 1:3, j in 1:4], rot)[1]) == (3, 4)
     Test.@test_throws DimensionMismatch GE.rotate!(zeros(3), zeros(4), rot)
 
-    # Rotating a rectilinear spherical grid gives a curvilinear one — which is what it is — and
-    # the cell measure carries over EXACTLY, because a rotation is an isometry of the sphere.
+    # Rotating a rectilinear spherical grid warps it — but that warping is a FORMULA, so the result
+    # stores the mesh and the rotation and evaluates a cell's position where it is asked for.
     sph = FG.Geometry.SphericalGeometry(6.371e6)
     λa = range(0, 2π; length = 25)[1:24]
     φa = range(-1.2, 1.2; length = 13)
     gs = GR.StructuredGrid(sph, λa, φa)
     gr = GR.unrotate(gs, rot)
-    Test.@test gr isa GR.CurvilinearGrid && size(gr) == (24, 13)
+    Test.@test gr isa GR.RotatedGrid && size(gr) == (24, 13)
+    # Rotating costs one `PoleRotation`. Materializing it cost two centre arrays, two corner arrays
+    # and a dense copy of a measure a rotation does not change.
+    Test.@test Base.summarysize(gr) - Base.summarysize(gs) ≤ sizeof(rot) + 64
+    Test.@test GR.measure(gr) === GR.measure(gs)           # shared, not copied
     Test.@test all(GR.measure(gr, i, j) == GR.measure(gs, i, j) for i in 1:24, j in 1:13)
-    Test.@test sum(GR.measure(gr)) ≈ sum(GR.measure(gs))
+    Test.@test sum(GR.measure(gr)) == sum(GR.measure(gs))  # an isometry, so exactly
     Test.@test GR._raw_coords(gr, 3, 4) == GE.unrotate(rot, λa[3], φa[4])
     Test.@test GR._raw_coords(GR.rotate(gs, rot), 3, 4) == GE.rotate(rot, λa[3], φa[4])
+    Test.@test GR.base_grid(gr) === gs
     # The mesh is unchanged, so its index topology and wrap length are too (λ is an angle in
-    # either frame).
+    # either frame), and so is its adjacency.
     Test.@test GR.isperiodic(gr, 1) && !GR.isperiodic(gr, 2)
     Test.@test GR.period(gr, 1) ≈ 2π
-    Test.@test size(GR.corners(gr, 1)) == (25, 14)
+    Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(gr)) ==
+               FG.Connectivity.nedges(FG.Connectivity.build_connectivity(gs))
+    # A rotated (λ, φ) depends on BOTH mesh coordinates, so there are no per-axis coordinate vectors
+    # and a ball query cannot be bounded by a per-axis window — it takes an index instead.
+    Test.@test_throws ArgumentError GR.coordinates(gr)
+    Test.@test GR.candidate_source(gr) isa GR.IndexedCandidates
+    # A rotation preserves distance, so a ball holds the same cells in either frame.
+    Test.@test FG.Connectivity.nneighbors_within(gr, 5, 6; ball = 1.5e6) ==
+               FG.Connectivity.nneighbors_within(gs, 5, 6; ball = 1.5e6)
     Test.@test GR.coordinate_names(gr) == (:λ, :φ)
     Test.@test FG.Connectivity.nneighbors(gr, 1, 5) == 4     # wraps, like the original
 end

@@ -380,41 +380,35 @@ function _curvilinear_grid(
 end
 
 """
-    rotate(grid::StructuredGrid, rot) -> CurvilinearGrid
-    unrotate(grid::StructuredGrid, rot) -> CurvilinearGrid
+    rotate(grid::StructuredGrid, rot) -> RotatedGrid
+    unrotate(grid::StructuredGrid, rot) -> RotatedGrid
 
 The same mesh with its coordinates expressed in the other frame of [`Geometry.PoleRotation`](@ref)
 `rot` — `unrotate` being the usual direction, taking a rotated-pole grid's rectilinear `(λ′, φ′)` axes
 to the geographic coordinates of each cell.
 
-The result is curvilinear because that is what it is: a rotated lat–lon mesh is logically rectangular
-and geometrically warped, and only its own frame's axes are separable.
+A rotated lat–lon mesh is logically rectangular and geometrically warped, and only its own frame's axes
+are separable — but that warping is a FORMULA, not data. The result stores the mesh and the rotation
+and evaluates a cell's position where it is asked for; see [`RotatedGrid`](@ref). Rotating a grid
+therefore costs one `PoleRotation`, where materializing it cost two centre arrays, two corner arrays
+and a dense copy of a measure that a rotation does not change.
 
-Two things carry over rather than being recomputed. The **cell measure** is exact, because a rotation is
-an isometry of the sphere — recomputing it from the rotated corners would only add roundoff. The
-**index topology** is too: it is the same mesh with the same neighbours, so a direction that wrapped
-still wraps. Longitude remains an angle mod `2π` in either frame, so the wrap length is unchanged.
+Two things carry over rather than being recomputed. The **cell measure** is exact, a rotation being an
+isometry of the sphere, so it is shared rather than recomputed from rotated corners — which would only
+add round-off. The **index topology** is too: the same mesh has the same neighbours, so a direction
+that wrapped still wraps, and longitude remains an angle mod `2π` in either frame.
+
+To difference along the mesh's own axes, ask [`base_grid`](@ref) for them: the frame changes where a
+cell is reported, not how the lattice is laid out.
 """
 rotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
-    _reframe(Geometry.rotate, grid, rot)
-unrotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
-    _reframe(Geometry.unrotate, grid, rot)
+    RotatedGrid(grid, rot, Geometry.rotate)
 
-function _reframe(
-    pointwise::F, grid::StructuredGrid{T, G,2}, rot::Geometry.PoleRotation,
-) where {F, T, G<:Geometry.AbstractSphericalGeometry{T}}
-    λ, φ = coordinates(grid, 1), coordinates(grid, 2)
-    _first(a, b) = T(pointwise(rot, a, b)[1])
-    _second(a, b) = T(pointwise(rot, a, b)[2])
-    centers = ([_first(a, b) for a in λ, b in φ], [_second(a, b) for a in λ, b in φ])
-    fλ, fφ = Discretization.faces(λ), Discretization.faces(φ)
-    corners = ([_first(a, b) for a in fλ, b in fφ], [_second(a, b) for a in fλ, b in fφ])
-    tp = topology(grid)
-    msk = mask(grid)
-    return CurvilinearGrid{T, G, 2, typeof(tp), typeof(centers), typeof(corners), Matrix{T},
-                           typeof(msk)}(
-        grid_geometry(grid), centers, corners, measure_array(grid), msk, tp,
-        (period(grid, 1), period(grid, 2)),
-        ntuple(d -> _axis_stats(centers[d]), Val(2)),
-    )
-end
+"""
+    unrotate(grid::StructuredGrid, rot) -> RotatedGrid
+
+[`rotate`](@ref) the other way: the mesh's axes are the rotated frame's, and each cell is reported at
+its geographic position. The usual direction for a rotated-pole grid.
+"""
+unrotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
+    RotatedGrid(grid, rot, Geometry.unrotate)

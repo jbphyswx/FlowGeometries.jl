@@ -307,7 +307,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
     NOT_CHECKED_BECAUSE = Set(Iterators.flatten((
         # types and traits
         [:AbstractGrid, :AbstractStructuredGrid, :AbstractCurvilinearGrid, :AbstractUnstructuredGrid,
-         :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :StaggeredGrid,
+         :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :StaggeredGrid, :RotatedGrid,
+         :base_grid, :rotation,
          :AbstractTopology, :Bounded, :Periodic,
          :AllActive, :SeparableMeasure, :SlabMeasure, :PoleRotation, :AbstractImageConvention,
          :AbstractReach,
