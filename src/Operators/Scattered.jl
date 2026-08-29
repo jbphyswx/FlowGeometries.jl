@@ -191,20 +191,25 @@ function _interp_scattered(
     idx, dist = Connectivity.k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
                           scratch = scratch)
     isempty(idx) && return masked
+    # Where the grid carries its cells, the containing one gives the answer exactly, from three
+    # values. `k_nearest` returns nearest first, which is the node whose incident cells to search.
+    #
+    # Tried BEFORE the mask test below, and not subject to it: that test asks whether the
+    # NEIGHBOURHOOD is wholly active, which is the right question for a fit over a neighbourhood and
+    # the wrong one for a value taken from one triangle. `_bary_weights` refuses a cell with an
+    # inactive vertex, which is what this path depends on — so the second range query is
+    # not merely redundant here, it would refuse points it has no business refusing.
+    a, b, c, w = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
+    a == 0 || return _bary_value(field, 0, a, b, c, w)
     # `BlankMasked` refuses where the neighbourhood is not wholly active, on the same rule a stencil
     # uses; `k_nearest` with `active_only` has already dropped those, so the test is whether doing so
     # left a hole — a cell nearer than the farthest one kept, that was skipped.
     if policy isa BlankMasked && active_only
-        msk = Grids.mask(grid)
         rmax = dist[end]
         n_in = Connectivity.nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
                                  scratch = scratch)
         n_in > length(idx) && return masked
     end
-    # Where the grid carries its cells, the containing one gives the answer exactly, from three
-    # values. `k_nearest` returns nearest first, which is the node whose incident cells to search.
-    a, b, c, w = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
-    a == 0 || return _bary_value(field, 0, a, b, c, w)
     return _scattered_fit(field, grid, geo, p0, idx, 0, masked)
 end
 
@@ -316,6 +321,16 @@ function interpolate!(
         fill!(out, masked)
         return out
     end
+    # The cell and its weights are a property of the POINT, so they are solved once and applied to
+    # every batch element — the same structure the k-d tree query above already has, and tried before
+    # the neighbourhood mask test for the same reason the scalar form does.
+    ba, bb, bc, bw = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
+    if ba != 0
+        @inbounds for b in 1:nb
+            out[b] = _bary_value(field, (b - 1) * n, ba, bb, bc, bw)
+        end
+        return out
+    end
     if policy isa BlankMasked && active_only
         rmax = dist[end]
         n_in = Connectivity.nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
@@ -324,15 +339,6 @@ function interpolate!(
             fill!(out, masked)
             return out
         end
-    end
-    # The cell and its weights are a property of the POINT, so they are solved once and applied to
-    # every batch element — the same structure the k-d tree query above already has.
-    ba, bb, bc, bw = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
-    if ba != 0
-        @inbounds for b in 1:nb
-            out[b] = _bary_value(field, (b - 1) * n, ba, bb, bc, bw)
-        end
-        return out
     end
     @inbounds for b in 1:nb
         out[b] = _scattered_fit(field, grid, geo, p0, idx, (b - 1) * n, masked)

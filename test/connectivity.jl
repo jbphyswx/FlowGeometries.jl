@@ -1848,6 +1848,31 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         end
     end
 
+    # Where a cell answers, the neighbourhood mask test is not consulted — and must not be. It asks
+    # whether the NEIGHBOURHOOD is wholly active, which is the right question for a fit over one and
+    # the wrong one for a value taken from a single triangle. Here the containing triangle is wholly
+    # active while a node two cells away is not: the mesh answers exactly, and the fit, which is what
+    # the same grid without cells falls back to, refuses a value that is in fact determined.
+    let mm = 14
+        lx = [Float64(i) for j in 0:(mm - 1) for i in 0:(mm - 1)]
+        ly = [Float64(j) for j in 0:(mm - 1) for i in 0:(mm - 1)]
+        nl = length(lx)
+        lin = LinearIndices((mm, mm))
+        gl = GD.UnstructuredGrid(cart, (lx, ly), trues(nl); k = 6)
+        fl = 2.5 .* lx .- 1.75 .* ly .+ 4.0
+        mk = trues(nl)
+        mk[lin[6, 7]] = false                       # the node at (x, y) = (5, 6)
+        args = (GD.coordinates(gl), collect(GD.measure(gl)), mk,
+                GD.neighbor_nbrs(gl), GD.neighbor_ptr(gl))
+        withmesh = GD.UnstructuredGrid(cart, args...; mesh = GD.cell_mesh(gl))
+        without = GD.UnstructuredGrid(cart, args...)
+        q = (6.35, 6.4)
+        Test.@test abs(O.interpolate(fl, withmesh, q) - (2.5q[1] - 1.75q[2] + 4.0)) < 1e-11
+        Test.@test isnan(O.interpolate(fl, without, q))
+        # A cell whose OWN vertex is inactive is still refused, which is what the mesh path depends on.
+        Test.@test isnan(O.interpolate(fl, withmesh, (5.4, 6.35)))
+    end
+
     # A grid handed its own areas has no tessellation to take cells from, and one handed its adjacency
     # directly has none either. Both say so rather than inventing a triangulation.
     Test.@test GD.cell_mesh(GD.UnstructuredGrid(cart, (xs, ys), trues(np); k = 3,
