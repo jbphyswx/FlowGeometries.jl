@@ -6,5 +6,5 @@ CurrentModule = FlowGeometries
 
 ```@autodocs
 Modules = [FlowGeometries.SphericalSampling]
-Order = [:type, :function]
+Order = [:type, :constant, :function]
 ```

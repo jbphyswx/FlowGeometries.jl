@@ -34,7 +34,7 @@ end
 `length(nodes) × (order+1)` recursion table. Both are overwritten.
 
 The allocating form is one of these per call, and a stencil is built once per sample of an axis, so a
-4096-sample axis costs ~8000 allocations without this. The degrade path in [`apply_stencil!`](@ref) needs
+4096-sample axis costs ~8000 allocations without this. The degrade path in [`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) needs
 one per cell near a mask edge, which is the reason it exists.
 """
 @inline fd_weights!(
@@ -145,7 +145,7 @@ choose a staggering or a boundary condition.
 """
     StencilScratch{T}
 
-The working buffers a degrading [`apply_stencil!`](@ref) needs to rebuild a window at a mask edge:
+The working buffers a degrading [`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) needs to rebuild a window at a mask edge:
 the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
 
 **One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
@@ -165,7 +165,7 @@ Buffers for the degrade path, so a caller taking many derivatives on a masked gr
 them per call. Without one a degrading call allocates a few hundred bytes each time — `O(1)` in the
 grid, but per *call*, so a flux computation taking nine derivatives pays it nine times.
 
-Only the degrading policies need it. An unmasked grid, and any grid under [`BlankMasked`](@ref), never
+Only the degrading policies need it. An unmasked grid, and any grid under [`BlankMasked`](@ref FlowGeometries.Operators.BlankMasked), never
 rebuilds a window and allocates nothing regardless.
 """
 stencil_scratch(order::Integer, nodes::Integer) = stencil_scratch(Float64, order, nodes)
@@ -196,7 +196,7 @@ The `order`-th derivative's [`fd_weights`](@ref) at **every** sample of axis `x`
 matrices: the axis indices each sample reads, and the weight on each.
 
 One row per sample, so a stretched axis costs nothing extra downstream — the varying weights are
-already here. Built once and reused by [`apply_stencil!`](@ref).
+already here. Built once and reused by [`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!).
 
 `period === nothing` shifts the stencil inward at the two ends, exactly as the single-sample
 [`fd_weights`](@ref) does. Given a period the stencil stays centred everywhere and wraps, with the
@@ -292,7 +292,7 @@ end
 The magnitude below which a scale factor is treated as degenerate: `L·√eps(T)` for a curved geometry of
 size `L`, and `0` for a Cartesian one, whose metric never degenerates.
 
-Relative to both the geometry's size and the element type on purpose — see [`derivative!`](@ref) for
+Relative to both the geometry's size and the element type on purpose — see [`derivative!`](@ref FlowGeometries.Operators.derivative!) for
 what an absolute constant does in `Float32`.
 """
 function metric_floor end

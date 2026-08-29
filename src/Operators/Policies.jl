@@ -33,7 +33,7 @@ count — the same thing the stencil already does at the end of a bounded axis, 
 run as the boundary. `masked` only where the run is shorter than `nodes`.
 
 The accuracy order is therefore the same everywhere a value is written, which is the property
-[`fd_weights`](@ref) exists to preserve. On a run of at least `nodes` active samples the weights are
+[`Discretization.fd_weights`](@ref) exists to preserve. On a run of at least `nodes` active samples the weights are
 **identical** to the unmasked ones, so the interior of an active region is bit-for-bit unchanged.
 """
 struct ShiftWithinRun <: AbstractMaskPolicy end

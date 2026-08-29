@@ -95,8 +95,8 @@ Every direction at `Center()`.
 """
     axis_at(sg, d, loc) -> AbstractVector
 
-Direction `d`'s samples at location `loc`: the primal axis at [`Center`](@ref), its faces at
-[`Face`](@ref).
+Direction `d`'s samples at location `loc`: the primal axis at [`Discretization.Center`](@ref), its faces at
+[`Discretization.Face`](@ref).
 """
 @inline axis_at(sg::StaggeredGrid, d::Integer, ::Discretization.Center) = coordinates(sg.center, d)
 # The face axes of different directions may be different types, so a runtime `d` selects one by the
@@ -107,7 +107,7 @@ Direction `d`'s samples at location `loc`: the primal axis at [`Center`](@ref), 
 """
     grid_at(sg, loc) -> StructuredGrid
 
-The grid of `sg` at location `loc`, one [`Center`](@ref)/[`Face`](@ref) per direction.
+The grid of `sg` at location `loc`, one [`Discretization.Center`](@ref)/[`Discretization.Face`](@ref) per direction.
 
 An ordinary [`StructuredGrid`](@ref), so every rectilinear operator applies to it unchanged. It is
 BUILT here rather than stored — there are `2^N` locations and a mesh needs few of them — so a caller

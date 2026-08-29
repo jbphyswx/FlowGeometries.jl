@@ -17,6 +17,7 @@ choose, not this package's to impose.
 ```@example disc
 using FlowGeometries: FlowGeometries as FG
 D = FG.Discretization
+O = FG.Operators
 A = FG.Axes
 
 x = [0.0, 1.0, 3.0, 6.0]
@@ -178,7 +179,7 @@ maximum(abs(FG.Geometry.nonuniform_first_derivative(
 
 ## Applying a weight set
 
-[`apply_stencil!`](@ref) is the one function here that touches a field, and only along a single
+[`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) is the one function here that touches a field, and only along a single
 direction with the result left where the input was. That case needs no convention the package has not
 already fixed: nothing to stagger, `fd_weights`' inward shift at a bounded end, wrapping on a periodic
 one — so no halo either.
@@ -233,7 +234,7 @@ derivative on a short axis can be annihilated outright by one hole.
 
 The window already shifts inward at the end of an axis, precisely so the node count — and the accuracy
 order — survives a boundary. The end of an active *run* is the same situation, and
-[`ShiftWithinRun`](@ref) treats it that way:
+[`ShiftWithinRun`](@ref FlowGeometries.Operators.ShiftWithinRun) treats it that way:
 
 ```@example disc
 xr = collect(0.0:1.0:6.0)
@@ -252,9 +253,9 @@ Every cell is blanked in the first, and every active cell is exact in the second
 
 | policy | at a run edge |
 |---|---|
-| [`BlankMasked`](@ref) | the default — write `masked` wherever the window reads an inactive sample |
-| [`ShiftWithinRun`](@ref) | shift the window to fit inside the run, keeping `nodes` and the accuracy order; `masked` only where the run is shorter than `nodes` |
-| [`ReduceInRun`](@ref) | as above, and where the run cannot hold `nodes`, use the largest window it can, down to `order + 1` |
+| [`BlankMasked`](@ref FlowGeometries.Operators.BlankMasked) | the default — write `masked` wherever the window reads an inactive sample |
+| [`ShiftWithinRun`](@ref FlowGeometries.Operators.ShiftWithinRun) | shift the window to fit inside the run, keeping `nodes` and the accuracy order; `masked` only where the run is shorter than `nodes` |
+| [`ReduceInRun`](@ref FlowGeometries.Operators.ReduceInRun) | as above, and where the run cannot hold `nodes`, use the largest window it can, down to `order + 1` |
 
 `ReduceInRun` is the only one that will silently lower the accuracy order, which is why it is a
 separate policy rather than a fallback inside `ShiftWithinRun`: a narrow strait genuinely wants an
@@ -276,7 +277,7 @@ size(idx), size(w)
 
 `apply_stencil!` differentiates with respect to a **coordinate**. On any curved geometry that is not
 the derivative a physical law is written in — that one is per unit *distance*, `∂f/∂sᵈ = (1/hᵈ)·∂f/∂ξᵈ`.
-[`derivative!`](@ref) is the two together:
+[`derivative!`](@ref FlowGeometries.Operators.derivative!) is the two together:
 
 ```@example disc
 R   = 6.371e6
@@ -321,7 +322,7 @@ different expression, and a wrong one.
 `apply_stencil!` needs a separable axis to difference along. A `CurvilinearGrid` has none, and a node
 set's neighbours come from connectivity rather than an index offset, so neither has a stencil.
 `Operators.gradient_plan` builds a least-squares gradient for them instead, and
-[`gradient!`](@ref) applies it:
+[`gradient!`](@ref FlowGeometries.Operators.gradient!) applies it:
 
 ```@example disc
 cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -350,7 +351,7 @@ line, at a boundary or beside a mask — that component is **zeroed rather than 
 
 ## Evaluating a field at a coordinate
 
-Observational data has a coordinate, not a cell index. [`interpolate`](@ref) answers for one:
+Observational data has a coordinate, not a cell index. [`interpolate`](@ref FlowGeometries.Operators.interpolate) answers for one:
 
 ```@example disc
 xa = collect(range(0, 2; length = 11)); ya = collect(range(-1, 3; length = 9))
@@ -364,9 +365,9 @@ which is exact for a linear field and reproduces a cell's own value at its centr
 direction interpolates across its seam** rather than clamping at the last sample — composing the
 per-axis weights by hand gets that wrong by half a cell everywhere on the seam.
 
-The mask policies mean here what they mean for a stencil: [`BlankMasked`](@ref) returns `masked` when a
-contributor is inactive, [`ReduceInRun`](@ref) renormalizes over the active ones, and
-[`ShiftWithinRun`](@ref) is refused, there being no window to shift.
+The mask policies mean here what they mean for a stencil: [`BlankMasked`](@ref FlowGeometries.Operators.BlankMasked) returns `masked` when a
+contributor is inactive, [`ReduceInRun`](@ref FlowGeometries.Operators.ReduceInRun) renormalizes over the active ones, and
+[`ShiftWithinRun`](@ref FlowGeometries.Operators.ShiftWithinRun) is refused, there being no window to shift.
 
 Anything that *does* need a convention the package has not chosen — a staggered difference, or a
 multi-direction operator like a divergence or a curl, which also need a result location and a

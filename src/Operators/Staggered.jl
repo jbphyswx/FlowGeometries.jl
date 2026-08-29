@@ -20,7 +20,7 @@
 """
     _face_span(nc, periodic) -> Int
 
-How many samples a direction of `nc` cells carries at [`Face`](@ref): `nc` where it wraps, its last
+How many samples a direction of `nc` cells carries at [`Discretization.Face`](@ref): `nc` where it wraps, its last
 face being its first, and `nc + 1` where it does not.
 """
 @inline _face_span(nc::Int, periodic::Bool) = periodic ? nc : nc + 1
@@ -215,7 +215,7 @@ end
     curl!(out, u1, u2, sg; masked = NaN) -> out
 
 The scalar curl of a C-staggered two-component field: `u1` at the 1-face location, `u2` at the 2-face
-location, written to `out` at the corner where both directions are at [`Face`](@ref) — the vorticity
+location, written to `out` at the corner where both directions are at [`Discretization.Face`](@ref) — the vorticity
 point of an Arakawa C cell.
 
 `(1/J)·[ ∂(h_2 u_2)/∂x_1 − ∂(h_1 u_1)/∂x_2 ]`, each term one difference across one cell. Like the
@@ -301,7 +301,7 @@ divergence(us::NTuple{N,AbstractArray}, sg::Grids.StaggeredGrid{T,N}; kwargs...)
 """
     curl(u1, u2, sg; kwargs...) -> Array
 
-[`curl!`](@ref) into a fresh array at the corner where both directions are at [`Face`](@ref).
+[`curl!`](@ref) into a fresh array at the corner where both directions are at [`Discretization.Face`](@ref).
 """
 function curl(u1::AbstractArray, u2::AbstractArray, sg::Grids.StaggeredGrid{T,2}; kwargs...) where {T}
     dims = ntuple(e -> length(Grids.axis_at(sg, e, Discretization.Face())), Val(2))

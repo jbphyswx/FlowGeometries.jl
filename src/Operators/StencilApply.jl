@@ -9,13 +9,13 @@ Apply a weight set along direction `dim` of `field`, writing
 This is the one field-touching operation here, and it is here because every convention it needs is
 already settled elsewhere in the package rather than being the caller's to choose: the result sits at
 the same location as the input, so there is no staggering decision; the stencil shifts inward at a
-bounded end and wraps on a periodic one, which is [`fd_weights`](@ref)'s stated boundary behaviour and
+bounded end and wraps on a periodic one, which is [`Discretization.fd_weights`](@ref)'s stated boundary behaviour and
 removes any need for a halo. What is *not* here is anything that does need those choices — a staggered
 difference, or a multi-direction operator like a divergence or a curl, which additionally needs a
 result location and a boundary-condition policy.
 
 Pass the axis and an order to have the weights built for you, or precomputed `indices`/`weights` from
-[`axis_stencils`](@ref) to reuse them across many fields.
+[`Discretization.axis_stencils`](@ref) to reuse them across many fields.
 
 With a `mask`, a cell is written as `masked` when it is inactive **or when its stencil reads an
 inactive cell** — the derivative there is not determined by the active data, so it is not invented.
@@ -60,7 +60,7 @@ end
     apply_stencil!(out, field, x, indices, weights, dim; order=1, period=nothing, mask=nothing,
                    masked=zero, policy=BlankMasked(), backend=nothing) -> out
 
-Apply a table built by [`axis_stencils`](@ref) **and** keep the axis, so any mask policy works.
+Apply a table built by [`Discretization.axis_stencils`](@ref) **and** keep the axis, so any mask policy works.
 
 The table depends on the axis and not on the field, so a caller differencing many fields along one
 direction should build it once. The bare `(indices, weights)` form cannot degrade at a mask edge —

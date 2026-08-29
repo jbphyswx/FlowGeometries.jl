@@ -205,7 +205,13 @@ struct BallIndex{TR,T,MT<:AbstractMatrix{T},E<:Grids.AbstractEmbedding}
     min_period::T
 end
 
-const _IndexableGrid = Union{Grids.StructuredGrid,Grids.CurvilinearGrid,Grids.UnstructuredGrid}
+# Every layout whose cell centres can be streamed, which is every layout: a formula one produces them
+# by arithmetic, a stored one reads them.
+const _IndexableGrid = Union{
+    Grids.StructuredGrid,Grids.CurvilinearGrid,Grids.UnstructuredGrid,
+    Grids.HEALPixGrid,Grids.RingGrid,Grids.CubedSphereGrid,Grids.YinYangGrid,
+    Grids.IcosahedralGrid,
+}
 
 Grids.has_spatial_index(::_IndexableGrid) = true
 

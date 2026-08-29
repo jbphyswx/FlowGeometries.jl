@@ -53,7 +53,7 @@ active `mask`, per-direction `topology`, and the wrap `period` of each periodic 
   forward reference a `{G,T}` order would need. [`CurvilinearGrid`](@ref) and
   [`UnstructuredGrid`](@ref) carry the same convention.
 - `N`: number of coordinate directions.
-- `S`: the [`SphericalSampling`](@ref) recipe the axes came from, or `Nothing` for axes given directly.
+- `S`: the `SphericalSampling` recipe the axes came from, or `Nothing` for axes given directly.
   A zero-size singleton, so it costs nothing to carry and lets quadrature exactness, the matching
   latitude weights and a rebuild at another resolution dispatch on which node set this is — none of
   which the coordinates alone determine. See [`sampling`](@ref).
