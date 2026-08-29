@@ -497,3 +497,25 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
         (I, J, d) -> nothing, gu; ball = 2.0e6, topology = C.indexed(gu), backend = cpu,
     )
 end
+
+Test.@testset "Every layout's cell centres can be indexed, not just the three architectures" begin
+    GD = FG.Grids
+    C = FG.Connectivity
+    # A formula layout streams its centres by arithmetic rather than reading them, which is no
+    # obstacle to building a tree over them — the extension used to list the architectures it knew.
+    layouts = (("HEALPix", GD.HEALPixGrid(8)),
+               ("ring", GD.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(16))),
+               ("cubed sphere", GD.CubedSphereGrid(8)),
+               ("Yin-Yang", GD.YinYangGrid(16, 8)),
+               ("icosahedral", GD.IcosahedralGrid(4)))
+    for (_, g) in layouts
+        Test.@test GD.has_spatial_index(g)
+        ix = C.indexed(g)
+        sc = C.ball_scratch()
+        cell = GD.cell_at(g, first(GD.cells(g)))
+        # An index may only ever OVER-return; the distance gate decides membership, so the indexed
+        # answer must equal the scan's exactly rather than approximately.
+        Test.@test C.nneighbors_within(g, cell...; ball = 2.0e6, topology = ix, scratch = sc) ==
+                   C.nneighbors_within(g, cell...; ball = 2.0e6, topology = C.MetricTopology(g))
+    end
+end
