@@ -140,17 +140,16 @@ struct UnstructuredGrid{
     neighbor_ptr::VP   # CSR offsets, length Nnodes+1
     topology::TP       # per-direction closure of the enclosing domain (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
-    stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined for scattered nodes
     mesh::MH           # the cells, where a triangulation produced them; see `CellMesh`
 end
 
 @inline _from_fields(
     ::Type{<:UnstructuredGrid},
     geometry::G, coordinates::C, measure::VA, mask::B, neighbor_nbrs::VN, neighbor_ptr::VP,
-    topology::TP, period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}}, mesh::MH,
+    topology::TP, period::NTuple{N,T}, mesh::MH,
 ) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP,MH} =
     UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP,MH}(geometry, coordinates, measure, mask, neighbor_nbrs,
-                                               neighbor_ptr, topology, period, stats, mesh)
+                                               neighbor_ptr, topology, period, mesh)
 
 """
     cell_mesh(grid) -> CellMesh | Nothing
@@ -326,7 +325,7 @@ function UnstructuredGrid(
     ))
     return UnstructuredGrid{
         T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p), typeof(mesh),
-    }(geometry, c, m, mask, nb, p, per, prd, ntuple(d -> _axis_stats(c[d]), Val(N)), mesh)
+    }(geometry, c, m, mask, nb, p, per, prd, mesh)
 end
 
 # Two-direction convenience forms. Node coordinates are all `AbstractVector`s, so — unlike a
@@ -412,20 +411,3 @@ function _build_kdtree_neighbors(
         "(or build adjacency explicitly and pass it to `UnstructuredGrid` alongside the coordinates).",
     ))
 end
-
-# Every architecture caches its per-direction reductions, so the span accessors are reads rather than
-# `extrema` over the coordinates. They sit under the search-radius bound a query evaluates, which is why
-# it matters that they are `O(1)` and not merely correct.
-const _StatGrid = Union{StructuredGrid,CurvilinearGrid,UnstructuredGrid}
-
-@inline axis_stats(grid::Union{CurvilinearGrid,UnstructuredGrid}) = getfield(grid, :stats)
-@inline axis_stats(grid::Union{CurvilinearGrid,UnstructuredGrid}, d::Integer) =
-    @inbounds axis_stats(grid)[d]
-
-@inline bounds(grid::_StatGrid, d::Integer) =
-    (st = axis_stats(grid, d); (st.min_value, st.max_value))
-@inline function extent(grid::_StatGrid, d::Integer)
-    st = axis_stats(grid, d)
-    return st.max_value - st.min_value
-end
-@inline origin(grid::_StatGrid, d::Integer) = axis_stats(grid, d).first_value

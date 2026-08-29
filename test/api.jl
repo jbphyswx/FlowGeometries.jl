@@ -238,7 +238,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
     ALLOCATION_CHECKED = Set([
         :coords, :measure, :isactive, :displacement, :neighbors, :neighbors!, :nneighbors,
         :nneighbors_within, :neighbors_within!, :fold_within, :metric_window, :k_nearest!,
-        :MetricTopology, :minimum_spacing, :maximum_spacing, :axis_stats, :AxisStats,
+        :MetricTopology, :minimum_spacing, :maximum_spacing,
         :area, :coords!, :axis, :spacing, :origin, :extent, :bounds, :isperiodic, :isuniform,
         :period, :size_tuple, :mask, :coordinate_names, :periodic_flags, :topology, :coordinates,
         :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,

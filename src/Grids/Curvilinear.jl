@@ -43,16 +43,15 @@ struct CurvilinearGrid{
     mask::B                   # active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
-    stats::NTuple{N,AxisStats{T}}   # span per direction; gaps are undefined without axes
 end
 
 @inline _from_fields(
     ::Type{<:CurvilinearGrid},
     geometry::G, coordinates::C, corners::KC, measure::MA, mask::B, topology::TP,
-    period::NTuple{N,T}, stats::NTuple{N,AxisStats{T}},
+    period::NTuple{N,T},
 ) where {T,G<:Geometry.AbstractGeometry{T},N,TP,C,KC,MA,B} =
     CurvilinearGrid{T,G,N,TP,C,KC,MA,B}(geometry, coordinates, corners, measure, mask, topology,
-                                        period, stats)
+                                        period)
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
 @inline period(grid::CurvilinearGrid, d::Integer) =
@@ -375,7 +374,6 @@ function _curvilinear_grid(
     return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(held), typeof(meas),
                            typeof(mask)}(
         geometry, centers, held, meas, mask, tp, prd,
-        ntuple(d -> _axis_stats(centers[d]), Val(N)),
     )
 end
 

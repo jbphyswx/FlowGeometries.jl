@@ -281,7 +281,7 @@ alone. See [`spacing_trait`](@ref) for the form a method can dispatch on.
 
 A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields, not axes.
 """
-@inline isuniform(grid::AbstractGrid, d::Integer) = Axes.isuniform(coordinates(grid, d))
+@inline isuniform(grid::AbstractGrid, d::Integer) = _at_axis(Axes.isuniform, coordinates(grid), d)
 @inline isuniform(grid::AbstractGrid) = all(Axes.isuniform, coordinates(grid))
 
 """
@@ -293,14 +293,14 @@ so a descending axis reports a negative spacing. Raises for a direction that is 
 for its range of gaps, [`local_spacing`](@ref) for the gaps at one index, or [`cell_width`](@ref) /
 [`cell_widths`](@ref) for the width of a cell.
 """
-@inline spacing(grid::AbstractGrid, d::Integer) = Axes.spacing(coordinates(grid, d))
+@inline spacing(grid::AbstractGrid, d::Integer) = _at_axis(Axes.spacing, coordinates(grid), d)
 
 """
     origin(grid, d) -> T
 
 The first coordinate along direction `d`.
 """
-@inline origin(grid::AbstractGrid, d::Integer) = first(coordinates(grid, d))
+@inline origin(grid::AbstractGrid, d::Integer) = _at_axis(first, coordinates(grid), d)
 
 """
     bounds(grid, d) -> (lo, hi)
@@ -308,8 +308,21 @@ The first coordinate along direction `d`.
 Smallest and largest coordinate along direction `d`, ordered `lo ≤ hi` regardless of whether the
 direction is stored ascending or descending. These are the extreme SAMPLE positions (cell centres),
 not the outer cell boundaries.
+
+`O(1)` on a rectilinear grid, whose directions are AXES: an axis is monotone — every search here
+bisects it, which requires that — so its extremes are its endpoints and there is nothing to scan.
+`O(N)` where the coordinates are per-cell fields instead, which have no such order; a query that wants
+that repeatedly reads it from a [`MetricTopology`](@ref FlowGeometries.Connectivity.MetricTopology), built once.
 """
 @inline bounds(grid::AbstractGrid, d::Integer) = extrema(coordinates(grid, d))
+
+@inline bounds(grid::AbstractStructuredGrid, d::Integer) = _at_axis(_axis_bounds, coordinates(grid), d)
+
+@inline function _axis_bounds(x::AbstractVector{T}) where {T}
+    isempty(x) && return (T(Inf), T(-Inf))
+    @inbounds a, b = first(x), last(x)
+    return a ≤ b ? (a, b) : (b, a)
+end
 
 """
     extent(grid, d) -> T
@@ -333,7 +346,8 @@ stretched axis happens to be equally spaced: its gaps are identical when the two
 
 A direction of fewer than two samples has no gap, and reports `Inf` — the identity for `min`.
 """
-@inline minimum_spacing(grid::AbstractStructuredGrid, d::Integer) = _min_gap(coordinates(grid, d))
+@inline minimum_spacing(grid::AbstractStructuredGrid, d::Integer) =
+    _at_axis(_min_gap, coordinates(grid), d)
 
 """
     maximum_spacing(grid, d) -> T
@@ -341,7 +355,8 @@ A direction of fewer than two samples has no gap, and reports `Inf` — the iden
 Largest gap between consecutive samples along direction `d`, the counterpart of
 [`minimum_spacing`](@ref). A direction of fewer than two samples reports `0`, the identity for `max`.
 """
-@inline maximum_spacing(grid::AbstractStructuredGrid, d::Integer) = _max_gap(coordinates(grid, d))
+@inline maximum_spacing(grid::AbstractStructuredGrid, d::Integer) =
+    _at_axis(_max_gap, coordinates(grid), d)
 
 # Selecting ONE axis by a runtime direction out of the coordinate tuple, whose entries may be different
 # types. `ntuple(…, Val(N))` unrolls where every direction is wanted; only one is here, so the tuple is

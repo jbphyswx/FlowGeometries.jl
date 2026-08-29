@@ -98,7 +98,7 @@ function _k_nearest!(
         "idx and dist must hold at least k = $kk entries; got $(length(idx)) and $(length(dist))",
     ))
     r = _knn_seed_radius(grid, Iraw, kk)
-    rmax = _knn_radius_ceiling(grid)
+    rmax = _knn_radius_ceiling(grid, topology)
     n = 0
     while true
         n = _route_fold(0, reach, grid, Ii, r, NearestImage(), active_only, false, topology, scratch) do m, J, d
@@ -137,19 +137,21 @@ function k_nearest(
 end
 
 # Every cell is within this of every other, so the widening always terminates.
-@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G<:Geometry.AbstractSphericalGeometry,T}
+@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}, mt) where {G<:Geometry.AbstractSphericalGeometry,T}
     return T(π) * T(Geometry.radius(Grids.grid_geometry(grid)))
 end
-@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
+@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}, mt) where {G<:Geometry.AbstractEllipsoidalGeometry,T}
     return T(π) * T(Geometry.semimajor_axis(Grids.grid_geometry(grid)))
 end
 # The diagonal of the coordinate extents, so every coordinate direction contributes: on a node set
 # `size_tuple` counts nodes, and the coordinate count is what spans the domain.
-@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}) where {G,T}
+@inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}, mt) where {G,T}
     D = Grids.ncoordinates(grid)
     s = zero(T)
+    # The topology's span, reduced once: off a rectilinear grid this would otherwise scan the
+    # coordinate fields on every query.
     for d in 1:D
-        e = T(Grids.extent(grid, d))
+        e = @inbounds T(mt.span[d])
         s += e * e
     end
     return sqrt(s) + one(T)

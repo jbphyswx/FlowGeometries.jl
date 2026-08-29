@@ -76,8 +76,16 @@ field-by-field for a device, so a mutable cache field would break both that and 
 struct MetricTopology{N,T,S}
     steps::NTuple{N,T}   # smallest index step per direction, seam included
     min3::T              # global minimum of direction 3 (geodetic height); zero below 3 directions
+    span::NTuple{N,T}    # coordinate extent per direction; see `_span_of`
     index::S
 end
+
+# The per-direction extent, reduced ONCE here. On a rectilinear grid it is two endpoint reads, but off
+# one the coordinates are per-cell fields with no order, so it is a scan — and a `k`-nearest query
+# needs it to size its opening radius. This is where such a reduction belongs: the invariants a query
+# reads, built once, rather than a field on every grid that every construction pays for.
+@inline _span_of(grid::Grids.AbstractGrid{G,T}, ::Val{N}) where {G,T,N} =
+    ntuple(d -> T(Grids.extent(grid, d)), Val(N))
 
 MetricTopology(grid::Grids.AbstractGrid; index = nothing) =
     MetricTopology(grid, index, Grids.candidate_source(grid))
@@ -86,13 +94,14 @@ function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.SeparableW
     N = Grids.ncoordinates(grid)
     steps = ntuple(d -> _min_step_scan(grid, d), Val(N))
     m3 = N ≥ 3 ? T(Grids.bounds(grid, 3)[1]) : zero(T)
-    return MetricTopology{N,T,typeof(index)}(steps, m3, index)
+    return MetricTopology{N,T,typeof(index)}(steps, m3, _span_of(grid, Val(N)), index)
 end
 
 # With no separable axes there is no step bound to carry, and the topology exists to hold the index.
 function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.IndexedCandidates) where {G,T}
     N = Grids.ncoordinates(grid)
-    return MetricTopology{N,T,typeof(index)}(ntuple(_ -> zero(T), Val(N)), zero(T), index)
+    return MetricTopology{N,T,typeof(index)}(ntuple(_ -> zero(T), Val(N)), zero(T),
+                                             _span_of(grid, Val(N)), index)
 end
 
 @inline _min_step(mt::MetricTopology, d::Int) = @inbounds mt.steps[d]

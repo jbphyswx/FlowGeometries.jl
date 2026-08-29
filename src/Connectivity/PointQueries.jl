@@ -165,8 +165,8 @@ function k_nearest!(
     kk ≥ 0 || throw(ArgumentError("k must be non-negative, got $k"))
     (kk == 0 || isempty(idx)) && return 0
     sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
-    r = _knn_seed_radius_at(grid, p, kk)
-    rmax = _knn_radius_ceiling(grid)
+    r = _knn_seed_radius_at(grid, p, kk, topology)
+    rmax = _knn_radius_ceiling(grid, topology)
     n = 0
     while true
         n = fold_at(0, grid, p; ball = r, active_only = active_only,
@@ -188,8 +188,8 @@ function Grids.locate(
     active_only::Bool = false, topology = MetricTopology(grid), scratch = nothing,
 ) where {T,D}
     sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
-    r = _knn_seed_radius_at(grid, p, 1)
-    rmax = _knn_radius_ceiling(grid)
+    r = _knn_seed_radius_at(grid, p, 1, topology)
+    rmax = _knn_radius_ceiling(grid, topology)
     while true
         best = fold_at((0, T(Inf)), grid, p; ball = r, active_only = active_only,
                        topology = topology, scratch = scratch) do acc, J, d
@@ -224,7 +224,7 @@ end
 
 # The cell the point falls in gives the local cell size to start from, exactly as the cell-seeded form
 # uses its own cell's measure.
-@inline function _knn_seed_radius_at(grid::Grids.StructuredGrid{T, G,N}, p, k::Int) where {G,T,N}
+@inline function _knn_seed_radius_at(grid::Grids.StructuredGrid{T, G,N}, p, k::Int, mt) where {G,T,N}
     sz = Grids.size_tuple(grid)
     raw = Grids.locate(grid, ntuple(d -> T(p[d]), Val(N)))
     return _knn_seed_radius(grid, ntuple(d -> clamp(raw[d], 1, sz[d]), Val(N)), k)
@@ -232,12 +232,14 @@ end
 
 # Elsewhere there are no axes to locate along, so the scale comes from the mean cell rather than the
 # one the point fell in. Only the starting radius depends on it; the doubling reaches the rest.
-@inline function _knn_seed_radius_at(grid::Grids.AbstractGrid{G,T}, p, k::Int) where {G,T}
+@inline function _knn_seed_radius_at(grid::Grids.AbstractGrid{G,T}, p, k::Int, mt) where {G,T}
     D = Grids.ncoordinates(grid)
     ncell = length(Grids.mask(grid))
     vol = one(T)
+    # The span comes from the topology, which reduced it once. Off a rectilinear grid the coordinates
+    # are fields with no order, so asking the grid would scan them on every query.
     for d in 1:D
-        e = T(Grids.extent(grid, d))
+        e = @inbounds T(mt.span[d])
         e > 0 && (vol *= e)
     end
     cell = ncell > 0 ? (vol / ncell)^(one(T) / D) : one(T)

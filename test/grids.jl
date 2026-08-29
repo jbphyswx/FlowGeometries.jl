@@ -1345,3 +1345,62 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
         Test.@test occursin("StaggeredGrid", sprint(show, s))
     end
 end
+
+Test.@testset "Span and spacing are computed from the axis, not cached on the grid" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    C = FG.Connectivity
+    cart = GE.CartesianGeometry{Float64}()
+
+    # The obvious, slow forms these accessors used to be precomputed into.
+    ref_mingap(x) = length(x) < 2 ? Inf : minimum(abs(x[i] - x[i - 1]) for i in 2:length(x))
+    ref_maxgap(x) = length(x) < 2 ? 0.0 : maximum(abs(x[i] - x[i - 1]) for i in 2:length(x))
+
+    for a in (collect(0.0:1.0:9.0), 0.0:0.5:5.0, FG.Axes.UniformAxis(0.0, 0.25, 12),
+              [0.0, 1.0, 3.0, 6.0, 10.0, 15.0],          # stretched, ascending
+              collect(range(6.0, 0.0; length = 9)),      # DESCENDING: bounds still order lo ≤ hi
+              FG.Axes.PowerAxis(0.0, 100.0, 1.7, 11))    # a formula axis
+        g = GD.StructuredGrid(cart, a, collect(0.0:1.0:4.0))
+        x = collect(a)
+        Test.@test GD.bounds(g, 1) == extrema(x)
+        Test.@test GD.extent(g, 1) == extrema(x)[2] - extrema(x)[1]
+        Test.@test GD.origin(g, 1) == first(x)
+        Test.@test GD.minimum_spacing(g, 1) ≈ ref_mingap(x)
+        Test.@test GD.maximum_spacing(g, 1) ≈ ref_maxgap(x)
+        Test.@test GD.isuniform(g, 1) == FG.Axes.isuniform(a)
+    end
+
+    # The cache existed because indexing the heterogeneous coordinate tuple with a RUNTIME direction
+    # is a dynamic lookup. The tail-split answers that instead, so these stay concrete and free —
+    # which is what makes the cache unnecessary rather than merely removable.
+    let g = GD.StructuredGrid(cart, [0.0, 1.0, 3.0, 6.0], 0.0:1.0:4.0)   # two different axis types
+        qb(gg, d) = FG.Grids.bounds(gg, d)
+        qo(gg, d) = FG.Grids.origin(gg, d)
+        qu(gg, d) = FG.Grids.isuniform(gg, d)
+        Test.@test Base.return_types(qb, Tuple{typeof(g),Int})[1] === Tuple{Float64,Float64}
+        Test.@test Base.return_types(qo, Tuple{typeof(g),Int})[1] === Float64
+        Test.@test Base.return_types(qu, Tuple{typeof(g),Int})[1] === Bool
+        for f in (qb, qo, qu)
+            f(g, 1)
+            Test.@test @allocated(f(g, 1)) == 0
+        end
+        Test.@test !(:stats in fieldnames(typeof(g)))
+    end
+
+    # Off a rectilinear grid the coordinates are per-cell FIELDS with no order, so a span is a genuine
+    # scan. A query that needs it repeatedly reads it from the topology, which reduced it once.
+    let λ = [0.3i for i in 0:99], φ = [0.2 * sin(3.0i) for i in 0:99],
+        sph = GE.SphericalGeometry(6.371e6)
+        gu = GD.UnstructuredGrid(sph, (λ, φ), ones(100), trues(100))
+        mt = C.MetricTopology(gu)
+        Test.@test all(mt.span[d] ≈ GD.extent(gu, d) for d in 1:2)
+        Test.@test GD.bounds(gu, 1) == extrema(λ)
+        Test.@test !(:stats in fieldnames(typeof(gu)))
+    end
+    let n = 6, xm = [i + 0.1j for i in 1:n, j in 1:n], ym = [j - 0.05i for i in 1:n, j in 1:n]
+        cg = GD.CurvilinearGrid(cart, xm, ym, trues(n, n); measure = ones(n, n))
+        Test.@test GD.bounds(cg, 1) == extrema(xm)
+        Test.@test GD.bounds(cg, 2) == extrema(ym)
+        Test.@test !(:stats in fieldnames(typeof(cg)))
+    end
+end
