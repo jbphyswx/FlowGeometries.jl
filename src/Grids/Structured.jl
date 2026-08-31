@@ -3,6 +3,29 @@
 # ---------------------------------------------------------------------------
 
 """
+    AxisSummary{T}
+
+One direction's reductions: the values [`origin`](@ref), [`bounds`](@ref), [`extent`](@ref),
+[`minimum_spacing`](@ref) and [`maximum_spacing`](@ref) report.
+
+A stretched axis answers each of these by scanning, and a distance query reads them through
+[`Connectivity.MetricTopology`](@ref FlowGeometries.Connectivity.MetricTopology), which is the default
+`topology` on every per-cell entry point. Holding them keeps that construction `O(1)` and keeps a query
+off the coordinates.
+
+`isbits`, five numbers per direction, filled once by [`_axis_summary`](@ref): one pass per axis, the
+`O(∑ Nᵈ)` the measure factors already cost. `first` is kept apart from `lo` because a descending axis
+starts at its largest value.
+"""
+struct AxisSummary{T<:AbstractFloat}
+    first::T
+    lo::T
+    hi::T
+    min_gap::T
+    max_gap::T
+end
+
+"""
     StructuredGrid{T, G, N, S, TP, C, AT, BT}
 
 Rectilinear `N`-dimensional grid, for any `N`: one coordinate vector per direction (`coordinates`),
@@ -11,9 +34,8 @@ active `mask`, per-direction `topology`, and the wrap `period` of each periodic 
 
 # Type parameters
 - `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
-  is a type error rather than a silent promotion — hence `T` precedes `G`, Julia forbidding the
-  forward reference a `{G,T}` order would need. [`CurvilinearGrid`](@ref) and
-  [`UnstructuredGrid`](@ref) carry the same convention.
+  raises a type error. `T` therefore precedes `G`, Julia forbidding the forward reference a `{G,T}`
+  order would need. [`CurvilinearGrid`](@ref) and [`UnstructuredGrid`](@ref) carry the same convention.
 - `N`: number of coordinate directions.
 - `S`: the `SphericalSampling` recipe the axes came from, or `Nothing` for axes given directly.
   A zero-size singleton, so it costs nothing to carry and lets quadrature exactness, the matching
@@ -21,12 +43,10 @@ active `mask`, per-direction `topology`, and the wrap `period` of each periodic 
   which the coordinates alone determine. See [`sampling`](@ref).
 - `TP`: the per-direction [`AbstractTopology`](@ref) — singletons, so no storage, readable from the type.
 - `C`: a heterogeneous `NTuple{N,AbstractVector{T}}`. Each axis independently keeps whatever concrete
-  `AbstractVector{T}` type it was constructed with (an [`Axes.UniformAxis`](@ref), a plain `Vector`, a
-  device array, or any other subtype); there is deliberately no shared vector type forcing the axes to
-  match. This matters beyond storage: a `UniformAxis`'s type is a compile-time proof of constant
-  spacing that [`spacing_trait`](@ref) and [`spacing`](@ref) read without touching a coordinate, and
-  forcing the axes into a common type would destroy it. One axis can be uniform while another is
-  stretched.
+  `AbstractVector{T}` type it was constructed with — an [`Axes.UniformAxis`](@ref), a plain `Vector`, a
+  device array — so one axis can be uniform while another is stretched. A `UniformAxis`'s type is a
+  compile-time proof of constant spacing that [`spacing_trait`](@ref) and [`spacing`](@ref) read
+  without touching a coordinate, and a common vector type across the axes erases it.
 - `AT`, `BT`: array types of the derived `measure` and of the active `mask`.
 """
 struct StructuredGrid{
@@ -46,6 +66,7 @@ struct StructuredGrid{
     topology::TP              # per-direction closure (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
     sampling::S               # the node-set recipe, or `nothing`; zero-size where it is one
+    stats::NTuple{N,AxisSummary{T}}   # per-direction reductions; see `AxisSummary`
 end
 
 """
@@ -65,9 +86,9 @@ can be asked for its matching weights, or rebuilt at another resolution, after c
 
 `grid` with the named fields replaced, its type parameters re-derived from what the new fields are.
 
-The hook a storage change goes through — moving a grid's arrays to a device, rewrapping them — so that
-one generic method serves every layout and adding a field to one does not silently leave a
-reconstruction elsewhere spelling out a parameter list that no longer matches.
+The hook a storage change goes through — moving a grid's arrays to a device, rewrapping them — so one
+generic method serves every layout and no reconstruction elsewhere spells out a parameter list of its
+own.
 
 `fields` need only name what changes; everything else is carried over.
 """
@@ -80,26 +101,34 @@ reconstruction elsewhere spelling out a parameter list that no longer matches.
 end
 
 # Every type parameter is determined by the field types, so these re-derive the whole list from the
-# values rather than carrying over the ones the old grid happened to have — which is the point, since a
-# storage change is exactly what alters them. One line per layout, beside the struct it mirrors, so a
-# field added to one cannot leave a stale parameter list somewhere that loads only with a weak
-# dependency.
+# values a rebuild is given; a storage change is what alters them. One line per layout, beside the
+# struct it mirrors
 #
-# The leading argument is the grid's own type, and it serves only to name the layout — two layouts can
-# hold the same field types, a geometry and a resolution parameter and a mask. The parameter list below
-# is built from the types of the field VALUES, since a field whose type changed is the reason to rebuild
-# in the first place.
+# The leading argument is the grid's own type, and names the layout: two layouts can hold the same field
+# types, a geometry and a resolution parameter and a mask.
+# `stats` travels as a value. `rebuild` serves a storage change — moving arrays to a device,
+# rewrapping them — which leaves every coordinate unchanged
 @inline _from_fields(
     ::Type{<:StructuredGrid},
     geometry::G, coordinates::C, measure::AT, mask::BT, topology::TP, period::NTuple{N,T},
-    sampling::S,
+    sampling::S, stats::NTuple{N,AxisSummary{T}},
 ) where {T,G<:Geometry.AbstractGeometry{T},N,S,TP,C,AT,BT} =
     StructuredGrid{T,G,N,S,TP,C,AT,BT}(geometry, coordinates, measure, mask, topology, period,
-                                       sampling)
+                                       sampling, stats)
 
 @inline topology(grid::StructuredGrid) = getfield(grid, :topology)
 @inline period(grid::StructuredGrid, d::Integer) =
     @inbounds getfield(grid, :period)[_checked_direction(getfield(grid, :period), d)]
+
+# The reductions each direction was summarised with at construction. The tuple is homogeneous, so a
+# runtime `d` indexes it type-stably, and each accessor below is one read of a number.
+@inline _axis_stat(grid::StructuredGrid, d::Integer) =
+    @inbounds getfield(grid, :stats)[_checked_direction(getfield(grid, :stats), d)]
+
+@inline origin(grid::StructuredGrid, d::Integer) = _axis_stat(grid, d).first
+@inline bounds(grid::StructuredGrid, d::Integer) = (s = _axis_stat(grid, d); (s.lo, s.hi))
+@inline minimum_spacing(grid::StructuredGrid, d::Integer) = _axis_stat(grid, d).min_gap
+@inline maximum_spacing(grid::StructuredGrid, d::Integer) = _axis_stat(grid, d).max_gap
 
 # ---------------------------------------------------------------------------
 # Point accessors: NamedTuple default; coords! / coords(S, ...) for other storage
@@ -118,7 +147,7 @@ end
 
 Positional coordinate values at indices `I`. Internal; prefer [`coords`](@ref).
 """
-@inline function _raw_coords(grid::StructuredGrid{T, G,N}, I::Vararg{Integer,N}) where {G,T,N}
+@inline function _raw_coords(grid::AbstractStructuredGrid{G,T}, I::Vararg{Integer,N}) where {G,T,N}
     c = coordinates(grid)
     @boundscheck _checkaxes(c, I)
     return ntuple(d -> @inbounds(c[d][I[d]]), Val(N))
@@ -208,8 +237,8 @@ range takes them.
 
 Conversion happens only where the element type must change, and there an arbitrary range subtype cannot
 generically be rebuilt at a new eltype. That case becomes an [`Axes.UniformAxis`](@ref)`{T}`, which is
-also how a `Float32` axis stops carrying `Float64` internals. To convert deliberately rather than by
-side effect, call [`Axes.uniform_axis`](@ref).
+also how a `Float32` axis stops carrying `Float64` internals. Call [`Axes.uniform_axis`](@ref) to
+convert at the call site.
 
 Four methods, ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
 `AbstractVector{T}`, so the parameterized range form is needed to break that tie):
@@ -264,6 +293,37 @@ _min_gap(x::AbstractRange{T}) where {T<:AbstractFloat} =
     length(x) < 2 ? T(Inf) : abs(T(step(x)))
 _max_gap(x::AbstractRange{T}) where {T<:AbstractFloat} =
     length(x) < 2 ? zero(T) : abs(T(step(x)))
+
+"""
+    _axis_summary(x) -> AxisSummary
+
+Reduce axis `x` in a single pass. A uniform axis answers from `first`, `step` and `length`, reading no
+element.
+"""
+function _axis_summary(x::AbstractVector{T}) where {T<:AbstractFloat}
+    n = length(x)
+    n == 0 && return AxisSummary{T}(T(NaN), T(Inf), T(-Inf), T(Inf), zero(T))
+    @inbounds f = x[1]
+    n == 1 && return AxisSummary{T}(f, f, f, T(Inf), zero(T))
+    @inbounds l = x[n]
+    lo, hi = f ≤ l ? (f, l) : (l, f)
+    @inbounds mn = mx = abs(x[2] - x[1])
+    @inbounds for i in 3:n
+        g = abs(x[i] - x[i - 1])
+        g < mn && (mn = g)
+        g > mx && (mx = g)
+    end
+    return AxisSummary{T}(f, lo, hi, mn, mx)
+end
+
+function _axis_summary(x::AbstractRange{T}) where {T<:AbstractFloat}
+    n = length(x)
+    n == 0 && return AxisSummary{T}(T(NaN), T(Inf), T(-Inf), T(Inf), zero(T))
+    f, l = first(x), last(x)
+    lo, hi = f ≤ l ? (f, l) : (l, f)
+    g = n < 2 ? (T(Inf), zero(T)) : (abs(T(step(x))), abs(T(step(x))))
+    return AxisSummary{T}(f, lo, hi, g[1], g[2])
+end
 
 # A period is a LENGTH, so this is a magnitude and does not change sign with the axis's storage
 # order. On a uniform axis it is exactly `n·|Δ|`, the axis's own closure.
@@ -324,13 +384,12 @@ Per-axis factors whose outer product is the cell measure: `measure[I...] == prod
 
 Every rectilinear cell measure this package supports is separable in exactly this way — Cartesian
 `Δx·Δy·Δz`, and spherical `R²cosφ·Δλ·Δφ` = `(Δλ) · (R²cosφ·Δφ)` or `r²cosφ·Δλ·Δφ·Δr` =
-`(Δλ) · (cosφ·Δφ) · (r²·Δr)`. Building the measure as an outer product of these factors rather than
-by a nested scalar loop keeps the result in whatever array type the axes use, and makes the
-separability available to callers that can exploit it.
+`(Δλ) · (cosφ·Δφ) · (r²·Δr)`. Building the measure as an outer product of these factors keeps the
+result in whatever array type the axes use, and exposes the separability to a caller that can exploit
+it.
 
-Degenerate (length-1) angular axes are handled by dropping the differential that no longer exists,
-so a zonal transect measures arc length `R·cosφ·Δλ` along its circle of latitude and a meridional
-one measures `R·Δφ` — not an area formula with a placeholder substituted in.
+A degenerate (length-1) angular axis drops its differential, so a zonal transect measures arc length
+`R·cosφ·Δλ` along its circle of latitude and a meridional one measures `R·Δφ`.
 """
 function _measure_factors(
     ::G, axes::NTuple{N,AbstractVector{T}}, periods::NTuple{N,Union{Nothing,Real}},
@@ -449,9 +508,11 @@ Each axis may independently be uniform or stretched, and keeps whichever it is i
 preserves uniformity and keeps a device-resident axis on its device.
 
 For a `SphericalGeometry` the directions are `(λ, φ, r, …)`: longitude, geographic latitude, and — in
-3-D and above — the absolute radius from the origin, not an offset from a reference radius. Measures
-are the metric elements `R·Δλ`, `R²cosφ·Δλ·Δφ` and `r²cosφ·Δλ·Δφ·Δr`, with further directions entering
-as plain widths. A `CartesianGeometry` measure is the product of the per-direction widths.
+3-D and above — the absolute radius from the origin. (A
+[`Geometry.SpheroidGeometry`](@ref FlowGeometries.Geometry.SpheroidGeometry)'s third direction is a
+height above the surface instead.) Measures are the metric elements `R·Δλ`, `R²cosφ·Δλ·Δφ` and
+`r²cosφ·Δλ·Δφ·Δr`, with further directions entering as plain widths. A `CartesianGeometry` measure is
+the product of the per-direction widths.
 
 # Keywords
 - `mask`: an `N`-D `Bool` array of active cells. Omit it (or pass `nothing`) for an all-active grid,
@@ -464,9 +525,8 @@ as plain widths. A `CartesianGeometry` measure is the product of the per-directi
   storage order — and every other direction is `Bounded`.
 - `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used:
   `2π` for spherical longitude, and `extent + one spacing` for a Cartesian direction, which is exact
-  for a uniform axis (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no well-defined
-  closure to infer — its seam gap is not determined by its samples — so `period` is required there
-  determine.
+  for a uniform axis (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer,
+  its seam gap being undetermined by its samples, so `period` is required there.
 """
 function StructuredGrid(
     geometry::Geometry.AbstractGeometry{T},
@@ -524,9 +584,11 @@ function _structured_grid(
     ))
 
     measure = _cell_measure(geometry, ax, period_args)
+    # One pass per axis, alongside the pass the measure factors already make.
+    stats = ntuple(d -> _axis_summary(ax[d]), Val(N))
     return StructuredGrid{
         T, G, N, typeof(sampling), typeof(tp), typeof(ax), typeof(measure), typeof(m),
-    }(geometry, ax, measure, m, tp, per, sampling)
+    }(geometry, ax, measure, m, tp, per, sampling, stats)
 end
 
 # Wrap length per direction; zero where bounded, so it never reads as usable.

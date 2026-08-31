@@ -97,16 +97,27 @@ function build_connectivity(
     grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true, backend = nothing,
 )
     n = length(Grids.mask(grid))
-    deg = zeros(Int, n)
+    # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill
+    # them run, and the build is device-resident end to end under a backend that launches kernels.
+    deg = Execution.allocate(backend, Int, n)
     Execution.run_indices(n, backend) do k
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
-    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, backend)
-    nbrs = Vector{Int}(undef, ptr[end] - 1)
+    total = _csr_total(deg, n, backend)
+    return _index_type(max(n + 1, total)) === Int32 ?
+        _formula_fill(Int32, total, grid, deg, n, active_only, backend) :
+        _formula_fill(Int, total, grid, deg, n, active_only, backend)
+end
+
+function _formula_fill(
+    ::Type{I}, total::Int, grid, deg, n::Int, active_only::Bool, backend,
+) where {I<:Integer}
+    ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
+    nbrs = Execution.allocate(backend, I, total)
     Execution.run_indices(n, backend) do k
         @inbounds begin
             ids, m = _formula_ids(grid, k, active_only)
-            slot = ptr[k]
+            slot = Int(ptr[k])
             for t in 1:m
                 j = ids[t]
                 active_only && !Grids.isactive(grid, j) && continue
@@ -189,13 +200,13 @@ end
 
 # ---- Icosahedral geodesic ---------------------------------------------------
 
-# Six lattice directions. The twelve base corners reach five, which is what makes them pentagons.
+# Six lattice directions. The twelve base corners reach five, and are the geodesic's pentagons.
 @inline Grids.max_neighbors(::Grids.IcosahedralGrid) = 6
 
 const _ICO_LATTICE_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1))
 
 """
-    Grids.formula_neighbors(grid::IcosahedralGrid, id)
+    _ico_neighbor_ids(id, ν) -> (NTuple{6,Int}, n)
 
 A geodesic vertex's neighbours: the six barycentric lattice steps, taken on every face the vertex sits
 on and resolved back to global ids.
@@ -203,9 +214,11 @@ on and resolved back to global ids.
 A vertex on a macro-edge or at a corner sits on several faces, and the steps along a shared edge land on
 the same vertex from each of them, so the duplicates are dropped. What survives is five neighbours at a
 corner and six everywhere else.
+
+Arithmetic in `(id, ν)` alone, so the grid layout and the sampling's own
+[`build_connectivity`](@ref) read the same adjacency from it.
 """
-@inline function Grids.formula_neighbors(grid::Grids.IcosahedralGrid, id::Integer)
-    ν = Grids.frequency(grid)
+@inline function _ico_neighbor_ids(id::Integer, ν::Int)
     k = Int(id)
     occ, nocc = SphericalSampling._ico_occurrences(k, ν)
     ids = ntuple(_ -> 0, Val(6))
@@ -222,6 +235,9 @@ corner and six everywhere else.
     end
     return (ids, n)
 end
+
+@inline Grids.formula_neighbors(grid::Grids.IcosahedralGrid, id::Integer) =
+    _ico_neighbor_ids(id, Grids.frequency(grid))
 
 # ---- Ring grids -------------------------------------------------------------
 

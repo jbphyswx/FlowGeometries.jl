@@ -85,6 +85,9 @@ The cell id of `(panel, i, j)`, the inverse of [`panel_cell`](@ref).
 
 @inline cell_address(::CubedSphereGrid) = FlatCells()
 @inline adjacency_source(::CubedSphereGrid) = FormulaNeighbors()
+
+# The seam fold maps a panel exit to the entry that maps back.
+@inline has_symmetric_adjacency(::CubedSphereGrid) = true
 @inline candidate_source(::CubedSphereGrid) = IndexedCandidates()
 
 # ---- coordinates ------------------------------------------------------------

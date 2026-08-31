@@ -16,8 +16,8 @@ is known from its type there is not even a subtraction.
 
 The gaps are **signed**, so a descending axis reports negative gaps and a derivative stencil keeps the
 index-versus-coordinate direction: composed with `nonuniform_first_derivative` this gives the same
-derivative with respect to the coordinate whichever way the axis is stored. [`cell_width`](@ref) is
-where the sign is dropped, being a length rather than a difference.
+derivative with respect to the coordinate whichever way the axis is stored. [`cell_width`](@ref) drops
+the sign, a width being a length.
 
 `period`, if given (e.g. `2π` for a periodic longitude axis), makes the boundary gaps *wrap* instead
 of vanishing: at `i == 1`, `h_m` is the gap to the unwrapped previous point `x[n]-period`; at
@@ -34,7 +34,7 @@ a non-periodic axis, where a boundary gap is zero and the caller falls back to a
         h_m = i > 1 ? @inbounds(x[i] - x[i-1]) : zero(T)
         h_p = i < n ? @inbounds(x[i+1] - x[i]) : zero(T)
     else
-        # The wrapped neighbour is one period away along the INDEX direction, which is not the
+        # The wrapped neighbour is one period away along the index direction, which runs opposite the
         # coordinate direction on a descending axis, so the offset carries the orientation.
         p = Axes.wrap_sign(x) * T(period)
         h_m = i > 1 ? @inbounds(x[i] - x[i-1]) : @inbounds(x[1] - (x[n] - p))
@@ -43,9 +43,8 @@ a non-periodic axis, where a boundary gap is zero and the caller falls back to a
     return h_m, h_p
 end
 
-# On ANY range the interior gap is `step`, so it is returned rather than recovered by differencing two
-# coordinates — which makes it exactly constant, where differencing varies by an ulp. This is why a
-# caller's own range does not need converting to get the fast path.
+# On any range the interior gap is `step`, returned directly and so exactly constant; differencing two
+# coordinates varies by an ulp. A caller's own range takes this path without conversion.
 @inline function local_spacing(
     x::AbstractRange{T}, i::Integer, period::Union{Nothing,Real} = nothing,
 ) where {T<:AbstractFloat}
@@ -70,19 +69,19 @@ The coordinate width of cell `i` of an axis of cell centres `x`: the centred wid
 one-sided gap to the single neighbour at a genuinely non-periodic boundary, and `1` for a length-1
 axis. On a uniform axis every width is the constant step.
 
-Equivalently `abs(faces(x)[i+1] - faces(x)[i])`, which is what it means: [`faces`](@ref) places a
-boundary midway between neighbouring centres, so the width between them is the average of the two
-adjacent gaps. This form is the one to call per cell, since `faces` materializes the whole axis.
+Equivalently `abs(faces(x)[i+1] - faces(x)[i])`: [`faces`](@ref) places a boundary midway between
+neighbouring centres, so the width between them is the average of the two adjacent gaps. Call this
+form per cell; `faces` materializes the whole axis.
 
-A width is a physical measure and so is non-negative however the axis is stored — increasing or
-decreasing, as a dataset holding latitude, depth or pressure levels top-down would. This is the one
-place that turns a spacing into a length/area/volume contribution, so it is where the `abs` belongs;
-[`local_spacing`](@ref) itself keeps the sign.
+A width is a physical measure, so it is non-negative however the axis is stored — increasing or
+decreasing, as a dataset holding latitude, depth or pressure levels top-down is. This is where a
+spacing becomes a length, area or volume contribution, and where the `abs` is applied;
+[`local_spacing`](@ref) keeps the sign.
 
-A length-1 axis contributes the multiplicative **identity**, not zero, to a measure that is a product
-of per-axis widths (Cartesian `Δx·Δy`), so a degenerate direction reduces an area to a length rather
-than collapsing the product. The spherical `R²cosφ·Δλ·Δφ` measure is not a plain product and handles
-its own singleton case, in the `Grids.StructuredGrid` constructor.
+A length-1 axis contributes the multiplicative **identity** to a measure that is a product of per-axis
+widths (Cartesian `Δx·Δy`), so a degenerate direction reduces an area to a length. The spherical
+`R²cosφ·Δλ·Δφ` measure is not a plain product and handles its own singleton case, in the
+`Grids.StructuredGrid` constructor.
 
 `Grids.cell_width` is this on a grid direction, and `Grids.cell_widths` the whole axis at once.
 """
@@ -102,13 +101,12 @@ end
 """
     cell_widths(x, period=nothing) -> AbstractVector
 
-[`cell_width`](@ref) at every index of an axis at once, for a caller that wants the whole profile
-rather than one cell — the coordinate widths a separable measure or a flux divergence is weighted by.
+[`cell_width`](@ref) at every index of an axis at once: the coordinate widths a separable measure or a
+flux divergence is weighted by.
 
-A uniform axis gets an [`Axes.ConstantVector`](@ref): one number and a length, since every one of its
-cells has the same width, so nothing is materialized. Anything else is built densely into the same
-kind of storage as `x`, by broadcasts over views rather than a scalar loop, so a device-resident axis
-is widened in place.
+A uniform axis gets an [`Axes.ConstantVector`](@ref), one number and a length, every one of its cells
+having the same width. Anything else is built densely into the same kind of storage as `x`, by
+broadcasts over views, so a device-resident axis is widened on its device.
 
 `Grids.cell_widths` is this on a grid direction, taking the period from the grid itself.
 """
@@ -138,7 +136,7 @@ function _cell_widths_dense(x::AbstractVector{T}, period::Union{Nothing,Real} = 
     w = similar(x, T, n)
     if n == 1
         # A singleton axis contributes a multiplicative identity, so a measure that is a product of
-        # per-axis widths degenerates (area → length) instead of collapsing to zero.
+        # per-axis widths degenerates from an area to a length.
         fill!(w, one(T))
         return w
     end

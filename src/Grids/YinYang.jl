@@ -9,9 +9,8 @@ The Kageyama–Sato Yin–Yang grid: two `nlon × nlat` lat–lon panels coverin
 `[-3π/4, 3π/4] × [-π/4, π/4]` in their own frames, `2·nlon·nlat` cells in all.
 
 It stores `nlon`, `nlat`, the geometry and the mask. In its own frame each panel is a separable lat–lon
-patch, and yang is yin rigidly rotated, so a cell's coordinates are the panel formula composed with a
-rotation — [`SphericalSampling._yin_yang_rotate`](@ref) — rather than a second coordinate array. A
-cell's area depends on its latitude row alone.
+patch, and yang is yin rigidly rotated, so a cell's coordinates are the panel formula composed with
+[`SphericalSampling._yin_yang_rotate`](@ref). A cell's area depends on its latitude row alone.
 
 Cells are numbered yin first with `i` fastest, then yang the same way, matching
 [`SphericalSampling.spherical_points`](@ref)`(YinYangSampling(), nlon, nlat)`. [`panel_cell`](@ref) and
@@ -86,6 +85,9 @@ end
 
 @inline cell_address(::YinYangGrid) = FlatCells()
 @inline adjacency_source(::YinYangGrid) = FormulaNeighbors()
+
+# Panel-local axial offsets, and the panels are not cross-linked.
+@inline has_symmetric_adjacency(::YinYangGrid) = true
 @inline candidate_source(::YinYangGrid) = IndexedCandidates()
 
 # ---- coordinates ------------------------------------------------------------
@@ -135,7 +137,7 @@ end
 
 @inline measure(grid::YinYangGrid) = GridMeasure(grid)
 
-# `Σ_j cos φ_j` over the `nlat` rows, twice over, so this is `O(nlat)` rather than `O(nlon·nlat)`.
+# `Σ_j cos φ_j` over the `nlat` rows, twice over: `O(nlat)` for all `nlon·nlat` cells.
 function _total_measure(grid::YinYangGrid{T}) where {T}
     nlon, nlat = panel_shape(grid)
     Δλ = (T(3π) / 2) / T(nlon)

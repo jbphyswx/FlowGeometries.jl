@@ -2,14 +2,13 @@
 # Separable reductions
 # ---------------------------------------------------------------------------
 #
-# A reduction over the outer product factors into a reduction over the axes when the pair
-# `(f, op)` permits it, turning `O(∏ Nᵈ)` into `O(∑ Nᵈ)`. Dispatch is on that PAIR, not on the
-# reduction's name: `mapreduce` is where `sum`, `prod`, `maximum`, `minimum`, `sum(f, ·)`, `count` and
-# the `dims` forms all arrive, so one method each covers them, and any pair not listed here falls
-# through to the generic dense path and stays correct.
+# A reduction over the outer product factors into a reduction over the axes when the pair `(f, op)`
+# permits it, turning `O(∏ Nᵈ)` into `O(∑ Nᵈ)`. Dispatch is on that pair: `mapreduce` is where `sum`,
+# `prod`, `maximum`, `minimum`, `sum(f, ·)`, `count` and the `dims` forms all arrive, so one method each
+# covers them, and any pair not listed here falls through to the generic dense path.
 #
-# `f` must be MULTIPLICATIVE — `f(xy) = f(x)f(y)` — for a sum or product to factor. `identity`, `abs`,
-# `abs2`, `sqrt` and `inv` are; `exp` and `log` are not, and must not take this path.
+# `f` must be multiplicative — `f(xy) = f(x)f(y)` — for a sum or product to factor. `identity`, `abs`,
+# `abs2`, `sqrt` and `inv` are; `exp` and `log` are not, and stay off this path.
 const _MultiplicativeF = Union{
     typeof(identity), typeof(abs), typeof(abs2), typeof(sqrt), typeof(inv),
 }
@@ -36,9 +35,8 @@ Base.extrema(f::_MultiplicativeF, m::SeparableMeasure) = _sep_extrema(f, m)
 Smallest and largest `f(cell)` over a [`SeparableMeasure`](@ref), from the per-axis extremes.
 
 A product's extremes are attained with every factor at one of its own endpoints, so all `2^N` endpoint
-combinations are formed and the best taken. That is exact for factors of ANY sign — `∏ maximum` alone
-would be wrong the moment a factor could go negative — and it costs `O(∑ Nᵈ + 2^N)` against the dense
-`O(∏ Nᵈ)`.
+combinations are formed and the best taken. This holds for factors of either sign, where `∏ maximum`
+alone holds only for non-negative ones, and it costs `O(∑ Nᵈ + 2^N)` against the dense `O(∏ Nᵈ)`.
 """
 function _sep_extrema(f, m::SeparableMeasure{T,N}) where {T,N}
     isempty(m) && throw(ArgumentError("extrema of an empty SeparableMeasure is undefined"))
@@ -159,13 +157,13 @@ measure_array(grid::AbstractGrid) = collect(measure(grid))
 """
     RingwiseVector(value, offset)
 
-The cell measure of a ring grid, stored as its per-ring values rather than materialized.
+The cell measure of a ring grid, held as its per-ring values.
 
 Every cell of an iso-latitude ring has the same area, so `npoints` entries carry only `nrings` numbers
 — `O(√npoints)`. A genuine `AbstractVector`: indexing, broadcasting and `collect` behave as for the
 dense equivalent.
 
-`sum` is specialized to `Σᵣ nlonᵣ·valueᵣ`, which is `O(nrings)` rather than `O(npoints)`.
+`sum` is specialized to `Σᵣ nlonᵣ·valueᵣ`, `O(nrings)` against the dense `O(npoints)`.
 """
 struct RingwiseVector{T,V<:AbstractVector{T},O<:AbstractVector{Int}} <: AbstractVector{T}
     value::V     # one per ring
@@ -263,8 +261,8 @@ Base.prod(m::AllActive) = true
 Base.minimum(m::AllActive) = _allactive_reduce(m, "minimum")
 Base.maximum(m::AllActive) = _allactive_reduce(m, "maximum")
 Base.extrema(m::AllActive) = (maximum(m), maximum(m))
-# `f::Function` rather than `f`: Base's own `all(f::Function, ::AbstractArray)` would otherwise be
-# equally specific, and the pair ambiguous.
+# `f::Function` keeps these more specific than Base's `all(f::Function, ::AbstractArray)`, which is
+# otherwise an equally specific match and ambiguous with them.
 Base.count(f::Function, m::AllActive) = f(true) ? length(m) : 0
 Base.all(f::Function, m::AllActive) = isempty(m) ? true : f(true)
 Base.any(f::Function, m::AllActive) = isempty(m) ? false : f(true)
@@ -283,8 +281,8 @@ size on an unstructured grid. [`area`](@ref) is the 2-D spelling of the same qua
 """
 @inline measure(grid::AbstractGrid) = getfield(grid, :measure)
 
-# `@boundscheck` + `@inbounds` body: elided at an `@inbounds` call site, so a hot loop pays nothing,
-# while an ordinary call errors instead of returning a value read past the end of the array.
+# `@boundscheck` + `@inbounds` body: the check is elided at an `@inbounds` call site, so a hot loop pays
+# nothing, and an ordinary call raises on an out-of-range index.
 @inline function measure(grid::AbstractGrid, I::Vararg{Integer})
     m = measure(grid)
     @boundscheck checkbounds(m, I...)

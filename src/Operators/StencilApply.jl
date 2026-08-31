@@ -6,13 +6,12 @@
 Apply a weight set along direction `dim` of `field`, writing
 `out[I] = Σ_q weights[I[dim], q] · field[…, indices[I[dim], q], …]`.
 
-This is the one field-touching operation here, and it is here because every convention it needs is
-already settled elsewhere in the package rather than being the caller's to choose: the result sits at
-the same location as the input, so there is no staggering decision; the stencil shifts inward at a
-bounded end and wraps on a periodic one, which is [`Discretization.fd_weights`](@ref)'s stated boundary behaviour and
-removes any need for a halo. What is *not* here is anything that does need those choices — a staggered
-difference, or a multi-direction operator like a divergence or a curl, which additionally needs a
-result location and a boundary-condition policy.
+Every convention this needs is fixed by the package: the result sits at the same location as the input,
+so there is no staggering decision, and the stencil shifts inward at a bounded end and wraps on a
+periodic one, which is [`Discretization.fd_weights`](@ref)'s stated boundary behaviour and removes the
+need for a halo. Operations that do take those choices live elsewhere — a staggered difference, or a
+multi-direction operator like a divergence or a curl, each of which needs a result location and a
+boundary-condition policy.
 
 Pass the axis and an order to have the weights built for you, or precomputed `indices`/`weights` from
 [`Discretization.axis_stencils`](@ref) to reuse them across many fields.
@@ -34,19 +33,18 @@ function apply_stencil!(
     ord = Int(order)
     k = Int(nodes)
     if policy isa ReduceInRun
-        # Under this policy `nodes` is a CEILING, not a demand. The end of the axis bounds a window
-        # exactly as the end of an active run does — the policy already says a run too short for
-        # `nodes` uses the largest window it can hold — so the two are made to behave the same way
-        # rather than one degrading and the other erroring. A single-latitude strip, a two-level
-        # column and a one-cell channel are ordinary grids, not mistakes.
+        # Under this policy `nodes` is a ceiling. The end of the axis bounds a window exactly as the end
+        # of an active run does, and the policy already gives a run too short for `nodes` the largest
+        # window it holds, so a short axis degrades the same way. A single-latitude strip, a two-level
+        # column and a one-cell channel are ordinary grids.
         if length(x) < ord + 1
             fill!(out, masked)      # no derivative of this order exists anywhere on such an axis
             return out
         end
         k = min(k, length(x))
     end
-    # A plan under the blanking policy, which is what the register-resident uniform weights need; the
-    # degrading policies rebuild a window from the axis and so want the table.
+    # The blanking policy takes a plan, which holds uniform weights in registers. The degrading policies
+    # rebuild a window from the axis, so they take the table.
     if policy isa BlankMasked || mask === nothing
         return apply_stencil!(out, field, Discretization.stencil_plan(x, ord, k; period = period),
                               dim; mask = mask, masked = masked, backend = backend)
@@ -62,18 +60,15 @@ end
 
 Apply a table built by [`Discretization.axis_stencils`](@ref) **and** keep the axis, so any mask policy works.
 
-The table depends on the axis and not on the field, so a caller differencing many fields along one
-direction should build it once. The bare `(indices, weights)` form cannot degrade at a mask edge —
-that needs the axis to rebuild a window from — so it accepts only [`BlankMasked`](@ref); this form
-takes both and serves every policy.
+The table depends on the axis alone, so a caller differencing many fields along one direction builds it
+once. Degrading at a mask edge needs the axis to rebuild a window from, so the bare `(indices, weights)`
+form accepts only [`BlankMasked`](@ref); this form takes both and serves every policy.
 
-The split is the one the degrade path already makes internally: the precomputed row is used wherever
-the window is intact, which is every cell away from a mask, and the axis is touched only where a
-window is actually rebuilt.
+The split is the one the degrade path makes internally: the precomputed row is used wherever the window
+is intact, which is every cell away from a mask, and the axis is touched only where a window is rebuilt.
 
-Building the table is `O(n)` against an `O(n²)` apply, so holding it matters most on small grids —
-2.4–13× at `n = 48`, 10–40% at `n = 256`, amortized away by `n = 1024`. The allocation it avoids is
-there at every size: 49 600 bytes per call at `n = 1024`.
+Building the table is `O(n)` against an `O(n²)` apply, so holding it across fields matters most on small
+grids. It also removes an `O(n · nodes)` allocation from every call, at any size.
 """
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
@@ -145,15 +140,13 @@ function _apply_stencil_degrade!(
     return out
 end
 
-# The cell index with direction `dim` replaced. `j` arrives as an ARGUMENT rather than being captured:
-# a local that is both reassigned and closed over is boxed by Julia, and the loops below reassign
-# theirs every iteration — measured at 288 bytes per `_run_reach` call before this was split out.
+# The cell index with direction `dim` replaced. `j` is an argument: Julia boxes a local that is both
+# reassigned and closed over, and the loops below reassign theirs every iteration.
 @inline _at_dim(I::NTuple{N,Int}, dim::Int, j::Int) where {N} =
     ntuple(d -> d == dim ? j : I[d], Val(N))
 
 # How far the active run containing `i` reaches, walked at most `k` steps: past that the run is longer
-# than any window, which is all the clamp needs to know. Bounding the walk is what keeps this `O(k)`
-# rather than `O(run length)`.
+# than any window, which is all the clamp needs to know. The bound on the walk makes this `O(k)`.
 @inline function _run_reach(mask, I::NTuple{N,Int}, dim::Int, i::Int, n::Int, k::Int, wrap::Bool) where {N}
     back = 0
     @inbounds while back < k
@@ -187,10 +180,9 @@ end
         end
         i = I[dim]
         # The precomputed window, if every node it reads is active. Contiguous and all-active means it
-        # lies in this cell's run, and the run-clamped window is then the same window — so this branch
-        # is bit-for-bit the unmasked result, and it is the one the interior of a region takes.
-        # Accumulated while checking, in the same order: a window that turns out to be intact has then
-        # been walked once rather than twice, and this is the branch every cell away from a mask takes.
+        # lies in this cell's run, and the run-clamped window is then the same window, so this branch
+        # gives bit-for-bit the unmasked result. Accumulation happens while checking, in the same order,
+        # so an intact window is walked once — the branch every cell away from a mask takes.
         intact = true
         acc = zero(S)
         for q in 1:k
@@ -270,9 +262,8 @@ function apply_stencil!(
             end
         end
     end
-    # The differenced direction and the node count are resolved ONCE, before the launch, for the same
-    # reason the host sweep resolves them once per sweep: they are properties of the weight set, not of
-    # the cell, and a `Val` built inside the body would cost more than it saves.
+    # The differenced direction and the node count are properties of the weight set, so they resolve to
+    # types once before the launch, as they do once per sweep on the host.
     vm = _mask_rank(mask, Val(N))
     return _dispatch_dim(Int(dim), vm) do vdim
         _dispatch_nodes(k) do vk
@@ -282,8 +273,8 @@ function apply_stencil!(
     end
 end
 
-# Over the WHOLE field, batch axes included: that is what makes a batched sweep one launch over
-# `prod(spatial) * prod(batch)` work items rather than one launch per slice.
+# Over the entire field, batch axes included, so a batched sweep is a single launch over
+# `prod(spatial) * prod(batch)` work items.
 function _launch_stencil!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, ::Val{dim}, nodes, ::Val{N},
     ::Val{M}, backend,
@@ -296,10 +287,10 @@ function _launch_stencil!(
     return out
 end
 
-# Two runtime values are wanted in the type: the differenced direction, so the loop nest can be split
-# around it, and the node count, so the innermost loop has a known trip count. Both are resolved ONCE
-# per sweep, here, rather than per cell — a `Val` built deeper costs more than it saves. Specialization
-# stays bounded: directions by `N`, node counts by the cap below, above which the runtime loop stands.
+# Two runtime values are lifted into the type: the differenced direction, so the loop nest splits around
+# it, and the node count, so the innermost loop has a known trip count. Both resolve once per sweep,
+# here. Specialization stays bounded: directions by `N`, node counts by the cap below, above which the
+# runtime loop stands.
 @inline _dispatch_dim(f::F, dim::Int, ::Val{N}) where {F,N} = _dim_switch(f, dim, Val(N))
 # `dim` is validated into `1:N` by the caller, so walking down from `N` always lands.
 @inline _dim_switch(f::F, ::Int, ::Val{1}) where {F} = f(Val(1))
@@ -319,23 +310,26 @@ end
 end
 
 """
-    _stencil_sweep_host!(out, field, indices, weights, mask, masked, Val(dim), nodes, Val(N)) -> out
+    _stencil_sweep_host!(out, field, indices, weights, mask, masked, Val(dim), nodes, Val(N),
+                         Val(M), invh, R) -> out
 
-The host sweep. The index-parallel form exists so one body serves a device launch; on the host it is
-the wrong shape, and three things it cannot express are worth ~6.6× together:
+The host sweep. The index-parallel form serves a device launch; this one adds three things a
+per-work-item body cannot express:
 
-- iterate the Cartesian range **directly**, rather than recovering an index per cell from a linear one;
-- **split the nest at `dim`**, so the stencil row — which depends only on the index along `dim` — is
-  hoisted out of the contiguous inner loop whenever the differenced direction is not the fastest
-  varying one;
-- carry the **node count in the type**, so the innermost loop has a known trip count, unrolls, and the
-  weights reach registers instead of being re-loaded per node.
+- iterate the Cartesian range directly, with no index recovered per cell from a linear one;
+- split the nest at `dim`, hoisting the stencil row — which depends only on the index along `dim` — out
+  of the contiguous inner loop wherever the differenced direction is a slower-varying one;
+- carry the node count in the type, so the innermost loop has a known trip count, unrolls, and holds
+  the weights in registers.
 
 The arithmetic and its order are identical to `_stencil_cell!`, so the two paths agree bit for bit.
+
+`invh` fuses the metric factor into the sweep — see [`_fuse_scale!`](@ref). Pass `nothing` for the
+plain sweep.
 """
 function _stencil_sweep_host!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, ::Val{dim}, nodes, ::Val{N},
-    ::Val{M},
+    ::Val{M}, invh = nothing, R::Int = 0,
 ) where {S,N,dim,M}
     sz = size(field)
     if _linear_layout(out, field, mask)
@@ -346,25 +340,32 @@ function _stencil_sweep_host!(
         npost = prod(ntuple(d -> sz[dim + d], Val(N - dim)))
         outer = stride * sz[dim]
         # The mask spans the leading `M` axes only, so it has fewer slabs than the field: the batch axes
-        # are the slowest, so field slab `p` reads mask slab `p % mpost`. One remainder per SLAB, not per
-        # cell. With no batch `mpost == npost` and the remainder is the identity.
+        # are the slowest, so field slab `p` reads mask slab `p % mpost`. One remainder per slab. With no
+        # batch `mpost == npost` and the remainder is the identity.
         mpost = prod(ntuple(d -> sz[dim + d], Val(M - dim)))
         if dim == 1
-            # The differenced direction is itself the contiguous one, so there is no span to hoist a
-            # row out of — every cell has its own row, used once. Hoisting it into a tuple would be
-            # pure overhead; the loop over `j` is the contiguous one instead.
+            # The differenced direction is itself the contiguous one, so every cell has its own row,
+            # read once, and there is no span to hoist it out of. The loop over `j` is contiguous.
             for p in 0:(npost - 1)
                 _stencil_first_linear!(out, field, indices, weights, mask, masked, p * outer,
                                        (p % mpost) * outer, sz[1], nodes)
+                invh === nothing || _fuse_scale!(out, invh, R, p * outer + 1, 1, sz[1], p, masked)
             end
             return out
         end
+        nruns = stride ÷ sz[1]
         for p in 0:(npost - 1), j in 1:sz[dim]
             _stencil_row_linear!(out, field, indices, weights, mask, masked, j, p * outer,
                                  (p % mpost) * outer, stride, nodes)
+            invh === nothing ||
+                _fuse_scale!(out, invh, R, p * outer + (j - 1) * stride + 1, nruns, sz[1],
+                             nruns * ((j - 1) + sz[dim] * p), masked)
         end
         return out
     end
+    invh === nothing || throw(ArgumentError(
+        "a fused metric factor needs the linear layout; scale as a separate pass for this array type",
+    ))
     pre = CartesianIndices(ntuple(d -> sz[d], Val(dim - 1)))
     post = CartesianIndices(ntuple(d -> sz[dim + d], Val(N - dim)))
     @inbounds for Ipost in post, j in 1:sz[dim]
@@ -385,9 +386,8 @@ end
 @inline _spatial(I::NTuple{N,Int}, ::Val{M}) where {N,M} = ntuple(d -> I[d], Val(M))
 
 # The mask fixes how many leading axes are spatial; the rest of the field is batch. A mask must match
-# the field over exactly those axes — a disagreement there is a real mistake and still raises — and the
-# differenced direction has to be one of them, since the stencil table describes a grid axis and not a
-# batch.
+# the field over exactly those axes, and the differenced direction must be one of them, since the
+# stencil table describes a grid axis.
 @inline _check_mask_extent(::Nothing, ::Tuple, ::Int) = nothing
 @inline function _check_mask_extent(mask::AbstractArray{Bool,M}, sz::NTuple{N,Int}, dim::Int) where {M,N}
     M ≤ N || throw(DimensionMismatch(
@@ -410,8 +410,8 @@ end
     (mask === nothing || IndexStyle(mask) === IndexLinear()) &&
     !Base.has_offset_axes(out, field) && (mask === nothing || !Base.has_offset_axes(mask))
 
-# `dim == 1`: the slab is one contiguous run along the differenced direction, so the stencil row
-# changes every step and is read straight out of the table rather than hoisted.
+# `dim == 1`: the slab is one contiguous run along the differenced direction, so the stencil row changes
+# every step and is read straight out of the table.
 @inline function _stencil_first_linear!(
     out::AbstractArray{S}, field, indices, weights, mask, masked, off::Int, moff::Int, n::Int,
     ::Val{k},
@@ -529,14 +529,14 @@ end
     return nothing
 end
 
-# One row: every cell whose index along `dim` is `j`. The stencil is the same for all of them, so it is
-# read once here rather than once per cell.
+# One row: every cell whose index along `dim` is `j`. The stencil is the same for all of them, so the
+# row is read once here.
 @inline function _stencil_row!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, j::Int, Ipost::Tuple, pre,
     ::Val{k}, ::Val{dim}, ::Val{N}, ::Val{M},
 ) where {S,N,dim,k,M}
-    # The row, read once. With `k` in the type these are stack tuples, so the inner loop unrolls over
-    # registers instead of re-reading two matrix columns per cell.
+    # The row, read once. With `k` in the type these are stack tuples, so the inner loop unrolls and
+    # keeps them in registers across the cells of the row.
     @inbounds js = ntuple(q -> Int(indices[j, q]), Val(k))
     @inbounds ws = ntuple(q -> S(weights[j, q]), Val(k))
     @inbounds for Ipre in pre
@@ -560,9 +560,8 @@ end
     return nothing
 end
 
-# Above the specialization cap the node count stays a runtime value: the row cannot become a tuple, so
-# it is read per cell as before. Correct, and the shape a very wide stencil would not benefit from
-# unrolling anyway.
+# Above the specialization cap the node count stays a runtime value, so the row stays in the table and
+# is read per cell.
 @inline function _stencil_row!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, j::Int, Ipost::Tuple, pre,
     k::Int, ::Val{dim}, ::Val{N}, ::Val{M},
@@ -595,9 +594,9 @@ end
 
 The node count, from either a `Val` or a plain `Int`.
 
-One body then serves both: with a `Val` the trip count is a literal, so the loop unrolls and the
-weights reach registers; with an `Int` it is an ordinary loop, which is what a node count above the
-specialized set gets. Writing the loop twice would be two copies of the same arithmetic to keep in step.
+One body then serves both. With a `Val` the trip count is a literal, so the loop unrolls and the weights
+reach registers; with an `Int`, the form a node count above the specialized set takes, it is an ordinary
+loop.
 """
 @inline _nodecount(::Val{k}) where {k} = k
 @inline _nodecount(k::Int) = k

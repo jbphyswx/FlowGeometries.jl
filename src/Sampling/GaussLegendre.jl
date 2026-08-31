@@ -12,8 +12,8 @@ Newton's method on ``Pₙ``, evaluated by the Bonnet recurrence, from a Tricomi 
 accurate to ``O(n⁻³)`` — so 2–4 iterations reach machine precision. Roots come in ``±`` pairs, so
 only the upper half is solved.
 
-Needs ``O(1)`` scratch. Time is still ``O(n²)`` — each of the ``n/2`` roots costs an ``O(n)``
-recurrence; an ``O(n)`` total needs Bogaert-style asymptotic expansions instead of Newton.
+Needs ``O(1)`` scratch. Time is ``O(n²)``: each of the ``n/2`` roots costs an ``O(n)`` recurrence. The
+Bogaert-style asymptotic expansions below are the ``O(n)`` path.
 """
 function _gauss_legendre_μ!(μ::AbstractVector{T}, w::AbstractVector{T}) where {T<:AbstractFloat}
     length(w) == length(μ) || throw(DimensionMismatch("μ and w must have the same length"))
@@ -30,8 +30,8 @@ end
 # ---------------------------------------------------------------------------
 #
 # Each node sits near `j_k/(n+½)` for `j_k` the k-th zero of `J₀`, with corrections in powers of
-# `(n+½)⁻²`. Nothing is iterated and no root depends on its neighbours, so this is `O(1)` per node
-# with no error accumulation along the sequence — which is what separates it from a march.
+# `(n+½)⁻²`. Nothing is iterated and no root depends on its neighbours, so this is `O(1)` per node and
+# carries no error along the sequence.
 
 # The first 20 zeros of J₀ to full Float64 precision; beyond that McMahon's expansion (DLMF 10.21.19)
 # is already accurate, with fewer terms needed as k grows.

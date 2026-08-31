@@ -34,8 +34,8 @@ On a sphere the tree is built on the unit-sphere embedding, where nearest-by-cho
 nearest-by-great-circle — which also makes longitude wrap for free, since `λ` and `λ+2π` embed to the
 same point. Cartesian domains wrap by replicating the point set at the periodic images.
 
-It also supplies the reusable index behind [`Connectivity.indexed`](@ref), which is what makes a ball
-query on a curvilinear or node grid a range search rather than a scan of every cell:
+It also supplies the reusable index behind [`Connectivity.indexed`](@ref), which brings a ball query on
+a curvilinear or node grid down to a range search:
 
 ```julia
 using NearestNeighbors
@@ -67,7 +67,7 @@ triangles — the dual of the convex hull on the sphere.
 Bulk loops here come in two shapes, and only one maps to a kernel. `run_indices` applies a body to one
 index at a time with nothing carried across indices; `run_chunks` hands a contiguous range to a body that
 accumulates across it. Loading `KernelAbstractions` makes the first launchable on any backend it
-supports, and makes the second raise on a device backend rather than quietly running on the host.
+supports; the second raises on a device backend.
 
 ```julia
 using KernelAbstractions
@@ -80,8 +80,7 @@ Both are bit-identical to the serial result, which the suite checks on `KernelAb
 GPU needed to verify that the code is device-generic. There is no per-vendor code in the package: a
 backend arrives from the caller and the kernel is compiled for it.
 
-The precondition is that a kernel cannot allocate, which is why the allocation gate over every per-cell
-entry point is what makes this possible at all rather than an aspiration.
+A kernel cannot allocate, and the suite gates every per-cell entry point at zero bytes.
 
 Ball queries follow from the same rule. Without an index a query reads only coordinates and the mask and
 allocates nothing, so it runs inside a launch — including through `foreach_within`, which becomes one
@@ -95,10 +94,9 @@ FG.Connectivity.foreach_within(grid; ball = r,
 end
 ```
 
-What stays on the host is the *indexed* form, for a reason rather than as pending work: the index is a
-k-d tree, a host structure, so `Adapt` refuses to move a topology carrying one instead of dropping it
-silently and leaving the device scanning every cell. That is no loss — the tree exists to spare a single
-thread an `O(n)` scan, and a device has a thread per cell instead.
+The *indexed* form stays on the host: the index is a k-d tree, a host structure, so `Adapt` raises on a
+topology carrying one. Little is lost — the tree spares a single thread an `O(n)` scan, and a device
+has a thread per cell.
 
 ## SparseArrays
 
@@ -110,8 +108,7 @@ A = FG.Connectivity.sparse_adjacency_matrix(conn; Ti = Int32, Tv = Float64)
 
 ## StaticArrays
 
-Adds `SVector`/`MVector` methods that stay in vector form end to end rather than round-tripping
-through tuples:
+Adds `SVector`/`MVector` methods that stay in vector form end to end, with no tuple round-trip:
 
 ```julia
 using StaticArrays
@@ -143,9 +140,8 @@ using Adapt, CUDA
 dev = adapt(CuArray, grid)
 ```
 
-Handles all three grid types plus `CSRConnectivity` and `IndexTopology`. A `SeparableMeasure` moves
-its *factors*, not a materialized outer product — materializing onto a device is exactly what the
-factored form exists to avoid — and `AllActive` carries only its size, so there is nothing to move.
+Handles all three grid types plus `CSRConnectivity` and `IndexTopology`. A `SeparableMeasure` moves its
+*factors*, so the device receives `O(∑ Nᵈ)` numbers, and `AllActive` carries only its size.
 
 ## ComputationalBackends — threading
 

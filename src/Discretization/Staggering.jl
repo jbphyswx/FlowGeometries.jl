@@ -53,8 +53,8 @@ The form to use when staggering repeatedly — a moving mesh, a column solver st
 """
 function faces!(out::AbstractVector{T}, x::AbstractVector{T}) where {T<:AbstractFloat}
     n = length(x)
-    # An axis of `n` centres has `n+1` faces, and an empty one has none — which is what `faces` returns
-    # for it, so the two agree on that case rather than one of them raising.
+    # An axis of `n` centres has `n+1` faces, and an empty one has none, matching what `faces` returns
+    # for it.
     want = iszero(n) ? 0 : n + 1
     length(out) == want || throw(DimensionMismatch(
         "out holds $(length(out)) faces for an axis of $n centres, which has $want",
@@ -92,7 +92,7 @@ The `N` cell centres of an axis of `N+1` cell boundaries: the midpoint of each p
 
 It inverts [`faces`](@ref) exactly on a uniform axis. On a stretched one it does not: `faces` places a
 boundary midway between two centres, and re-midpointing those boundaries averages neighbouring cell
-widths rather than recovering the centre. The two are inverse only where the widths are constant.
+widths. The two are inverse only where the widths are constant.
 """
 function centers(f::AbstractVector{T}) where {T<:AbstractFloat}
     n = length(f) - 1

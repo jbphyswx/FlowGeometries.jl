@@ -10,16 +10,15 @@
 The geometries whose coordinates are `(λ, φ, …)` about a polar axis:
 [`AbstractSphericalGeometry`](@ref) and [`AbstractEllipsoidalGeometry`](@ref).
 
-They share their local frame. On an oblate spheroid the GEODETIC latitude is defined by the surface
+They share their local frame. On an oblate spheroid the geodetic latitude is defined by the surface
 normal, `n̂ = (cosφ·cosλ, cosφ·sinλ, sinφ)`, and the parallel through a point is a circle in a plane of
 constant `z`, so `ê_λ = (-sinλ, cosλ, 0)` and `ê_φ = n̂ × ê_λ` — the sphere's three vectors at the same
-`(λ, φ)`. Every frame rotation here is therefore one implementation for both hierarchies. What does
-differ is the POSITION a `(λ, φ)` sits at, which is [`embed`](@ref)'s business, and the physical length
-of a unit coordinate step, which is [`scale_factors`](@ref)'.
+`(λ, φ)`. Every frame rotation here is therefore one implementation for both hierarchies. What differs
+is the position a `(λ, φ)` sits at, which is [`embed`](@ref)'s business, and the physical length of a
+unit coordinate step, which is [`scale_factors`](@ref)'.
 
-A `Union` rather than a common supertype: an ellipsoid is not a sphere, and must not inherit the area
-identities — `4πR²/n`, spherical excess — that hold only on one. That is why the two hierarchies are
-siblings, and this names exactly the part they do share.
+The two hierarchies are siblings, so that an ellipsoid does not inherit the area identities — `4πR²/n`,
+spherical excess — that hold on a sphere alone. This `Union` names the part they share.
 """
 const AbstractLonLatGeometry{T} =
     Union{AbstractSphericalGeometry{T},AbstractEllipsoidalGeometry{T}}
@@ -46,8 +45,8 @@ end
     vector_to_cartesian(S, geo, args...) -> S
 
 Map the components of a vector given in the local `(ê_λ, ê_φ, ê_r)` basis at `(λ, φ)` into the ambient
-Cartesian basis. This transforms VECTOR COMPONENTS at a point, not a position — see [`embed`](@ref) for
-positions. The 2-component form assumes `u_r = 0`.
+Cartesian basis. This transforms vector components at a point; see [`embed`](@ref) for positions. The
+2-component form assumes `u_r = 0`.
 
 A rotation of the frame and nothing else, so it is one and the same on a sphere and on a spheroid — see
 [`AbstractLonLatGeometry`](@ref).
@@ -60,8 +59,8 @@ A rotation of the frame and nothing else, so it is one and the same on a sphere 
     uφ = convert(T, u_φ)
     ur = convert(T, u_r)
     êλ, êφ, êr = _enu_frame(geo, λ, φ)
-    # `ê_λ` has no `z` component, the parallel lying in a plane of constant `z`, so that term is
-    # omitted rather than multiplied by a zero.
+    # `ê_λ` has no `z` component, the parallel lying in a plane of constant `z`, so `z` drops the `uλ`
+    # term.
     return (;
         x = uλ * êλ[1] + uφ * êφ[1] + ur * êr[1],
         y = uλ * êλ[2] + uφ * êφ[2] + ur * êr[2],
@@ -112,9 +111,8 @@ end
 @inline vector_from_cartesian(::Type{S}, geo::AbstractLonLatGeometry, args...) where {S} =
     build_point(S, (:λ, :φ, :r), Tuple(vector_from_cartesian(geo, args...)))
 
-# `vᵀ τ w` for a symmetric `τ` given by its six independent components. Written out rather than looped
-# over an indexed basis: the loop form measured about 5× slower, which is the reason callers hand-roll
-# this instead of calling it, so the flat form belongs here and not in each of them.
+# `vᵀ τ w` for a symmetric `τ` given by its six independent components, written flat. A loop over an
+# indexed basis is several times slower here, so every caller shares this one expansion.
 @inline _quad(
     τxx::T, τyy::T, τzz::T, τxy::T, τxz::T, τyz::T,
     v1::T, v2::T, v3::T, w1::T, w2::T, w3::T,
@@ -288,8 +286,8 @@ end
     Pn = _embed(geo, _at(T, neighbor))
     dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
     êλ, êφ, _ = _enu_frame(geo, c[1], c[2])
-    # Written out rather than `sum(dr[i] * ê[i] for i in 1:3)`: the generator indexes the tuple with
-    # a loop variable, which does not unroll, and measured ~5× slower than the unrolled contraction.
+    # The contraction is written flat. `sum(dr[i] * ê[i] for i in 1:3)` indexes the tuple with a loop
+    # variable, which does not unroll.
     return (;
         λ = dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
         φ = dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
@@ -341,6 +339,7 @@ end
 
 """
     scale_factors(geo, point) -> NTuple
+    scale_factors(geo, point, Val(N)) -> NTuple{N}
 
 Physical length of a unit coordinate step in each direction at `point` — see
 [`FlowGeometries.Discretization.scale_factors`](@ref).
@@ -348,6 +347,10 @@ Physical length of a unit coordinate step in each direction at `point` — see
 Cartesian: `1` in every direction, the metric being the identity. Spherical: `(R·cosφ, R)` on the
 surface of radius `R`, and `(r·cosφ, r, 1)` where a radius direction is present, `r` being that
 point's own radius.
+
+The result is one factor per direction, so from a point whose length is a runtime value — an
+`AbstractVector` — its width is one too. `Val(N)` names that width, checks it, and gives a concrete
+`NTuple{N}`.
 """
 @inline scale_factors(::AbstractCartesianGeometry{T}, p::Tuple{Vararg{Real,N}}) where {T,N} =
     ntuple(_ -> one(T), Val(N))
@@ -365,19 +368,20 @@ end
 end
 
 @inline scale_factors(geo::AbstractGeometry, p) = scale_factors(geo, as_ntuple(p))
+@inline scale_factors(geo::AbstractGeometry, p, v::Val) = scale_factors(geo, as_ntuple(p, v))
 
 """
     metric_invariant_directions(geo) -> NTuple{K,Int}
 
 The coordinate directions along which [`scale_factors`](@ref) does not vary.
 
-A bulk operation that divides by a scale factor can then solve it once per line rather than per cell:
-on a sphere no factor depends on longitude, so a whole row shares one value.
+A bulk operation that divides by a scale factor then solves it once per line: on a sphere no factor
+depends on longitude, so a whole row shares one value.
 
-The default is `()` — no direction is assumed invariant — and it is declared per CONCRETE geometry
-rather than per hierarchy. A subtype of [`AbstractSphericalGeometry`](@ref) may write its own
-`scale_factors`, and inheriting a claim about them would hoist a value that in fact varies, giving a
-wrong derivative rather than a slow one. Declare the directions for your own geometry to opt in.
+The default is `()`, no direction invariant, and each concrete geometry declares its own. A subtype of
+[`AbstractSphericalGeometry`](@ref) may write its own `scale_factors`, and an inherited claim about
+them hoists a value that varies, giving a wrong derivative. Declare the directions for your own
+geometry to opt in.
 """
 function metric_invariant_directions end
 

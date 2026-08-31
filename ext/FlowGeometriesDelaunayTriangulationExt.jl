@@ -53,28 +53,27 @@ function Grids._voronoi_tessellation(
     ))
 
     # A degenerate (collinear) point set has no triangulation, and feeding one in surfaces as an
-    # opaque internal error. It is an O(N) precondition, so check it rather than catching whatever
-    # comes back out — a `try`/`catch` here would also swallow genuine bugs and interrupts.
+    # opaque internal error. The precondition is `O(N)`, so it is checked up front; a `try`/`catch`
+    # around the triangulation swallows genuine bugs and interrupts alongside it.
     _assert_not_collinear(x, y, N)
 
-    # The tessellation runs in Float64 whatever `T` is: the orientation/incircle predicates are
-    # exact-arithmetic and defined there, and narrowing them would trade robustness for nothing.
-    # Only the resulting areas are converted back to `T`.
+    # The tessellation runs in Float64 whatever `T` is: the orientation and incircle predicates are
+    # exact-arithmetic and defined there. Only the resulting areas are converted back to `T`.
     pts = [(Float64(x[i]), Float64(y[i])) for i in 1:N]
     tri = DT.triangulate(pts)
     vorn = DT.voronoi(tri; clip = true)
 
-    # `zeros`, never `undef`: duplicate input points are silently skipped by the triangulation and
-    # so are never assigned a polygon. An unwritten slot of an `undef` buffer would escape as a
-    # plausible-looking area — and a skipped point genuinely owns no region, so zero is correct.
+    # `zeros`, never `undef`: the triangulation skips duplicate input points, which are then assigned
+    # no polygon. A skipped point owns no region, so zero is its area, and an unwritten `undef` slot
+    # would escape as a plausible-looking one.
     areas = zeros(T, N)
     @inbounds for i in DT.each_polygon_index(vorn)
         (1 ≤ i ≤ N) || continue
         areas[i] = T(DT.get_area(vorn, i))
     end
 
-    # The triangulation the areas came from, kept rather than discarded. Only the SOLID triangles: a
-    # ghost triangle names the boundary rather than a region, and has no node to be a cell of.
+    # The triangulation the areas came from, returned alongside them. Solid triangles only: a ghost
+    # triangle names the boundary, and has no node to be a cell of.
     # The narrowest integer that indexes this node set, as the neighbour arrays use.
     I = N ≤ typemax(Int32) ? Int32 : Int
     cell_nodes = I[]

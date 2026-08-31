@@ -137,9 +137,8 @@ end
 
 Allocating wrapper around [`spherical_axes!`](@ref).
 
-The element type leads, as it does for `zeros` and `rand`, so that it takes part in dispatch: a type
-supplied as a keyword is invisible to dispatch, and the returned eltype would be unknown to the
-caller for any call the compiler cannot constant-fold whole.
+The element type leads, as it does for `zeros` and `rand`, so it takes part in dispatch and the
+returned eltype is known from the signature.
 """
 function spherical_axes end
 
@@ -243,8 +242,8 @@ end
 Which construction computes an equiangular node family's sine sums: [`Recurrence`](@ref), always
 available, or [`Transform`](@ref), which needs an FFT planner.
 
-A type rather than an availability check, as the mask policies are: the two agree only to round-off, so
-naming one pins a result on a machine that differs only in whether an FFT backend is installed.
+A type, as the mask policies are. The two agree to round-off, so naming one pins a result across
+machines that differ in whether an FFT backend is installed.
 """
 abstract type AbstractEquiangularAlgorithm end
 
@@ -279,17 +278,17 @@ take `algorithm` — see [`latitude_weights`](@ref).
 """
 function latitude_weights! end
 
-# `algorithm` is accepted here only so asking for one names the reason it does not apply, rather than
-# reporting an unsupported keyword on a function that does accept it for other samplings.
+# The keyword is valid for the equiangular families, so it is accepted here and answered with a message
+# about this sampling.
 function latitude_weights!(
     w::AbstractVector{T}, ::AbstractGaussLegendreSampling, nlat::Integer;
     algorithm::Union{Nothing,AbstractEquiangularAlgorithm} = nothing,
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
     algorithm === nothing || throw(ArgumentError(
-        "Gauss–Legendre weights come from the Bogaert root solve, not the equiangular sine-series " *
-        "rule, so there is no $(algorithm) to select. `algorithm` applies to DriscollHealySampling " *
-        "and ClenshawCurtisSampling.",
+        "Gauss–Legendre weights come from the Bogaert root solve, so there is no $(algorithm) to " *
+        "select. `algorithm` picks the equiangular sine-series construction, and applies to " *
+        "DriscollHealySampling and ClenshawCurtisSampling.",
     ))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
     _gauss_legendre!(T, nothing, w, nlat)
@@ -300,8 +299,7 @@ end
     OpenNodes(), ClosedNodes()
 
 The two equiangular colatitude families: open `θᵢ = π(i−½)/N` (Clenshaw–Curtis) and closed
-`θᵢ = π(i−1)/N` (Driscoll–Healy). Named rather than passed as a `θ(i)` closure so the sum below can
-dispatch on which one it is.
+`θᵢ = π(i−1)/N` (Driscoll–Healy). They are types, so the sum below dispatches on which one it has.
 """
 struct OpenNodes end
 struct ClosedNodes end
@@ -323,8 +321,8 @@ With no `algorithm`, [`_equiangular_algorithm`](@ref) chooses one for the elemen
 ) where {T<:AbstractFloat} =
     _equiangular_sums!(s, family, nlat, nterm, _equiangular_algorithm(T))
 
-# `Transform` names a capability an extension supplies, so the name resolves either way and says what
-# is missing rather than raising `MethodError` on a type the caller can see is defined.
+# `Transform` names a capability an extension supplies. This method resolves without the extension and
+# says which package to load.
 _equiangular_sums!(::AbstractVector{T}, _, ::Int, ::Int, ::Transform) where {T<:AbstractFloat} =
     throw(ArgumentError(
         "Transform() needs an FFT planner for $T; load an AbstractFFTs implementation (FFTW, for " *
@@ -333,7 +331,7 @@ _equiangular_sums!(::AbstractVector{T}, _, ::Int, ::Int, ::Transform) where {T<:
 
 """
 The recurrence: `sin((2k+1)θ) = 2cos(2θ)·sin((2k−1)θ) − sin((2k−3)θ)`, seeded with `s₋₁ = −sin θ`,
-`s₀ = sin θ`, so each term costs two multiplies rather than a `sin`.
+`s₀ = sin θ`, so each term costs two multiplies and no transcendental.
 """
 function _equiangular_sums!(
     s::AbstractVector{T}, family, nlat::Int, nterm::Int, ::Recurrence,
@@ -398,10 +396,10 @@ equiangular families.
 
 These integrate a single `P_l` exactly for `l ≤ N−1`, which is weaker than
 [`bandlimit`](@ref)`(ClenshawCurtisSampling(), N) = N−1` suggests: spectral analysis integrates
-PRODUCTS of two degree-`lmax` functions, so a quadrature exact to `l ≤ N−1` supports
-quadrature-based analysis only up to `lmax ≈ (N−1)/2`. The reported band limit describes what the
-grid can represent, not what this quadrature can integrate. Use `GaussLegendreSampling` (exact to
-`2N−1`) when analysis must be exact at the stated band limit.
+products of two degree-`lmax` functions, so a quadrature exact to `l ≤ N−1` supports quadrature-based
+analysis only up to `lmax ≈ (N−1)/2`. The reported band limit describes what the grid represents; this
+quadrature integrates to half of it. Use `GaussLegendreSampling` (exact to `2N−1`) where analysis must
+be exact at the stated band limit.
 """
 function latitude_weights!(
     w::AbstractVector{T}, ::AbstractClenshawCurtisSampling, nlat::Integer;
@@ -429,7 +427,7 @@ Latitude quadrature weights `wⱼ` for sampling `s`, normalized so that
 
     Σⱼ wⱼ = ∫₀^π sinθ dθ = 2
 
-for EVERY sampling that provides them. The weights therefore carry the `sinθ` Jacobian and nothing
+for every sampling that provides them. The weights therefore carry the `sinθ` Jacobian and nothing
 else; the longitude factor is the caller's, so a full-sphere integral is always
 
     ∫ f dΩ ≈ (2π/nlon) · Σⱼ wⱼ Σᵢ f(λᵢ, φⱼ)

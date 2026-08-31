@@ -13,13 +13,13 @@ using FlowGeometries.Connectivity: Connectivity
 
 @inline _adapt_tuple(to, t::Tuple) = map(x -> Adapt.adapt(to, x), t)
 
-# `SeparableMeasure` is the factors; adapting it means adapting each factor, not materializing the
-# outer product onto the device. `AllActive` holds only a size, so it is already device-safe.
+# `SeparableMeasure` is its factors, so adapting it adapts each factor and the device receives
+# `O(∑ Nᵈ)` numbers. `AllActive` holds only a size, so it is already device-safe.
 Adapt.adapt_structure(to, m::Grids.SeparableMeasure) =
     Grids.SeparableMeasure(_adapt_tuple(to, m.factors))
 
-# Likewise a `SlabMeasure`: the coupled pair is one matrix, and adapting it moves that rather than the
-# `∏ Nᵈ` product it stands for.
+# Likewise a `SlabMeasure`: the coupled pair is one matrix, and the device receives that matrix and the
+# per-axis factors, `O(Nφ·Nh + Nλ)` numbers.
 Adapt.adapt_structure(to, m::Grids.SlabMeasure) =
     Grids.SlabMeasure(Adapt.adapt(to, m.lead), Adapt.adapt(to, m.slab), _adapt_tuple(to, m.rest))
 
@@ -31,17 +31,16 @@ Adapt.adapt_structure(to, m::Grids.CellMesh) = Grids.CellMesh(
     Adapt.adapt(to, m.node_ptr), Adapt.adapt(to, m.node_cells),
 )
 
-# An unindexed `MetricTopology` is isbits and travels as-is. One carrying a spatial index does not: a
-# k-d tree is a host structure, so it is refused rather than dropped, which would leave the device with
-# a topology that silently scans.
+# An unindexed `MetricTopology` is isbits and travels as-is. One carrying a spatial index raises: a k-d
+# tree is a host structure, and dropping it leaves the device with a topology that silently scans.
 Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology{N,T,Nothing}) where {N,T} = mt
 Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology) = throw(ArgumentError(
     "a MetricTopology carrying a spatial index cannot be moved to another backend; adapt the grid and " *
     "build the topology there, or use `MetricTopology(grid)` without an index",
 ))
 
-# `isbits`: no heap reference to move. An analytic axis is its formula's parameters, so moving it
-# means moving those, not evaluating the formula onto the device.
+# `isbits`: no heap reference to move. An analytic axis is its formula's parameters, and those are what
+# reach the device; the formula runs there.
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.UniformAxis) = a
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.AbstractAnalyticAxis) = a
 Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c

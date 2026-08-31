@@ -35,10 +35,10 @@ it and [`similar_geometry`](@ref) carries a geometry to another width, keeping i
 FG.Geometry.float_type(sph), FG.Geometry.similar_geometry(Float32, wgs)
 ```
 
-Anything that builds at a chosen width takes the type FIRST, positionally, as `zeros` and `rand` do —
-a type given as a keyword takes no part in dispatch, so the result's element type would be unknown to
-the caller. Where a constructor takes both a width and a geometry, the width wins and the geometry is
-carried to it; where only a geometry is given, its own width is the one meant:
+Anything that builds at a chosen width takes the type first, positionally, as `zeros` and `rand` do, so
+it takes part in dispatch and the result's element type is known from the signature. Where a
+constructor takes both a width and a geometry, the width wins and the geometry is carried to it; where
+only a geometry is given, its own width is the one meant:
 
 ```@example geometry
 g32 = FG.Connectivity.structured_grid(Float32, FG.SphericalSampling.GaussLegendreSampling(), 16)
@@ -50,9 +50,8 @@ eltype(FG.Grids.axis(g32, 1)), FG.Geometry.float_type(FG.Grids.grid_geometry(g32
 The geometry decides what a point's components are called, and the grid types inherit that.
 Cartesian is `(x, y[, z])`; spherical is `(λ, φ[, r])` — longitude, **geographic** latitude, radius.
 
-This is enforced rather than conventional: `grid.x` on a spherical grid is a `FieldError`, not a
-silent alias for longitude. Reading `x` and getting longitude is the kind of bug that survives code
-review and shows up as a wrong answer months later.
+The names are enforced: `grid.x` on a spherical grid raises a `FieldError`. Reading `x` and getting
+longitude is the kind of bug that survives code review and shows up as a wrong answer months later.
 
 ```@example geometry
 FG.Grids.coords(grid, 2, 3)          # (λ = …, φ = …) on a spherical grid
@@ -105,8 +104,8 @@ FG.Geometry.vector_from_cartesian(sph, v.x, v.y, v.z, λ, φ)      # and back
 FG.Geometry.project_to_tangent_plane(sph, (λ, φ), (λ + 1e-6, φ))
 ```
 
-`project_to_tangent_plane` gives a neighbour's offset in the tangent plane at `centre`, which is what
-finite-difference and structure-function calculations on a sphere actually need.
+`project_to_tangent_plane` gives a neighbour's offset in the tangent plane at `centre`: the quantity a
+finite-difference or structure-function calculation on a sphere differences against.
 
 ## Nonuniform derivatives
 
@@ -203,10 +202,10 @@ FG.Geometry.rotate!(λs, φs, rot)
 λs
 ```
 
-Rotating a rectilinear spherical grid **warps** it — only its own frame's axes are separable — but that
-warping is a formula, not data. The result keeps the mesh and the rotation and evaluates a cell's
-position where it is asked for. `unrotate` is the usual direction, taking a rotated-pole grid's
-`(λ′, φ′)` axes to the geographic coordinates of each cell.
+Rotating a rectilinear spherical grid **warps** it, and only its own frame's axes stay separable. The
+warping is a formula, so the result keeps the mesh and the rotation and evaluates a cell's position
+where it is asked for. `unrotate` is the usual direction, taking a rotated-pole grid's `(λ′, φ′)` axes
+to the geographic coordinates of each cell.
 
 ```@example geometry
 sph = FG.Geometry.SphericalGeometry()
@@ -216,10 +215,9 @@ grot = FG.Grids.unrotate(FG.Grids.StructuredGrid(sph, λr, φr), rot)
 typeof(grot).name.name, size(grot), FG.Grids.coordinate_names(grot)
 ```
 
-The cell measure carries over *exactly* rather than being recomputed, since a rotation is an isometry of
-the sphere — recomputing from the rotated corners would only add roundoff, and here the measure is
-shared outright. The index topology carries over too: same mesh, same neighbours, so a direction that
-wrapped still wraps.
+The cell measure carries over *exactly*, a rotation being an isometry of the sphere, so the array is
+shared; recomputing it from the rotated corners adds roundoff. The index topology carries over too:
+same mesh, same neighbours, so a direction that wrapped still wraps.
 
 ```@example geometry
 gplain = FG.Grids.StructuredGrid(sph, λr, φr)

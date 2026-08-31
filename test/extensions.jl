@@ -318,6 +318,10 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     steady = map((64, 256)) do nlat
         s = zeros(Float64, nlat)
         fam = SS.ClosedNodes()
+        # The assertion below is about a cold cache, and the weight tests above have already planned
+        # some of these sizes, so the entry is dropped first. `_sum_plan` rebuilds it on the next call.
+        delete!(get!(() -> Dict{Tuple{DataType,Int},Any}(), task_local_storage(),
+                     :flowgeometries_equiangular_plans), (Float64, nlat))
         first = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
         again = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
         third = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
@@ -368,11 +372,12 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
     Test.@test FG.Connectivity.sparse_adjacency_coo!(I, J, conn) == ne
     Test.@test SparseArrays.sparse(I, J, trues(ne), n, n) == A
 
-    # A symmetric graph's CSR arrays ARE its CSC arrays, so the matrix reads the neighbour list rather
-    # than transposing it into a second permanent copy. What decides that is the STENCIL's symmetry,
-    # read from its type: a stencil need not be symmetric, and wrapping an asymmetric graph would
-    # return the transpose of the adjacency, which is a different matrix. The contract — entry `(i, j)`
-    # set exactly when `j` is a neighbour of `i` — is what gets checked, on every shape.
+    # A symmetric graph's CSR arrays ARE its CSC arrays, so the matrix reads the neighbour list and
+    # holds no second permanent copy. What decides that is the layout: under an index stencil it is the
+    # STENCIL's symmetry, read from its type, and under a formula it is
+    # `Grids.has_symmetric_adjacency`. An asymmetric graph wrapped that way gives the transpose of the
+    # adjacency, a different matrix. The contract — entry `(i, j)` set exactly when `j` is a neighbour
+    # of `i` — is what gets checked, on every shape.
     let cart = FG.Geometry.CartesianGeometry{Float64}(),
         xs = collect(0.0:1.0:4.0), ys = collect(0.0:1.0:3.0),
         mk = trues(5, 4)
@@ -398,8 +403,7 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
                            for i in 1:FG.Connectivity.nnodes(cn)
                            for k in cn.ptr[i]:(cn.ptr[i + 1] - 1))
         end
-        # And the wrap is what makes the symmetric case the CHEAPER one: asking the built graph
-        # instead would answer by building the very transpose the wrap exists to avoid.
+        # And the symmetric case is the cheaper one, the transpose route allocating a second CSR.
         big = FG.Grids.StructuredGrid(cart, collect(range(0.0, 1.0; length = 120)),
                                       collect(range(0.0, 1.0; length = 120)))
         sym() = FG.Connectivity.sparse_adjacency_matrix(big)
@@ -407,6 +411,57 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
         sym(); asym()
         Test.@test @allocated(sym()) < @allocated(asym())
     end
+end
+
+Test.@testset "A formula layout's symmetric adjacency wraps into CSC" begin
+    using SparseArrays: SparseArrays
+    # Each of these declares `has_symmetric_adjacency`, and every declaration is checked here against
+    # the graph the formula builds.
+    symmetric = (FG.Grids.HEALPixGrid(4), FG.Grids.HEALPixGrid(8),
+                 FG.Grids.CubedSphereGrid(6), FG.Grids.IcosahedralGrid(3),
+                 FG.Grids.YinYangGrid(16, 8))
+    for g in symmetric
+        Test.@test FG.Grids.has_symmetric_adjacency(g)
+        conn = FG.Connectivity.build_connectivity(g)
+        Test.@test FG.Connectivity.is_symmetric_adjacency(conn)
+        A = FG.Connectivity.sparse_adjacency_matrix(g)
+        Test.@test A == FG.Connectivity.sparse_adjacency_matrix(conn)
+        Test.@test A == permutedims(A)
+        # The wrap: the matrix's own arrays are the sorted neighbour list, entry for entry.
+        FG.Connectivity.sort_neighbors!(conn)
+        Test.@test A.colptr == collect(conn.ptr)
+        Test.@test A.rowval == collect(conn.nbrs)
+    end
+
+    # A ring grid's straddling relation is directed where adjacent rings differ in width, so it stays
+    # at the default and takes the transpose.
+    ring = FG.Grids.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(8))
+    Test.@test !FG.Grids.has_symmetric_adjacency(ring)
+    rconn = FG.Connectivity.build_connectivity(ring)
+    Test.@test !FG.Connectivity.is_symmetric_adjacency(rconn)
+    R = FG.Connectivity.sparse_adjacency_matrix(ring)
+    Test.@test R == FG.Connectivity.sparse_adjacency_matrix(rconn)
+    Test.@test R != permutedims(R)
+    Test.@test all(R[i, Int(rconn.nbrs[k])]
+                   for i in 1:FG.Connectivity.nnodes(rconn)
+                   for k in rconn.ptr[i]:(rconn.ptr[i + 1] - 1))
+
+    # A mask drops both directions of every edge it touches, so the symmetry the trait declares
+    # survives it.
+    let n = length(FG.Grids.HEALPixGrid(4)),
+        gm = FG.Grids.HEALPixGrid(FG.Geometry.SphericalGeometry(), 4; mask = [isodd(i) for i in 1:n])
+        M = FG.Connectivity.sparse_adjacency_matrix(gm)
+        Test.@test M == permutedims(M)
+        Test.@test M == FG.Connectivity.sparse_adjacency_matrix(FG.Connectivity.build_connectivity(gm))
+    end
+
+    # And the wrap is the cheaper route on a formula layout too.
+    hp = FG.Grids.HEALPixGrid(16)
+    wrap() = FG.Connectivity.sparse_adjacency_matrix(hp)
+    transpose_route() =
+        FG.Connectivity.sparse_adjacency_matrix(FG.Connectivity.build_connectivity(hp))
+    wrap(); transpose_route()
+    Test.@test @allocated(wrap()) < @allocated(transpose_route())
 end
 
 Test.@testset "Index-parallel loops run as kernels and give the same answer" begin
@@ -501,13 +556,18 @@ end
 Test.@testset "Every layout's cell centres can be indexed, not just the three architectures" begin
     GD = FG.Grids
     C = FG.Connectivity
-    # A formula layout streams its centres by arithmetic rather than reading them, which is no
-    # obstacle to building a tree over them — the extension used to list the architectures it knew.
+    # A formula layout streams its centres by arithmetic, and a rotated one evaluates them through its
+    # frame; a tree is built over either the same way.
     layouts = (("HEALPix", GD.HEALPixGrid(8)),
                ("ring", GD.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(16))),
                ("cubed sphere", GD.CubedSphereGrid(8)),
                ("Yin-Yang", GD.YinYangGrid(16, 8)),
-               ("icosahedral", GD.IcosahedralGrid(4)))
+               ("icosahedral", GD.IcosahedralGrid(4)),
+               ("rotated", GD.rotate(
+                    GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
+                                      range(0, 2π; length = 25)[1:24],
+                                      range(-1.2, 1.2; length = 13)),
+                    FG.Geometry.PoleRotation(0.7, 1.1))))
     for (_, g) in layouts
         Test.@test GD.has_spatial_index(g)
         ix = C.indexed(g)

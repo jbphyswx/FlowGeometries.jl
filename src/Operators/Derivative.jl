@@ -6,21 +6,19 @@
     derivative!(out, field, grid, dim; order=1, nodes=order+1, policy=BlankMasked(),
                 masked=zero, active_only=true, backend=nothing) -> out
 
-The derivative with respect to **distance** along direction `dim`, rather than with respect to the
-coordinate: [`apply_stencil!`](@ref) divided by the metric factor,
+The derivative with respect to **distance** along direction `dim`: [`apply_stencil!`](@ref) divided by
+the metric factor,
 
     ∂f/∂sᵈ = (1/hᵈ) · ∂f/∂ξᵈ,    hᵈ = Geometry.scale_factors(geo, p)[d]
 
 On a Cartesian metric every `hᵈ` is `1` and this is `apply_stencil!` exactly, at no cost. Anywhere else
-it is the derivative a physical law is written in, and assembling it from the parts was the one thing
-every geometry-aware caller had to add — including the coordinate singularity below, which is not
-theirs to get right.
+it is the derivative a physical law is written in, singular points included.
 
-**Where the metric degenerates the derivative does not exist**, and `masked` is written rather than a
-number invented. Longitude at a pole is the case: `h_λ = R cos φ → 0`, so `1/h_λ` diverges. The test is
-relative to the geometry's own size and to the precision, `|h| ≤ L·√eps(T)` — an absolute threshold
-cannot be right for both, since `1e-12` is below `eps(Float32)` and in `Float32`
-`cos(Float32(π/2)) ≈ -4.4e-8`, so a pole row would quietly receive a large finite number instead.
+**Where the metric degenerates the derivative does not exist**, and `masked` is written. Longitude at a
+pole is the case: `h_λ = R cos φ → 0`, so `1/h_λ` diverges. The test scales with the geometry's own size
+and with the precision, `|h| ≤ L·√eps(T)`. A fixed threshold serves neither: `1e-12` is below
+`eps(Float32)`, and at `Float32` on Earth's radius `cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole
+around 0.28 m.
 
 No scale factor in this package depends on **longitude**, so `hᵈ` is constant along the first axis
 whichever direction is differenced. The scaling is applied once per remaining index and swept along

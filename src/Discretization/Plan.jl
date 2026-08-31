@@ -24,17 +24,15 @@ The weight set of a uniformly spaced axis: one centred row of `K` weights, plus 
 where a bounded window shifts inward.
 
 Every interior sample reads `field[j - left + q - 1]` weighted by `weights[q]`, the same `K` numbers
-throughout, so they reach the sweep as a tuple in registers rather than a row gathered from a table per
-cell. Storage is `O(K²)` — independent of the axis length. A wrapping axis has no shifted rows at all,
-every sample being centred.
+throughout, so they reach the sweep as a tuple in registers with no per-cell gather. Storage is `O(K²)`,
+independent of the axis length. A wrapping axis has no shifted rows at all, every sample being centred.
 
 `left` and `right` count the nodes before and after the sample and are equal only for odd `K`: a 4-node
 window reads one sample back and two forward, so two rows shift at the top end and one at the bottom.
 
-The weights come from the spacing rather than from a row of [`axis_stencils`](@ref)'s table. On a uniform
-axis those are the same numbers mathematically, and the table carries per-row round-off from
-reconstructing each window's coordinates — measured at `~1e-14` relative on a 5-node first derivative —
-where one exact row applied everywhere carries none.
+The weights are built from the spacing. Mathematically they are the row [`axis_stencils`](@ref) holds,
+and the table carries per-row round-off from reconstructing each window's coordinates, at `~1e-14`
+relative on a 5-node first derivative; one exact row applied everywhere carries none.
 """
 struct UniformStencilPlan{
     T<:AbstractFloat, K, MI<:AbstractMatrix{<:Integer}, MW<:AbstractMatrix{T},
@@ -52,8 +50,8 @@ end
 """
     TabulatedStencilPlan{T,K,MI,MW}
 
-The weight set of a stretched axis: the `n × K` node indices and weights, which is what a per-sample
-weight set is. The same two matrices [`axis_stencils`](@ref) returns.
+The weight set of a stretched axis: one row of node indices and weights per sample, as the `n × K` pair
+of matrices [`axis_stencils`](@ref) returns.
 """
 struct TabulatedStencilPlan{
     T<:AbstractFloat, K, MI<:AbstractMatrix{<:Integer}, MW<:AbstractMatrix{T},
@@ -108,9 +106,8 @@ A uniform axis gives a [`UniformStencilPlan`](@ref) and a stretched one a
 [`Axes.spacing_trait`](@ref), never from inspecting its values.
 
 A wrapping uniform axis takes the uniform form only when the `period` given is the one the axis's own
-spacing implies, `n·h`. That is a consistency check on the argument, not an inference from the
-coordinates: a period saying otherwise means the seam's spacing is not `h`, and the tabulated form is
-then what describes the axis.
+spacing implies, `n·h`. This checks the argument against the axis type, and reads no coordinate: any
+other period puts a seam gap other than `h` at the wrap, which the tabulated form describes.
 """
 function stencil_plan(
     x::AbstractVector{T}, order::Integer, nodes::Integer; period::Union{Nothing,Real} = nothing,

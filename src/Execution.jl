@@ -12,8 +12,8 @@ module Execution
 """
     chunk_ranges(n, k) -> Vector{UnitRange{Int}}
 
-Partition `1:n` into at most `k` contiguous ranges of near-equal length. Contiguity matters: each
-chunk then touches one span of every array the loop indexes, rather than striding across all of them.
+Partition `1:n` into at most `k` contiguous ranges of near-equal length. Contiguity matters: each chunk
+then touches one span of every array the loop indexes.
 """
 function chunk_ranges(n::Integer, k::Integer)
     n = Int(n); k = max(1, min(Int(k), max(n, 1)))
@@ -43,14 +43,13 @@ run_chunks(f::F, n::Integer, ::Nothing) where {F} = (n > 0 && f(1:Int(n)); nothi
     map_chunks(f, n, backend) -> Vector
 
 Apply `f(range)` over a partition of `1:n` and collect one result per chunk, for a bulk operation that
-reduces rather than writes. The caller combines them, so `f` needs no lock and the combining order is the
-caller's to fix — which is what keeps a threaded reduction independent of scheduling when the operation
-is associative but not commutative.
+reduces. The caller combines them, so `f` needs no lock and the combining order is the caller's to fix,
+which keeps a threaded reduction independent of scheduling for an operation that is associative but not
+commutative.
 
-`f` is called at least once, on an empty range when `n == 0`: a reduction has to produce a value, where
-[`run_chunks`](@ref) has nothing to write and so does not call `f` at all. Being callable on an empty
-range is therefore part of the contract, and it is also how the result's element type is known before the
-chunks run.
+`f` is called at least once, on an empty range when `n == 0`, since a reduction has to produce a value;
+[`run_chunks`](@ref) has nothing to write there and does not call `f`. Being callable on an empty range
+is part of the contract, and it is how the result's element type is known before the chunks run.
 """
 map_chunks(f::F, n::Integer, ::Nothing) where {F} = [f(1:Int(n))]
 
@@ -60,9 +59,8 @@ map_chunks(f::F, n::Integer, ::Nothing) where {F} = [f(1:Int(n))]
 `f(range)` over a partition of `1:n`, combined left to right with `op`.
 
 Distinct from [`map_chunks`](@ref) because the serial path has nothing to collect: it hands `f` the whole
-range and returns that value directly, where going through `map_chunks` would build a one-element
-`Vector` to index once and discard. The compiler usually erases that vector, so its cost shows up only
-where it cannot — a reduction is otherwise allocation-free, and this keeps it so unconditionally.
+range and returns that value directly. `map_chunks` builds a one-element `Vector` there, which the
+compiler usually erases; this path keeps a serial reduction allocation-free unconditionally.
 """
 _reduce_chunks(f::F, ::O, n::Integer, ::Nothing) where {F,O} = f(1:Int(n))
 
@@ -74,10 +72,10 @@ _reduce_chunks(f::F, op::O, n::Integer, backend) where {F,O} =
 
 Apply `f(i)` for each `i in 1:n`, under the execution policy `backend` names. `f` must write only what
 `i` determines, with no accumulation across indices — the same contract as [`run_chunks`](@ref), stated
-per index because that is what a device launch can express.
+per index, the form a device launch expresses.
 
 This is the form a kernel maps onto: with `KernelAbstractions` loaded and a device backend, `f` becomes
-the body of a launch over `1:n` rather than a host loop.
+the body of a launch over `1:n`.
 """
 function run_indices(f::F, n::Integer, ::Nothing) where {F}
     @inbounds for i in 1:Int(n)
@@ -95,10 +93,12 @@ The per-index counterpart of [`_reduce_chunks`](@ref), and the reduction a devic
 index `i` and nothing else, so the work splits without a chunk body. Every integral, norm and count over
 a grid goes through this.
 
-`init` must be `op`'s identity. It seeds each partial as well as the whole, which is what lets the
-partials be combined in any grouping — and the grouping does depend on the partition, so the result is
-deterministic and independent of scheduling rather than equal to the serial fold bit for bit. `op` must
-be associative.
+`op` must be associative and `init` its identity. `init` seeds each partial as well as the whole, so
+the partials combine in any grouping.
+
+The grouping follows the partition, never the scheduling, so a threaded result is deterministic. It
+matches the serial left fold wherever `op` is exactly associative; floating-point `+` is not, so a
+threaded sum can differ from the serial one in its last bits.
 """
 function reduce_indices(f::F, op::O, init, n::Integer, ::Nothing) where {F,O}
     acc = init
@@ -107,6 +107,25 @@ function reduce_indices(f::F, op::O, init, n::Integer, ::Nothing) where {F,O}
     end
     return acc
 end
+
+"""
+    allocate(backend, T, n) -> AbstractVector{T}
+
+An uninitialised length-`n` vector the loops running under `backend` can write.
+
+A CSR build allocates its degree, offset and neighbour arrays through this, so the buffers land where
+the passes that fill them run: an ordinary `Vector` under `nothing` and the host backends, device
+memory under a backend that launches kernels.
+"""
+allocate(::Nothing, ::Type{T}, n::Integer) where {T} = Vector{T}(undef, Int(n))
+
+"""
+    scalar(v, i) -> v[i]
+
+One element of a buffer that may not be host memory.
+"""
+@inline scalar(v::Array, i::Integer) = @inbounds v[Int(i)]
+@inline scalar(v::AbstractVector, i::Integer) = @inbounds Array(view(v, Int(i):Int(i)))[1]
 
 """
     exclusive_scan!(out, counts, backend = nothing; init = 1) -> out

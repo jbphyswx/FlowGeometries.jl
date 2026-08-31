@@ -1,14 +1,14 @@
 """
     interpolate(field, grid, p; policy=BlankMasked(), masked=NaN, …) -> value
 
-The value of `field` at the coordinate `p`, which is the question observational data asks: a station, a
-float or a ship track has a coordinate, not a cell index.
+The value of `field` at the coordinate `p`, which is how observational data arrives: a station, a float
+or a ship track carries a coordinate.
 
-`interpolation_weights` gives this along **one** axis, and nothing composed them, so a caller had to
-build the tensor product themselves on a rectilinear grid and had nothing at all on the others.
+`Discretization.interpolation_weights` gives the weights along **one** axis; this composes them, on
+every layout.
 
 - `StructuredGrid` — multilinear, the tensor product of the per-axis weights. A periodic direction
-  interpolates *across* its seam rather than clamping at the last sample.
+  interpolates *across* its seam, so a coordinate past the last sample wraps to the first.
 - `CurvilinearGrid`, `UnstructuredGrid` — a weighted least-squares plane fitted to the `k` nearest
   cells in the tangent plane at `p`, which is **exact for a linear field** and reproduces a cell's own
   value at its centre. Falls back to the weighted mean where the fit is rank deficient, that being the
@@ -33,8 +33,8 @@ function interpolate end
 [`interpolate`](@ref) for a batched field, writing one value per batch element into `out`.
 
 The bracketing cell — or, off a rectilinear grid, the neighbour set and the least-squares fit — depends
-on the point and the geometry and not on the data, so it is solved once and applied to every element.
-That is why this is not the same as calling `interpolate` per slice.
+on the point and the geometry alone, so it is solved once and applied to every element. One call is
+therefore less work than `interpolate` per slice.
 """
 function interpolate! end
 

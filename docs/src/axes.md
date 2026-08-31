@@ -6,8 +6,8 @@ CurrentModule = FlowGeometries.Axes
 
 An axis answers: **where along this direction are the samples, and is the spacing constant?**
 
-That second half is a property of the axis's *type*, not of its values, so the fast paths that depend
-on constant spacing can be selected at compile time.
+The second half is answered by the axis's *type*, so the fast paths that depend on constant spacing are
+selected at compile time.
 
 ## Uniform or not
 
@@ -21,10 +21,9 @@ v = collect(u)                       # the same numbers, as a plain Vector
 A.isuniform(u), A.isuniform(v)
 ```
 
-`isuniform` is the compile-time question, and it is the only one this package asks. A `Vector` holding
-an arithmetic sequence answers `false` because nothing in its type says otherwise, and **no code path
-inspects coordinate values to decide otherwise** — no constructor sniffs your data, and there is no
-tolerance anywhere.
+`isuniform` reads the type, and that is the only question this package asks. A `Vector` holding an
+arithmetic sequence answers `false`, and **no code path inspects coordinate values to decide it** — no
+constructor sniffs your data, and there is no tolerance anywhere.
 
 Where the data question genuinely matters, the spacing accessors answer it exactly: an axis is equally
 spaced precisely when its smallest gap equals its largest.
@@ -35,8 +34,8 @@ gv = FG.Grids.StructuredGrid(geo, v, v)
 FG.Grids.minimum_spacing(gv, 1) == FG.Grids.maximum_spacing(gv, 1)
 ```
 
-If that holds and you want the fast path, build the axis and say so — the conversion replaces your
-coordinates with the exact arithmetic sequence, which is your call to make, not this package's:
+If that holds and you want the fast path, build the axis yourself. The conversion replaces your
+coordinates with the exact arithmetic sequence, so it is yours to ask for:
 
 ```@example axes
 Δ = FG.Grids.minimum_spacing(gv, 1)            # equals maximum_spacing, so it IS the spacing
@@ -70,11 +69,11 @@ gi = FG.Grids.StructuredGrid(geo, 0:8, 0:8)      # Int range, Float64 grid
 typeof(FG.Grids.coordinates(gi, 1))
 ```
 
-A [`UniformAxis`](@ref) stores three numbers and computes `origin + (i-1)·Δ` in its own element type,
-which is what `uniform_axis` gives you when you want it.
-`range(0f0; step = 0.25f0, length = 5)` is a `StepRangeLen{Float32, Float64, Float64, Int}` — `Float32`
-elements over a `Float64` offset and step — so a `Float32` grid built from one does `Float64` index
-arithmetic. That is kept because it is what you passed; converting is the opt-in:
+A [`UniformAxis`](@ref) stores three numbers and computes `origin + (i-1)·Δ` in its own element type;
+`uniform_axis` builds one. `range(0f0; step = 0.25f0, length = 5)` is a
+`StepRangeLen{Float32, Float64, Float64, Int}` — `Float32` elements over a `Float64` offset and step —
+so a `Float32` grid built from one does `Float64` index arithmetic. The grid keeps what you passed, and
+converting is opt-in:
 
 ```@example axes
 typeof(range(0.0f0; step = 0.25f0, length = 5)), typeof(A.uniform_axis(Float32, range(0.0f0; step = 0.25f0, length = 5)))
@@ -154,10 +153,10 @@ typeof.(FG.Grids.measure_factors(gz)), Base.summarysize(gz)
 u isa AbstractRange, step(u)
 ```
 
-Two things follow. Base solves `searchsorted` on a range in closed form rather than by bisection, so
-lookup cost does not grow with the axis length — measured flat at 42 ns over `n = 10 … 10⁷`, against
-35→69 ns for the equivalent `Vector`. And any package that already tests `isa AbstractRange` to pick a
-uniform-grid fast path accepts this type without knowing it exists.
+Two things follow. Base solves `searchsorted` on a range in closed form, so lookup cost is flat in the
+axis length — 42 ns over `n = 10 … 10⁷`, against 35→69 ns for the equivalent `Vector`. And any package
+that already tests `isa AbstractRange` to pick a uniform-grid fast path accepts this type without
+knowing it exists.
 
 ```@example axes
 big = A.UniformAxis(0.0, 1e-7, 10^7)
@@ -166,15 +165,15 @@ searchsortedfirst(big, 0.5), searchsortedfirst(big, 0.5) == searchsortedfirst(co
 
 ## What it buys
 
-`minimum`, `maximum`, `extrema` and `sum` are closed forms rather than scans, and the axis is
-`isbits`, so moving it to another storage backend costs nothing.
+`minimum`, `maximum`, `extrema` and `sum` are closed forms, and the axis is `isbits`, so moving it to
+another storage backend costs nothing.
 
 ```@example axes
 sum(u), extrema(u), isbits(u), sizeof(u)
 ```
 
-On a grid the payoff is the cell measure. A uniform axis's per-cell width is one number repeated, so
-it is stored as a [`ConstantVector`](@ref) rather than `N` copies of the same value:
+On a grid the payoff is the cell measure. A uniform axis's per-cell width is one number repeated, held
+as a [`ConstantVector`](@ref):
 
 ```@example axes
 geo = FG.Geometry.CartesianGeometry()
@@ -201,6 +200,6 @@ FG.Grids.bounds(g, 1), FG.Grids.extent(g, 1),
 FG.Grids.minimum_spacing(gs, 1), FG.Grids.maximum_spacing(gs, 1)
 ```
 
-`minimum_spacing` and `maximum_spacing` are `O(1)` on a uniform direction and `O(N)` otherwise; they
-bound how far an index window must reach to cover a given physical distance, which is what a
-neighbourhood-by-distance query needs on a stretched axis.
+`minimum_spacing` and `maximum_spacing` are `O(1)` on a uniform direction and `O(N)` otherwise. They
+bound how far an index window must reach to cover a given physical distance, as a
+neighbourhood-by-distance query on a stretched axis needs.

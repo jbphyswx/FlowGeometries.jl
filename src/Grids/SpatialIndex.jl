@@ -8,15 +8,15 @@
 A uniform-bin spatial index over the embedded cell centres: points are bucketed by which bin of side `h`
 they fall in, and a query visits the bins its ball can reach.
 
-Three properties distinguish it from a tree, and all three are why it is the one that runs on a device:
+Three properties let it run on a device, where a tree cannot:
 
   * it is **arrays only** — bin offsets, point ids and the bin each sits in — so `Adapt` moves it like
     any other field, and it holds no copy of the coordinates, which stay on the grid;
-  * every point lands in **exactly one** bin, because periodicity wraps the bin coordinate rather than
-    replicating the point, so a query emits each cell once and needs no candidate buffer to deduplicate
-    into. That is what lets [`fold_candidates`](@ref) be a fold rather than a list;
-  * bins are hashed into `O(n)` buckets, so the memory does not depend on `h`. A sphere binned at
-    100 km would otherwise need `(2R/h)³ ≈ 2×10⁶` mostly empty cells, and far more as `h` shrinks.
+  * every point lands in **exactly one** bin, periodicity wrapping the bin coordinate and leaving the
+    point where it is, so a query emits each cell once and needs no candidate buffer to deduplicate
+    into. [`fold_candidates`](@ref) is therefore a fold, with no list to materialize;
+  * bins are hashed into `O(n)` buckets, so the memory is independent of `h`. A dense lattice over a
+    sphere binned at 100 km is `(2R/h)³ ≈ 2×10⁶` mostly empty cells, and grows as `h` shrinks.
 
 Build it for the radius you intend to query at: `h` is that radius, so a query touches `3ᴰ` bins. A much
 larger radius still works and costs `(2⌈r/h⌉+1)ᴰ` bins.
@@ -40,8 +40,8 @@ end
 """
     embedded_at(grid, cell) -> NTuple{D,T}
 
-A cell's centre in the space an index searches, from the grid rather than from a stored copy: `O(1)`
-arithmetic where the coordinates are a formula, and a read where they are data.
+A cell's centre in the space an index searches, taken from the grid: `O(1)` arithmetic where the
+coordinates are a formula, a read where they are data.
 """
 @inline embedded_at(grid::AbstractGrid, cell) = embed_point(grid, _cell_coords(grid, cell))
 
@@ -91,7 +91,7 @@ The linear index a cell reports as, and the inverse of [`_cell_from_linear`](@re
 end
 
 # Bin coordinate of a point, wrapped where the direction does. A wrapping direction's width divides the
-# period exactly, so `mod` lands on a real lattice rather than aliasing a partial bin onto bin zero.
+# period exactly, so `mod` lands on a lattice bin and no partial bin aliases onto bin zero.
 @inline function _bin_of(ix::CellListIndex{D,T}, x::NTuple{D,T}) where {D,T}
     return ntuple(Val(D)) do d
         @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - ix.lo[d]) / ix.h[d]))
@@ -131,9 +131,8 @@ function cell_list(grid::AbstractGrid{G,T}; ball::Real, active_only::Bool = fals
     embedding = embedding_of(grid)
     hemb = T(embedded_radius(embedding, h))
     hemb > 0 || throw(ArgumentError("radius $ball is degenerate in this embedding"))
-    # A function barrier on the dimension: it is a runtime value here, so building the index type from
-    # it inline leaves the whole construction loop dynamically dispatched — measured at 34 MiB and
-    # 196 ms for 65k points, against 3 ms once the dimension is a type.
+    # A function barrier on the dimension: it is a runtime value here, and building the index type from
+    # it inline leaves the whole construction loop dynamically dispatched.
     D = length(embedded_at(grid, first_cell(grid)))
     return _build_cell_list(grid, embedding, hemb, active_only, Val(D))
 end
@@ -193,9 +192,9 @@ end
 A lower bound on the embedded coordinate in each direction, less one bin, which is where the lattice
 starts. `O(1)`: no cell is read.
 
-It only has to be a bound, not the tightest one — the lattice is unbounded along a direction that does
-not wrap, and bins are hashed, so a loose origin shifts every bin index equally and changes nothing. The
-bound comes from the geometry, which is what lets a layout be indexed without a pass over its cells.
+Any bound serves: the lattice is unbounded along a direction that does not wrap, and bins are hashed, so
+a loose origin shifts every bin index equally. Taking it from the geometry indexes a layout without a
+pass over its cells.
 """
 function _embedded_floor end
 
@@ -256,9 +255,8 @@ end
 Thread `acc = f(acc, k)` over every cell `k` the index reports near cell `I`, without building a list. A
 **superset** of the ball, each cell exactly once; the caller's exact distance gate decides membership.
 
-A fold rather than a returned list is the whole point: it allocates nothing and needs no per-query
-buffer, which is what a kernel requires and what a tree cannot offer, since a tree walk has to
-deduplicate the periodic images it searches over.
+A fold allocates nothing and needs no per-query buffer, so it runs inside a kernel. A tree walk needs
+one, having to deduplicate the periodic images it searches over.
 """
 function fold_candidates end
 
@@ -269,8 +267,8 @@ end
 """
     fold_candidates_at(f, acc, index, q, r, scratch) -> acc
 
-[`fold_candidates`](@ref) around an arbitrary point `q`, already in the index's embedding, rather than
-around a cell. A cell query is this one at the cell's own centre, so there is one traversal.
+[`fold_candidates`](@ref) around an arbitrary point `q`, already in the index's embedding. A cell query
+is this one at the cell's own centre, so there is a single traversal.
 
 `scratch` is a candidate buffer for an index that has to materialize one — a tree does, since it must
 deduplicate the periodic images it searches over. A cell list folds directly and ignores it.
@@ -291,13 +289,12 @@ function fold_candidates_at(f::F, acc, ix::CellListIndex{D,T}, q::NTuple{D,T}, r
     # A wrapping direction is capped at the lattice width, since beyond that the offsets revisit bins
     # already covered.
     reach = ntuple(d -> @inbounds(ix.wrap[d]) ? min(2 * span[d] + 1, ix.nbins[d]) : 2 * span[d] + 1, Val(D))
-    # A ball much wider than the bin side walks more bins than the lattice holds cells, and most of them
-    # are empty — at which point every cell is a candidate anyway and enumerating them directly is both
-    # cheaper and bounded. Without this a query at 10× the bin side costs `10^D` times its own answer,
-    # and an index built for one radius and queried at a far larger one degenerates without limit.
+    # A ball much wider than the bin side walks more bins than the lattice holds cells, most of them
+    # empty. Every cell is then a candidate, and enumerating them directly bounds the query by `n`
+    # however far the radius exceeds the side the index was built for.
     if _window_bins(reach) > nbucket
-        # Every indexed cell is a candidate. That is `items`, not `1:n`: a masked grid indexes a subset,
-        # and `items` holds the ids it kept.
+        # Every indexed cell is a candidate. The ids come from `items`, since a masked grid indexes a
+        # subset of `1:n`.
         @inbounds for t in eachindex(ix.items)
             acc = f(acc, ix.items[t])
         end
@@ -310,9 +307,8 @@ function fold_candidates_at(f::F, acc, ix::CellListIndex{D,T}, q::NTuple{D,T}, r
         end
         bucket = _bin_hash(b, nbucket)
         for t in ix.starts[bucket]:(ix.starts[bucket + 1] - 1)
-            # A bucket is a hash of a bin and two bins can share one, so the bin decides membership.
-            # It is stored alongside the item, which is what keeps this an integer compare rather than
-            # a coordinate lookup and `D` divisions.
+            # A bucket is a hash of a bin and two bins can share one, so the bin decides membership. It
+            # is stored alongside the item, making the test an integer compare.
             ix.bins[t] == b || continue
             acc = f(acc, ix.items[t])
         end
@@ -344,11 +340,11 @@ direction wrapped first. A direction `p` lies outside reports `0` for that direc
 
 Elsewhere there are no axes to bracket along and it is the **nearest cell centre**, which is exactly the
 containing cell for a node set, whose cells are the Voronoi regions of its nodes. On a curvilinear grid
-the two can differ where cells are strongly sheared, so read it as nearest-centre rather than
-point-in-quadrilateral. That form takes the keywords: `topology` carrying an index — [`cell_list`](@ref)
-— makes it a bin lookup rather than a scan, `scratch` is a `Connectivity.ball_scratch` buffer,
-and `active_only` restricts the answer to unmasked cells (`false` here, unlike the ball queries, since
-the cell a point falls in is a question about the grid rather than about the active region).
+the two can differ where cells are strongly sheared, so the contract is nearest-centre. That form takes
+the keywords: `topology` carrying an index — [`cell_list`](@ref) — makes it a bin lookup, `scratch` is a
+`Connectivity.ball_scratch` buffer, and `active_only` restricts the answer to unmasked cells. It
+defaults to `false` here, where the ball queries default to `true`: which cell a point falls in is a
+question about the grid, answerable over the masked region.
 """
 function locate end
 
@@ -364,9 +360,8 @@ function locate(grid::StructuredGrid{T, G,N}, p::NTuple{N,Real}) where {G,T,N}
         end
         i = Discretization.locate(x, v)
         # The cell straddling the seam has half its extent on each side, so after wrapping into one
-        # period part of it lies beyond the outermost face and `locate` reports "outside". It is
-        # whichever end cell is nearer across the seam — the comparison, not `1`, so a descending axis
-        # is right too.
+        # period part of it lies beyond the outermost face and `locate` reports "outside". The answer
+        # is whichever end cell is nearer across the seam, by comparison, so a descending axis works.
         if i == 0 && per
             n = length(x)
             L = T(period(grid, d))
@@ -430,6 +425,9 @@ different tessellation library): overridden for `CartesianGeometry` by a consume
 DelaunayTriangulation extension (load `using DelaunayTriangulation`, planar Voronoi clipped to the
 point set's convex hull) and for `SphericalGeometry` by a consumer Quickhull extension (load
 `using Quickhull`, spherical Voronoi from the dual of the 3D convex hull of the unit-sphere embedding).
+
+An [`Geometry.AbstractEllipsoidalGeometry`](@ref FlowGeometries.Geometry.AbstractEllipsoidalGeometry)
+has no such construction and says so: its cell areas are the caller's to supply.
 """
 function _voronoi_tessellation(::Geometry.AbstractCartesianGeometry, x::AbstractVector, y::AbstractVector)
     throw(ArgumentError(
@@ -444,6 +442,19 @@ function _voronoi_tessellation(::Geometry.AbstractSphericalGeometry, x::Abstract
     ))
 end
 
+# A cell's area on an ellipsoid is the integral of `M(φ)·N(φ)·cosφ` over a region bounded by geodesic
+# bisectors, which is not the spherical excess the hull dual gives. `SpheroidGeometry` states the rule
+# the whole package follows here: a sphere identity is not applied to an ellipsoid.
+function _voronoi_tessellation(
+    geo::Geometry.AbstractEllipsoidalGeometry, x::AbstractVector, y::AbstractVector,
+)
+    throw(ArgumentError(
+        "$(nameof(typeof(geo))) has no Voronoi-cell areas to derive: the tessellation behind them is " *
+        "built on spherical excess, a sphere identity, where an ellipsoid's cell area integrates " *
+        "`M(φ)·N(φ)·cosφ`. Pass `areas` to the `UnstructuredGrid` constructor.",
+    ))
+end
+
 """
     _voronoi_areas(geometry, x, y) -> Vector{T}
 
@@ -455,20 +466,20 @@ _voronoi_areas(geometry, x::AbstractVector, y::AbstractVector) =
 """
     UnstructuredGrid(geometry, x, y, mask; k=6, radius=nothing, areas=nothing)
 
-Build an `UnstructuredGrid` with REAL neighbor adjacency, via a k-d-tree nearest-neighbor query
-(`NearestNeighbors.jl`; brute-force O(N²) doesn't scale) — either the `k` nearest neighbors per node
-(default `k=6`), or every neighbor within a physical `radius` (pass `radius` to switch; mutually
-exclusive with `k`). For `SphericalGeometry` the tree is built on the 3D Cartesian embedding of the
-nodes (nearest-by-chord-distance is exactly nearest-by-great-circle-distance — exact, not an
-approximation).
+Build an `UnstructuredGrid` whose adjacency comes from a k-d-tree nearest-neighbour search over the
+nodes: either the `k` nearest per node (default `k = 6`), or every neighbour within a physical `radius`.
+The two are mutually exclusive. Requires `NearestNeighbors`.
 
-`areas`: supply per-node cell areas explicitly (common for a real dataset that ships its own), or
-leave `nothing` to auto-compute exact Voronoi-cell areas from a Delaunay/convex-hull tessellation
-(`DelaunayTriangulation.jl` for Cartesian, `Quickhull.jl` for spherical — see [`_voronoi_areas`](@ref)).
+For `SphericalGeometry` the tree is built on the 3-D Cartesian embedding of the nodes, where nearest by
+chord distance and nearest by great-circle distance give the same ordering.
 
-`periodic`/`period` declare a wrapping domain, and the neighbor search honors it: a node near one
-face finds the nodes across the opposite face as genuine neighbors. Spherical longitude wraps by
-default; a Cartesian box is opt-in and needs its `period`.
+`areas` supplies per-node cell areas, as a dataset that ships its own does; `nothing` derives exact
+Voronoi-cell areas from a Delaunay or convex-hull tessellation (`DelaunayTriangulation.jl` for
+Cartesian, `Quickhull.jl` for spherical — see [`_voronoi_areas`](@ref)).
+
+`periodic`/`period` declare a wrapping domain, and the neighbour search honours it: a node near one face
+finds the nodes across the opposite face. Spherical longitude wraps by default; a Cartesian box is
+opt-in and needs its `period`.
 """
 UnstructuredGrid(
     geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
@@ -488,10 +499,9 @@ function UnstructuredGrid(
         periodic = map(_is_periodic, per), period = prd,
     )
     # Voronoi tessellation is a 2-D algorithm (planar Delaunay / spherical convex hull), so past two
-    # directions the control volumes are the caller's to supply — the neighbour search is not, and is
-    # built for any `N` above.
-    # The tessellation returns the cells it built as well as the areas it derived from them, and the
-    # grid keeps both. Supplying `areas` skips the tessellation
+    # directions the control volumes are the caller's to supply. The neighbour search above holds for
+    # any `N`. The tessellation returns the cells it built alongside the areas it derived from them,
+    # and the grid keeps both; supplying `areas` skips it.
     areas_T, mesh = if areas !== nothing
         (_to_axis(T, areas), nothing)
     elseif N == 2
@@ -521,10 +531,10 @@ The CSR adjacency arrays: the flat neighbour indices, and the per-node offsets i
 
 The neighbours of cell `I`, as a lazy sequence of linear indices that allocates nothing.
 
-Where they come from is the layout's [`adjacency_source`](@ref): index-space offsets, which is what
-`stencil` selects among, or the mesh's own stored incidence, which no stencil ranges over.
+Where they come from is the layout's [`adjacency_source`](@ref): index-space offsets, which `stencil`
+selects among, or the mesh's own stored incidence, over which a stencil has no meaning.
 
-`active_only` holds either way — a masked cell has no neighbours, and a masked cell is not one. See
+`active_only` applies either way: a masked cell has no neighbours and is nobody's neighbour. See
 [`incident_nodes`](@ref) for the unfiltered storage behind a stored graph.
 """
 function neighbors end
@@ -534,8 +544,8 @@ function neighbors end
 
 The nodes stored as incident to node `idx`, as a zero-copy view into the CSR adjacency.
 
-Storage, not a query: it reports what the mesh holds, with no regard for the mask. `neighbors` is the
-query, and it honours `active_only` on every layout.
+This is storage: it reports what the mesh holds, with no regard for the mask. `neighbors` is the query,
+and it honours `active_only` on every layout.
 """
 @inline function incident_nodes(grid::AbstractUnstructuredGrid, idx::Integer)
     ptr = neighbor_ptr(grid)

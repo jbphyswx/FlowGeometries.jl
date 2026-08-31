@@ -5,7 +5,7 @@ module Geometry
 # are intentionally not exported.
 
 # Spheroid before Frames: the local frame is shared by the spherical and the ellipsoidal hierarchy, and
-# the type naming that union is evaluated where it is written rather than when it is first called.
+# the `const` naming that union is evaluated at its definition, so both hierarchies must exist by then.
 include("Geometry/Metric.jl")
 include("Geometry/Spheroid.jl")
 include("Geometry/Frames.jl")

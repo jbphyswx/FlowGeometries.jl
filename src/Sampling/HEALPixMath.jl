@@ -7,10 +7,10 @@ healpix_nring(s::HEALPixSampling) = healpix_nring(s.nside)
 healpix_pixel_area(nside::Integer) = 4π / healpix_npix(nside)
 healpix_pixel_area(s::HEALPixSampling) = healpix_pixel_area(s.nside)
 
-# A ring walk, not a pixel walk: colatitude is constant along a ring, so the `acos` and the latitude
-# conversion happen `4·nside − 1` times rather than `12·nside²`, and a pixel's longitude is
-# `(j − shift)·Δϕ` with `Δϕ` the ring's. `ringpix` is `4·nr` in every regime, so one expression for `Δϕ`
-# reproduces all three exactly.
+# A ring walk: colatitude is constant along a ring, so the `acos` and the latitude conversion run
+# `4·nside − 1` times over the `12·nside²` pixels, and a pixel's longitude is `(j − shift)·Δϕ` with `Δϕ`
+# the ring's. `ringpix` is `4·nr` in every regime, so one expression for `Δϕ` reproduces all three
+# exactly.
 function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, s::HEALPixSampling) where {T<:AbstractFloat}
     npix = healpix_npix(s)
     length(λ) == npix && length(φ) == npix || throw(DimensionMismatch("buffers must have length healpix_npix"))
@@ -34,6 +34,43 @@ spherical_points(s::HEALPixSampling) = spherical_points(Float64, s)
 function spherical_points(::Type{T}, s::HEALPixSampling) where {T<:AbstractFloat}
     n = npoints(s)
     return spherical_points!(Vector{T}(undef, n), Vector{T}(undef, n), s)
+end
+
+"""
+    _healpix_nested_cloud!(λ, φ, nside) -> (; λ, φ)
+
+The whole HEALPix cloud in NESTED pixel order.
+
+The ring quantities are tabulated once, `4·nside − 1` of them, so the `acos` and the latitude conversion
+run per ring here too. A nested pixel's ring and position along it come from its face coordinates
+(`_hp_xyf2ringj`), and the coordinates are then the ring walk's own expressions, so the two
+orderings hold the same numbers to the bit. Both writes are sequential.
+"""
+function _healpix_nested_cloud!(
+    λ::AbstractVector{T}, φ::AbstractVector{T}, nside::Integer,
+) where {T<:AbstractFloat}
+    ns = Int(nside)
+    _require_nested_nside(ns)
+    npix = healpix_npix(ns)
+    length(λ) == npix && length(φ) == npix ||
+        throw(DimensionMismatch("buffers must have length healpix_npix"))
+    nring = healpix_nring(ns)
+    Δϕ = Vector{T}(undef, nring)
+    shift = Vector{T}(undef, nring)
+    lat = Vector{T}(undef, nring)
+    @inbounds for r in 1:nring
+        info = ring_info(T, ns, r)
+        Δϕ[r] = T(π) / (T(2) * T(info.ringpix ÷ 4))
+        shift[r] = info.shifted ? T(0.5) : one(T)
+        lat[r] = info.latitude
+    end
+    @inbounds for p in 0:(npix - 1)
+        ix, iy, f = _hp_nest2xyf(ns, p)
+        jr, jp, _ = _hp_xyf2ringj(ns, ix, iy, f)
+        λ[p + 1] = mod((T(jp) - shift[jr]) * Δϕ[jr], T(2π))
+        φ[p + 1] = lat[jr]
+    end
+    return (; λ, φ)
 end
 
 function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractFloat}
@@ -154,7 +191,10 @@ function _hp_ring2xyf(nside::Int, pix::Int)
     return ix, iy, face_num
 end
 
-function _hp_xyf2ring(nside::Int, ix::Int, iy::Int, face_num::Int)
+# A pixel's ring `jr` and its 1-based position `jp` along that ring, from its face coordinates. The ring
+# index is what the ring walk indexes and `jp` the `j` it writes at, so a caller holding a per-ring table
+# reaches a pixel's coordinates from these two without forming its ring index at all.
+@inline function _hp_xyf2ringj(nside::Int, ix::Int, iy::Int, face_num::Int)
     nl4 = 4 * nside
     jr = (_HP_JRLL[face_num + 1] * nside) - ix - iy - 1
     info = _hp_get_ring_info_small(nside, jr)
@@ -162,7 +202,12 @@ function _hp_xyf2ring(nside::Int, ix::Int, iy::Int, face_num::Int)
     kshift = 1 - Int(info.shifted)
     jp = (_HP_JPLL[face_num + 1] * nr + ix - iy + 1 + kshift) ÷ 2
     jp < 1 && (jp += nl4)
-    return info.startpix + jp - 1
+    return jr, jp, info.startpix
+end
+
+function _hp_xyf2ring(nside::Int, ix::Int, iy::Int, face_num::Int)
+    _jr, jp, startpix = _hp_xyf2ringj(nside, ix, iy, face_num)
+    return startpix + jp - 1
 end
 
 
@@ -189,12 +234,10 @@ The ordering that makes a neighbourhood contiguous. Requires `nside` to be a pow
 """
 struct Nested <: RingScheme end
 
-# Bit interleaving: NESTED packs the two face-local coordinates into one index by placing `ix` on the
-# even bit positions and `iy` on the odd ones, which is what makes each pixel's four children adjacent.
-# Done as a fixed cascade of mask-and-shift rather than a branch per bit: the interleave doubles the
-# gap between bits five times, which spreads all 32 input bits at once. Measured against the per-bit
-# loop over the whole domain it covers, same answers, 10.3 ns → 1.7 ns spreading and 9.1 ns → 1.7 ns
-# compressing — paid on every pixel of a NESTED conversion.
+# Bit interleaving: the nested scheme packs the two face-local coordinates into one index by placing
+# `ix` on the even bit positions and `iy` on the odd ones, which puts a pixel's four children at
+# consecutive indices. The cascade below doubles the gap between bits five times, spreading all 32
+# input bits with no branch and no loop.
 @inline function _spread_bits(v::Int)
     x = UInt64(v) & 0x00000000ffffffff
     x = (x | (x << 16)) & 0x0000ffff0000ffff
@@ -234,9 +277,9 @@ end
 """
     _hp_ang2xyf(nside, θ, ϕ) -> (ix, iy, face)
 
-Face-local coordinates of the pixel containing colatitude `θ`, longitude `ϕ`, by the HEALPix
-projection (Górski et al. 2005). Written with division and remainder rather than shift and mask, so it
-holds for any `nside` rather than only a power of two.
+Face-local coordinates of the pixel containing colatitude `θ`, longitude `ϕ`, by the HEALPix projection
+(Górski et al. 2005). Division and remainder, so it holds for any `nside`; shift and mask would need a
+power of two.
 """
 function _hp_ang2xyf(nside::Int, θ::T, ϕ::T) where {T<:AbstractFloat}
     z = cos(θ)
@@ -348,8 +391,8 @@ end
     ring2nest(nside, pix) -> Int
     nest2ring(nside, pix) -> Int
 
-Convert a 0-based pixel index between the two orderings. Both need `nside` to be a power of two,
-which is what makes the NESTED quadtree exist.
+Convert a 0-based pixel index between the two orderings. Both need `nside` to be a power of two, which
+is the condition for the nested quadtree to exist.
 """
 function ring2nest(nside::Integer, pix::Integer)
     ns = Int(nside)

@@ -6,7 +6,7 @@
 # needs no sort of the candidate set and no allocation, and it is the same code for every architecture
 # because it consumes `fold_within`.
 # Ordered by (distance, index), so an equal-distance tie resolves the same way whatever order the
-# traversal happened to visit in — which is what makes an indexed query and a scan agree exactly.
+# traversal visited in, and an indexed query and a scan return the same cells.
 @inline _knn_after(d1, i1, d2, i2) = d1 > d2 || (d1 == d2 && i1 > i2)
 
 @inline function _heap_sift_down!(ds, is, n::Int, root::Int)
@@ -54,10 +54,10 @@ end
 end
 
 # A radius to start the search from: the cell's own size scaled to hold roughly `k` of them. Too small
-# only costs a doubling, and the doubling is what makes the result independent of the guess.
+# costs a doubling, and the doubling makes the result independent of the guess.
 #
-# The root is over the COORDINATE directions, which is what turns a measure into a length: a spherical
-# cell's measure is an area and its square root a distance, whatever the rank of the index space.
+# The root is over the coordinate directions, which turns a measure into a length: a spherical cell's
+# measure is an area and its square root a distance, whatever the rank of the index space.
 @inline function _knn_seed_radius(grid::Grids.AbstractGrid{G,T}, I, k::Int) where {G,T}
     D = Grids.ncoordinates(grid)
     m = T(Grids.measure(grid, I...))

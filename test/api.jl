@@ -295,8 +295,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         # the `!` forms of those, whose buffers are the caller's — covered by the `!`-form testset
         [:spherical_axes!, :spherical_points!, :spherical_quadrature!, :latitude_weights!,
          :icosahedral_vertices!, :cubed_sphere_points!, :yin_yang_panels!],
-        # take a function and run it; cost is the body's, not theirs
         [:run_chunks, :run_indices, :map_chunks, :reduce_indices, :exclusive_scan!],
+        [:allocate, :scalar],
         # builds a NamedTuple from names given at runtime, so the caller chooses the cost
         [:build_point],
     )))
@@ -311,7 +311,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :base_grid, :rotation,
          :AbstractTopology, :Bounded, :Periodic,
          :AllActive, :SeparableMeasure, :SlabMeasure, :PoleRotation, :AbstractImageConvention,
-         :AbstractReach,
+         :AbstractReach, :AxisSummary,
          :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
          :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
          :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
@@ -335,6 +335,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :corners, :corner_coords, :has_corners, :neighbor_nbrs, :distance, :embedded_points,
          :cell_list,
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
+         :has_symmetric_adjacency,
          :CellMesh, :cell_mesh, :has_cell_mesh, :ncells, :cell_nodes, :node_cells,
          :spatial_order, :reorder,
          :sampling, :rebuild, :ncoordinates, :ncomponents, :materialize, :cells, :cell_at, :embedded_at,

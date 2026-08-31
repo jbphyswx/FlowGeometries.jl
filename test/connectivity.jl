@@ -56,6 +56,43 @@ Test.@testset "Curvilinear periodicity" begin
     Test.@test FG.Connectivity.linear_index(g, 1, 2) in nbr
 end
 
+Test.@testset "A built CSR is stored at the narrowest width that holds it" begin
+    C = FG.Connectivity
+    GD = FG.Grids
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    Test.@test C._index_type(10) === Int32
+    Test.@test C._index_type(typemax(Int32)) === Int32
+    Test.@test C._index_type(typemax(Int32) + 1) === Int
+
+    # One width serves both buffers: `nbrs` holds node ids and `ptr` offsets into it, and a
+    # `SparseMatrixCSC` declares a single index type for the pair.
+    sph = GE.SphericalGeometry(6.371e6)
+    cart = GE.CartesianGeometry{Float64}()
+    for g in (GD.HEALPixGrid(4), GD.CubedSphereGrid(4), GD.IcosahedralGrid(3),
+              GD.YinYangGrid(8, 6), GD.RingGrid(sph, SS.OctahedralGaussianSampling(8)),
+              GD.StructuredGrid(cart, 0.0:1.0:9.0, 0.0:1.0:7.0))
+        conn = C.build_connectivity(g)
+        Test.@test eltype(conn.ptr) === Int32 && eltype(conn.nbrs) === Int32
+        Test.@test conn.ptr[end] - 1 == length(conn.nbrs)
+        n = C.nnodes(conn)
+        Test.@test all(1 ≤ Int(j) ≤ n for j in conn.nbrs)
+        cs = GD.cells(g)
+        Test.@test all(sort(collect(GD.neighbors(conn, k))) ==
+                       sort(collect(GD.neighbors(g, GD.cell_at(g, cs[k])...))) for k in 1:n)
+    end
+    # The sampling builders, the ball builder and the edge-list builder narrow the same way.
+    for c in (C.build_connectivity(SS.HEALPixSampling(4)),
+              C.build_connectivity(SS.IcosahedralSampling(3)),
+              C.build_connectivity(SS.CubedSphereSampling(), 4),
+              C.build_connectivity_within(GD.StructuredGrid(cart, 0.0:1.0:9.0, 0.0:1.0:7.0);
+                                          ball = 2.5))
+        Test.@test eltype(c.ptr) === Int32 && eltype(c.nbrs) === Int32
+        Test.@test c.ptr[end] - 1 == length(c.nbrs)
+        Test.@test C.is_symmetric_adjacency(c)
+    end
+end
+
 Test.@testset "Spherical sampling connectivity" begin
     function _symmetric(conn)
         A = FG.Connectivity.adjacency_matrix(conn)
@@ -132,6 +169,24 @@ Test.@testset "Spherical sampling connectivity" begin
     for k in 1:length(cs)
         Test.@test sort(collect(FG.Grids.neighbors(csconn, k))) ==
                    sort(collect(FG.Grids.neighbors(cs, k)))
+    end
+
+    # The geodesic's adjacency is arithmetic in `(ν, id)`, so the sampling builds it per vertex and
+    # the `20ν²` triangles and `30ν²` edges of the mesh are never formed. Row for row it is the graph
+    # the mesh's undirected edge list gives, and the graph the layout reports.
+    for ν in (1, 2, 3, 5, 8)
+        a = FG.Connectivity.build_connectivity(FG.SphericalSampling.IcosahedralSampling(ν))
+        mesh = FG.SphericalSampling.icosahedral_mesh(ν)
+        b = FG.Connectivity._csr_from_undirected_edges(length(mesh.λ), mesh.edges)
+        g = FG.Grids.IcosahedralGrid(ν)
+        nv = FG.SphericalSampling.icosahedral_nvertices(ν)
+        Test.@test FG.Connectivity.nnodes(a) == nv
+        Test.@test FG.Connectivity.nedges(a) == FG.Connectivity.nedges(b)
+        Test.@test all(sort(collect(FG.Grids.neighbors(a, k))) ==
+                       sort(collect(FG.Grids.neighbors(b, k))) for k in 1:nv)
+        Test.@test all(sort(collect(FG.Grids.neighbors(a, k))) ==
+                       sort(collect(FG.Grids.neighbors(g, k))) for k in 1:nv)
+        Test.@test _symmetric(a)
     end
 end
 
@@ -1772,12 +1827,34 @@ Test.@testset "A Connected query reuses its buffers, and works on every adjacenc
                                                             reach = C.Connected(S.Moore(1)))
     end
 
-    # With a scratch the query allocates nothing, which is what its `Unrestricted` sibling already did.
+    # The query allocates nothing, matching its `Unrestricted` sibling — with a scratch of the
+    # caller's, and with the per-task pool a query that names none borrows from.
     let s = C.connected_scratch(), hp = GD.HEALPixGrid(sph, 4), s2 = C.connected_scratch()
         Test.@test _alloc(q_conn, g, ball, s) == 0
         Test.@test _alloc(q_connf, hp, 3.0e6, s2) == 0
-        # …and without one it still answers, just at a cost
-        Test.@test _alloc(q_conn, g, ball, nothing) > 0
+        Test.@test _alloc(q_conn, g, ball, nothing) == 0
+        Test.@test _alloc(q_connf, hp, 3.0e6, nothing) == 0
+    end
+
+    # The borrow nests: `f` runs while the outer query's buffers hold its ball, so a query made from
+    # inside it takes its own. Both answers stay the ones a standalone query gives.
+    let inner_ok = Ref(true)
+        outer = C.fold_within(Int[], g, 12, 9; ball = ball, reach = C.Connected()) do v, J, _
+            k = C.nneighbors_within(g, J...; ball = 3.0, reach = C.Connected())
+            k == C.nneighbors_within(g, J...; ball = 3.0, reach = C.Connected(),
+                                     scratch = C.connected_scratch()) || (inner_ok[] = false)
+            push!(v, C._sweep_linear(g, J))
+            return v
+        end
+        Test.@test sort(outer) == conn
+        Test.@test inner_ok[]
+    end
+
+    # And the pool is per task, so two tasks querying at once cannot reach the same buffers.
+    let t1 = Threads.@spawn(sort(C.neighbors_within(g, 12, 9; ball = ball, reach = C.Connected()))),
+        t2 = Threads.@spawn(sort(C.neighbors_within(g, 12, 9; ball = ball, reach = C.Connected())))
+        Test.@test fetch(t1) == conn
+        Test.@test fetch(t2) == conn
     end
 end
 
@@ -1828,6 +1905,35 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         Test.@test abs(out[1] - v) < 1e-12 && abs(out[2] - 2v) < 1e-12 && abs(out[3] + v) < 1e-12
     end
 
+    # A fit over a neighbourhood is refused where the mask left a hole inside it, and that costs a
+    # second range query. An `AllActive` grid has no cell to hide, so it is not asked.
+    let ga = GD.UnstructuredGrid(cart, (xs, ys); k = 6, areas = ones(np)),
+        mk = trues(np)
+        mk[24] = false
+        gm = GD.UnstructuredGrid(cart, (xs, ys), mk; k = 6, areas = ones(np))
+        Test.@test GD.mask(ga) isa GD.AllActive
+        Test.@test !O._mask_may_hide(ga, O.BlankMasked(), true)
+        Test.@test O._mask_may_hide(gm, O.BlankMasked(), true)
+        Test.@test !O._mask_may_hide(gm, O.BlankMasked(), false)
+        for q in ((3.1, 2.2), (1.4, 4.6), (5.0, 1.2))
+            Test.@test O.interpolate(f, ga, q; k = 6) ≈ α * q[1] + β * q[2] + γ rtol = 1e-8
+        end
+    end
+
+    # …and the count test alone would misread a TIE for a hole: on a regular all-active lattice more
+    # cells sit at exactly the k-th distance than `k_nearest` kept, with nothing skipped.
+    let rx = [Float64(i) for _ in 0:8 for i in 0:8],
+        ry = [Float64(j) for j in 0:8 for _ in 0:8]
+        nr = length(rx)
+        gr = GD.UnstructuredGrid(cart, (rx, ry); k = 6, areas = ones(nr))
+        fr = α .* rx .+ β .* ry .+ γ
+        q = (4.0, 4.0)
+        _idx, dist = FG.Connectivity.k_nearest(gr, q; k = 3)
+        Test.@test FG.Connectivity.nneighbors_within(gr, q; ball = dist[end],
+                                                     active_only = false) > 3
+        Test.@test O.interpolate(fr, gr, q; k = 3) ≈ α * 4.0 + β * 4.0 + γ rtol = 1e-8
+    end
+
     # On a sphere the cells come from the hull of the unit-vector embedding, which is the spherical
     # Delaunay triangulation: a closed one has exactly 2n-4 of them.
     let R = 6.371e6, sph = GE.SphericalGeometry(R), nn = 200
@@ -1838,6 +1944,34 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         Test.@test GD.ncells(ms) == 2nn - 4
         Test.@test all(length(GD.node_cells(ms, i)) ≥ 3 for i in 1:nn)
         Test.@test sum(GD.measure(gs)) ≈ 4π * R^2 rtol = 1e-9
+        # The mesh's IDS are the narrow width — node numbers, facet numbers — and its OFFSETS run to
+        # the entry count `3·ncells`, which is six times the node count.
+        Test.@test eltype(ms.cell_nodes) === Int32 && eltype(ms.node_cells) === Int32
+        Test.@test eltype(ms.cell_ptr) === Int && eltype(ms.node_ptr) === Int
+        Test.@test ms.cell_ptr[end] - 1 == length(ms.cell_nodes)
+        Test.@test ms.node_ptr[end] - 1 == length(ms.node_cells)
+        # The neighbour CSR splits the same way: ids narrow, offsets holding the edge count.
+        Test.@test eltype(GD.neighbor_nbrs(gs)) === Int32
+        Test.@test eltype(GD.neighbor_ptr(gs)) === Int
+        Test.@test GD.neighbor_ptr(gs)[end] - 1 == length(GD.neighbor_nbrs(gs))
+
+        # A cell's area on an ellipsoid is not the spherical excess the hull dual gives, so a spheroid
+        # node set names what it needs: `areas`, supplied by the caller.
+        let spd = GE.SpheroidGeometry()
+            e = try
+                GD.UnstructuredGrid(spd, (λ, φ); k = 6)
+                nothing
+            catch err
+                err
+            end
+            Test.@test e isa ArgumentError
+            Test.@test occursin("areas", sprint(showerror, e))
+            # …and with them supplied it builds, carrying no mesh.
+            gsp = GD.UnstructuredGrid(spd, (λ, φ); k = 6, areas = ones(nn))
+            Test.@test length(gsp) == nn
+            Test.@test !GD.has_cell_mesh(gsp)
+            Test.@test FG.Connectivity.nneighbors(gsp, 1) > 0
+        end
         # Exact for a field linear in the tangent plane AT the query point, which is where the
         # barycentric combination is taken.
         for q in ((0.4, 0.3), (2.0, -0.6), (5.5, 0.9))

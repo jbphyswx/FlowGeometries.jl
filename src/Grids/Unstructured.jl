@@ -6,12 +6,12 @@
     CellMesh(cell_ptr, cell_nodes, node_ptr, node_cells)
     CellMesh(cell_ptr, cell_nodes, nnodes)
 
-A node set's CELLS, and the nodes each one joins — both directions, each as CSR.
+A node set's cells, and the nodes each one joins — both directions, each as CSR.
 
-Node→node adjacency says which nodes are linked; it does not say which nodes bound a face. Only the
-cells do, and they are what an area, a flux through an edge, or an interpolation inside a triangle is
-defined on. A triangulation is what produces them, and the tessellation that computes a node set's
-Voronoi areas has already built one: this is that mesh, kept rather than discarded.
+Node→node adjacency says which nodes are linked; it does not say which nodes bound a face. The cells do,
+and an area, a flux through an edge, or an interpolation inside a triangle is defined on them. A
+triangulation produces them, and the tessellation that computes a node set's Voronoi areas builds one,
+which is the mesh held here.
 
 - `cell_nodes[cell_ptr[c] : cell_ptr[c+1]-1]` are the nodes of cell `c`, in order around it
 - `node_cells[node_ptr[i] : node_ptr[i+1]-1]` are the cells incident on node `i`
@@ -19,9 +19,8 @@ Voronoi areas has already built one: this is that mesh, kept rather than discard
 Both are `O(n)`: a triangulation of `n` nodes has about `2n` triangles and `6n` entries either way.
 The second is the transpose of the first and the two-argument form builds it.
 
-The cells are a triangulation or the caller's own. They are NOT a `k`-nearest graph: that is not
-planar, not symmetric once truncated, and its "cells" do not tile anything, so every quantity defined
-on a cell would be defined on a fiction.
+The cells are a triangulation or the caller's own. A `k`-nearest graph is neither planar nor symmetric
+once truncated, and its cells tile nothing, so it cannot serve here.
 """
 struct CellMesh{VI<:AbstractVector{<:Integer},VP<:AbstractVector{<:Integer}}
     cell_ptr::VP
@@ -101,24 +100,21 @@ Base.show(io::IO, m::CellMesh) =
 Unstructured mesh (e.g. radial data, finite volume, or triangular mesh) where coords are 1D vectors.
 
 # Type parameters
-- `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it (a mismatched-eltype geometry is
-  a type error, not a silent promotion) — hence `T` precedes `G` (Julia forbids the forward reference
-  `G<:AbstractGeometry{T}, T` needed to keep the `{G,T}` order), matching the same convention
-  [`CurvilinearGrid`](@ref) uses.
-- `C`: tuple type of the per-direction node-coordinate vectors (a node set's own coordinate vectors
-  are legitimately almost always the same concrete type).
-- `VA`: vector type of the derived `measure` field — independent of `C`, since it is frequently a
-  computed field (Voronoi tessellation) with no reason to match the coordinate vectors' storage type.
+- `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
+  raises a type error. `T` therefore precedes `G`, Julia forbidding the forward reference
+  `G<:AbstractGeometry{T}, T` a `{G,T}` order would need, on the convention
+  [`CurvilinearGrid`](@ref) follows.
+- `C`: tuple type of the per-direction node-coordinate vectors.
+- `VA`: vector type of the derived `measure` field, independent of `C`, a Voronoi tessellation having
+  no reason to match the coordinate vectors' storage type.
 - `B`: mask storage type.
-- `VN`/`VP`: CSR neighbor-list and offset storage types, independent of each other. Their element
-  type is a free `Integer`, so a large mesh can carry `Int32` indices (half the memory and bandwidth
-  of `Int64`, and the width GPU kernels want) without needing a separate grid type.
+- `VN`/`VP`: CSR neighbour-list and offset storage types, independent of each other. Their element type
+  is a free `Integer`, so a large mesh carries `Int32` indices — half the memory and bandwidth of
+  `Int64`, and the width a GPU kernel wants — through this same type.
 
-Neighbor adjacency is stored CSR-style (flat `neighbor_nbrs` + `neighbor_ptr` offsets, node `t` owns
-`neighbor_ptr[t]:neighbor_ptr[t+1]-1`) rather than as a vector of per-node vectors — the data is
-immutable after construction, so there's no reason to pay for `Nnodes` separately-heap-allocated
-`Vector`s (cache-unfriendly pointer-chasing, one allocation per node) when one contiguous block (two
-allocations total) holds the same information.
+Neighbour adjacency is CSR: a flat `neighbor_nbrs` with `neighbor_ptr` offsets, node `t` owning
+`neighbor_ptr[t]:neighbor_ptr[t+1]-1`. The adjacency is immutable after construction, so the whole
+graph is two contiguous allocations and a traversal reads them in order.
 """
 struct UnstructuredGrid{
     T<:AbstractFloat,
@@ -195,28 +191,26 @@ Scattered nodes usually arrive in whatever order they were generated, and a neig
 jumps across the whole array per edge. Along a space-filling curve, neighbours in space are neighbours
 in memory, so `neighbor_nbrs[ptr[i]:ptr[i+1]-1]` reads mostly-adjacent addresses.
 
-The order is a property of the POINTS, not of the order they came in: the same set, differently
-shuffled, sorts to the same sequence. So this repairs an incoherent input order and does not improve
-on one that is already coherent.
+The order is a property of the points: the same set, differently shuffled, sorts to the same sequence.
+So this repairs an incoherent input order and leaves a coherent one as it is.
 
-This RETURNS the permutation rather than applying it, and construction does not apply it either. The
-node index is the caller's handle on their own data: a grid that quietly renumbered would leave every
-field they hold pointing at the wrong node. Apply it with [`reorder`](@ref) and permute those fields
-the same way.
+The permutation is returned, and construction does not apply it. The node index is the caller's handle
+on their own data, and a renumbering here leaves every field they hold pointing at the wrong node.
+Apply it with [`reorder`](@ref) and permute those fields the same way.
 """
 function spatial_order(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
     n = length(mask(grid))
     n < 2 && return collect(1:n)
-    # Keyed on the EMBEDDED position, not the raw coordinates: on a sphere longitude wraps, and two
-    # nodes either side of the seam are neighbours in space whose `λ` differ by a whole turn. The
-    # ambient position has no seam, so the curve does not cut there.
+    # Keyed on the embedded position: on a sphere longitude wraps, and two nodes either side of the
+    # seam are neighbours in space whose `λ` differ by a whole turn. The ambient position has no seam,
+    # so the curve does not cut there.
     pts = [embed_point(grid, _raw_coords(grid, i)) for i in 1:n]
     D = length(first(pts))
     bits = min(64 ÷ D, 21)
     span = UInt64(1) << bits - one(UInt64)
     lo = ntuple(d -> minimum(p[d] for p in pts), D)
     hi = ntuple(d -> maximum(p[d] for p in pts), D)
-    # A direction of zero extent quantizes to one bucket rather than dividing by nothing.
+    # A direction of zero extent quantizes to a single bucket, with no division.
     scale = ntuple(d -> hi[d] > lo[d] ? T(span) / T(hi[d] - lo[d]) : zero(T), D)
     keys = Vector{UInt64}(undef, n)
     @inbounds for i in 1:n
@@ -288,10 +282,10 @@ end
 Build a node grid in **any** number of directions from one coordinate vector per direction and CSR
 adjacency. Coordinates come as a tuple; the two-direction case may pass `x, y` positionally.
 
-Omitting the CSR pair gives a grid with no adjacency — every node reports zero neighbours, which is
-enough for scattered-point spectral methods that never query it. Real-space neighbourhood operations
-need adjacency: build it (e.g. through the k-d-tree constructor below) and pass it in, or query by
-distance with `Connectivity.neighbors_within`, which reads coordinates rather than edges.
+Omitting the CSR pair gives a grid with no adjacency — every node reports zero neighbours, which serves
+a scattered-point spectral method that never queries it. A real-space neighbourhood operation needs
+adjacency: build it (e.g. through the k-d-tree constructor below) and pass it in, or query by distance
+with `Connectivity.neighbors_within`, which reads coordinates.
 
 `periodic` declares that the enclosing domain wraps in a direction, and `period` gives the wrap
 length there. A scattered point set carries no axis to infer this from, so both are explicit —
@@ -310,9 +304,9 @@ function UnstructuredGrid(
     ))
     length(mask) == n || throw(ArgumentError("coordinates and mask must have the same length"))
     length(measure) == n || throw(ArgumentError("coordinates and measure must have the same length"))
-    # No CSR pair given: every node reports zero neighbours, which is `ptr` all-ones — and a constant
-    # vector says that in one number rather than `n + 1` copies of it. `neighbors` reads it through the
-    # same `ptr[i]:ptr[i+1]-1` slice and gets an empty range.
+    # No CSR pair given: every node reports zero neighbours, which is `ptr` all-ones, held as a
+    # constant vector in one number. `neighbors` reads it through the same `ptr[i]:ptr[i+1]-1` slice
+    # and gets an empty range.
     p = ptr === nothing ? Axes.ConstantVector(1, n + 1) : ptr
     nb = ptr === nothing ? Int[] : nbrs
     length(p) == n + 1 || throw(ArgumentError(

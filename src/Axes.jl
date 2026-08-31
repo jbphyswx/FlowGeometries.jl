@@ -2,7 +2,7 @@ module Axes
 
 # Coordinate-axis storage, and the spacing trait everything else dispatches on. An axis is either
 # provably uniform — its type carries the spacing — or nonuniform, where the samples are the only
-# description. Keeping that in the type is what lets the fast paths be selected at compile time.
+# description. The trait is in the type, so the fast paths are selected at compile time.
 
 # ---------------------------------------------------------------------------
 # Spacing trait
@@ -12,8 +12,8 @@ module Axes
     UniformSpacing()
     NonuniformSpacing()
 
-Whether an axis's spacing is known from its type. [`spacing_trait`](@ref) returns one of these, for
-dispatch rather than a runtime branch.
+Whether an axis's spacing is known from its type. [`spacing_trait`](@ref) returns one of these, so a
+method can dispatch on it.
 """
 struct UniformSpacing end
 
@@ -26,9 +26,8 @@ struct NonuniformSpacing end
 The axis's spacing trait. [`UniformAxis`](@ref) and any `AbstractRange` carry a constant step in
 their type; every other array is nonuniform.
 
-This is the compile-time question, not the data question: a `Vector` holding an arithmetic sequence is
-`NonuniformSpacing()` because its type does not say otherwise, and no code path here inspects values to
-decide otherwise — the fast paths are selected by type alone.
+The question is answered by the type: a `Vector` holding an arithmetic sequence is
+`NonuniformSpacing()`. No code path here inspects values to decide it.
 """
 spacing_trait(::AbstractArray) = NonuniformSpacing()
 spacing_trait(::AbstractRange) = UniformSpacing()
@@ -68,8 +67,8 @@ and `Base.length` — and everything else here follows: indexing, the `O(1)` red
 reversal, and the affine arithmetic. None of the generic methods touch a field, so a subtype may store
 whatever it likes under whatever names.
 
-Implement [`similar_axis`](@ref) as well if derived axes should keep the subtype rather than becoming a
-plain `UniformAxis`.
+Implement [`similar_axis`](@ref) as well to have derived axes keep the subtype; without it they come
+back as a plain `UniformAxis`.
 """
 abstract type AbstractUniformAxis{T} <: AbstractRange{T} end
 
@@ -229,7 +228,7 @@ function Base.broadcasted(::typeof(-), a::AbstractUniformAxis, b::AbstractUnifor
     return similar_axis(a, first(a) - first(b), step(a) - step(b), length(a))
 end
 
-# Anything else is not affine — `cos.(axis)` must become a plain array, not pretend otherwise.
+# Any other broadcast leaves the affine family, so `cos.(axis)` becomes a plain array.
 Base.BroadcastStyle(::Type{<:AbstractUniformAxis}) = Broadcast.DefaultArrayStyle{1}()
 
 # A subtype cannot be reconstructed at a promoted eltype generically, so mixing two different uniform
@@ -282,7 +281,7 @@ storing them stores a formula's output.
 A subtype implements three methods:
 
 - `Base.length(a)`
-- [`coordinate`](@ref)`(a, ξ)` — the coordinate at CONTINUOUS index `ξ`, agreeing with `a[i]` at every
+- [`coordinate`](@ref)`(a, ξ)` — the coordinate at continuous index `ξ`, agreeing with `a[i]` at every
   integer `i`
 - [`index_at`](@ref)`(a, x)` — its inverse, the continuous index whose coordinate is `x`
 
@@ -291,10 +290,10 @@ and gets indexing, the `O(1)` endpoint reductions, and — through the inverse �
 `Vector` bisects in `O(log n)`; here the inverse names the cell directly and one comparison against the
 neighbouring face settles the rounding.
 
-The coordinate must be strictly monotone in `ξ`, which is what makes the inverse single-valued. That is
-checked once by a constructor, not on every call. Where `index_at` cannot answer — a coordinate outside
-the formula's domain, which a far-extrapolated face can be — it returns a non-finite value and the
-caller falls back to the search, so the answer is the same either way.
+The coordinate must be strictly monotone in `ξ`, which makes the inverse single-valued. A constructor
+checks it once. Where `index_at` cannot answer — a coordinate outside the formula's domain, which a
+far-extrapolated face can be — it returns a non-finite value and the caller falls back to the search,
+reaching the same answer.
 """
 abstract type AbstractAnalyticAxis{T<:AbstractFloat} <: AbstractVector{T} end
 
@@ -302,9 +301,8 @@ abstract type AbstractAnalyticAxis{T<:AbstractFloat} <: AbstractVector{T} end
     coordinate(a, ξ) -> T
 
 The coordinate of [`AbstractAnalyticAxis`](@ref) `a` at continuous index `ξ`, equal to `a[i]` at every
-integer index. Half-integer `ξ` is what a face sits at in INDEX space, which is not in general where a
-face sits in coordinate space — this package's faces are coordinate midpoints — so it is the formula
-that is being extended here, not the cell boundary.
+integer index. A half-integer `ξ` is the midpoint in index space; this package's faces are midpoints in
+coordinate space, so the two coincide only on a uniform axis. What is extended here is the formula.
 """
 function coordinate end
 
@@ -350,15 +348,15 @@ Base.show(io::IO, ::MIME"text/plain", a::AbstractAnalyticAxis{T}) where {T} =
     GeometricAxis{T}(origin, Δ, ratio, n)
 
 `n` samples whose successive gaps are `Δ, Δ·r, Δ·r², …` — the stretched grid a boundary layer or a
-model's vertical levels are usually built on, held as four numbers rather than `n`.
+model's vertical levels are built on — held as four numbers.
 
     x(ξ) = origin + Δ·(r^(ξ-1) − 1)/(r − 1)
 
-so `x(1) = origin` and `x(i+1) − x(i) = Δ·r^(i-1)`. The inverse is a logarithm, which is what makes
-locating a coordinate on it `O(1)`.
+so `x(1) = origin` and `x(i+1) − x(i) = Δ·r^(i-1)`. The inverse is a logarithm, so locating a
+coordinate is `O(1)`.
 
-`r > 0` and `r ≠ 1`. At `r == 1` the gaps are constant and the axis is a [`UniformAxis`](@ref), which
-carries that in its type; this one would only hide it.
+`r > 0` and `r ≠ 1`. At `r == 1` the gaps are constant, which is a [`UniformAxis`](@ref); that type
+carries the spacing where this one hides it in a parameter.
 """
 struct GeometricAxis{T<:AbstractFloat} <: AbstractAnalyticAxis{T}
     origin::T
@@ -462,8 +460,7 @@ Base.show(io::IO, a::PowerAxis{T}) where {T} = print(
 """
     ConstantVector(value, n)
 
-`n` copies of `value`, stored as that value and a length — which is what a uniform axis's per-cell
-width is.
+`n` copies of `value`, stored as that value and a length. A uniform axis's per-cell width is one.
 
 A genuine `AbstractVector`: indexing, iteration, broadcasting and `collect` behave as for
 `fill(value, n)`. `getindex` folds to a constant and every reduction below is closed-form.
@@ -505,7 +502,7 @@ end
 @inline Base.all(c::ConstantVector{Bool}) = isempty(c) ? true : c.value
 @inline Base.any(c::ConstantVector{Bool}) = isempty(c) ? false : c.value
 
-# `f` is applied once, not n times.
+# One call to `f` covers all `n` entries.
 @inline Base.sum(f, c::ConstantVector{T}) where {T} = T(c.n) * f(c.value)
 @inline Base.prod(f, c::ConstantVector) = f(c.value)^c.n
 @inline Base.minimum(f, c::ConstantVector) =

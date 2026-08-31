@@ -16,6 +16,35 @@ struct CSRConnectivity{VN<:AbstractVector{<:Integer}, VP<:AbstractVector{<:Integ
 end
 
 """
+    _index_type(m) -> Type{<:Integer}
+
+The narrowest integer that holds values up to `m`: `Int32` for anything under two billion.
+
+A builder passes the larger of the node count and the edge count, so a single width serves both
+buffers — `nbrs` holds node ids, `ptr` holds offsets into `nbrs`. At one width the two arrays go
+straight to a `SparseMatrixCSC`, which declares one index type for both.
+
+Halves the CSR's memory and the bandwidth every traversal of it costs, and is the width a device
+kernel wants.
+"""
+@inline _index_type(m::Integer) = m ≤ typemax(Int32) ? Int32 : Int
+
+"""
+    _csr_total(deg, n, backend) -> Int
+
+The CSR's edge count, `sum(deg)`, reduced wherever the counting pass ran.
+
+A builder takes `_index_type(max(n + 1, total))` from it and calls its filling pass through that
+CONCRETE type: `Vector{I}` for an `I` the compiler cannot see is a dynamic call whose buffers are
+typed abstractly for the whole of that pass.
+"""
+@inline function _csr_total(deg::AbstractVector, n::Int, backend)
+    return Execution.reduce_indices(+, 0, n, backend) do k
+        return @inbounds Int(deg[k])
+    end
+end
+
+"""
     csr_connectivity(nbrs, ptr; validate=true) -> CSRConnectivity
 
 Wrap CSR buffers. `validate=false` skips O(nnz) checks (internal / trusted data).

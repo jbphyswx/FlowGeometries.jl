@@ -123,8 +123,8 @@ end
 How many connected inactive regions are fully enclosed by active cells — the number of holes in the
 active region, and so an estimate of its first Betti number.
 
-A region that reaches a non-wrapping edge is outside rather than enclosed. Along a wrapping direction
-there is no edge to reach, so enclosure there is decided by the fill alone.
+A region that reaches a non-wrapping edge counts as outside. Along a wrapping direction there is no
+edge to reach, so enclosure there is decided by the fill alone.
 """
 function count_holes(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1))
     t = IndexTopology(grid)

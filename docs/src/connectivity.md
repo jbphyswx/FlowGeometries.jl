@@ -144,7 +144,7 @@ FG.Connectivity.neighbors_within(g, 1, 7; ball = 1.5e6) ==
 ### Distance between two cells
 
 `Geometry.distance` also takes two cell indices, resolving them through the grid's own topology. Across a
-periodic seam that is the short way round, not the full extent:
+periodic seam it takes the short way round:
 
 ```@example conn
 gper = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
@@ -154,10 +154,10 @@ gper = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
 FG.Geometry.distance(gper, (1, 1), (10, 1)), FG.Grids.displacement(gper, (1, 1), (10, 1))
 ```
 
-[`Grids.displacement`](@ref) is the signed per-direction offset that distance was taken from — a
-coordinate quantity, which is why it sits in `Grids` while the distance extends `Geometry.distance`.
+[`Grids.displacement`](@ref) is the signed per-direction offset that distance was taken from. It is a
+coordinate quantity, so it sits in `Grids`, while the distance extends `Geometry.distance`.
 
-### Convolutions need every image, not the nearest one
+### Convolutions over every image
 
 A neighbour set visits each cell once, at its nearest image. A convolution on a torus cannot: with period
 `L`,
@@ -168,8 +168,8 @@ A neighbour set visits each cell once, at its nearest image. A convolution on a 
 
 so once the kernel support exceeds `L/2` one cell contributes through several images at different
 displacements. [`Connectivity.fold_within`](@ref) takes the convention as an argument —
-[`NearestImage`](@ref) or [`AllImages`](@ref) — and `AllImages` also widens the window, since
-`metric_window`'s one-turn cap would itself discard those images.
+[`NearestImage`](@ref) or [`AllImages`](@ref) — and `AllImages` also widens the window past
+`metric_window`'s one-turn cap, which excludes those images.
 
 ```@example conn
 Nx, Δx = 32, 62.5; Lx = Nx * Δx
@@ -182,14 +182,14 @@ count_within(FG.Connectivity.NearestImage(), 3500.0),
 count_within(FG.Connectivity.AllImages(), 3500.0)
 ```
 
-Below `L/2` the two agree exactly, so nothing that was already correct changes. Above it, filtering one
-Fourier mode with a Gaussian of width `ℓ = L` reproduces the analytic transfer `exp(-k²ℓ²/4α)` to
-roundoff under `AllImages`, while the nearest-image error stays at 40% no matter how far the support is
-widened — the images it drops cannot be recovered by searching further.
+Below `L/2` the two agree exactly. Above it, filtering one Fourier mode with a Gaussian of width `ℓ = L`
+reproduces the analytic transfer `exp(-k²ℓ²/4α)` to roundoff under `AllImages`; under nearest-image the
+error stays at 40% however far the support is widened, since a dropped image is not recovered by
+searching further.
 
 Summing images asserts that a periodic direction is a *translation* of the domain. On a sphere it is an
-identification instead — `λ` and `λ+2π` are the same point — so `AllImages` is refused there rather than
-counting one cell repeatedly.
+identification — `λ` and `λ+2π` are the same point — so `AllImages` raises there, where summing images
+counts one cell repeatedly.
 
 `self = true` folds the centre cell too, at distance zero. A neighbour set excludes it; a convolution
 needs it, and it carries the kernel's largest weight.
@@ -211,10 +211,10 @@ active — and nothing else. That triple is `IndexTopology`, and it is why a cur
 separate implementation from a structured one: it is the `N = 2` case of the same algorithm.
 
 A ball query is the one thing that cannot work that way. It needs coordinates, and the smallest step per
-direction, which is what bounds the candidate window on a **stretched** axis. That is
-[`Connectivity.MetricTopology`](@ref), the same idea for the metric path — and it is `O(1)` to build,
-because it reads the per-axis reductions through [`Grids.minimum_spacing`](@ref) and
-[`Grids.bounds`](@ref), which every layout answers without a scan:
+direction, which bounds the candidate window on a stretched axis. That is
+[`Connectivity.MetricTopology`](@ref), the same idea for the metric path. It is `O(1)` to build: it
+reads the per-axis reductions through [`Grids.minimum_spacing`](@ref) and [`Grids.bounds`](@ref), which
+every layout answers without a scan:
 
 ```@example conn
 mt = FG.Connectivity.MetricTopology(g)
@@ -237,9 +237,9 @@ top = FG.Connectivity.MetricTopology(gc; index = FG.Grids.cell_list(gc; ball = 2
 FG.Connectivity.nneighbors_within(gc, 1; ball = 2.0e6, topology = top)
 ```
 
-Every cell lands in exactly one bin — periodicity wraps the bin coordinate rather than replicating the
-point — so a query emits each cell once and needs no buffer to deduplicate into. That is what lets it
-run inside a kernel, and it is why the sweeps build one by default.
+Every cell lands in exactly one bin — periodicity wraps the bin coordinate, leaving the point where it
+is — so a query emits each cell once and needs no buffer to deduplicate into. It therefore runs inside
+a kernel, and the sweeps build one by default.
 
 [`Connectivity.indexed`](@ref) is the alternative, a k-d tree, and needs `NearestNeighbors`:
 
@@ -255,9 +255,9 @@ The index only ever returns a *superset* of the ball — the exact `distance ≤
 membership — so an indexed query and a scan return the same cells, and loading the extension changes
 speed and nothing else.
 
-A neighbour list is a **set**: which order the cells come back in is whatever enumerated them, and no
-query sorts, since that would put an `O(m log m)` pass on top of an `O(m)` query for something nothing
-needs. [`Connectivity.sort_neighbors!`](@ref) is there when you do want it.
+A neighbour list is a **set**: the cells come back in whatever order enumerated them, and no query
+sorts, which puts an `O(m log m)` pass on an `O(m)` query. [`Connectivity.sort_neighbors!`](@ref) sorts
+on request.
 [`Connectivity.ball_scratch`](@ref) is the candidate buffer, one per task; without it each query
 allocates its own.
 
@@ -265,8 +265,8 @@ allocates its own.
 
 Better still, do not write the loop. [`Connectivity.foreach_within`](@ref) and
 [`Connectivity.mapreduce_within`](@ref) walk every cell's ball and build the topology *and* the index
-once for the whole sweep, which is what makes them `O(n log n)` where the hand-written loop is `O(n²)` —
-9× on a 9 216-cell curvilinear grid here:
+once for the whole sweep, making them `O(n log n)` where a per-cell loop that rebuilds the index is
+`O(n²)`:
 
 ```@example conn
 FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, g; ball = 1.0e6)   # total pairs within 1000 km
@@ -276,8 +276,8 @@ FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, g; ball = 1.0e6)   # tota
 FG.Connectivity.mapreduce_within((I, J, d) -> d, +, 0.0, g; ball = 1.0e6) # and the total distance
 ```
 
-`foreach_within` is the same traversal for an `f` that writes rather than reduces; under a threaded
-`backend` it runs on disjoint spans of cells, so what `f` writes must be determined by `I`.
+`foreach_within` is the same traversal for an `f` that writes; under a threaded `backend` it runs on
+disjoint spans of cells, so what `f` writes must be determined by `I`.
 `build_connectivity_within` does the same hoisting internally.
 
 ### The k nearest
@@ -292,10 +292,10 @@ dist
 
 It widens a ball until `k` cells have been seen and keeps the `k` smallest in a bounded heap, so the
 result never depends on the starting radius and nothing is materialized along the way. Equal distances
-resolve by linear index, which is what makes an indexed query and a scan agree exactly.
+resolve by linear index, so an indexed query and a scan agree exactly.
 [`Connectivity.k_nearest!`](@ref) writes into your own buffers and allocates nothing.
 
-### Seeding from a coordinate rather than a cell
+### Seeding from a coordinate
 
 Every query above starts at a cell. Observational data does not arrive that way — a station, a ship
 track or a float has a coordinate, and the cell it belongs to is part of the question. Passing a
@@ -316,14 +316,13 @@ cell. There is no seed cell to skip, so unlike the cell-seeded form every cell w
 visited — including the point's own.
 
 `locate` is the containing cell on a rectilinear grid, per direction and wrapping a periodic one, and
-the nearest cell centre elsewhere. For a node set those are the same thing, its cells being the Voronoi
-regions of its nodes; on a strongly sheared curvilinear grid they can differ, so it is documented as
-nearest-centre rather than point-in-quadrilateral.
+the nearest cell centre elsewhere. For a node set those coincide, its cells being the Voronoi regions of
+its nodes; on a strongly sheared curvilinear grid they can differ, so the contract is nearest-centre.
 
 The traversal is the cell-seeded one with the window widened by how far the point sits from its cell's
-centre, so it stays `O(1)` per direction rather than degenerating into a scan. Off the rectilinear
-grids the cost depends on the index: [`Grids.cell_list`](@ref) answers "which bins does this
-point's ball reach" directly, and is the reason a point query need not visit every cell.
+centre, keeping it `O(1)` per direction. Off the rectilinear grids the cost depends on the index:
+[`Grids.cell_list`](@ref) answers "which bins does this point's ball reach" directly, so a point query
+visits only those bins.
 
 ### The ball, and the part of it you can get to
 
@@ -347,16 +346,15 @@ under the adjacency — always so on a maskless Cartesian `StructuredGrid`, wher
 monotonically in one coordinate — and `Connected` is strictly smaller wherever something separates two
 parts of the ball.
 
-The two are easy to conflate, so it is worth being precise about why one cannot be computed as a cheaper
-version of the other. Take cells `P` (the seed), `Q` and `R`, adjacent only as `P–Q–R`, with
-`d(P,Q) = 1.2r` and `d(P,R) = 0.8r`. Walking outward from `P` and dropping anything farther than `r`
-stops at `Q`, so it never reaches `R` — which *is* inside the ball. That walk is not a broken
-`Unrestricted`; it is exactly `Connected`.
+Neither is a cheaper version of the other. Take cells `P` (the seed), `Q` and `R`, adjacent only as
+`P–Q–R`, with `d(P,Q) = 1.2r` and `d(P,R) = 0.8r`. Walking outward from `P` and dropping anything
+farther than `r` stops at `Q`, so it never reaches `R`, which *is* inside the ball. Such a walk computes
+`Connected`; the ball is reached only by a spatial query.
 
 Adjacency has to be named, because only a node set carries its own: `Connected()` means direction-1
 adjacency on the index-space architectures and the stored neighbour lists on an `UnstructuredGrid`, and
 `Connected(stencil)` sets it explicitly for the former. On the latter a stencil has no index space to
-mean anything in, so it is refused rather than ignored.
+mean anything in, so it raises.
 
 ## Querying neighbours
 
@@ -374,12 +372,12 @@ it = FG.Grids.neighbors(grid, i, j)                            # lazy iterator, 
 
 `stencil` is any [`Stencils`](@ref) shape — `Axial(r)`, `VonNeumann(r)`, `Moore(r)` (alias `Vertex`),
 `Diagonal(r)`, `Anisotropic(radii)` or `Custom(offsets)` — at any radius and in any number of
-dimensions. It is named by its TYPE, not by a symbol: a symbol could only be resolved at run time, and
-the neighbour iterator built from it would then allocate once per cell. `active_only = true`
-excludes masked-out cells from both ends of an edge.
+dimensions. A stencil is named by its type, so the neighbour iterator built from it resolves at compile
+time and allocates nothing per cell. `active_only = true` excludes masked-out cells from both ends of an
+edge.
 
-Prefer `neighbors!` in hot loops. `neighbors` returns an iterator rather than a freshly built vector
-per cell, which would cost two heap allocations for every cell visited.
+Prefer `neighbors!` in hot loops: `neighbors` returns a lazy iterator, and `neighbors!` writes into a
+buffer you own.
 
 ## CSR
 
@@ -391,9 +389,10 @@ FG.Connectivity.nnodes(conn), FG.Connectivity.nedges(conn)
 FG.Grids.neighbors(conn, i)                                # a view into the flat array
 ```
 
-`CSRConnectivity` stores one flat neighbour array plus offsets — never a vector per node, which costs
-`nnodes` allocations and turns every later traversal into pointer chasing. Both buffers are typed
-independently and accept any `Integer`, so a large mesh can carry `Int32` indices.
+`CSRConnectivity` stores one flat neighbour array plus offsets, so a traversal reads contiguous memory
+and the whole graph is two allocations. Both buffers accept any `Integer`, and a builder picks the
+narrowest that holds both a node id and an offset: `Int32` below two billion of either, halving the
+graph's memory and the bandwidth every traversal of it costs. `Ti` names a width explicitly.
 
 Building from a sampling never constructs a grid:
 
@@ -401,9 +400,9 @@ Building from a sampling never constructs a grid:
 FG.Connectivity.build_connectivity(FG.SphericalSampling.GaussLegendreSampling(), 1000)
 ```
 
-The neighbour graph of a tensor-product sampling is fixed by its axis *lengths* and longitude
-wrapping alone, so the axes are never evaluated — for Gauss–Legendre that alone would be an O(n²)
-root solve, to produce numbers the answer does not depend on.
+The neighbour graph of a tensor-product sampling is fixed by its axis *lengths* and longitude wrapping
+alone, so the axes are never evaluated. For Gauss–Legendre, evaluating them is an `O(n²)` root solve
+whose result the graph does not depend on.
 
 ## Index topology directly
 
@@ -433,12 +432,19 @@ pass — no coordinate triples, no sort, no permutation vector, and row indices 
 free because the placement walks nodes in order.
 
 For a **symmetric** adjacency with sorted rows the CSR and CSC arrays are the *same* arrays, so
-`sparse_adjacency_matrix(grid)` on a structured or curvilinear grid hands the connectivity's own
-buffers to the matrix rather than transposing into a second copy.
+`sparse_adjacency_matrix(grid)` hands the connectivity's own buffers to the matrix, with no transpose
+and no second copy.
+
+Whether that holds is read from the layout before the graph exists. Under an index stencil it is the
+stencil's own symmetry; a formula layout answers with
+[`Grids.has_symmetric_adjacency`](@ref FlowGeometries.Grids.has_symmetric_adjacency), which HEALPix,
+the cubed sphere, the icosahedral geodesic and Yin–Yang declare. A ring grid does not: adjacent rings
+of unequal width make its straddling relation directed, so it takes the transpose.
 
 ```@example connectivity
-FG.Connectivity.is_symmetric_adjacency(conn)   # what licenses that shortcut
-FG.Connectivity.sort_neighbors!(conn)          # order each node's block ascending, in place
+FG.Grids.has_symmetric_adjacency(FG.Grids.HEALPixGrid(4))   # licenses the shortcut, before the build
+FG.Connectivity.is_symmetric_adjacency(conn)                # the same question of a BUILT graph
+FG.Connectivity.sort_neighbors!(conn)                       # order each node's block ascending
 ```
 
 ## Threading
@@ -450,7 +456,7 @@ using ComputationalBackends: ThreadedBackend
 FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
 ```
 
-Results are bit-identical to serial, which the test suite asserts with `==` rather than a tolerance.
+Results are bit-identical to serial; the test suite asserts it with `==`.
 
 ## Sampling-specific topology
 
@@ -486,8 +492,8 @@ count(C.interior(g)), count(C.boundary_cells(g)), count(m)
 `interior` is the active cells whose whole stencil is active and in range; `boundary_cells` is the
 rest of the active set, and the two partition it. `count_holes` counts the connected inactive regions
 fully enclosed by active cells — an estimate of the active region's first Betti number. A region that
-reaches a non-wrapping edge is outside rather than enclosed, so wrapping a direction can turn one into
-the other:
+reaches a non-wrapping edge counts as outside, so wrapping a direction can turn an outside region into
+an enclosed one:
 
 ```@example conn
 gp = FG.Grids.StructuredGrid(geo, 0.0:1.0:8.0, 0.0:1.0:8.0, m;

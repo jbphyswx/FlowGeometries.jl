@@ -20,8 +20,8 @@ The primary form: the weights are built once, so a caller differencing many fiel
 pays for them once, and nothing is allocated per call. The `(out, field, x, dim; order, nodes)` forms
 build a plan and call this, which is where their allocation comes from.
 
-`mask` and `masked` behave as they do for the table forms — a cell whose stencil reads an inactive cell
-is written `masked` rather than given an invented derivative.
+`mask` and `masked` behave as they do for the table forms: a cell whose stencil reads an inactive cell
+is written `masked`.
 """
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
@@ -81,15 +81,18 @@ function _plan_tables(plan::Discretization.UniformStencilPlan{T,K}) where {T,K}
 end
 
 """
-    _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M)) -> out
+    _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M), invh, R) -> out
 
-The host sweep for a uniform plan. Same nest as [`_stencil_sweep_host!`](@ref) — Cartesian range walked
-directly, nest split at `dim`, node count in the type — with the interior row a tuple instead of a table
-read, and the shifted end rows handled from the plan's own `O(K²)` table.
+The host sweep for a plan. Same nest as [`_stencil_sweep_host!`](@ref) — Cartesian range walked
+directly, nest split at `dim`, node count in the type — with a uniform plan's interior row a tuple in
+registers and the shifted end rows read from its own `O(K²)` table.
+
+`invh` fuses the metric: each span is scaled as it is written, while it is in cache, saving the second
+full pass over `out` a separate `_scale_by_metric!` costs. Pass `nothing` for the plain sweep.
 """
 function _plan_sweep_host!(
     out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K},
-    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, invh = nothing,
+    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, invh = nothing, R::Int = 0,
 ) where {S,N,T,K,dim,M}
     sz = size(field)
     n = sz[dim]
@@ -99,28 +102,27 @@ function _plan_sweep_host!(
         outer = stride * sz[dim]
         mpost = prod(ntuple(d -> sz[dim + d], Val(M - dim)))
         if dim == 1
+            # The slab written is one direction-1 run, and `p` counts the batch axes too — the batch is
+            # the slowest, so slab `p` takes spatial run `p % R`, exactly as it takes mask slab
+            # `p % mpost`.
             for p in 0:(npost - 1)
                 _plan_first_linear!(out, field, plan, mask, masked, p * outer,
                                     (p % mpost) * outer, n, Val(K))
-                # The metric factor is constant on this slab, and the slab is still in cache: scaling
-                # it here costs an L1 pass where a second sweep over `out` costs a DRAM one.
-                #
-                # `invh` holds one factor per SPATIAL row, and `p` counts the batch axes too — the batch
-                # is the slowest, so slab `p` takes spatial row `p % length(invh)`, exactly as it takes
-                # mask slab `p % mpost`.
-                invh === nothing ||
-                    _scale_span!(out, p * outer + 1, n,
-                                 @inbounds(invh[mod1(p + 1, length(invh))]), masked)
+                invh === nothing || _fuse_scale!(out, invh, R, p * outer + 1, 1, n, p, masked)
             end
             return out
         end
+        # The span written covers `stride ÷ sz[1]` direction-1 runs, one factor each. Its first run,
+        # counted over directions `2:N` in column-major order, is `nruns · ((j−1) + n·p)`: the batch
+        # part of `p` advances by a whole multiple of `R` and drops out of the modulus.
+        nruns = stride ÷ sz[1]
         for p in 0:(npost - 1), j in 1:n
             nodes, wts = Discretization.plan_row(plan, j)
             _plan_row_linear!(out, field, nodes, wts, mask, masked, j, p * outer,
                               (p % mpost) * outer, stride, Val(K))
             invh === nothing ||
-                _scale_span!(out, p * outer + (j - 1) * stride + 1, stride,
-                             @inbounds(invh[mod1(p * n + j, length(invh))]), masked)
+                _fuse_scale!(out, invh, R, p * outer + (j - 1) * stride + 1, nruns, sz[1],
+                             nruns * ((j - 1) + n * p), masked)
         end
         return out
     end
@@ -137,6 +139,39 @@ function _plan_sweep_host!(
                    Val(dim), Val(N), Val(M))
     end
     return out
+end
+
+# A tabulated plan holds the two matrices the table sweep takes, and that sweep has the same nest and
+# the same span boundaries, so the metric fuses there on the same terms. `K` is in the plan's type, so
+# the node count needs no runtime switch.
+@inline _plan_sweep_host!(
+    out::AbstractArray{S,N}, field, plan::Discretization.TabulatedStencilPlan{T,K},
+    mask, masked, vdim::Val, ::Val{N}, vm::Val, invh = nothing, R::Int = 0,
+) where {S,N,T,K} =
+    _stencil_sweep_host!(out, field, plan.indices, plan.weights, mask, masked, vdim, Val(K),
+                         Val(N), vm, invh, R)
+
+"""
+    _fuse_scale!(out, invh, R, start, nruns, runlen, rbase, masked) -> nothing
+
+Scale a span the sweep has just written, run by run, while it is still in cache.
+
+The span holds `nruns` contiguous runs of `runlen` cells along direction 1, and the metric factor is
+constant on each of them, direction 1 being metric-invariant. `invh[1:R]` holds one factor per SPATIAL
+run in column-major order over directions `2:N`, and a batch element repeats that cycle, so the run
+number is taken modulo `R`. `rbase` is the span's first run, counted the same way.
+
+`invh` comes from [`_metric_scratch`](@ref) and is held across calls, so it may be longer than `R`:
+the count is the argument, never `length(invh)`.
+"""
+@inline function _fuse_scale!(
+    out::AbstractArray, invh::AbstractVector, R::Int, start::Int, nruns::Int, runlen::Int,
+    rbase::Int, masked,
+)
+    @inbounds for t in 0:(nruns - 1)
+        _scale_span!(out, start + t * runlen, runlen, invh[(rbase + t) % R + 1], masked)
+    end
+    return nothing
 end
 
 """
@@ -206,9 +241,9 @@ end
 
 # One cell from an explicit row, linearly addressed. The end rows and the wrapping case use it.
 @inline function _plan_cell_linear!(
-    out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,T},
+    out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
     mask, masked, off::Int, moff::Int, j::Int, ::Val{K},
-) where {S,T,K}
+) where {S,K}
     @inbounds begin
         if mask !== nothing && !mask[moff + j]
             out[off + j] = masked
@@ -228,12 +263,12 @@ end
     return nothing
 end
 
-# `dim != 1`: the row is hoisted out of the contiguous span, so it is read once per row either way —
-# which is why this shape measures level with the table form and exists for uniformity, not for speed.
+# `dim != 1`: the row is hoisted out of the contiguous span, so it is read once per row on both plan
+# shapes, and this one runs level with the table form.
 @inline function _plan_row_linear!(
-    out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,T},
+    out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
     mask, masked, j::Int, off::Int, moff::Int, stride::Int, ::Val{K},
-) where {S,T,K}
+) where {S,K}
     base = off + (j - 1) * stride
     mbase = moff + (j - 1) * stride
     @inbounds for i in 1:stride
@@ -260,9 +295,9 @@ end
 # The Cartesian fallback: correct for an offset array or a strided view, where the address arithmetic
 # above does not apply.
 @inline function _plan_row!(
-    out::AbstractArray{S,N}, field, nodes::NTuple{K,Int}, wts::NTuple{K,T},
+    out::AbstractArray{S,N}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
     mask, masked, j::Int, tpost::Tuple, pre, ::Val{K}, ::Val{dim}, ::Val{N}, ::Val{M},
-) where {S,N,T,K,dim,M}
+) where {S,N,K,dim,M}
     @inbounds for Ipre in pre
         tpre = Tuple(Ipre)
         I = (tpre..., j, tpost...)

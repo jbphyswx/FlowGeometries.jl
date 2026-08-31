@@ -1,6 +1,7 @@
 module FlowGeometriesNearestNeighborsExt
 
 using NearestNeighbors: NearestNeighbors
+using FlowGeometries.Connectivity: Connectivity
 using FlowGeometries.Geometry: Geometry
 using FlowGeometries.Grids: Grids
 
@@ -10,7 +11,7 @@ using FlowGeometries.Grids: Grids
 # to the same point.
 
 # Point replication and the per-geometry embedding live in `Grids`, so this extension and the in-package
-# index search the same space by construction rather than by two implementations agreeing.
+# index search the same space, from one implementation.
 using FlowGeometries.Grids: _ghost_points
 
 """
@@ -42,16 +43,12 @@ this node, stopping at `kmax`.
     return m
 end
 
-"""
-    _index_type(N) -> Type{<:Integer}
-
-The narrowest integer that indexes `N` nodes: `Int32` for anything under two billion of them.
-
-Halves the CSR's memory and the bandwidth every traversal of it costs, and is the width a device
-kernel wants. `UnstructuredGrid` stores its neighbour arrays under free `Integer` type parameters
-precisely so the choice is available here.
-"""
-@inline _index_type(N::Integer) = N ≤ typemax(Int32) ? Int32 : Int
+# `Connectivity._index_type`, applied here to the NEIGHBOUR ids alone: their values are node numbers,
+# so `N` bounds them. A CSR's offsets run to the EDGE count, which a radius query leaves unbounded by
+# `N`, so those stay `Int` — `N + 1` of them against the neighbour list's `nnz`, so the width there
+# costs almost nothing. `UnstructuredGrid` stores the two arrays under free `Integer` type parameters,
+# so they need not agree.
+@inline _index_type(N::Integer) = Connectivity._index_type(N)
 
 # Queries go one point at a time through `knn!`/`inrange!` into reused buffers; the batch forms
 # return a `Vector{Vector{…}}`, i.e. two heap vectors per query point.
@@ -96,20 +93,22 @@ function _csr_from_knn(pts::AbstractMatrix, k::Integer, ng::Int = 1)
     N = size(pts, 2) ÷ ng
     I = _index_type(N)
     if N < 2
-        return I[], ones(I, N + 1)
+        return I[], ones(Int, N + 1)
     end
     kq = min(Int(k), N - 1)
     # Ask for enough candidates that `kq` DISTINCT originals survive even when several images of the
     # same node sit closer than the next real neighbor.
     ask = min(kq * ng + 1, size(pts, 2))
     return _knn_loop!(
-        Vector{I}(undef, N * kq), Vector{I}(undef, N + 1),
+        Vector{I}(undef, N * kq), Vector{Int}(undef, N + 1),
         NearestNeighbors.KDTree(pts), pts, N, kq, ask,
     )
 end
 
-function _radius_loop!(ptr::AbstractVector{I}, tree, pts::AbstractMatrix, N::Int, r::Real) where {I<:Integer}
-    # A radius query has no fixed degree bound, so CSR is grown directly rather than sized from a
+function _radius_loop!(
+    ptr::AbstractVector{<:Integer}, ::Type{I}, tree, pts::AbstractMatrix, N::Int, r::Real,
+) where {I<:Integer}
+    # A radius query has no fixed degree bound, so the CSR grows in place; sizing it up front needs a
     # `maximum(length, lists)` pass over materialized lists.
     nbrs = I[]
     sizehint!(nbrs, 8N)
@@ -131,9 +130,9 @@ function _csr_from_radius(pts::AbstractMatrix, r::Real, ng::Int = 1)
     N = size(pts, 2) ÷ ng
     I = _index_type(N)
     if N < 2
-        return I[], ones(I, N + 1)
+        return I[], ones(Int, N + 1)
     end
-    return _radius_loop!(Vector{I}(undef, N + 1), NearestNeighbors.KDTree(pts), pts, N, r)
+    return _radius_loop!(Vector{Int}(undef, N + 1), I, NearestNeighbors.KDTree(pts), pts, N, r)
 end
 
 # Points go to the tree as a contiguous `D × N` matrix: `KDTree` takes that form directly, and it
@@ -187,13 +186,12 @@ end
 # The construction path above builds a tree and discards it, having no more use for it. This one is kept
 # and queried repeatedly, and it goes through the same embedding, so the two cannot diverge.
 #
-# `index_within!` is only required to return a SUPERSET of the ball — the caller re-tests every candidate
-# with the geometry's own `distance`. That is what lets the embedding be a lower bound rather than exact,
-# which matters for the ellipsoid: the ECEF chord is ≤ the geodesic, so a chord query over-returns and the
-# caller's gate trims it.
+# `index_within!` need only return a superset of the ball, the caller re-testing every candidate with the
+# geometry's own `distance`. The embedding is therefore free to be a lower bound, which the ellipsoid
+# needs: the ECEF chord is ≤ the geodesic, so a chord query over-returns and the caller's gate trims it.
 
-# The embedding is a type parameter, so the radius conversion below resolves at compile time instead of
-# branching on a stored tag once per query.
+# The embedding is a type parameter, so the radius conversion below resolves at compile time and no
+# query branches on it.
 struct BallIndex{TR,T,MT<:AbstractMatrix{T},E<:Grids.AbstractEmbedding}
     tree::TR
     pts::MT          # the embedded points, reused as query vectors
@@ -210,13 +208,13 @@ end
 const _IndexableGrid = Union{
     Grids.StructuredGrid,Grids.CurvilinearGrid,Grids.UnstructuredGrid,
     Grids.HEALPixGrid,Grids.RingGrid,Grids.CubedSphereGrid,Grids.YinYangGrid,
-    Grids.IcosahedralGrid,
+    Grids.IcosahedralGrid,Grids.RotatedGrid,
 }
 
 Grids.has_spatial_index(::_IndexableGrid) = true
 
-# Dispatched on the concrete architectures, so this ADDS a method rather than overwriting the
-# `AbstractGrid` fallback in `Grids` — overwriting is an error during precompilation.
+# Dispatched on the concrete architectures, so this adds a method beside the `AbstractGrid` fallback in
+# `Grids`; overwriting that one is an error during precompilation.
 function Grids.spatial_index(grid::_IndexableGrid)
     pts, ng, embedding = Grids.embedded_points(grid)
     T = eltype(pts)
@@ -268,8 +266,8 @@ function Grids.index_within!(buf::AbstractVector{<:Integer}, ix::BallIndex, grid
     # period cannot have found both, and there is nothing to remove. Skipping the sort matters: it is
     # `O(m log m)` on an `O(m)` query, and the wide radius that needs it is the rare case.
     2 * r < ix.min_period && return buf
-    # Sorted only so the dedup below is a linear pass rather than `unique!`'s hash set. `QuickSort`
-    # because the default algorithm allocates a scratch buffer, which this path exists to avoid.
+    # Sorted so the dedup below is a linear pass; `unique!` would build a hash set. `QuickSort` because
+    # the default algorithm allocates a scratch buffer, and this path allocates nothing.
     sort!(buf; alg = Base.Sort.QuickSort)
     return _dedup_sorted!(buf)
 end

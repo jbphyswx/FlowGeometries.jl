@@ -67,8 +67,8 @@ Dense `n × n` adjacency over the `n` nodes.
 **This allocates n² bytes**, which is quadratic in the node count and therefore quartic in the side
 of a 2-D grid: a 1000×1000 grid has 10⁶ nodes and so needs ~10¹² bytes. Dense adjacency is for small
 node counts and for testing. For anything else use [`sparse_adjacency_matrix`](@ref), which stores
-`nedges` entries instead of `n²`, or [`neighbors!`](@ref), which answers neighbour queries from the
-index stencil with no graph storage at all.
+`nedges` entries, or [`neighbors!`](@ref), which answers neighbour queries from the index stencil with
+no graph storage at all.
 """
 adjacency_matrix(conn::CSRConnectivity) =
     adjacency_matrix!(Matrix{Bool}(undef, nnodes(conn), nnodes(conn)), conn)
@@ -142,7 +142,7 @@ end
     is_symmetric_adjacency(conn) -> Bool
 
 Whether `j ∈ N(i)` implies `i ∈ N(j)` throughout. `O(nedges + nnodes)`, by comparing the graph with its
-transpose rather than searching a row per edge; guards the shortcut that reads a CSR as a CSC.
+transpose; it guards the shortcut that reads a CSR as a CSC.
 """
 function is_symmetric_adjacency(conn::CSRConnectivity)
     ptr, nbrs = conn.ptr, conn.nbrs
@@ -246,10 +246,10 @@ function sparse_adjacency_matrix end
     sparse_adjacency_matrix!(colptr, rowval, nzval, conn) -> SparseMatrixCSC
 
 Assemble the adjacency matrix into caller-owned buffers and wrap them without copying, so a repeated
-build reuses storage instead of allocating a new matrix each time. Requires `using SparseArrays`.
+build reuses one set of storage. Requires `using SparseArrays`.
 
-The returned matrix ALIASES the three buffers, so reusing them for a later call invalidates any
+The returned matrix **aliases** the three buffers, so reusing them for a later call invalidates any
 matrix built from them earlier. Buffers longer than needed are trimmed to fit (`nnodes+1` and
-`nedges`), since a matrix must own arrays of exactly the right length.
+`nedges`), a matrix owning arrays of exactly the right length.
 """
 function sparse_adjacency_matrix! end

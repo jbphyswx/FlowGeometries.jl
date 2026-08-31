@@ -13,12 +13,12 @@ vertex arrays are what `corners` holds, one per direction and one larger in ever
 retained when the caller supplies them or asks for them with `keep_corners = true`, and are otherwise
 construction input to the area kernel alone — so `corners` is `nothing` on a grid built from centres,
 and [`has_corners`](@ref) reports which. In any dimension other than 2 the measure is the caller's to
-supply: the corner-area kernel is a genuinely 2-D algorithm, not a 2-D special case of an N-D one.
+supply: the corner-area kernel is a 2-D algorithm with no N-D generalization here.
 
 # Type parameters
-- `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it (a mismatched-eltype geometry is
-  a type error, not a silent promotion) — hence `T` precedes `G` (Julia forbids the forward
-  reference `G<:AbstractGeometry{T}, T` needed to keep the `{G,T}` order).
+- `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
+  raises a type error. `T` therefore precedes `G`, Julia forbidding the forward reference
+  `G<:AbstractGeometry{T}, T` a `{G,T}` order would need.
 - `N`: number of coordinate directions.
 - `C`: tuple type of the center coordinate arrays.
 - `KC`: tuple type of the cell-vertex arrays, or `Nothing` where they were not retained.
@@ -145,9 +145,8 @@ function _centers_to_corners(C::AbstractArray{T,N}) where {T<:AbstractFloat, N}
         "auto-deriving curvilinear cell corners needs at least 2 centers across every direction " *
         "(got $(size(C))); supply the `corners` arrays explicitly for a smaller grid",
     ))
-    # The padded ghost ring is indexed rather than materialized: `_ghosted` returns the same value a
-    # padded copy would hold, so the vertex pass reads straight from `C` and only the result is
-    # allocated (one array instead of two, and one pass over the data instead of three).
+    # `_ghosted` returns the value a padded copy holds at an index, so the ghost ring stays implicit:
+    # the vertex pass reads straight from `C` in one pass and allocates only the result.
     K = similar(C, T, (size(C) .+ 1)...)
     shifts = CartesianIndices(ntuple(_ -> 0:1, Val(N)))
     scale = one(T) / T(2^N)
@@ -166,8 +165,8 @@ end
 # center index `I`. Each out-of-range direction contributes its own linear extrapolation `2·edge − inner`
 # taken with every other direction clamped, and where several are out at once those contributions add
 # with the shared clamped value counted once — the standard halo fill, exact for a field linear in each
-# direction. Written as a flat loop rather than a recursion over directions: a recursive form cannot
-# inline, and its intermediate index tuples then box (measured at 992 bytes per call).
+# direction. The flat loop keeps it inlinable; a recursion over directions does not inline, and its
+# intermediate index tuples box.
 @inline function _ghosted(C::AbstractArray{T,N}, I::NTuple{N,Int}) where {T,N}
     sz = size(C)
     cl = ntuple(d -> clamp(I[d], 1, sz[d]), Val(N))
@@ -231,9 +230,8 @@ function _corner_areas(
     nk = Nx + 1
     R2 = Geometry.radius(geometry)^2
     areas = similar(λc, T, Nx, Ny)
-    # Chunked over ROWS, each chunk with its own two-row buffer: a chunk re-derives its first row
-    # rather than sharing one with its neighbour, which costs one extra row of trig per chunk and
-    # keeps the chunks independent.
+    # Chunked over rows, each chunk with its own two-row buffer. A chunk re-derives its first row, at
+    # one extra row of trig per chunk, which keeps the chunks independent.
     Execution.run_chunks(Int(Ny), backend) do rows
         lo = Vector{NTuple{3,T}}(undef, nk)
         hi = Vector{NTuple{3,T}}(undef, nk)
@@ -262,8 +260,8 @@ a dataset ships its own cell areas), and may equally be given as the `measure` k
 With no measure supplied, one is computed from the cell-vertex arrays — **at `N = 2` only**, as the
 exact quadrilateral cell area. Spherical cells use the exact spherical-quadrilateral area, the
 spherical excess of the two triangles through the cell's four corner directions (see
-[`Geometry.spherical_excess`](@ref)); Cartesian cells the exact planar shoelace area. That kernel is a 2-D algorithm
-rather than the 2-D case of an N-D one, so in any other dimension the measure must be given.
+[`Geometry.spherical_excess`](@ref)); Cartesian cells the exact planar shoelace area. That kernel is a
+2-D algorithm with no N-D generalization here, so in any other dimension the measure must be given.
 
 Pass `corners` (a tuple of arrays, each one larger than the centers in every direction) for exact
 cell vertices, e.g. from the source mesh's own vertex grid; otherwise they are reconstructed from the
@@ -283,9 +281,9 @@ function CurvilinearGrid(geometry::Geometry.AbstractGeometry, args...; kwargs...
 end
 
 # Optional trailing `mask`, optionally preceded by a `measure`; everything before them is a coordinate
-# array. The mask is recognised by its element type rather than by position, so leaving it out is
-# unambiguous — and leaving it out is what a fully active grid should do, since `AllActive` costs one
-# size tuple where a dense all-true mask costs a load and a branch per cell.
+# array. The mask is recognised by its element type, so omitting it is unambiguous. A fully active grid
+# omits it: `AllActive` costs one size tuple, where a dense all-true mask costs a load and a branch per
+# cell.
 function _split_curvilinear_args(args::Tuple)
     hasmask = !isempty(args) && last(args) isa AbstractArray{Bool}
     mask = hasmask ? last(args) : nothing
@@ -300,10 +298,9 @@ function _split_curvilinear_args(args::Tuple)
     return (rest, nothing, mask)
 end
 
-# No mask means every cell participates, which is a size rather than an array — the same default
-# `StructuredGrid` has always had. Resolved in its own method rather than with a `nothing` branch
-# inside the one below: that would leave `mask` a small union and cost the whole constructor its
-# specialization, which measured as the suite taking three times as long.
+# No mask means every cell participates, which `AllActive` expresses as a size. This resolves in its own
+# method: a `nothing` branch inside the one below leaves `mask` a small union and costs the whole
+# constructor its specialization.
 _curvilinear_grid(
     geometry::Geometry.AbstractGeometry, coords::NTuple{N,AbstractArray}, measure_pos, ::Nothing;
     kwargs...,
@@ -361,8 +358,8 @@ function _curvilinear_grid(
     else
         throw(ArgumentError(
             "a $N-dimensional CurvilinearGrid has no measure to derive: the corner-area kernel is a " *
-            "2-D algorithm (exact quadrilateral area), not the 2-D case of an N-D one. Pass the cell " *
-            "measure explicitly.",
+            "2-D algorithm (exact quadrilateral area) with no N-D form here. Pass the cell measure " *
+            "explicitly.",
         ))
     end
 
@@ -386,18 +383,17 @@ The same mesh with its coordinates expressed in the other frame of [`Geometry.Po
 to the geographic coordinates of each cell.
 
 A rotated lat–lon mesh is logically rectangular and geometrically warped, and only its own frame's axes
-are separable — but that warping is a FORMULA, not data. The result stores the mesh and the rotation
-and evaluates a cell's position where it is asked for; see [`RotatedGrid`](@ref). Rotating a grid
-therefore costs one `PoleRotation`, where materializing it cost two centre arrays, two corner arrays
-and a dense copy of a measure that a rotation does not change.
+are separable. The warping is a formula, so the result stores the mesh and the rotation and evaluates a
+cell's position where it is asked for; see [`RotatedGrid`](@ref). Rotating a grid therefore costs one
+`PoleRotation`, against two centre arrays, two corner arrays and a dense measure to materialize it.
 
-Two things carry over rather than being recomputed. The **cell measure** is exact, a rotation being an
-isometry of the sphere, so it is shared rather than recomputed from rotated corners — which would only
-add round-off. The **index topology** is too: the same mesh has the same neighbours, so a direction
-that wrapped still wraps, and longitude remains an angle mod `2π` in either frame.
+Two things carry over. The **cell measure** is exact under a rotation, an isometry of the sphere, so it
+is shared; recomputing it from rotated corners adds round-off. The **index topology** carries over too:
+the same mesh has the same neighbours, so a direction that wrapped still wraps, and longitude remains
+an angle mod `2π` in either frame.
 
 To difference along the mesh's own axes, ask [`base_grid`](@ref) for them: the frame changes where a
-cell is reported, not how the lattice is laid out.
+cell is reported, leaving the lattice as it is.
 """
 rotate(grid::AbstractStructuredGrid, rot::Geometry.PoleRotation) =
     RotatedGrid(grid, rot, Geometry.rotate)

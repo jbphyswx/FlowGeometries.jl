@@ -165,8 +165,8 @@ end
 
 # ---- materialization --------------------------------------------------------
 
-# A ring walk rather than the generic per-cell one: the ring a cell belongs to is known from the loop,
-# so no cell pays the `O(log nrings)` bisection `ring_of` does.
+# A ring walk: the ring a cell belongs to is known from the loop, so no cell pays the `O(log nrings)`
+# bisection `ring_of` does.
 function materialize(grid::RingGrid{T}) where {T}
     n = length(grid)
     λ = Vector{T}(undef, n)

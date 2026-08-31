@@ -36,9 +36,8 @@ The sphere radius. The one method a spherical geometry supplies; defaults to the
 
 Flat metric in `T`, of any dimension.
 
-It carries no grid spacing. A cell's extent belongs to the grid's axes, which already state it per
-cell and per direction; a nominal `dx`/`dy`/`dz` on the geometry would be a second, unchecked copy
-that could contradict them. The dimension likewise lives on the grid.
+It carries no grid spacing. A cell's extent belongs to the grid's axes, which state it per cell and per
+direction, and the dimension likewise lives on the grid.
 """
 struct CartesianGeometry{T<:AbstractFloat} <: AbstractCartesianGeometry{T} end
 
@@ -124,16 +123,17 @@ const PointLike = Union{NamedTuple,AbstractVector{<:Real}}
 
 """
     as_ntuple(p) -> Tuple
+    as_ntuple(p, Val(N)) -> NTuple{N}
 
 Normalize a point (`Tuple`, `NamedTuple`, or `AbstractVector` of length 1–3) to a plain `Tuple`.
 
-A vector's length is a runtime value, so for one this returns a union of the three tuple widths: the
-width of the result IS the width of the point. Every entry point here reduces a point to a value whose
-type does not depend on that width — `distance` to a scalar, `spherical_to_cartesian` to three
-components — so the union splits across the branch and each infers concretely and allocates nothing.
+A vector's length is a runtime value, so for one the first form returns a union of the three tuple
+widths. Every entry point here reduces a point to a value whose type does not depend on that width —
+`distance` to a scalar, `spherical_to_cartesian` to three components — so the union splits across the
+branch and each arm infers concretely and allocates nothing.
 
-[`scale_factors`](@ref) is the exception, its result being one factor per direction. Hand it a tuple
-where that matters.
+[`scale_factors`](@ref) is the exception, its result being one factor per direction. Name the width
+with `Val(N)` there, or hand it a tuple.
 """
 @inline as_ntuple(p::NamedTuple) = Tuple(p)
 @inline as_ntuple(p::Tuple) = p
@@ -149,6 +149,18 @@ where that matters.
     throw(ArgumentError("a point vector must have length 1, 2, or 3"))
 end
 
+@inline as_ntuple(p::NTuple{N,Any}, ::Val{N}) where {N} = p
+@inline as_ntuple(p::Tuple, ::Val{N}) where {N} = throw(ArgumentError(
+    "this needs a point with $N component(s); got $(length(p))",
+))
+@inline as_ntuple(p::NamedTuple, v::Val) = as_ntuple(Tuple(p), v)
+@inline function as_ntuple(p::AbstractVector, ::Val{N}) where {N}
+    length(p) == N || throw(ArgumentError(
+        "this needs a point with $N component(s); got $(length(p))",
+    ))
+    return ntuple(i -> @inbounds(p[i]), Val(N))
+end
+
 """
     _lonlat(p) -> (λ, φ)
     _xyz(v) -> (x, y, z)
@@ -159,8 +171,8 @@ A point's components for a consumer that needs a fixed number of them, with the 
 reports an index out of bounds, when what is wrong is the point. These say so instead, and return a pair
 or a triple whose type does not depend on how many components the point had.
 
-The arity IS the dispatch, so the width that survives is a method signature rather than a comparison
-against `length`, and the tuple is indexed only where it is known wide enough to index.
+The arity is the dispatch, so the accepted width is a method signature and the tuple is indexed only
+where its type is known wide enough.
 """
 @inline _lonlat(p) = _lonlat(as_ntuple(p))
 @inline _lonlat(q::Tuple{Any,Any,Vararg{Any}}) = (q[1], q[2])
@@ -351,8 +363,8 @@ end
     volume_element(geo::AbstractCartesianGeometry, dx, dy, dz)
     volume_element(geo::AbstractSphericalGeometry, r, φ, dλ, dφ, dr)
 
-Local cell volume from the cell's own extents. The spherical form uses the LOCAL radius `r` at this
-level, not the reference [`radius`](@ref), so it is the genuine shell element `r²·cosφ·dλ·dφ·dr`.
+Local cell volume from the cell's own extents. The spherical form takes the local radius `r` at this
+level, giving the shell element `r²·cosφ·dλ·dφ·dr`; the reference [`radius`](@ref) does not enter.
 """
 @inline volume_element(::AbstractCartesianGeometry{T}, dx::Real, dy::Real, dz::Real) where {T} =
     convert(T, dx) * convert(T, dy) * convert(T, dz)

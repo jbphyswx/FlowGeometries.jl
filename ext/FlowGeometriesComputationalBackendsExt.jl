@@ -5,8 +5,12 @@ using FlowGeometries.Execution: Execution
 
 Execution.run_chunks(f::F, n::Integer, ::AbstractSerialBackend) where {F} = Execution.run_chunks(f, n, nothing)
 
-# One chunk per thread rather than `@threads for i in 1:n`: the loops this drives are short-bodied,
-# so per-index scheduling would cost more than the body.
+# Both host backends run threads over ordinary memory, so a buffer for them is an ordinary `Vector`.
+Execution.allocate(::AbstractSerialBackend, ::Type{T}, n::Integer) where {T} = Vector{T}(undef, Int(n))
+Execution.allocate(::AbstractThreadedBackend, ::Type{T}, n::Integer) where {T} = Vector{T}(undef, Int(n))
+
+# One chunk per thread: the loops this drives are short-bodied, so per-index scheduling costs more than
+# the body it schedules.
 function Execution.run_chunks(f::F, n::Integer, ::AbstractThreadedBackend) where {F}
     n = Int(n)
     n > 0 || return nothing

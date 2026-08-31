@@ -192,15 +192,15 @@ end
 
 Reduced Gaussian grid with an explicit longitude count per ring, north to south.
 
-The classical reduced grids are published as tables rather than formulas — the count holds constant
-across blocks of latitudes and jumps between them — so the table is the input. Use
+The classical reduced grids are published as tables — the count holds constant across blocks of
+latitudes and jumps between them — so the table is the input. Use
 [`OctahedralGaussianSampling`](@ref) for the octahedral rule, which is a formula.
 """
 struct ReducedGaussianSampling{V<:AbstractVector{Int}} <: AbstractReducedGaussianSampling
     nlon_per_ring::V
     # Cumulative counts with a leading zero, so a ring's slice of the flattened point vector is two
-    # reads rather than a prefix sum. Built once here because the table is arbitrary — the octahedral
-    # rule has a closed form and stores nothing.
+    # reads. Built once here, the table being arbitrary; the octahedral rule has a closed form and
+    # stores nothing.
     ring_offset::V
     function ReducedGaussianSampling(nlon::AbstractVector{<:Integer})
         isempty(nlon) && throw(ArgumentError("a reduced Gaussian grid needs at least one ring"))
@@ -237,7 +237,7 @@ end
 
 is_tensor_product(::AbstractSphericalSampling) = false
 is_tensor_product(::AbstractTensorProductSphericalSampling) = true
-is_tensor_product(::AbstractYinYangSampling) = false  # two structured panels, not one TP grid
+is_tensor_product(::AbstractYinYangSampling) = false  # two structured panels, each its own patch
 
 is_iso_latitude(::AbstractSphericalSampling) = false
 is_iso_latitude(::AbstractTensorProductSphericalSampling) = true
@@ -369,9 +369,9 @@ icosahedral_nvertices(frequency::Integer) = 10 * Int(frequency)^2 + 2
 Longitudes on each iso-latitude ring, north to south.
 
 Defined for **every** sampling laid out in rings, so a caller walking a map ring by ring — a per-ring
-longitude transform, a zonal reduction, a row-wise sweep — writes one loop rather than a branch per
-sampling. A sampling that carries its own size (`HEALPixSampling`, the reduced Gaussians) answers from
-itself; a tensor-product one takes the `nlat` that fixes its shape, as [`npoints`](@ref) does.
+longitude transform, a zonal reduction, a row-wise sweep — writes one loop for all of them. A sampling
+that carries its own size (`HEALPixSampling`, the reduced Gaussians) answers from itself; a
+tensor-product one takes the `nlat` that fixes its shape, as [`npoints`](@ref) does.
 """
 function nlon_per_ring(s::OctahedralGaussianSampling)
     N = s.nlat_half
@@ -434,7 +434,7 @@ indices [`spherical_points`](@ref) writes that ring into.
 
 `O(1)` for every sampling, so a ring-by-ring pass is a loop over slices carrying no running offset.
 The octahedral rule's offset is a closed form in the ring index; the tabulated reduced grid carries
-cumulative counts built with the sampling rather than rescanned per lookup.
+cumulative counts, built once with the sampling.
 """
 function ring_range end
 

@@ -54,15 +54,13 @@ function cubed_sphere_points!(
     N = 6 * n * n
     length(λ) == N && length(φ) == N || throw(DimensionMismatch("buffers must have length 6n²"))
     panel === nothing || length(panel) == N || throw(DimensionMismatch("buffers must have length 6n²"))
-    # CELL CENTRES, not panel vertices: ξ_i = -π/4 + (i-½)·(π/2)/n.
+    # Cell centres: ξ_i = -π/4 + (i-½)·(π/2)/n.
     #
-    # An endpoint-inclusive `range(-π/4, π/4; length=n)` puts nodes ON the panel edges, so adjacent
-    # panels emit coincident points — measured, exactly 12(n-2)+16 duplicates — while
-    # `_cubed_neighbor` simultaneously treats those edges as folding onto a *different* panel's
-    # cells. Points and connectivity would then disagree, and any grid built from them carries
-    # coincident nodes (degenerate tessellation, zero-area cells). Cell centres give 6n² genuinely
-    # distinct points that match the connectivity, and make n=1 (one cell per face, at the face
-    # centre) fall out of the formula instead of needing a special case.
+    # An endpoint-inclusive `range(-π/4, π/4; length=n)` puts nodes on the panel edges, where adjacent
+    # panels emit coincident points, while `_cubed_neighbor` folds those same edges onto a *different*
+    # panel's cells; points and connectivity then disagree and a grid built from them carries
+    # coincident nodes. Cell centres give 6n² distinct points that match the connectivity, and n=1
+    # (one cell per face, at the face centre) falls out of the same formula.
     # Each output slot is a pure function of its own linear index, so chunks are independent.
     Execution.run_chunks(N, backend) do rng
         @inbounds for k in rng
@@ -184,11 +182,11 @@ end
 """
     yin_yang_panels!(λyin, φyin, λyang, φyang, nlon, nlat) -> (; yin, yang)
 
-The two Kageyama–Sato panels. `yin` is a pair of AXES (`nlon` and `nlat` long): in its own frame the
-panel is a separable lat–lon patch. `yang` is that panel rotated onto the sphere, which is no longer
-separable in global lon/lat, so it is a pair of `nlon × nlat` FIELDS — one `(λ, φ)` per cell.
+The two Kageyama–Sato panels. `yin` is a pair of axes (`nlon` and `nlat` long): in its own frame the
+panel is a separable lat–lon patch. `yang` is that panel rotated onto the sphere, which is separable in
+neither global longitude nor latitude, so it is a pair of `nlon × nlat` fields, one `(λ, φ)` per cell.
 
-The shapes differ because the geometry does, not by convention; the argument types say so.
+The argument types carry that difference.
 """
 function yin_yang_panels!(
     λyin::AbstractVector{T}, φyin::AbstractVector{T},
@@ -200,9 +198,9 @@ function yin_yang_panels!(
         throw(DimensionMismatch("yin axes must be nlon and nlat long"))
     size(λyang) == (nlon, nlat) && size(φyang) == (nlon, nlat) ||
         throw(DimensionMismatch("yang fields must be nlon × nlat"))
-    # Cell centres, not panel edges: each node carries one cell, so the nlon×nlat cells tile
-    # [-3π/4, 3π/4] × [-π/4, π/4] exactly. Sampling the endpoints instead would give the two
-    # boundary columns/rows half-width cells while the connectivity still counts them whole.
+    # Cell centres: each node carries one cell, so the nlon×nlat cells tile [-3π/4, 3π/4] × [-π/4, π/4]
+    # exactly. Sampling the endpoints gives the two boundary columns and rows half-width cells while
+    # the connectivity counts them whole.
     @inbounds for i in 1:nlon
         λyin[i] = _yin_yang_panel_coords(T, nlon, nlat, i, 1)[1]
     end
@@ -296,16 +294,16 @@ function icosahedral_mesh(
 ) where {T<:AbstractFloat}
     ν = Int(frequency)
     nexp = icosahedral_nvertices(ν)
-    # Fixed combinatorial facts, so load-time constants rather than four allocations per call.
+    # Fixed combinatorial facts, held as load-time constants.
     base = _icosahedron_base(T)
     faces = _ICOSAHEDRON_FACES
     macro_edges = _ICOSAHEDRON_MACRO_EDGES      # the 30 canonical (lo, hi) corner pairs
     edge_index = _ICOSAHEDRON_EDGE_INDEX
 
-    # Vertices are numbered by TOPOLOGY, not by hashing their coordinates: the 12 corners, then the
-    # ν-1 interior points of each of the 30 macro-edges, then the (ν-1)(ν-2)/2 interior points of
-    # each of the 20 faces — which sums to exactly 10ν²+2. Every vertex therefore has one owner and
-    # is generated once, so no dedup dictionary, no quantized keys, and no per-vertex hashing.
+    # Vertices are numbered topologically: the 12 corners, then the ν-1 interior points of each of the
+    # 30 macro-edges, then the (ν-1)(ν-2)/2 interior points of each of the 20 faces, summing to
+    # 10ν²+2. Every vertex has one owner and is generated once, so there is no dedup dictionary, no
+    # quantized key and no per-vertex hashing.
     nint = ((ν - 1) * (ν - 2)) ÷ 2
     verts = Vector{NTuple{3,T}}(undef, nexp)
     @inline norm3(p) = (r = sqrt(p[1]^2 + p[2]^2 + p[3]^2); (p[1] / r, p[2] / r, p[3] / r))
@@ -333,11 +331,10 @@ function icosahedral_mesh(
         end
     end
 
-    # Triangles and edges from ONE walk of the three lattice directions on each face. A
+    # Triangles and edges from a single walk of the three lattice directions on each face. A
     # face-boundary edge is generated by both adjacent faces, so the edge list is canonicalized and
-    # deduped by sorting — a single sort of ~30ν² pairs, rather than hashing every edge into a Set.
-    # Triangles need no dedup: each belongs to exactly one face. The two lattice orientations give
-    # ν(ν+1)/2 upward plus ν(ν-1)/2 downward per face, i.e. 20ν² in total.
+    # deduped by one sort of ~30ν² pairs. Triangles need no dedup, each belonging to one face. The two
+    # lattice orientations give ν(ν+1)/2 upward plus ν(ν-1)/2 downward per face, 20ν² in total.
     per_face = 3 * ((ν * (ν + 1)) ÷ 2)
     edges = Vector{NTuple{2,Int}}(undef, topology ? 20 * per_face : 0)
     triangles = Vector{NTuple{3,Int}}(undef, topology ? 20 * ν * ν : 0)
@@ -392,9 +389,8 @@ end
     _ico_node_id(f, face, i, j, ν, edge_index, nint, face_base) -> Int
 
 Global vertex id of barycentric lattice node `(i, j)` (with `i + j ≤ ν`, weights `ν-i-j`, `i`, `j`
-on the face's corners `A`, `B`, `C`) of face `f`. Nodes on a corner or a macro-edge resolve to that
-shared entity's id, which is what makes the two faces meeting at an edge agree without any lookup
-table.
+on the face's corners `A`, `B`, `C`) of face `f`. A node on a corner or a macro-edge resolves to that
+shared entity's id, so the two faces meeting at an edge agree with no lookup table.
 """
 @inline function _ico_node_id(
     f::Int, face::NTuple{3,Int}, i::Int, j::Int, ν::Int,
@@ -413,8 +409,8 @@ table.
     elseif i + j == ν
         return _ico_edge_id(B, C, j, ν, edge_index)
     end
-    # Face interior. Closed form for the position of (i, j) in the same `for ii, jj` order the
-    # vertex pass used, so this stays O(1) instead of rescanning the lattice per lookup.
+    # Face interior. Closed form for the position of (i, j) in the same `for ii, jj` order the vertex
+    # pass used, keeping the lookup O(1).
     k = (i - 1) * (ν - 1) - ((i - 1) * i) ÷ 2 + j
     return face_base + (f - 1) * nint + k
 end
@@ -472,8 +468,8 @@ The face-interior lattice node whose position in the walk `for i in 1:(ν-1), j 
 Row `i` of the walk holds `ν-1-i` nodes, so the nodes before it number
 `S(i-1) = (i-1)(ν-1) - (i-1)i/2`. Then `m = i-1` is the largest value with `S(m) < k`, and
 `j = k - S(m)`. `S(m) < k` rearranges to `m² - m(2ν-3) + 2k > 0`, so the smaller root of that quadratic
-brackets `m`; its floor is taken and then corrected either way, which makes the answer exact rather than
-a bet on the square root's last bit.
+brackets `m`; its floor is taken and then stepped in either direction, so the result does not depend on
+the square root's last bit.
 """
 @inline function _ico_face_ij(k::Int, ν::Int)
     S(m) = m * (ν - 1) - (m * (m + 1)) ÷ 2
@@ -493,7 +489,7 @@ end
     _ico_occurrences(id, ν) -> (NTuple{5,NTuple{3,Int}}, n)
 
 Every `(face, i, j)` lattice position vertex `id` occupies, in the first `n` entries. A face interior
-has one, a macro-edge interior two, a corner five — which is why a geodesic sphere has twelve
+has one, a macro-edge interior two, a corner five; the twelve corners are the geodesic sphere's twelve
 pentagons.
 """
 @inline function _ico_occurrences(id::Int, ν::Int)
@@ -596,8 +592,7 @@ end
 """
     _put_lonlat!(λ, φ, v, p, T)
 
-Normalize `p` and write vertex `v`'s longitude/latitude. Top-level rather than a closure so nothing
-is captured.
+Normalize `p` and write vertex `v`'s longitude and latitude. Top-level, so it captures nothing.
 """
 @inline function _put_lonlat!(
     λ::AbstractVector{T}, φ::AbstractVector{T}, v::Int, p::NTuple{3,T}, ::Type{T},
@@ -696,7 +691,7 @@ the norm `√(1+φ²)`, formed once.
     )
 end
 
-# Derived once at load rather than rebuilt, with a sort and a dedup, on every call.
+# A property of the base icosahedron, so the sort and dedup behind it run once, at load.
 const _ICOSAHEDRON_MACRO_EDGES = Tuple(_icosahedron_edges(_ICOSAHEDRON_FACES))
 
 const _ICOSAHEDRON_EDGE_INDEX = let m = zeros(Int, 12, 12)
@@ -749,8 +744,7 @@ spherical_points(::AbstractScatteredSphericalSampling, λ::AbstractVector, φ::A
 
 Copy a scattered point set into caller-owned buffers.
 
-The source arrays are required: a scattered sampling carries no rule from which points could be
-generated, so a form taking only the destinations would have nothing to write.
+The source arrays are required, a scattered sampling carrying no rule to generate points from.
 """
 function spherical_points!(
     λ_out::AbstractVector, φ_out::AbstractVector, ::AbstractScatteredSphericalSampling,

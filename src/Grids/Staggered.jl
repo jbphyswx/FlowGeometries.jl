@@ -6,7 +6,7 @@
     StaggeredGrid(geometry, axes...; mask = nothing, topology = nothing, period = nothing)
     StaggeredGrid(center::StructuredGrid)
 
-One rectilinear mesh, read at any staggered LOCATION: a family of grids rather than a grid.
+One rectilinear mesh, readable at any staggered location: a family of grids.
 
 A location is one [`FlowGeometries.Discretization.AbstractLocation`](@ref) per direction — `Center()`
 where the samples are the cell centres, `Face()` where they are the cell boundaries. On an Arakawa C
@@ -15,17 +15,17 @@ arrangement the tracer sits at all-centres, the velocity component along directi
 [`grid_at`](@ref) returns the ordinary [`StructuredGrid`](@ref) at any of them, so every operator that
 already works on a rectilinear grid works at every location without knowing this type exists.
 
-The face axes are built once, at construction. A face axis derived from a UNIFORM primal axis is
-itself an [`Axes.UniformAxis`](@ref) — see [`FlowGeometries.Discretization.faces`](@ref) — so a uniform
-mesh does not look stretched to the methods that dispatch on spacing.
+The face axes are built once, at construction. A face axis derived from a uniform primal axis is itself
+an [`Axes.UniformAxis`](@ref) — see [`FlowGeometries.Discretization.faces`](@ref) — so a uniform mesh
+stays uniform to every method that dispatches on spacing.
 
-A periodic direction of `N` cells has `N` faces, not `N+1`: its last face is its first, and storing
-both would be one column of duplicated degrees of freedom. A bounded direction has `N+1`.
+A periodic direction of `N` cells has `N` faces, its last face being its first; a bounded direction has
+`N+1`.
 
-A mask is given over the CENTRE cells, and a staggered point is active where every centre it is built
-from is. That is the finite-volume rule and not a new one: a velocity face between an active and an
-inactive cell is a boundary, not a free value, on the same footing as the least-squares gradient's
-unresolved direction and a stencil's masked cell.
+A mask is given over the centre cells, and a staggered point is active where every centre it is built
+from is. This is the finite-volume rule: a velocity face between an active and an inactive cell is a
+boundary, on the same footing as the least-squares gradient's unresolved direction and a stencil's
+masked cell.
 """
 struct StaggeredGrid{
     T<:AbstractFloat,
@@ -100,7 +100,7 @@ Direction `d`'s samples at location `loc`: the primal axis at [`Discretization.C
 """
 @inline axis_at(sg::StaggeredGrid, d::Integer, ::Discretization.Center) = coordinates(sg.center, d)
 # The face axes of different directions may be different types, so a runtime `d` selects one by the
-# same recursive tail-split `coordinates(grid, d)` uses rather than by indexing the tuple.
+# same recursive tail-split `coordinates(grid, d)` uses.
 @inline axis_at(sg::StaggeredGrid, d::Integer, ::Discretization.Face) =
     _at_axis(identity, sg.faces, d)
 
@@ -110,8 +110,8 @@ Direction `d`'s samples at location `loc`: the primal axis at [`Discretization.C
 The grid of `sg` at location `loc`, one [`Discretization.Center`](@ref)/[`Discretization.Face`](@ref) per direction.
 
 An ordinary [`StructuredGrid`](@ref), so every rectilinear operator applies to it unchanged. It is
-BUILT here rather than stored — there are `2^N` locations and a mesh needs few of them — so a caller
-differencing repeatedly holds the result, the way a stencil plan is held.
+built on request — there are `2^N` locations and a mesh uses few of them — so a caller differencing
+repeatedly holds the result, the way a stencil plan is held.
 """
 function grid_at(
     sg::StaggeredGrid{T,N}, loc::NTuple{N,Discretization.AbstractLocation},

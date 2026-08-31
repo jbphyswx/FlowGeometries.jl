@@ -70,8 +70,8 @@ function embedding_of end
 The space a geometry's `ncoords`-coordinate points sit in. [`embedding_of`](@ref) is this for a grid,
 which knows its own coordinate count; a caller holding loose coordinate vectors states it.
 
-One definition, so an index built from a grid and one built from bare coordinates convert a radius the
-same way rather than by two implementations agreeing.
+One definition, so an index built from a grid and one built from bare coordinates convert a radius
+through the same code.
 """
 @inline _embedding_for(::Geometry.AbstractCartesianGeometry, ::Integer) = CartesianEmbedding()
 
@@ -92,8 +92,8 @@ A physical radius as a radius in the embedding.
 @inline embedded_radius(::CartesianEmbedding, r::T) where {T} = r
 @inline embedded_radius(::ChordEmbedding, r::T) where {T} = r
 
-# `2R·sin(σ/2)` is monotone only to `σ = π`, so an arc of an antipodal distance or more saturates at the
-# diameter rather than turning back down.
+# `2R·sin(σ/2)` is monotone only to `σ = π`, so an arc of an antipodal distance or more saturates at
+# the diameter.
 @inline function embedded_radius(e::ArcEmbedding{T}, r::Real) where {T}
     σ = T(r) / e.radius
     return σ ≥ T(π) ? T(2) * e.radius : T(2) * e.radius * sin(σ / T(2))
@@ -186,17 +186,19 @@ function embedded_points(
     return pts, ng, embedding_of(grid)
 end
 
-# `Geometry.embed` rather than either formula written again, so a cell centre reaches the index through
-# the same map as a query point. Longitude needs no ghost images — `λ` and `λ+2π` embed together.
+# Through `Geometry.embed`, so a cell centre reaches the index by the same map as a query point.
+# Longitude needs no ghost images, `λ` and `λ+2π` embedding to the same point.
 function embedded_points(
     grid::AbstractGrid{G,T}; ghosts::Bool = true,
 ) where {G<:Geometry.AbstractLonLatGeometry,T}
     geo = grid_geometry(grid)
-    raw, D = _grid_points(grid)
-    pts = Matrix{T}(undef, 3, size(raw, 2))
-    @inbounds for k in axes(raw, 2)
-        c = Geometry.embed(geo, ntuple(d -> raw[d, k], D))
-        pts[1, k] = c[1]; pts[2, k] = c[2]; pts[3, k] = c[3]
+    msk = mask(grid)
+    pts = Matrix{T}(undef, 3, length(msk))
+    k = 0
+    @inbounds for c in cells(grid)
+        k += 1
+        p = Geometry.embed(geo, _cell_coords(grid, cell_at(grid, c)))
+        pts[1, k] = p[1]; pts[2, k] = p[2]; pts[3, k] = p[3]
     end
     return pts, 1, embedding_of(grid)
 end

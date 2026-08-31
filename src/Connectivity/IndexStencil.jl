@@ -7,11 +7,9 @@
 @inline _stencil_offsets(::Val{N}, s::Stencils.AbstractStencil) where {N} =
     Stencils.offsets(s, Val(N))
 
-# A stencil is named by its TYPE, never by a symbol: a symbol cannot be resolved until run time, so the
-# neighbour iterator built from it would not be concretely typed and every cell of a traversal would
-# allocate. This signature is where that is enforced — the `stencil` keyword is deliberately left
-# UNANNOTATED, because annotating it `::AbstractStencil` would declare it abstract and destroy the very
-# inference the type-level design exists to get.
+# A stencil is named by its type, so the neighbour iterator built from it is concretely typed and a
+# traversal allocates nothing per cell. This signature is where that is enforced. The `stencil` keyword
+# stays unannotated: `::AbstractStencil` on it declares an abstract type and loses the inference.
 @inline _stencil_val(s::Stencils.AbstractStencil) = s
 
 @inline function _wrap_or_clip(i::Int, di::Int, n::Int, periodic::Bool)
@@ -25,8 +23,7 @@
     end
 end
 
-# The grid carries its topology in its type, so this is a const-fold of singleton types rather than a
-# tuple rebuilt per call.
+# The grid carries its topology in its type, so this const-folds from singleton types.
 @inline _periodic_flags(grid::Grids.AbstractGrid) = Grids.periodic_flags(grid)
 
 # ---------------------------------------------------------------------------
@@ -165,9 +162,9 @@ end
     IndexTopology(grid)
 
 Extent, wrapping and activity per dimension — the whole of what a neighbor computation reads.
-Coordinates, cell measure and geometry never enter one, so a sampling can hand this over directly
-rather than materializing a grid (axes, dense measure, full mask) to be read once and dropped. A
-curvilinear grid is the `N = 2` case of the same algorithm, not a separate one.
+Coordinates, cell measure and geometry never enter one, so a sampling hands this over directly, with no
+grid (axes, dense measure, full mask) built to be read once and dropped. A curvilinear grid is the
+`N = 2` case of the same algorithm.
 
 `mask === nothing` means every cell is active, and costs no storage and no load.
 """
@@ -177,9 +174,9 @@ struct IndexTopology{N,M}
     mask::M
 end
 
-# `Grids.mask`, not `grid.mask`: dot access on a grid resolves coordinate names first, which is not free.
-# Defined where a cell's index space and the coordinate directions are the same directions, which is
-# what makes one `periodic` flag per axis of `size` meaningful.
+# `Grids.mask` is used here; dot access on a grid resolves coordinate names first. Defined where a
+# cell's index space and the coordinate directions coincide, so one `periodic` flag per axis of `size`
+# is meaningful.
 @inline IndexTopology(grid::Grids.AbstractGrid) = IndexTopology(grid, Grids.cell_address(grid))
 @inline IndexTopology(grid, ::Grids.CartesianCells) =
     IndexTopology(Grids.size_tuple(grid), _periodic_flags(grid), Grids.mask(grid))
@@ -192,9 +189,9 @@ IndexTopology(grid, ::Grids.FlatCells) = throw(ArgumentError(
 @inline _active(::IndexTopology{N,Nothing}, ::Vararg{Int,N}) where {N} = true
 @inline _active(t::IndexTopology{N}, I::Vararg{Int,N}) where {N} = @inbounds t.mask[I...]
 
-# Both queries below read only `(size, periodic, mask)`, so structured and curvilinear grids share
-# one implementation. Constructing the topology copies two tuples and a mask REFERENCE — nothing is
-# allocated, and `N` stays a type parameter so the offset loop still unrolls.
+# Both queries below read only `(size, periodic, mask)`, so structured and curvilinear grids share one
+# implementation. Constructing the topology copies two tuples and a mask reference, allocating nothing,
+# and `N` stays a type parameter so the offset loop still unrolls.
 
 @inline function _check_index(t::IndexTopology{N}, Ii::NTuple{N,Int}) where {N}
     @inbounds for d in 1:N
@@ -210,9 +207,8 @@ function _nneighbors(
     active_only && !_active(t, Ii...) && return 0
     sz = t.size
     per = t.periodic
-    # Folded rather than looped over a returned offset tuple: the offsets are unrolled into the body, so
-    # a wide stencil materializes nothing, and the count is threaded through as a value rather than a
-    # captured local.
+    # A fold: the offsets are unrolled into the body, so a wide stencil materializes no tuple, and the
+    # count is threaded through as a value with nothing captured.
     return Stencils.fold_offsets(0, sten, Val(N)) do k, δ
         J = ntuple(d -> _wrap_or_clip(Ii[d], δ[d], sz[d], per[d]), Val(N))
         any(==(0), J) && return k

@@ -1,5 +1,9 @@
+# A `#` comment between a docstring and its definition drops the docstring, so this sits above.
 """
-    GradientPlan{D,T}
+    GradientPlan
+
+The two index buffers are typed independently and hold any `Integer`, so a plan built off a CSR keeps
+that CSR's own width — see `Connectivity._index_type`.
 
 The geometry of a least-squares gradient, separated from any field: for each cell, the coefficient on
 each neighbour's *difference* from it, once per coordinate direction. Built by
@@ -7,11 +11,10 @@ each neighbour's *difference* from it, once per coordinate direction. Built by
 
 `D` is the number of directions the fit resolves, which is the grid's coordinate count: two on a
 surface — a `(λ, φ)` or `(x, y)` mesh — and three in a volume, where the neighbourhood spans a solid
-angle rather than a tangent plane.
+angle.
 
 `apply_stencil!` covers the separable case. A `CurvilinearGrid` has no separable axis to build a scalar
-stencil along, and a node set's neighbours come from connectivity rather than an index offset, so
-neither has a gradient without this.
+stencil along, and a node set's neighbours come from connectivity, so this is the gradient for both.
 
 The construction, with tangent-plane displacements `Δrₖ` from
 [`Geometry.project_to_tangent_plane`](@ref), differences `Δfₖ = fₖ - f₀` and weights `wₖ = 1/|Δrₖ|²`:
@@ -28,12 +31,13 @@ What this buys over inverting an index-space Jacobian:
 - it reduces to the centred difference where the stencil is separable and orthogonal (`A` diagonal), so
   it agrees with `apply_stencil!` where both apply.
 
-Where `A` is rank deficient — a direction with no data, at a boundary or beside a mask — that
-component is **zeroed rather than invented**, by the pseudo-inverse. Same rule `apply_stencil!` states
-for a mask: not determined by the active data, so not produced.
+Where `A` is rank deficient — a direction with no data, at a boundary or beside a mask — the
+pseudo-inverse **zeroes** that component, under the rule `apply_stencil!` states for a mask: a value
+the active data does not determine is not produced.
 """
-struct GradientPlan{D,T,VI<:AbstractVector{Int},VT<:AbstractVector{T}}
-    ptr::VI                   # CSR row pointers into `nbr` and each of `coeffs`, length n+1
+struct GradientPlan{D,T,VP<:AbstractVector{<:Integer},VI<:AbstractVector{<:Integer},
+                    VT<:AbstractVector{T}}
+    ptr::VP                   # CSR row pointers into `nbr` and each of `coeffs`, length n+1
     nbr::VI                   # neighbour cell, as a linear index
     coeffs::NTuple{D,VT}      # coefficient on this neighbour's difference, one per direction
     names::NTuple{D,Symbol}   # what those directions are, from the geometry
@@ -69,25 +73,28 @@ displacements being metric already.
 function gradient! end
 
 function gradient!(
-    outs::NTuple{D,AbstractArray{S}}, field::AbstractArray, plan::GradientPlan{D},
+    outs::Tuple{AbstractArray{S},Vararg{AbstractArray{S}}}, field::AbstractArray,
+    plan::GradientPlan{D},
 ) where {D,S}
     n = length(plan)
+    length(outs) == D || throw(DimensionMismatch(
+        "the plan resolves $D components; got $(length(outs)) output arrays",
+    ))
     all(length(o) == length(field) for o in outs) || throw(DimensionMismatch(
         "field $(length(field)) and outputs $(map(length, outs)) must have the same length",
     ))
-    # A field may carry trailing BATCH axes beyond the grid's: the plan is over cells, so batch element
+    # A field may carry trailing batch axes beyond the grid's: the plan is over cells, so batch element
     # `b` is the contiguous linear span `(b-1)*n .+ (1:n)` and one call covers all of them. The plan's
-    # coefficients are geometry, not data, so they are reused across the batch rather than rebuilt.
+    # coefficients depend on the geometry alone and are reused across the batch.
     (length(field) % n == 0) || throw(DimensionMismatch(
         "plan is for $n cells; a field of $(length(field)) is not a whole number of them",
     ))
     nb = length(field) ÷ n
-    # Indexed linearly rather than through `vec`, which would build an array wrapper per output per
-    # call — 192 bytes on an operation that otherwise allocates nothing. An `N`-D array of the grid's
-    # shape indexes linearly as it stands, and a batched one is that shape repeated.
+    # Indexed linearly: an `N`-D array of the grid's shape indexes linearly as it stands, and a batched
+    # one is that shape repeated, so `vec` adds an array wrapper per output per call for nothing.
     #
-    # The per-direction accumulator is a TUPLE rebuilt each step rather than `D` named scalars, so one
-    # body serves any `D`: `ntuple` over a `Val` unrolls and stays in registers.
+    # The per-direction accumulator is a tuple rebuilt each step, so one body serves any `D`: `ntuple`
+    # over a `Val` unrolls and stays in registers.
     @inbounds for b in 0:(nb - 1)
         off = b * n
         for i in 1:n
@@ -103,10 +110,10 @@ function gradient!(
     return outs
 end
 
-# The three tuple steps of the loop above, each taking everything it touches as an ARGUMENT. Written
-# inline in `gradient!` the accumulator would be a local that is both reassigned each step and captured
-# by the `ntuple` closure, which the compiler has to box — measured at 1120 B per cell.
-@inline _grad_coefs(coeffs::NTuple{D,VT}, t::Int, ::Type{S}) where {D,VT,S} =
+# The three tuple steps of the loop above, each taking everything it touches as an argument. Written
+# inline in `gradient!`, the accumulator is a local that is both reassigned each step and captured by
+# the `ntuple` closure, which Julia boxes.
+@inline _grad_coefs(coeffs::NTuple{D,AbstractVector}, t::Int, ::Type{S}) where {D,S} =
     ntuple(d -> @inbounds(S(coeffs[d][t])), Val(D))
 
 @inline _grad_accum(s::NTuple{D,S}, c::NTuple{D,S}, df::S) where {D,S} =
@@ -131,10 +138,10 @@ end
 Pseudo-inverse of the symmetric 2×2 `[a b; b c]`, dropping any eigendirection whose eigenvalue is below
 `tol`. Closed form: a 2×2 symmetric eigenproblem has one.
 
-Dropping rather than regularising is the point. A stencil that carries no information along some
-tangent direction — every neighbour on one line, which happens at a boundary and beside a mask — leaves
-`A` singular in that direction, and the gradient there is not determined by the data. Inverting a
-nudged matrix would answer anyway, with a number governed by the nudge.
+A direction is dropped, never regularised. A stencil that carries no information along some tangent
+direction — every neighbour on one line, which happens at a boundary and beside a mask — leaves `A`
+singular there, and the data does not determine that component of the gradient. Inverting a nudged
+matrix answers with a number governed by the nudge.
 """
 @inline function _sympinv2(a::T, b::T, c::T, tol::T) where {T}
     τ = a + c
@@ -161,8 +168,7 @@ end
 Pseudo-inverse of a symmetric positive-semidefinite `A` given as its rows, dropping any eigendirection
 whose eigenvalue is at or below `tol`. `D = 2` and `D = 3`, which are the tangent plane and the volume.
 
-Dropping rather than regularising is the point — see [`_sympinv2`](@ref), which this is for `D = 2`
-and calls unchanged.
+A direction is dropped, never regularised — see [`_sympinv2`](@ref), which this calls at `D = 2`.
 """
 @inline function _sympinv(A::NTuple{2,NTuple{2,T}}, tol::T) where {T}
     p11, p12, p22 = _sympinv2(A[1][1], A[1][2], A[2][2], tol)
@@ -175,9 +181,9 @@ end
 Eigenvalues of a symmetric 3×3, largest first, by the closed form for the characteristic cubic: shift
 by the mean eigenvalue, scale, and read the three roots off `cos` at thirds of a turn.
 
-Only the eigenVALUES. An eigenVECTOR of a 3×3 in closed form is the part that loses accuracy when two
-eigenvalues are close, and [`_sympinv3`](@ref) needs none: a pseudo-inverse of a symmetric matrix is a
-polynomial in that matrix, and its coefficients are functions of the eigenvalues alone.
+Eigenvalues only. A closed-form eigenvector of a 3×3 loses accuracy when two eigenvalues are close, and
+[`_sympinv3`](@ref) needs none: a pseudo-inverse of a symmetric matrix is a polynomial in that matrix,
+and its coefficients are functions of the eigenvalues alone.
 """
 @inline function _sym_eigvals3(A::NTuple{3,NTuple{3,T}}, ::T) where {T}
     a11, a22, a33 = A[1][1], A[2][2], A[3][3]
@@ -210,9 +216,9 @@ end
 
 Pseudo-inverse of a symmetric positive-semidefinite 3×3.
 
-`A⁺` is a polynomial in `A` with no constant term at every rank, which is what lets this be closed form
-and eigenvector-free — such a polynomial annihilates the null space and acts as `1/λ` on the range,
-which is exactly the Moore–Penrose conditions:
+At every rank `A⁺` is a polynomial in `A` with no constant term, so this is closed form and needs no
+eigenvector. Such a polynomial annihilates the null space and acts as `1/λ` on the range, which is the
+Moore–Penrose conditions:
 
 - rank 3: `adj(A)/det(A)`, the ordinary inverse;
 - rank 2: `αA² + βA` with `α = -(λ₁+λ₂)/(λ₁λ₂)²` and `β = (λ₁² + λ₁λ₂ + λ₂²)/(λ₁λ₂)²`;

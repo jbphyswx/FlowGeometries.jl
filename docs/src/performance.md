@@ -32,17 +32,17 @@ size step:
 | `build_connectivity` sampling | 91.48 | 9 | 0.93 |
 | `unstructured_grid` icosahedral | 4.00 | 80 | 1.04 |
 
-Allocation counts are flat in `n` everywhere. `build_connectivity`'s 91 MiB is the CSR output itself
-for ~2M nodes, not overhead.
+Allocation counts are flat in `n` everywhere. `build_connectivity`'s 91 MiB is the CSR output for
+~2M nodes.
 
 ## Ball queries: nothing per query that belongs to the grid
 
-A ball query has costs that are properties of the *grid*, not of the query: the smallest step per
-direction, which bounds the candidate window, the span of each axis, and — where there are no separable
-axes to bound with — a spatial index. The first two are read through
-[`Grids.minimum_spacing`](@ref) and [`Grids.bounds`](@ref), which every layout answers in `O(1)` — a
-rectilinear grid from reductions taken once when it was built, a layout whose coordinates are a formula
-from its own parameters. [`Connectivity.MetricTopology`](@ref) carries them for a whole sweep.
+A ball query's costs belong to the *grid*: the smallest step per direction, which bounds the candidate
+window, the span of each axis, and — where there are no separable axes to bound with — a spatial index.
+The first two are read through [`Grids.minimum_spacing`](@ref) and [`Grids.bounds`](@ref), which every
+layout answers in `O(1)` — a rectilinear grid from reductions taken once when it was built, a layout
+whose coordinates are a formula from its own parameters. [`Connectivity.MetricTopology`](@ref) carries
+them for a whole sweep.
 
 The effect is that the per-query default costs nothing, so there is no hoisting to get right. On a
 stretched axis, with the radius and the window's cell count held fixed:
@@ -54,26 +54,19 @@ stretched axis, with the radius and the window's cell count held fixed:
 | 4 096 | 0.029 µs | 0.029 µs |
 | 16 384 | 0.030 µs | 0.029 µs |
 
-Both columns allocate nothing. Before the reductions were cached the default column was a per-query
-`O(N_d)` rescan — 15.2 µs at 16 384, growing without bound in the axis length — and every grid with a
-non-uniform axis paid it, which includes every Gaussian-latitude grid.
+Both columns allocate nothing, and both are flat in the axis length: the per-direction reductions are
+taken once, so no query rescans a stretched axis. Every Gaussian-latitude grid has a stretched axis.
 
 ### A heterogeneous coordinate tuple
 
 Each direction keeps whatever `AbstractVector` type it was built from, so a grid with a range for
 longitude and a vector for latitude has a *heterogeneous* coordinate tuple. Indexing that tuple with a
-loop variable is a dynamic lookup, and one such loop — a bounds check in `_raw_coords` — used to defeat
-inference for every coordinate read:
+loop variable is a dynamic lookup, so every read of it goes through a recursive tail-split that keeps
+each branch concretely typed.
 
-| on a mixed-axis grid | before | after |
-|---|---|---|
-| `coords` | 192 B | **0 B** |
-| `distance(grid, I, J)` | 384 B | **0 B** |
-| `nneighbors_within` | 9 600 B, 5.3 µs | **0 B, 0.32 µs** |
-| `fold_within` | 9 600 B | **0 B** |
-
-Every per-cell entry point is now allocation-free on every grid shape, and the suite checks that against
-a matrix of shapes — including mixed-axis ones, which is the case it did not previously have.
+Every per-cell entry point is therefore allocation-free on every grid shape — `coords`,
+`distance(grid, I, J)`, `nneighbors_within` and `fold_within` all at 0 B — and the suite checks it
+across a matrix of shapes, mixed-axis ones included.
 
 ### Which index
 
@@ -87,12 +80,11 @@ default:
 | k-d tree (`NearestNeighbors`) | 8.95 ms | 1.25 µs | 672 |
 | no index (scan) | — | 646 µs | 0 |
 
-The cell list also enumerates through a fold rather than a returned list, so a query holds no buffer and
-runs inside a kernel; a tree cannot, because it searches replicated points and has to deduplicate.
+The cell list also enumerates through a fold, so a query holds no buffer and runs inside a kernel. A
+tree searches replicated points and has to deduplicate, so it needs one.
 
-Its build is `O(n)`, but only once the dimension reaches the type: taking it from `size(pts, 1)` — a
-runtime value — left the construction loop dynamically dispatched at **196 ms and 34 MiB** for those
-65 536 points, against 2.75 ms and 3 MiB behind a function barrier.
+Its build is `O(n)`, with the point dimension lifted into the type behind a function barrier; left as a
+runtime value it leaves the whole construction loop dynamically dispatched.
 
 ### Indexing the architectures with no axes
 
@@ -135,15 +127,14 @@ without it.
 
 Gauss–Legendre holds machine precision past degree `2N−1`; Driscoll–Healy and Clenshaw–Curtis lose
 exactness just after `N−1`, which is the distinction
-`admits_exact_bandlimited_quadrature` encodes. The fitted exponents on the right are measured
-per run, not asserted.
+`admits_exact_bandlimited_quadrature` encodes. The fitted exponents on the right are measured per run.
 
 
 Gauss–Legendre uses asymptotic expansions (Bogaert 2014; Hale & Townsend 2013) above `n = 60`: each
 node sits near `j_k/(n+½)` for `j_k` a zero of `J₀`, with corrections in powers of `(n+½)⁻²`. Nothing
 iterates and no root depends on its neighbours, so it is `O(1)` per node and allocation-free.
 
-| `n = 2048` | Golub–Welsch | now |
+| `n = 2048` | Golub–Welsch | asymptotic expansion |
 |---|---|---|
 | time | 279.4 ms | **0.05 ms** |
 | memory | 33.4 MiB | 32 KiB |
@@ -159,14 +150,14 @@ agreeing to 1.4e-14.
 
 ## Memory
 
-The two big materializations are gone:
+Neither of the two large per-cell fields is materialized:
 
-- **Cell measure** — stored as per-axis factors. At 2000²: **61.0 MiB → 0.046 MiB**.
-- **Curvilinear corner directions** — two rows live at a time instead of the whole field. At 1000²:
-  **61.3 MiB → 23.1 MiB**, with bit-identical areas.
+- **Cell measure** — held as per-axis factors: **0.046 MiB** at 2000², against 61.0 MiB dense.
+- **Curvilinear corner directions** — two rows live at a time: **23.1 MiB** at 1000², against 61.3 MiB
+  for the whole field, with bit-identical areas.
 
-The factored measure is also *faster* to read, which was not the expectation. At 2000² the dense
-array is 61 MiB and DRAM-bound while the factors stay in cache:
+The factored measure is also *faster* to read. At 2000² the dense array is 61 MiB and DRAM-bound while
+the factors stay in cache:
 
 | access | factored vs dense |
 |---|---|
@@ -177,7 +168,7 @@ array is 61 MiB and DRAM-bound while the factors stay in cache:
 
 !!! warning "Measure at realistic sizes"
     A memory-bound comparison taken at a size where the dense array still fits in cache measures the
-    cache, not the code. These are taken at 2000² and above for that reason.
+    cache. These are taken at 2000² and above.
 
 ## Threading
 
@@ -195,28 +186,23 @@ using ComputationalBackends: ThreadedBackend
 FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
 ```
 
-Chunks are contiguous, so each thread touches one span of every array rather than striding across
-all of them. Passing `nothing` (the default) hands the loop body the whole range in one call, so the
-serial path adds no partitioning at all.
+Chunks are contiguous, so each thread touches one span of every array. Passing `nothing` (the default)
+hands the loop body the whole range in one call, so the serial path adds no partitioning at all.
 
-Two passes are deliberately **not** threaded, and the reasons are structural rather than pending
-work. The CSR compacting move can have row `j`'s destination fall inside row `i`'s source block for
-`i < j`, so concurrent rows would overwrite unread candidates. And the prefix scan between the count
-and fill passes is inherently sequential — it is `O(n)` against the `O(n·stencil)` passes it
-separates.
+Two passes are **not** threaded, for structural reasons. In the CSR compacting move, row `j`'s
+destination can fall inside row `i`'s source block for `i < j`, so concurrent rows overwrite unread
+candidates. And the prefix scan between the count and fill passes is inherently sequential; it is
+`O(n)` against the `O(n·stencil)` passes it separates.
 
-## Things measured and found *not* to be problems
-
-Recorded so they are not re-litigated:
+## Measured non-issues
 
 - **`getproperty` coordinate-name lookup is free** — 0.065 vs 0.077 ms per 10⁶ reads; it const-folds.
 - **The dense-mask branch is free** in a predictable loop.
 - **Cross-point SIMD is unavailable** — `@simd` over 10⁶ haversines is 1.01×; LLVM cannot vectorize
   `sin`/`cos`/`atan`. Eliminating trig is the only lever, so the geometry kernels use `sincos` and
   hoist `atan` out of loops.
-- **Vector-axis construction is not superlinear** — the gap against a uniform axis is a constant
-  factor, not a growing one.
+- **Vector-axis construction is not superlinear** — the gap against a uniform axis is a constant factor.
 - **The ball-query candidate buffer is mostly an allocation win** — 1.43× in time on a 20-candidate ball
-  and 1.06× on a 310-candidate one, against zero bytes per query rather than 480 B and 6.1 KB. Worth
-  passing in a sweep; the time it saves is only visible where the ball is small enough that the
-  allocation is most of the query.
+  and 1.06× on a 310-candidate one, at zero bytes per query against 480 B and 6.1 KB. Worth passing in
+  a sweep; the time it saves shows up only where the ball is small enough that the allocation is most
+  of the query.

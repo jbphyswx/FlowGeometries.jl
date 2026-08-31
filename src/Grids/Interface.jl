@@ -31,11 +31,9 @@ abstract type AbstractUnstructuredGrid{G<:Geometry.AbstractGeometry, T<:Abstract
 # What a traversal asks of a layout
 # ---------------------------------------------------------------------------
 #
-# Three questions, and every neighbourhood algorithm here is a function of the answers rather than of
-# which grid type it was handed: how a cell is named, where its adjacency comes from, and how a
-# distance query enumerates candidates. They are independent — a layout picks one answer to each — so
-# they are three traits and not one, and a new layout supplies three methods instead of joining every
-# traversal's dispatch table.
+# Every neighbourhood algorithm here is a function of three answers: how a cell is named, where its
+# adjacency comes from, and how a distance query enumerates candidates. A layout picks one answer to
+# each independently, hence three traits, and a new layout supplies three methods.
 
 """
     AbstractCellAddress
@@ -108,10 +106,9 @@ struct FormulaNeighbors <: AbstractAdjacency end
 A cell's neighbours as linear indices, in the first `n` entries of a fixed-width tuple, where `K` is
 [`max_neighbors`](@ref)`(grid)`.
 
-A tuple rather than a buffer because it is a stack value: a traversal over every cell of a layout whose
-adjacency is arithmetic then allocates nothing at all, and needs no scratch to be threaded through. `n`
-varies where a layout has singular cells — a HEALPix pixel at a face corner has seven neighbours, not
-eight.
+The tuple is a stack value, so a traversal over every cell of a layout whose adjacency is arithmetic
+allocates nothing and threads no scratch through. `n` varies where a layout has singular cells: a
+HEALPix pixel at a face corner has seven neighbours where the rest have eight.
 
 The one method a [`FormulaNeighbors`](@ref) layout supplies.
 """
@@ -145,14 +142,34 @@ function adjacency_source end
 @inline adjacency_source(::AbstractUnstructuredGrid) = StoredMeshNeighbors()
 
 """
+    has_symmetric_adjacency(grid) -> Bool
+
+Whether the graph `grid` builds satisfies `j ∈ N(i) ⟺ i ∈ N(j)`, answered from the layout.
+
+A symmetric graph with sorted rows has the same arrays read as CSR and as CSC, so
+`Connectivity.sparse_adjacency_matrix` hands its buffers to the matrix without transposing.
+[`Connectivity.is_symmetric_adjacency`](@ref FlowGeometries.Connectivity.is_symmetric_adjacency)
+answers the same question about a built graph, and pays a transpose to do it; this answers before one
+exists.
+
+`false` by default, so a layout claims the shortcut only where its own formula gives it. Masking
+preserves it either way: an edge and its reverse are the same pair of cells, and both are dropped
+together. A layout whose neighbours are an index stencil answers through the stencil, which carries
+its own
+[`Stencils.is_symmetric`](@ref FlowGeometries.Stencils.is_symmetric).
+"""
+function has_symmetric_adjacency end
+
+@inline has_symmetric_adjacency(::AbstractGrid) = false
+
+"""
     AbstractCandidateSource
 
 How a distance query enumerates the cells it must test: [`SeparableWindow`](@ref) or
 [`IndexedCandidates`](@ref). Read it with [`candidate_source`](@ref).
 
-Either way the caller's exact `distance ≤ r` gate decides membership, so both must return a SUPERSET
-of the ball — which is what makes the two enumerations agree by construction rather than by two
-implementations happening to match.
+Membership is decided by the caller's exact `distance ≤ r` gate, so each need only return a superset of
+the ball, and the two enumerations agree on the result.
 """
 abstract type AbstractCandidateSource end
 
@@ -260,13 +277,12 @@ Direction `d`'s coordinate axis. Only rectilinear grids have axes; this is
 
 Whether direction `d`'s spacing is known from its type, as a value a method can **dispatch** on.
 
-[`isuniform`](@ref) answers the same question, but as a `Bool`, and a `Bool` can only be branched on.
-A kernel that wants the uniform form of an expression — a stencil row that is the same at every
-interior sample, an `O(1)` locate — has to select it by dispatch, which needs the direction in the
-type. Hence the `Val`: it is what makes the answer available where the branch would be too late.
+[`isuniform`](@ref) answers the same question as a `Bool`, which a method can only branch on. A kernel
+that selects the uniform form of an expression — a stencil row that is the same at every interior
+sample, an `O(1)` locate — selects it by dispatch, and that needs the direction in the type, hence the
+`Val`.
 
-`isuniform(grid, d::Integer)` remains for a direction chosen at run time, where no such selection is
-possible and a value is the only available form.
+`isuniform(grid, d::Integer)` serves a direction chosen at run time.
 """
 @inline spacing_trait(grid::AbstractGrid, ::Val{d}) where {d} =
     Axes.spacing_trait(@inbounds coordinates(grid)[d])
@@ -275,11 +291,11 @@ possible and a value is the only available form.
     isuniform(grid, d) -> Bool
     isuniform(grid) -> Bool
 
-Whether coordinate direction `d` has constant spacing known from its TYPE (all directions, for the
-no-`d` form). No code path inspects coordinate VALUES to decide this; the answer comes from the type
-alone. See [`spacing_trait`](@ref) for the form a method can dispatch on.
+Whether coordinate direction `d` has constant spacing known from its type (all directions, for the
+no-`d` form). The answer comes from the type alone; no code path inspects coordinate values to decide
+it. See [`spacing_trait`](@ref) for the form a method can dispatch on.
 
-A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields, not axes.
+A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields with no axes.
 """
 @inline isuniform(grid::AbstractGrid, d::Integer) = _at_axis(Axes.isuniform, coordinates(grid), d)
 @inline isuniform(grid::AbstractGrid) = all(Axes.isuniform, coordinates(grid))
@@ -306,13 +322,12 @@ The first coordinate along direction `d`.
     bounds(grid, d) -> (lo, hi)
 
 Smallest and largest coordinate along direction `d`, ordered `lo ≤ hi` regardless of whether the
-direction is stored ascending or descending. These are the extreme SAMPLE positions (cell centres),
-not the outer cell boundaries.
+direction is stored ascending or descending. These are the extreme sample positions, i.e. cell centres.
 
-`O(1)` on a rectilinear grid, whose directions are AXES: an axis is monotone — every search here
-bisects it, which requires that — so its extremes are its endpoints and there is nothing to scan.
-`O(N)` where the coordinates are per-cell fields instead, which have no such order; a query that wants
-that repeatedly reads it from a [`MetricTopology`](@ref FlowGeometries.Connectivity.MetricTopology), built once.
+`O(1)` on a rectilinear grid: an axis is monotone, as every search here bisects it, so its extremes are
+its endpoints. `O(N)` where the coordinates are per-cell fields, which carry no such order; a query
+that reads this repeatedly takes it from a
+[`MetricTopology`](@ref FlowGeometries.Connectivity.MetricTopology), built once.
 """
 @inline bounds(grid::AbstractGrid, d::Integer) = extrema(coordinates(grid, d))
 
@@ -340,9 +355,9 @@ end
 
 Smallest gap between consecutive samples along direction `d`, as a non-negative magnitude. `O(1)` when
 the direction is [`isuniform`](@ref) and `O(N_d)` otherwise. With [`maximum_spacing`](@ref) it bounds
-how far an index window must reach to cover a given physical distance, which is what a
-neighbourhood-by-distance query needs on a stretched axis. They are also the exact test of whether a
-stretched axis happens to be equally spaced: its gaps are identical when the two are equal.
+how far an index window must reach to cover a given physical distance, as a neighbourhood-by-distance
+query on a stretched axis needs. The two are also the exact test of whether a stretched axis happens to
+be equally spaced: its gaps are identical when they are equal.
 
 A direction of fewer than two samples has no gap, and reports `Inf` — the identity for `min`.
 """
@@ -358,11 +373,11 @@ Largest gap between consecutive samples along direction `d`, the counterpart of
 @inline maximum_spacing(grid::AbstractStructuredGrid, d::Integer) =
     _at_axis(_max_gap, coordinates(grid), d)
 
-# Selecting ONE axis by a runtime direction out of the coordinate tuple, whose entries may be different
-# types. `ntuple(…, Val(N))` unrolls where every direction is wanted; only one is here, so the tuple is
-# walked by a recursive tail-split instead — the same shape as `_checkaxes`. Each branch sees a
+# Selects a single axis by a runtime direction out of the coordinate tuple, whose entries may be
+# different types. `ntuple(…, Val(N))` unrolls where every direction is wanted; only one is here, so the
+# tuple is walked by a recursive tail-split, the same shape as `_checkaxes`. Each branch sees a
 # concretely typed axis and every branch returns the same concrete type, so the result infers and
-# nothing allocates, where `coordinates(grid, d)` alone would be a dynamic lookup.
+# nothing allocates.
 @inline _at_axis(::F, ::Tuple{}, d::Integer) where {F} =
     throw(ArgumentError("direction $d is outside this grid's directions"))
 @inline _at_axis(f::F, c::Tuple, d::Integer) where {F} =
@@ -380,8 +395,8 @@ Signed, so a descending axis reports negative gaps — see the axis-level form f
 per-point form to call inside a loop assembling a finite-difference operator.
 """
 @inline function local_spacing(grid::AbstractStructuredGrid, d::Integer, i::Integer)
-    # Branching here rather than passing a `Union{Nothing,T}` period: both arms return the same
-    # concrete tuple type, where the union would have to be split inside the callee on every call.
+    # Both arms return the same concrete tuple type. Passing a `Union{Nothing,T}` period through instead
+    # moves the split inside the callee, onto every call.
     return isperiodic(grid, d) ?
         _at_axis(x -> Discretization.local_spacing(x, i, period(grid, d)), coordinates(grid), d) :
         _at_axis(x -> Discretization.local_spacing(x, i, nothing), coordinates(grid), d)
@@ -393,9 +408,9 @@ end
 The coordinate width of cell `i` along direction `d`: [`Discretization.cell_width`](@ref) on that
 direction's axis, with the grid's own wrap period. Non-negative whichever way the axis is stored.
 
-This is the coordinate width, not the cell measure — on a sphere [`measure`](@ref) is `R²cosφ·Δλ·Δφ`
-and this is the `Δλ` or `Δφ` in it, which [`measure_factors`](@ref) does not expose separately
-because it folds the metric into the factor it multiplies.
+A coordinate width, distinct from the cell measure: on a sphere [`measure`](@ref) is `R²cosφ·Δλ·Δφ` and
+this is the `Δλ` or `Δφ` in it. [`measure_factors`](@ref) folds the metric into each factor, so it does
+not expose these separately.
 """
 @inline function cell_width(grid::AbstractStructuredGrid, d::Integer, i::Integer)
     return isperiodic(grid, d) ?
@@ -424,8 +439,8 @@ The grid's coordinate names, from its geometry: `(:x, :y[, :z])` or `(:λ, :φ[,
 @inline coordinate_names(grid::AbstractGrid) =
     Geometry.point_names(grid_geometry(grid), Val(ncoordinates(grid)))
 
-# Geometry-correct named access (`grid.x` / `grid.λ`), resolved from `coordinate_names`. A name that
-# does not belong to this geometry is a `FieldError`, not a silent alias for the wrong quantity.
+# Geometry-correct named access (`grid.x` / `grid.λ`), resolved from `coordinate_names`. A name outside
+# this geometry falls through to `getfield` and raises a `FieldError`.
 @inline function Base.getproperty(grid::AbstractGrid, name::Symbol)
     d = findfirst(==(name), coordinate_names(grid))
     d === nothing && return getfield(grid, name)
@@ -444,8 +459,7 @@ end
 How a coordinate direction closes: [`Periodic`](@ref) or [`Bounded`](@ref).
 
 Carried in the grid's type, so [`isperiodic`](@ref) is a compile-time answer and callers can dispatch
-on it. The cell measure depends on it — a wrapped boundary cell has a width a bounded one does not —
-so it is part of what the grid is, not a flag attached to it.
+on it. The cell measure depends on it: a wrapped boundary cell has a width that a bounded one lacks.
 """
 abstract type AbstractTopology end
 
@@ -459,7 +473,7 @@ struct Periodic <: AbstractTopology end
 """
     Bounded()
 
-A direction that ends: its first and last cells each have one neighbour rather than two.
+A direction that ends: its first and last cells have one neighbour each.
 """
 struct Bounded <: AbstractTopology end
 
@@ -492,10 +506,9 @@ Whether coordinate direction `d` wraps. See [`topology`](@ref) for the type-leve
 @inline isperiodic(grid::AbstractGrid, d::Integer) =
     @inbounds periodic_flags(grid)[_checked_direction(periodic_flags(grid), d)]
 
-# A direction is a dimension selector, not an array index, so an out-of-range one is an
-# `ArgumentError` — the same one `_at_axis` raises — rather than whatever the underlying tuple read
-# happens to do. Without this the read is `@inbounds` on a runtime index: under `--check-bounds=yes`
-# it raises `BoundsError` from an internal, and under the default it is simply out of bounds.
+# A direction is a dimension selector, so an out-of-range one raises the `ArgumentError` `_at_axis`
+# raises. The read below it is `@inbounds` on a runtime index, which under `--check-bounds=yes` gives a
+# `BoundsError` from an internal and under the default reads out of bounds.
 @inline function _checked_direction(t::Tuple, d::Integer)
     1 ≤ d ≤ length(t) ||
         throw(ArgumentError("direction $d is outside this grid's directions"))
@@ -516,13 +529,13 @@ _as_topology(::Val{N}, t::Union{Tuple,AbstractVector}) where {N} =
 """
     SeparableMeasure(factors)
 
-The cell measure of a rectilinear grid, stored as its per-axis factors rather than materialized.
+The cell measure of a rectilinear grid, held as its per-axis factors.
 
 Every measure this package supports on such a grid is a product of one factor per axis (see
 [`_measure_factors`](@ref)), so the `∏ Nᵈ` entries carry only `∑ Nᵈ` numbers. It is a genuine
 `AbstractArray`: indexing, broadcasting and `collect` behave as for the dense equivalent.
 
-`sum` is specialized to `∏ᵈ ∑ᵢ wᵈᵢ`, which is `O(∑ Nᵈ)` rather than `O(∏ Nᵈ)`.
+`sum` is specialized to `∏ᵈ ∑ᵢ wᵈᵢ`, `O(∑ Nᵈ)` against the dense `O(∏ Nᵈ)`.
 """
 struct SeparableMeasure{T,N,F<:NTuple{N,AbstractVector{T}}} <: AbstractArray{T,N}
     factors::F
@@ -539,16 +552,15 @@ end
 """
     SlabMeasure(lead, slab, rest)
 
-The cell measure of a rectilinear grid in which ONE pair of directions is coupled and the rest are
-not: `measure[i, j, k, l…] == lead[i] · slab[j, k] · rest[1][l] · …`.
+The cell measure of a rectilinear grid with a single coupled pair of directions:
+`measure[i, j, k, l…] == lead[i] · slab[j, k] · rest[1][l] · …`.
 
-A geodetic `(λ, φ, h)` volume element is `(N(φ)+h)·cosφ·(M(φ)+h)·Δλ·Δφ·Δh`. The height offsets BOTH
-curvature radii, so no product of per-axis factors reproduces it and a
-[`SeparableMeasure`](@ref) cannot hold it — but longitude enters none of it, so only `(φ, h)` need be
-stored together. That is `Nφ·Nh + Nλ + …` numbers where the dense array is `∏ Nᵈ`: at a degree of
-longitude and a hundred levels, a hundred and forty kilobytes rather than fifty megabytes.
+A geodetic `(λ, φ, h)` volume element is `(N(φ)+h)·cosφ·(M(φ)+h)·Δλ·Δφ·Δh`. The height offsets both
+curvature radii, so no product of per-axis factors reproduces it and [`SeparableMeasure`](@ref) cannot
+hold it. Longitude enters none of that coupling, so only `(φ, h)` are stored together, giving
+`Nφ·Nh + Nλ + …` numbers against the dense `∏ Nᵈ`.
 
-`sum` and `extrema` are specialized, on the same argument as the separable case: the whole is a product
+`sum` and `extrema` are specialized on the same argument as the separable case: the whole is a product
 of independent groups, so its total is the product of their totals and its extremes are attained with
 every group at one of its own.
 """
@@ -575,8 +587,8 @@ Base.IndexStyle(::Type{<:SlabMeasure}) = IndexCartesian()
     return v
 end
 
-# ∑_{i,j,k} lead_i·slab_jk·… = (∑ lead)·(∑ slab)·∏(∑ rest), which is `O(Nλ + Nφ·Nh + ∑)` rather than
-# `O(∏ Nᵈ)` — the same factorization `SeparableMeasure` uses, with one group of rank two.
+# ∑_{i,j,k} lead_i·slab_jk·… = (∑ lead)·(∑ slab)·∏(∑ rest), `O(Nλ + Nφ·Nh + ∑)` against the dense
+# `O(∏ Nᵈ)`. The factorization `SeparableMeasure` uses, with one group of rank two.
 Base.sum(m::SlabMeasure) = sum(m.lead) * sum(m.slab) * prod(sum, m.rest; init = one(eltype(m)))
 
 function Base.extrema(m::SlabMeasure{T}) where {T}

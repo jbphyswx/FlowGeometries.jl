@@ -56,9 +56,9 @@ The buffers a [`Connected`](@ref) query needs: the ball's cells and their distan
 the breadth-first order, the queue, and the candidate buffer the ball pass itself takes.
 
 **One per task**, exactly as [`ball_scratch`](@ref) is — every buffer is written per query, so two tasks
-cannot share a set. Build one with [`connected_scratch`](@ref) and pass it as `scratch`; without one the
-query allocates its buffers each time, which is correct but is the cost its `Unrestricted` sibling does
-not have.
+cannot share a set. Build one with [`connected_scratch`](@ref) and pass it as `scratch`. A query given
+no scratch borrows one from a per-task pool for its duration and returns it, so repeated queries on one
+task allocate once; naming your own pins the buffers to a lifetime you control.
 """
 struct ConnectedScratch{
     T, VI<:AbstractVector{Int}, VT<:AbstractVector{T}, VB<:AbstractVector{Bool},
@@ -75,7 +75,7 @@ end
     connected_scratch([T = Float64]) -> ConnectedScratch{T}
 
 Buffers for a [`Connected`](@ref) query, so a caller making many of them allocates none. `T` is the
-grid's coordinate type, which is what its distances are.
+grid's coordinate type, which its distances are reported in.
 
 The buffers grow to the largest ball seen and are reused, so the first query on a new size is the only
 one that allocates.
@@ -83,12 +83,23 @@ one that allocates.
 connected_scratch(::Type{T} = Float64) where {T} =
     ConnectedScratch{T,Vector{Int},Vector{T},Vector{Bool}}(Int[], T[], Bool[], Int[], Int[], Int[])
 
+const _DefaultConnectedScratch{T} = ConnectedScratch{T,Vector{Int},Vector{T},Vector{Bool}}
+
+# The free list a query with no scratch of its own borrows from. Keyed on the scratch type itself, so
+# one lookup lands on a concretely typed vector. The store is task-local, so two tasks never reach the
+# same buffers, and the borrow nests: a query made from inside another one's fold finds the list empty
+# and takes fresh buffers, leaving the outer query's untouched.
+@inline _conn_pool(::Type{T}) where {T} = get!(
+    () -> _DefaultConnectedScratch{T}[], task_local_storage(), _DefaultConnectedScratch{T},
+)::Vector{_DefaultConnectedScratch{T}}
+
+@inline _borrow_scratch(pool::AbstractVector{<:ConnectedScratch{T}}) where {T} =
+    isempty(pool) ? connected_scratch(T) : pop!(pool)
+
 # The buffers for one query, from whatever the caller passed as `scratch`: a `ConnectedScratch` supplies
-# all of them, a bare vector supplies the ball pass's candidate buffer alone, and `nothing` supplies
-# none. Each branch returns concretely typed buffers, and the caller is specialized on the scratch type,
-# so no union crosses into the walk.
-@inline _conn_bufs(::Nothing, ::Type{T}) where {T} =
-    (Int[], T[], Bool[], Int[], Int[], nothing)
+# all of them, and a bare vector supplies the ball pass's candidate buffer alone. Each branch returns
+# concretely typed buffers, and the caller is specialized on the scratch type, so no union crosses into
+# the walk.
 @inline _conn_bufs(v::AbstractVector{<:Integer}, ::Type{T}) where {T} =
     (Int[], T[], Bool[], Int[], Int[], v)
 @inline _conn_bufs(s::ConnectedScratch{T}, ::Type{T}) where {T} =
@@ -105,13 +116,13 @@ end
 
 Sort the ball by linear index, carrying each cell's distance with it.
 
-Membership is then a binary search rather than a `Set`: the walk tests it once per (cell, neighbour)
-pair, and `searchsortedfirst` over a sorted `Vector{Int}` beats hashing at these sizes without allocating
-a dictionary per query.
+Membership is then a binary search: the walk tests it once per (cell, neighbour) pair, and
+`searchsortedfirst` over a sorted `Vector{Int}` beats hashing at these sizes and allocates no
+dictionary per query.
 
-Both arrays move together in place, so there is no permutation vector — `sortperm` plus two `permute!`
-is three allocations on a path whose sibling is free. Quicksort with a median-of-three pivot, recursing
-on the smaller side so the depth stays `O(log m)`, and insertion sort for a short span.
+Both arrays move together in place, so there is no permutation vector; `sortperm` plus two `permute!`
+is three allocations. Quicksort with a median-of-three pivot, recursing on the smaller side so the
+depth stays `O(log m)`, and insertion sort for a short span.
 """
 function _sort_ball!(
     idxs::AbstractVector{Int}, ds::AbstractVector, lo::Int = 1, hi::Int = length(idxs),
@@ -166,7 +177,7 @@ function _sort_ball!(
 end
 
 # The seed's component, as positions into `idxs` in breadth-first order, written into the caller's
-# buffers. The frontier is walked by a head index rather than `popfirst!`, so `queue` is only appended to.
+# buffers. A head index walks the frontier, so `queue` is only ever appended to.
 function _component!(
     order::AbstractVector{Int}, queue::AbstractVector{Int}, visited::AbstractVector{Bool},
     idxs::AbstractVector{Int}, seed::Int, adj::A,
@@ -243,6 +254,21 @@ function _connected_fold(
     _component!(order, queue, visited, idxs, seed, _walk_adjacency(grid, reach))
     return _emit_component(f, init, idxs, ds, order, seed, self,
                            lin -> Grids._cell_from_linear(grid, lin))
+end
+
+# No scratch named: borrow one, and return it however the fold ends. `f` runs while the buffers are
+# live, so a nested query must not see this one — the pool is empty for its whole duration.
+function _connected_fold(
+    f::F, init, grid::Grids.AbstractGrid{G,T}, I, ball, images::AbstractImageConvention,
+    active_only::Bool, self::Bool, mt::MetricTopology, ::Nothing, reach::Connected,
+) where {F,G,T}
+    pool = _conn_pool(T)
+    s = _borrow_scratch(pool)
+    try
+        return _connected_fold(f, init, grid, I, ball, images, active_only, self, mt, s, reach)
+    finally
+        push!(pool, s)
+    end
 end
 
 # The graph the component walk expands along, from `Grids.adjacency_source` — the mesh's own neighbour

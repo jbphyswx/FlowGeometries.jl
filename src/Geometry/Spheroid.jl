@@ -42,8 +42,8 @@ Oblate spheroid of equatorial radius `a` and flattening `f = (a-b)/a`. The no-ar
 `a = 6378137.0`, `f = 1/298.257223563`.
 
 `distance`, `area_element`, `volume_element` and `scale_factors` differ from a sphere. Grid directions
-are `(λ, φ, h)`, with `h` the height above the ellipsoid — not an absolute radius, which is what the
-spherical third direction is.
+are `(λ, φ, h)`, with `h` the height above the ellipsoid, where a sphere's third direction is an
+absolute radius.
 
 Rectilinear grids and the index-space connectivity built on them work as they do for a sphere; the
 samplings are purely angular and so carry over unchanged. So does everything written against the two
@@ -53,7 +53,7 @@ interpolation. See [`AbstractLonLatGeometry`](@ref) for why the frame is shared.
 
 The spherical *area* routines do not: `unstructured_grid`'s Voronoi areas and the cell areas behind
 `spherical_grid` are built on spherical excess and `4πR²/n`, which are sphere identities. They stay
-restricted to [`AbstractSphericalGeometry`](@ref) rather than returning sphere areas for an ellipsoid.
+restricted to [`AbstractSphericalGeometry`](@ref), and raise on an ellipsoid.
 """
 struct SpheroidGeometry{T<:AbstractFloat} <: AbstractEllipsoidalGeometry{T}
     a::T
@@ -155,8 +155,7 @@ end
 longitude, which holds the result to well under a millimetre at Earth scale.
 
 Vincenty's iteration converges slowly for very nearly antipodal point pairs. It is capped, and on
-reaching the cap the great-circle distance on a sphere of the mean radius is returned instead of a
-half-converged number.
+reaching the cap the result is the great-circle distance on a sphere of the mean radius.
 
 3-D `(λ, φ, h)`: the chord through Cartesian (ECEF), mirroring the spherical 3-D convention. A lone
 `(λ,)` is the shorter arc of the equator.
@@ -185,10 +184,10 @@ Spherical excess of the triangle spanned by three UNIT vectors, via Van Oosterom
 
     tan(E/2) = |a · (b × c)| / (1 + a·b + b·c + c·a)
 
-One `atan` and no other transcendental, versus L'Huilier's three great-circle distances (each its own
-trig) plus four tangents. It takes directions rather than `(λ, φ)` so a mesh can convert each vertex
-once — see [`unit_vector`](@ref) — instead of re-deriving them per triangle. Multiply by `R²` for an
-area, which is what [`triangle_area`](@ref) does.
+One `atan` and no other transcendental, against L'Huilier's three great-circle distances (each its own
+trig) plus four tangents. Taking directions lets a mesh convert each vertex once — see
+[`unit_vector`](@ref) — and share it across every triangle. Multiply by `R²` for an area, as
+[`triangle_area`](@ref) does.
 """
 @inline function spherical_excess(a::NTuple{3,T}, b::NTuple{3,T}, c::NTuple{3,T}) where {T}
     num = a[1] * (b[2] * c[3] - b[3] * c[2]) +
@@ -206,8 +205,8 @@ end
 Exact area of the spherical triangle through three `(λ, φ)` points, each in any accepted representation.
 `R²` times [`spherical_excess`](@ref).
 
-Convenient rather than fast: it converts all three points every call. A mesh that already holds vertex
-directions should use `spherical_excess` on those and scale once.
+This converts all three points on every call. A mesh that already holds vertex directions should call
+`spherical_excess` on those and scale once.
 """
 @inline function triangle_area(
     geo::AbstractSphericalGeometry{T}, p1, p2, p3,
@@ -222,8 +221,8 @@ end
 [`triangle_area`](@ref) for vertices already held as unit vectors — `R²` times
 [`spherical_excess`](@ref), with no coordinate conversion.
 
-A separate name rather than a `triangle_area` method because the two cannot be told apart by dispatch:
-a unit vector and a 3-D spherical point `(λ, φ, r)` are both 3-tuples.
+It carries its own name because dispatch cannot tell the two apart: a unit vector and a 3-D spherical
+point `(λ, φ, r)` are both 3-tuples.
 
 Pass `R²` itself to walk many triangles: a mesh shares vertices between cells, so the squaring belongs
 outside the loop alongside the one-per-vertex [`unit_vector`](@ref) call. That is the form the cell-area
@@ -341,7 +340,7 @@ function _cartesian_to_geodetic(
             "f = $(flattening(g))",
         ))
     end
-    # One last evaluation, so `h` belongs to the `φ` returned rather than to the step before it.
+    # One last evaluation, at the `φ` being returned, so `h` matches it.
     sinφ, cosφ = sincos(φ)
     h = p * cosφ + z * sinφ - a * sqrt(one(T) - e² * sinφ * sinφ)
     return (; λ = λ, φ = φ, h = h)
@@ -403,7 +402,7 @@ function _spheroid_distance(
         end
     end
     if !converged
-        # Near-antipodal: fall back to a sphere of the mean radius rather than report a partial solve.
+        # Near-antipodal: the great-circle distance on a sphere of the mean radius.
         R = (2 * a + b) / 3
         dλ = λ2 - λ1
         h = sin((φ2 - φ1) / T(2))^2 + cos(φ1) * cos(φ2) * sin(dλ / T(2))^2

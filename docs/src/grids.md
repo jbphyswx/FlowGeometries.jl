@@ -105,8 +105,8 @@ Coordinates are also reachable by their geometry-correct names — `grid.λ`, `g
 ## Cell measure is stored factored
 
 On a rectilinear grid every measure this package supports is a product of one factor per axis:
-Cartesian `Δx·Δy·Δz`, spherical `R²cosφ·Δλ·Δφ = (Δλ)·(R²cosφ·Δφ)`. So a `StructuredGrid` stores the
-factors, not the `∏ Nᵈ` products.
+Cartesian `Δx·Δy·Δz`, spherical `R²cosφ·Δλ·Δφ = (Δλ)·(R²cosφ·Δφ)`. A `StructuredGrid` stores those
+`∑ Nᵈ` factors, and the `∏ Nᵈ` products come out of them.
 
 ```@example grids
 m = FG.Grids.measure(grid)           # a SeparableMeasure — a real AbstractArray
@@ -116,10 +116,10 @@ FG.Grids.measure_factors(grid)       # the per-axis factors, or `nothing`
 FG.Grids.measure_array(grid)         # materialize densely, if you really need it
 ```
 
-Indexing, broadcasting and `collect` behave exactly as for the dense array — only the storage
-differs, and the values are bit-identical. At 2000² that is **61.0 MiB → 0.046 MiB**, and it is
-*faster* on every access pattern measured, because the factors stay in cache while a 61 MiB array is
-DRAM-bound. See [Performance](@ref performance-page).
+Indexing, broadcasting and `collect` behave exactly as for the dense array, and the values are
+bit-identical. At 2000² the measure is **0.046 MiB** against 61.0 MiB dense, and *faster* to read on
+every access pattern measured: the factors stay in cache while a 61 MiB array is DRAM-bound. See
+[Performance](@ref performance-page).
 
 Operations that keep the measure a *product* stay factored, so a unit conversion does not undo the
 saving: scaling, a multiplicative map (`abs`, `abs2`, `sqrt`, `inv`), and a factor-wise product or
@@ -130,9 +130,9 @@ km² = m ./ 1e6
 typeof(km²).name.name, Base.summarysize(km²), sum(km²) ≈ sum(m) / 1e6
 ```
 
-Anything else materializes — correct, just dense. `exp` is the clean example: it is not multiplicative,
-so `exp(∏wᵈ) ≠ ∏exp(wᵈ)` and there is no factored form to keep. A *negative* scale also materializes
-deliberately: non-negative factors are an invariant the `findmax`/`findmin` shortcut relies on.
+Anything else materializes, correct and dense. `exp` is the clean example: it is not multiplicative, so
+`exp(∏wᵈ) ≠ ∏exp(wᵈ)` and there is no factored form to keep. A *negative* scale materializes too,
+non-negative factors being an invariant the `findmax`/`findmin` shortcut relies on.
 
 ```@example grids
 typeof(exp.(m)).name.name, typeof((-1.0) .* m).name.name
@@ -176,9 +176,8 @@ FG.Grids.has_corners(lean), FG.Grids.has_corners(full),
 ```
 
 A curvilinear grid takes any number of directions — one `N`-D array each, `mask` last. Beyond 2-D the
-cell measure is yours to pass: the corner-area kernel is an exact-quadrilateral algorithm, not the 2-D
-case of an N-D one, so asking for a 3-D measure it cannot compute is an error rather than a number from
-the wrong formula.
+cell measure is yours to pass: the corner-area kernel is an exact-quadrilateral algorithm with no N-D
+generalization here, so asking it for a 3-D measure raises.
 
 ```@example grids
 cart = FG.Geometry.CartesianGeometry()
@@ -234,6 +233,6 @@ needs no optional dependency. On the node sets, pass `areas = …` to supply you
 
 !!! note "Yin–Yang panels overlap"
     The two panels overlap by construction, so their cell areas sum to `3√2πR²` — 6.07% more than the
-    sphere, at *every* resolution. That excess is the grid's real geometry, not a discretisation
-    error. Integrating over both panels needs a partition-of-unity weight for the shared region,
-    which is a modelling choice made on top of these areas.
+    sphere, at *every* resolution. The excess is the overlap itself, and it does not shrink with the
+    mesh. Integrating over both panels needs a partition-of-unity weight for the shared region, which
+    is a modelling choice made on top of these areas.

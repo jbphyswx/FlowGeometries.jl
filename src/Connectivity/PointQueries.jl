@@ -1,13 +1,13 @@
 # ---------------------------------------------------------------------------
-# Queries seeded by a point rather than a cell
+# Queries seeded by a point
 # ---------------------------------------------------------------------------
 #
-# Observation data does not arrive on the grid: a float, a station, a ship track is a coordinate. Every
-# query above is seeded by a cell index, so relating such data to a grid was not expressible at all on a
-# curvilinear or node grid, where there are no axes to compose `locate` along either.
+# Observation data does not arrive on the grid: a float, a station, a ship track is a coordinate. The
+# queries above are seeded by a cell index, and these take a coordinate, on every layout — a curvilinear
+# or node grid included, where there are no axes to compose `locate` along.
 #
 # The gate is the same `distance ≤ r` under the geometry's own metric; only the enumeration differs,
-# because a point has no cell whose window to take.
+# a point having no cell whose window to take.
 
 """
     fold_at(f, init, grid, p; ball, active_only=true, topology, scratch) -> acc
@@ -55,21 +55,22 @@ function fold_at(
     return acc
 end
 
+# Every layout whose candidates come from an index answers a point query the same way: the index
+# reports a superset and the exact distance gate below decides. What differs is how a cell is named,
+# which is [`Grids.cell_address`](@ref) — a curvilinear mesh and a panel layout by index tuple, a node
+# set and a pixelization by one integer.
 function fold_at(
-    f::F, init, grid::Grids.CurvilinearGrid{T,G,N}, p::NTuple{N,Real};
+    f::F, init, grid::Grids.AbstractGrid{G,T}, p::NTuple{D,Real};
     ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
-) where {F,T,G,N}
-    return _fold_at_scattered(f, init, grid, ntuple(d -> T(p[d]), Val(N)), ball, active_only,
-                              topology, scratch, Grids.size_tuple(grid))
+) where {F,G,T,D}
+    return _fold_at_scattered(f, init, grid, ntuple(d -> T(p[d]), Val(D)), ball, active_only,
+                              topology, scratch, _linear_shape(grid))
 end
 
-function fold_at(
-    f::F, init, grid::Grids.UnstructuredGrid{T,G,N}, p::NTuple{N,Real};
-    ball, active_only::Bool = true, topology = MetricTopology(grid), scratch = nothing,
-) where {F,T,G,N}
-    return _fold_at_scattered(f, init, grid, ntuple(d -> T(p[d]), Val(N)), ball, active_only,
-                              topology, scratch, nothing)
-end
+# The shape a linear candidate index is resolved against, or `nothing` where a cell already is one.
+@inline _linear_shape(grid::Grids.AbstractGrid) = _linear_shape(grid, Grids.cell_address(grid))
+@inline _linear_shape(grid, ::Grids.CartesianCells) = Grids.size_tuple(grid)
+@inline _linear_shape(_grid, ::Grids.FlatCells) = nothing
 
 function _fold_at_scattered(
     f::F, init, grid::Grids.AbstractGrid{G,T}, p0::NTuple{D,T}, ball, active_only::Bool,
@@ -103,8 +104,8 @@ end
     return acc
 end
 
-# Anything else goes through the index's own point query, which raises if it has none — rather than
-# quietly scanning every cell behind a topology the caller passed in order to avoid exactly that.
+# Anything else goes through the index's own point query, which raises where it has none. A caller who
+# passed an index gets a range query or an error, never a silent scan of every cell.
 @inline _fold_at_index(f::F, acc, index, grid, p0, r, scratch) where {F} =
     Grids.fold_candidates_at(f, acc, index, Grids.embed_point(grid, p0), r, scratch)
 
@@ -112,9 +113,9 @@ end
     neighbors_within(grid, p; ball, …) -> Vector{Int}
     nneighbors_within(grid, p; ball, …) -> Int
 
-Cells within `ball` of the **point** `p`, and how many. A coordinate rather than the cell indices the
-other methods take, which is what distinguishes them; it may be a `Tuple`, `NamedTuple`,
-`AbstractVector` or `SVector`, as everywhere else a point is accepted.
+Cells within `ball` of the **point** `p`, and how many. `p` is a coordinate, where the cell-seeded
+methods take index arguments; it may be a `Tuple`, `NamedTuple`, `AbstractVector` or `SVector`, as
+everywhere else a point is accepted.
 """
 function neighbors_within(
     grid::Grids.AbstractGrid, p::NTuple{D,Real}; ball, active_only::Bool = true,
@@ -182,12 +183,12 @@ end
 
 # Off the rectilinear grids there are no axes to bracket the point along, so the containing cell is the
 # nearest centre — exactly right for a node set, whose cells are its nodes' Voronoi regions. The radius
-# widens as `k_nearest` does; tracking one best rather than a heap keeps it free of any buffer.
+# widens as `k_nearest` does, and tracking one best needs no heap and no buffer.
 function Grids.locate(
-    grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, p::NTuple{D,Real};
+    grid::Grids.AbstractGrid{G,T}, p::NTuple{D,Real};
     active_only::Bool = false, topology = MetricTopology(grid), scratch = nothing,
-) where {T,D}
-    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
+) where {G,T,D}
+    sz = _linear_shape(grid)
     r = _knn_seed_radius_at(grid, p, 1, topology)
     rmax = _knn_radius_ceiling(grid, topology)
     while true
@@ -230,8 +231,8 @@ end
     return _knn_seed_radius(grid, ntuple(d -> clamp(raw[d], 1, sz[d]), Val(N)), k)
 end
 
-# Elsewhere there are no axes to locate along, so the scale comes from the mean cell rather than the
-# one the point fell in. Only the starting radius depends on it; the doubling reaches the rest.
+# Elsewhere there are no axes to locate along, so the scale comes from the mean cell. Only the starting
+# radius depends on it; the doubling reaches the rest.
 @inline function _knn_seed_radius_at(grid::Grids.AbstractGrid{G,T}, p, k::Int, mt) where {G,T}
     D = Grids.ncoordinates(grid)
     ncell = length(Grids.mask(grid))

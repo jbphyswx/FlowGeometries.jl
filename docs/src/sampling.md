@@ -37,11 +37,11 @@ stored.
 
 Gauss–Legendre and Clenshaw–Curtis put their points on iso-latitude rings that crowd toward the
 poles; HEALPix, the cubed sphere and the icosahedral geodesic are quasi-uniform. Yin–Yang is two
-overlapping panels, which is why it has no polar singularity.
+overlapping panels, neither of which reaches a pole.
 
 ## Traits
 
-Rather than testing types, ask:
+Ask a sampling what it is, and do not test its type:
 
 ```@example sampling
 FG.SphericalSampling.is_tensor_product(s)                       # fits an (nlon × nlat) structured grid?
@@ -50,8 +50,8 @@ FG.SphericalSampling.is_equal_area(s)                            # every cell th
 FG.SphericalSampling.admits_exact_bandlimited_quadrature(s)      # weights integrate PRODUCTS exactly at `bandlimit`?
 ```
 
-That last one is deliberately strict. Spectral analysis forms products of two degree-`lmax` fields,
-so it needs exactness to degree `2·lmax`, not `lmax`:
+That last one is strict. Spectral analysis forms products of two degree-`lmax` fields, so it needs
+exactness to degree `2·lmax`:
 
 | sampling | exact for a single `Pₗ` | `bandlimit` | needs | exact? |
 |---|---|---|---|---|
@@ -98,10 +98,9 @@ FG.SphericalSampling.spherical_quadrature!(λ, φ, w, FG.SphericalSampling.Gauss
 sum(w)
 ```
 
-Weights are normalized so `Σw = ∫₀^π sinθ dθ = 2` for every sampling that has them. McEwen–Wiaux
-deliberately has none: its quadrature is built on an extension of the sphere to a torus, and applying
-the sine-series rule to its nodes is not exact even at `l = 0`, so asking for them raises rather than
-returning a plausible wrong answer.
+Weights are normalized so `Σw = ∫₀^π sinθ dθ = 2` for every sampling that has them. McEwen–Wiaux has
+none: its quadrature is built on an extension of the sphere to a torus, and the sine-series rule at its
+nodes is not exact even at `l = 0`, so asking for them raises.
 
 ## Sampling-specific constructors
 
@@ -113,10 +112,9 @@ size(FG.SphericalSampling.yin_yang_panels(nlon, nlat).yang.λ)
 FG.SphericalSampling.healpix_npix(nside), FG.SphericalSampling.healpix_nring(nside)
 ```
 
-`yin_yang_panels` returns asymmetric shapes on purpose. The yin panel is a separable lat–lon patch in
-its own frame, so it is a pair of **axes**; yang is that panel rotated onto the sphere, which is not
-separable in global lon/lat, so it is a pair of `nlon × nlat` **fields**. The shapes differ because
-the geometry does.
+`yin_yang_panels` returns two different shapes. The yin panel is a separable lat–lon patch in its own
+frame, so it is a pair of **axes**; yang is that panel rotated onto the sphere, separable in neither
+global longitude nor latitude, so it is a pair of `nlon × nlat` **fields**.
 
 `icosahedral_vertices!` writes the points straight into your buffers with no mesh built at all, so its
 allocation count does not grow with ν.
@@ -208,10 +206,10 @@ rings = [SS.ring_info(4, r) for r in 1:15]
 sum(i -> i.ringpix, rings) == 12 * 4^2, rings[1].startpix == 0
 ```
 
-## Cell centres, not panel edges
+## Points sit at cell centres
 
-Every sampling here places points at **cell centres**. This matters more than it sounds: sampling the
-panel edges instead makes adjacent panels emit coincident points while the connectivity treats those
-same edges as folding onto a different panel. Points and topology then disagree, and any grid built
-from them carries duplicate nodes and zero-area cells. Cell centres also make the degenerate sizes
-(`n = 1`, `nlon = 1`) fall out of the formula instead of needing special cases.
+Every sampling here places points at **cell centres**. Sampling the panel edges makes adjacent panels
+emit coincident points while the connectivity folds those same edges onto a different panel; points and
+topology then disagree, and a grid built from them carries duplicate nodes and zero-area cells. Cell
+centres also give the degenerate sizes (`n = 1`, `nlon = 1`) from the same formula, with no special
+case.

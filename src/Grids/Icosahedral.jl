@@ -14,7 +14,7 @@ area are each arithmetic in `(ν, id)`: reading the numbering backwards gives th
 vertex occupies, and everything follows from those.
 
 A vertex sits on one face if a face owns it, two if a macro-edge does, and five if it is a corner. That
-count is its valence, which is why exactly twelve cells are pentagons.
+count is its valence, so the twelve corners are the grid's twelve pentagons.
 
 The measure is the spherical Voronoi dual, computed from the vertex's own incident triangles — each
 triangle split among its three vertices by the arcs from its circumcenter to its edge midpoints. It
@@ -66,6 +66,9 @@ The subdivision frequency `ν`: the grid has `10ν² + 2` vertices and `20ν²` 
 
 @inline cell_address(::IcosahedralGrid) = FlatCells()
 @inline adjacency_source(::IcosahedralGrid) = FormulaNeighbors()
+
+# A lattice step and its negation are both in the six directions.
+@inline has_symmetric_adjacency(::IcosahedralGrid) = true
 @inline candidate_source(::IcosahedralGrid) = IndexedCandidates()
 
 # ---- coordinates ------------------------------------------------------------
@@ -120,9 +123,13 @@ the three shares tile the triangle.
     return Geometry.spherical_excess(V, Mva, O) + Geometry.spherical_excess(V, O, Mvb)
 end
 
-function measure(grid::IcosahedralGrid{T}, id::Integer) where {T}
-    ν = frequency(grid)
-    k = Int(id)
+"""
+    _ico_vertex_measure(grid, k, ν) -> T
+
+The dual area of vertex `k`, from its own incident triangles: the fan of
+[`_ico_dual_share`](@ref)s over every face the vertex sits on.
+"""
+function _ico_vertex_measure(grid::IcosahedralGrid{T}, k::Int, ν::Int) where {T}
     V = SphericalSampling._ico_vertex_dir(T, k, ν)
     occ, nocc = SphericalSampling._ico_occurrences(k, ν)
     a = zero(T)
@@ -136,15 +143,77 @@ function measure(grid::IcosahedralGrid{T}, id::Integer) where {T}
     return T(Geometry.radius(grid_geometry(grid)))^2 * a
 end
 
+# Descending, by three compares.
+@inline function _sorted3(a::Int, b::Int, c::Int)
+    a < b && ((a, b) = (b, a))
+    b < c && ((b, c) = (c, b))
+    a < b && ((a, b) = (b, a))
+    return (a, b, c)
+end
+
+"""
+    _ico_class(k, ν) -> (b, c)
+
+Vertex `k`'s symmetry class: the two smallest of its barycentric parts `(i, j, ν−i−j)`, the largest
+being `ν` minus their sum.
+
+All twenty faces are the same spherical triangle and the geodesic is built the same way on each, so a
+vertex's dual area depends only on its barycentric position within a face; the face being equilateral,
+only on that triple up to order. A vertex on a macro-edge or at a corner sits on several faces, and an
+isometry of the icosahedron carrying it to another vertex of its class carries those faces with it, so
+the areas agree there too.
+
+The classes are the partitions of `ν` into three parts, `O(ν²/12)` of them against `10ν² + 2` vertices.
+"""
+@inline function _ico_class(k::Int, ν::Int)
+    occ, _ = SphericalSampling._ico_occurrences(k, ν)
+    _fc, i, j = @inbounds occ[1]
+    _a, b, c = _sorted3(i, j, ν - i - j)
+    return (b, c)
+end
+
+# Face 1's lattice node `(b, c)`, the member of the class that stands for all of them. Congruent cells
+# then hold one number, so a sum over them does not depend on which member each came from.
+@inline _ico_class_vertex(b::Int, c::Int, ν::Int) = SphericalSampling._ico_lattice_id(1, b, c, ν)
+
+function measure(grid::IcosahedralGrid{T}, id::Integer) where {T}
+    ν = frequency(grid)
+    b, c = _ico_class(Int(id), ν)
+    return _ico_vertex_measure(grid, _ico_class_vertex(b, c, ν), ν)
+end
+
 @inline measure(grid::IcosahedralGrid) = GridMeasure(grid)
 
 # The dual cells tile the sphere, the three shares of every triangle summing to it.
 @inline _total_measure(grid::IcosahedralGrid{T}) where {T} =
     T(4π) * T(Geometry.radius(grid_geometry(grid)))^2
 
+"""
+    measure_array(grid::IcosahedralGrid) -> Vector
+
+The dual-cell areas of every vertex, the fan of spherical excesses evaluated once per symmetry class —
+see [`_ico_class`](@ref). The two smallest barycentric parts key a `(ν+1)²` table.
+"""
+function measure_array(grid::IcosahedralGrid{T}) where {T}
+    ν = frequency(grid)
+    n = length(grid)
+    out = Vector{T}(undef, n)
+    tbl = fill(T(NaN), ν + 1, ν + 1)
+    @inbounds for k in 1:n
+        b, c = _ico_class(k, ν)
+        v = tbl[b + 1, c + 1]
+        if isnan(v)
+            v = _ico_vertex_measure(grid, _ico_class_vertex(b, c, ν), ν)
+            tbl[b + 1, c + 1] = v
+        end
+        out[k] = v
+    end
+    return out
+end
+
 # ---- materialization --------------------------------------------------------
 
-# The vertex writer, which walks the owning entities in id order rather than decoding each id.
+# The vertex writer, walking the owning entities in id order so no id is decoded.
 function materialize(grid::IcosahedralGrid{T}) where {T}
     n = length(grid)
     p = SphericalSampling.icosahedral_vertices!(

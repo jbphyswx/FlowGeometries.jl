@@ -79,6 +79,9 @@ of them inactive.
 
 @inline cell_address(::HEALPixGrid) = FlatCells()
 @inline adjacency_source(::HEALPixGrid) = FormulaNeighbors()
+
+# The RING face-table walk names each neighbour from both ends.
+@inline has_symmetric_adjacency(::HEALPixGrid) = true
 @inline candidate_source(::HEALPixGrid) = IndexedCandidates()
 
 # ---- coordinates ------------------------------------------------------------
@@ -119,12 +122,21 @@ coordinates(grid::HEALPixGrid) = throw(ArgumentError(
 # ---- materialization --------------------------------------------------------
 
 # The whole cloud as a ring walk, costing `4·nside − 1` `acos` calls: colatitude is constant along a
-# ring. The RING ordering is what makes a ring's pixels contiguous, so it is the scheme this serves; the
-# generic per-cell path covers `Nested`.
+# ring, and the RING ordering makes a ring's pixels contiguous.
 function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Ring}) where {T,G}
     n = npixels(grid)
     p = SphericalSampling.spherical_points!(
         Vector{T}(undef, n), Vector{T}(undef, n), SphericalSampling.HEALPixSampling(nside(grid)),
+    )
+    return (p.λ, p.φ)
+end
+
+# The nested ids in their own order, off the same per-ring table: `4·nside − 1` `acos` calls for the
+# whole cloud, where the per-cell path costs one per pixel.
+function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Nested}) where {T,G}
+    n = npixels(grid)
+    p = SphericalSampling._healpix_nested_cloud!(
+        Vector{T}(undef, n), Vector{T}(undef, n), nside(grid),
     )
     return (p.λ, p.φ)
 end

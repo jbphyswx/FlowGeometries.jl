@@ -20,7 +20,7 @@ function locate(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     return _locate_bisect(x, vT, n, ascending)
 end
 
-# Whether `v` lies between the outer faces, which is what makes it locatable at all.
+# Whether `v` lies between the outer faces, i.e. inside a cell of the axis.
 @inline function _in_span(x::AbstractVector{T}, vT::T, n::Int, ascending::Bool) where {T}
     f1 = _face_at(x, 1, n)
     fe = _face_at(x, n + 1, n)
@@ -41,11 +41,10 @@ end
     return lo
 end
 
-# An analytic axis inverts, so the cell comes from the inverse rather than from `log₂ n` face
-# evaluations. A face lies strictly between two samples, so the containing cell `i` has
-# `index_at(v) ∈ (i-1, i+1)` — the seed is within one cell, and one comparison against the neighbouring
-# face settles it, exactly as on a uniform axis. The faces themselves are still the coordinate
-# midpoints `_face_at` defines, so this agrees with the bisection cell for cell.
+# An analytic axis inverts, so the cell comes from `index_at` in `O(1)`. A face lies strictly between
+# two samples, so the containing cell `i` has `index_at(v) ∈ (i-1, i+1)`: the seed is within one cell,
+# and one comparison against the neighbouring face settles it, as on a uniform axis. The faces are the
+# coordinate midpoints `_face_at` defines, so this agrees with the bisection cell for cell.
 function locate(a::Axes.AbstractAnalyticAxis{T}, v::Real) where {T<:AbstractFloat}
     n = length(a)
     n == 0 && return 0
@@ -64,9 +63,9 @@ function locate(a::Axes.AbstractAnalyticAxis{T}, v::Real) where {T<:AbstractFloa
     return i
 end
 
-# The bisection above needs `log₂ n` of the `n + 1` faces, so they are evaluated one at a time from
-# the centres rather than materialized — `faces(x)` would allocate the whole axis on every query.
-# Same rule as `faces`, so the two never disagree about where a boundary is.
+# The bisection above needs `log₂ n` of the `n + 1` faces, so each is evaluated on demand from the
+# centres and `faces(x)` is never materialized. Same rule as `faces`, so the two agree on where a
+# boundary is.
 @inline function _face_at(x::AbstractVector{T}, j::Int, n::Int) where {T}
     @inbounds begin
         n == 1 && return j == 1 ? x[1] - one(T) / 2 : x[1] + one(T) / 2
@@ -118,8 +117,8 @@ function nearest_index(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     n == 0 && throw(ArgumentError("an empty axis has no nearest sample"))
     n == 1 && return 1
     vT = T(v)
-    # The nearest sample is one of the two that bracket `v`, so the same bisection that
-    # `interpolation_weights` uses answers this in `O(log n)` rather than by scanning the axis.
+    # The nearest sample is one of the two that bracket `v`, so the same `O(log n)` bisection
+    # `interpolation_weights` uses answers this.
     i = _bracket(x, vT, n)
     @inbounds return abs(x[i+1] - vT) < abs(x[i] - vT) ? i + 1 : i   # strict `<` keeps a tie low
 end
@@ -129,10 +128,9 @@ function nearest_index(a::AbstractRange{T}, v::Real) where {T<:AbstractFloat}
     n == 0 && throw(ArgumentError("an empty axis has no nearest sample"))
     n == 1 && return 1
     vT = T(v)
-    # Deliberately the same bracket-then-compare as the general path, rather than a closed-form
-    # round-to-nearest: the samples of a stretched and a uniform axis are the same numbers, so the
-    # answers must match, and `(v - first)/Δ` can read as an exact tie where the two representable
-    # samples are not in fact equidistant from `v`.
+    # The same bracket-then-compare as the general path. A uniform axis and its `collect` hold the same
+    # numbers and give the same answer; a closed-form `(v - first)/Δ` can read as an exact tie where the
+    # two representable samples are not equidistant from `v`.
     i = _bracket(a, vT, n)
     @inbounds return abs(a[i+1] - vT) < abs(a[i] - vT) ? i + 1 : i   # strict `<` keeps a tie low
 end
@@ -147,9 +145,8 @@ end
 Linear interpolation on axis `x` at coordinate `v`, as the left sample index `i` and the weight pair
 `w = (w_i, w_{i+1})` with `w_i + w_{i+1} == 1`.
 
-Weights only: applying them to a field is the caller's loop, and the field's layout is not this
-module's business. Outside the axis the nearest end is used with weight 1, so the result is a clamp
-rather than an extrapolation.
+Weights only: applying them to a field is the caller's loop. Outside the axis the nearest end is used
+with weight 1, so a coordinate beyond the ends clamps.
 """
 function interpolation_weights(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}
     n = length(x)
@@ -210,7 +207,7 @@ Lagrange interpolation weights of `length(nodes)` points on axis `x` at coordina
 polynomials up to degree `nodes-1` and valid on an arbitrarily spaced axis.
 
 The stencil is centred on `v` as far as the axis allows and shifted inward at the ends, so the node
-count is honoured everywhere rather than degrading near a boundary.
+count holds at a boundary as well as in the interior.
 """
 function lagrange_weights(x::AbstractVector{T}, v::Real, nodes::Integer) where {T<:AbstractFloat}
     return lagrange_weights!(Vector{T}(undef, Int(nodes)), x, v, nodes)
@@ -221,8 +218,8 @@ end
 
 [`lagrange_weights`](@ref) into a caller-owned vector of length `nodes`.
 
-The indices come back as a range, which is a value and not an allocation, so with `w` supplied the call
-allocates nothing — the form to use when interpolating many points along one axis.
+The indices come back as a range, a stack value, so with `w` supplied the call allocates nothing. This
+is the form to use when interpolating many points along one axis.
 """
 function lagrange_weights!(
     w::AbstractVector{T}, x::AbstractVector{T}, v::Real, nodes::Integer,

@@ -54,8 +54,8 @@ connected) are separate. Dispatch on the abstracts; use the concrete defaults as
 ## Uniformity is a property of the type
 
 A direction is either provably uniform — its spacing readable without touching a coordinate — or
-genuinely stretched, and each direction of a grid keeps its own answer. That is what lets the exact
-fast paths be selected at compile time: an `O(1)` point location, a constant cell width, a closed-form
+genuinely stretched, and each direction of a grid keeps its own answer. The exact fast paths are
+therefore selected at compile time: an `O(1)` point location, a constant cell width, a closed-form
 neighbourhood bound.
 
 ```julia
@@ -68,8 +68,7 @@ data question matters, the spacing accessors answer it exactly — an axis is eq
 when `minimum_spacing == maximum_spacing`.
 
 A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
-is a few hundred bytes rather than tens of kilobytes — and nothing is materialized onto a device that
-did not need to be.
+is a few hundred bytes, and that is all a device receives.
 
 ## Any number of dimensions
 
@@ -81,8 +80,7 @@ FG.Grids.topology(g4)                                   # per-direction Periodic
 ```
 
 Topology lives in the type because the cell measure depends on it: a wrapped boundary cell has a width
-a bounded one does not, so a grid that could not tell the two apart would be describing a torus and an
-interval with the same words.
+that a bounded one lacks, so a torus and an interval are different types here.
 
 ## Stencils
 
@@ -96,12 +94,12 @@ FG.Connectivity.build_connectivity(grid; stencil = S.Moore(2))
 FG.Connectivity.nneighbors(grid, i, j; stencil = S.Anisotropic((3, 1)))
 ```
 
-A stencil is named by its type, never a symbol: a symbol could only be resolved at run time, so the
-neighbour iterator built from it would allocate once per cell.
+A stencil is named by its type, so the neighbour iterator built from it resolves at compile time and
+allocates nothing per cell.
 
-A neighbourhood by physical distance rather than by cells is a `MetricBall`, queried under the
-geometry's own metric — great-circle, Vincenty, or the chord where a radial direction is present —
-with periodic seams wrapped by minimum image:
+A neighbourhood by physical distance is a `MetricBall`, queried under the geometry's own metric —
+great-circle, Vincenty, or the chord where a radial direction is present — with periodic seams wrapped
+by minimum image:
 
 ```julia
 FG.Connectivity.neighbors_within(grid, i, j; ball = S.MetricBall(500e3))   # within 500 km
@@ -112,8 +110,8 @@ FG.Connectivity.build_connectivity_within(grid; ball = 500e3)              # the
 ## Discretization primitives
 
 Point location, interpolation weights, staggering, metric factors, and finite-difference weights for
-**any** derivative order to **any** accuracy on **arbitrarily spaced** nodes — one recursion
-(Fornberg 1988) rather than a tableau per case.
+**any** derivative order to **any** accuracy on **arbitrarily spaced** nodes, from one recursion
+(Fornberg 1988).
 
 ```julia
 D = FG.Discretization
@@ -146,10 +144,10 @@ FG.Operators.curl(u1, u2, sg)            # faces  → corners
 These are the orthogonal-curvilinear forms built from the geometry's own `scale_factors`, so the same
 call is `∂/∂x` on a plane and `(1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]` on a sphere. Each is a single
 difference across one cell evaluated where the result lives, so the divergence telescopes exactly and
-the curl of a discrete gradient is zero to round-off, not merely small.
+the curl of a discrete gradient is zero to round-off.
 
 The boundary condition is still the caller's: a face with a cell on one side only has no difference
-across it, so it is written `masked` rather than given an invented value.
+across it, and is written `masked`.
 
 ## Mask topology
 
@@ -167,17 +165,17 @@ Every built-in layout gets true cell areas with **no optional dependency** — t
 its gnomonic rectangle for the cubed sphere, dual-cell areas from the mesh's own triangulation for
 icosahedral, lat–lon patches for Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
 `4πR²/N` is exact only for HEALPix (flat colour above); on an icosahedral geodesic the largest cell is
-nearly twice the smallest, so that default would silently corrupt every area-weighted integral. The dark
-spots are the twelve pentagons.
+nearly twice the smallest, and every area-weighted integral feels the difference. The dark spots are
+the twelve pentagons.
 
 ```julia
 g = FG.Grids.CubedSphereGrid(24)                                                        # 3456 cells, Σarea = 4πR² exactly
 g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))     # 2562 nodes, Σarea = 4πR² exactly
 ```
 
-Yin–Yang is the exception worth knowing about: its two panels **overlap by construction**, so the
-cell areas sum to 6.07% more than the sphere — at *every* resolution. That is real geometry, not a
-discretisation error.
+Yin–Yang is the exception worth knowing about: its two panels **overlap by construction**, so the cell
+areas sum to 6.07% more than the sphere, at *every* resolution. The excess is the overlap itself, and
+it does not shrink with the mesh.
 
 ![Yin–Yang overlap](docs/src/assets/yinyang.png)
 
@@ -203,9 +201,9 @@ are `O(n log n)` with any FFT backend loaded, and fall back to an exact recurren
 
 ![HEALPix and icosahedral connectivity](docs/src/assets/connectivity.png)
 
-Topology of a *grid* or of a *sampling that defines a mesh*. A neighbour computation reads only
-extent, wrapping and activity — never a coordinate — which is what `IndexTopology` captures, and why
-a curvilinear grid needs no separate implementation from a structured one.
+Topology of a *grid* or of a *sampling that defines a mesh*. A neighbour computation reads only extent,
+wrapping and activity — never a coordinate. `IndexTopology` holds exactly that triple, so a curvilinear
+grid and a structured one share one implementation.
 
 | Layout | How connectivity is obtained |
 |--------|------------------------------|
@@ -224,19 +222,19 @@ your buffers and allocate nothing beyond their return value.
 
 ## Points and frames
 
-The point type from `coords` is a geometry-named `NamedTuple`: `(x=, y=)` or `(λ=, φ=)`. Asking for
-the wrong name is an error, never a silent alias for the other quantity. Escapes:
-`coords!(out, …)`, `coords(NTuple{2,T}, …)`, `coords(SVector{2,T}, …)` with StaticArrays.
+The point type from `coords` is a geometry-named `NamedTuple`: `(x=, y=)` or `(λ=, φ=)`. Asking for a
+name this geometry does not have raises. Escapes: `coords!(out, …)`, `coords(NTuple{2,T}, …)`,
+`coords(SVector{2,T}, …)` with StaticArrays.
 
-Spherical vector / tangent helpers use the polar frame (`λ`, `φ`, `r`), not east/north:
+Spherical vector and tangent helpers use the polar frame (`λ`, `φ`, `r`):
 `local_tangent_basis` → `(; λ=ê_λ, φ=ê_φ)`, `spherical_to_cartesian` / `cartesian_to_spherical`
 ↔ `(; x,y,z)` / `(; λ,φ,r)`.
 
 ## Storage
 
-A structured grid's cell measure is stored as its per-axis factors, not the `∏ Nᵈ` products — it is a
-real `AbstractArray`, so indexing and broadcasting are unchanged, but 2000² costs 0.046 MiB instead
-of 61 MiB and `sum` is `O(∑ Nᵈ)`. An all-active mask (`AllActive`) stores only its size.
+A structured grid's cell measure is held as its per-axis factors. It is a real `AbstractArray`, so
+indexing and broadcasting behave as for the dense form, but 2000² costs 0.046 MiB against 61 MiB and
+`sum` is `O(∑ Nᵈ)`. An all-active mask (`AllActive`) stores only its size.
 
 ```julia
 FG.Grids.measure_factors(grid)     # the factors, or `nothing`

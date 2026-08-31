@@ -20,8 +20,8 @@ to a field is the caller's.
 function fd_weights(nodes::AbstractVector{T}, x₀::Real, order::Integer) where {T<:AbstractFloat}
     n = length(nodes)
     w = Vector{T}(undef, n)
-    # `max(…, 0)` so a negative `order` reaches `fd_weights!`'s own message rather than an
-    # array-dimension error from sizing the table.
+    # `max(…, 0)` lets a negative `order` reach `fd_weights!`'s own message; sizing the table with it
+    # raises an array-dimension error first.
     c = Matrix{T}(undef, n, max(Int(order) + 1, 0))
     fd_weights!(w, c, nodes, x₀, order)
     return w
@@ -33,17 +33,16 @@ end
 [`fd_weights`](@ref) into caller buffers: `w` holds the `length(nodes)` weights and `c` is the
 `length(nodes) × (order+1)` recursion table. Both are overwritten.
 
-The allocating form is one of these per call, and a stencil is built once per sample of an axis, so a
-4096-sample axis costs ~8000 allocations without this. The degrade path in [`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) needs
-one per cell near a mask edge, which is the reason it exists.
+The allocating form allocates two arrays per call, and a stencil is built once per sample of an axis.
+The degrade path in [`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) rebuilds one per
+cell near a mask edge, and holds these buffers across all of them.
 """
 @inline fd_weights!(
     w::AbstractVector{T}, c::AbstractMatrix{T}, nodes::AbstractVector{T}, x₀::Real, order::Integer,
 ) where {T<:AbstractFloat} = _fd_weights!(w, c, nodes, length(nodes), x₀, order)
 
 # The node count is separate from `length(nodes)` so a caller holding an oversized buffer can use its
-# first `n` entries without a `view` — which allocates 48 bytes per call, and the degrade path calls
-# this once per cell it rebuilds.
+# first `n` entries without a `view`, which the degrade path would allocate once per cell it rebuilds.
 function _fd_weights!(
     w::AbstractVector{T}, c::AbstractMatrix{T}, nodes::AbstractVector{T}, n::Int, x₀::Real,
     order::Integer,
@@ -111,7 +110,7 @@ function fd_weights(
     1 ≤ i ≤ n || throw(BoundsError(x, i))
     i0 = _window_start(Int(i), k, 1, n)
     idx = i0:(i0 + k - 1)
-    # A view, not a copy: `fd_weights` only reads its nodes, and this runs once per sample of the axis.
+    # A view: `fd_weights` only reads its nodes, and this runs once per sample of the axis.
     return (idx, fd_weights(@view(x[idx]), @inbounds(x[i]), order))
 end
 
@@ -121,17 +120,24 @@ end
 
 """
     scale_factors(geometry, point) -> NTuple
+    scale_factors(geometry, point, Val(N)) -> NTuple{N}
 
 The metric scale factors `hᵈ` at `point`: the physical length of a unit step in each coordinate
 direction. Cartesian gives `1` in every direction; spherical gives `(R cosφ, R)` on the surface and
 `(r cosφ, r, 1)` with a radius direction.
 
-These are what turns a coordinate derivative into a physical one — `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ` — so a
-divergence or a curl is assembled from these plus [`fd_weights`](@ref) without this module having to
-choose a staggering or a boundary condition.
+They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`, so a divergence or a
+curl is assembled from these plus [`fd_weights`](@ref) at the call site, where the staggering and the
+boundary condition are chosen.
+
+`Val(N)` names how many components `point` has, giving a concrete `NTuple{N}` from a point whose
+length is a runtime value.
 """
 @inline scale_factors(geometry::Geometry.AbstractGeometry, point) =
     Geometry.scale_factors(geometry, point)
+
+@inline scale_factors(geometry::Geometry.AbstractGeometry, point, v::Val) =
+    Geometry.scale_factors(geometry, point, v)
 
 """
     jacobian(geometry, point) -> Real
@@ -184,8 +190,7 @@ end
     _window_start(i, k, lo, hi) -> Int
 
 First index of a `k`-node window centred on `i` and shifted to fit inside `[lo, hi]`. The whole-axis
-case is `lo = 1, hi = n`; the masked case is the same expression with the bounds of the active run,
-which is why both share this.
+case is `lo = 1, hi = n`; the masked case passes the bounds of the active run.
 """
 @inline _window_start(i::Int, k::Int, lo::Int, hi::Int) = clamp(i - (k - 1) ÷ 2, lo, hi - k + 1)
 
@@ -225,10 +230,10 @@ end
 
 [`axis_stencils`](@ref) into two caller-owned `n × nodes` matrices.
 
-The table is `O(n·k)`, so a caller rebuilding it — at each step of a stretching mesh, say — should own
-the matrices rather than have two allocated per call. Pass a [`stencil_scratch`](@ref) as well and the
-call allocates nothing at all: the remaining buffers are the Fornberg table and the node list, which are
-`O(k)` but still per call without one.
+The table is `O(n·k)`, so a caller rebuilding it — at each step of a stretching mesh, say — owns the
+matrices and passes them in. Pass a [`stencil_scratch`](@ref) as well and the call allocates nothing:
+the remaining buffers are the Fornberg table and the node list, `O(k)` each, allocated per call
+without one.
 """
 function axis_stencils!(
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix{T},
@@ -245,8 +250,7 @@ function axis_stencils!(
     size(weights) == (n, k) || throw(DimensionMismatch(
         "weights is $(size(weights)) but the table is ($n, $k)",
     ))
-    # Reused across every sample: the allocating `fd_weights` would be two per sample, ~8000 on a
-    # 4096-sample axis, for a table whose size never changes.
+    # The table's size is the same at every sample, so one set of buffers serves the whole axis.
     buf, wbuf, cbuf = _weight_bufs(scratch, T, k, ord)
     half = (k - 1) ÷ 2
     P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
@@ -292,8 +296,8 @@ end
 The magnitude below which a scale factor is treated as degenerate: `L·√eps(T)` for a curved geometry of
 size `L`, and `0` for a Cartesian one, whose metric never degenerates.
 
-Relative to both the geometry's size and the element type on purpose — see [`derivative!`](@ref FlowGeometries.Operators.derivative!) for
-what an absolute constant does in `Float32`.
+It scales with both the geometry's size and the element type. At `Float32` on Earth's radius,
+`cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole around 0.28 m, above any fixed small constant.
 """
 function metric_floor end
 

@@ -338,6 +338,24 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
                FG.Connectivity.nneighbors_within(gs, 5, 6; ball = 1.5e6)
     Test.@test GR.coordinate_names(gr) == (:λ, :φ)
     Test.@test FG.Connectivity.nneighbors(gr, 1, 5) == 4     # wraps, like the original
+
+    # How the cells are SPACED along an index direction is the lattice's, and the lattice is the base
+    # grid's, so every spacing question is answered there. The span stays the rotated frame's.
+    for b in (gs, GR.StructuredGrid(sph, λa, [-1.2 + 2.4 * (t / 12)^1.3 for t in 0:12]))
+        g = GR.rotate(b, rot)
+        Test.@test GR.isuniform(g, 1) == GR.isuniform(b, 1)
+        Test.@test GR.isuniform(g, 2) == GR.isuniform(b, 2)
+        Test.@test GR.isuniform(g) == GR.isuniform(b)
+        Test.@test GR.spacing(g, 1) == GR.spacing(b, 1)
+        Test.@test GR.spacing_trait(g, Val(1)) === GR.spacing_trait(b, Val(1))
+        Test.@test GR.minimum_spacing(g, 2) == GR.minimum_spacing(b, 2)
+        Test.@test GR.maximum_spacing(g, 2) == GR.maximum_spacing(b, 2)
+        Test.@test GR.local_spacing(g, 2, 5) == GR.local_spacing(b, 2, 5)
+        Test.@test GR.cell_width(g, 2, 5) == GR.cell_width(b, 2, 5)
+        Test.@test GR.cell_widths(g, 2) == GR.cell_widths(b, 2)
+        Test.@test GR.bounds(g, 2) == (-π / 2, π / 2)
+        Test.@test_throws ArgumentError GR.coordinates(g)
+    end
 end
 
 Test.@testset "Metric scale factors and the Jacobian" begin
@@ -363,6 +381,32 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     # Any point representation is accepted.
     Test.@test G.scale_factors(sg, (λ = 0.0, φ = π / 3)) == G.scale_factors(sg, (0.0, π / 3))
     Test.@test G.scale_factors(sg, [0.0, π / 3]) == G.scale_factors(sg, (0.0, π / 3))
+
+    # A vector's length is a runtime value, so the factors it gives are a union of the three widths.
+    # `Val(N)` names the width, and the result is one concrete tuple — same values, every spelling.
+    for pt in ([0.0, π / 3], (0.0, π / 3), (λ = 0.0, φ = π / 3))
+        Test.@test Test.@inferred(G.scale_factors(sg, pt, Val(2))) == G.scale_factors(sg, (0.0, π / 3))
+        Test.@test Test.@inferred(FG.Discretization.scale_factors(sg, pt, Val(2))) ==
+                   G.scale_factors(sg, (0.0, π / 3))
+        Test.@test Test.@inferred(G.as_ntuple(pt, Val(2))) === (0.0, π / 3)
+    end
+    Test.@test Test.@inferred(G.scale_factors(sg, [0.0, π / 3, 5.0], Val(3))) ==
+               G.scale_factors(sg, (0.0, π / 3, 5.0))
+    # Naming the width gives a CONCRETE result from a vector-spelled point, where the plain form's
+    # type depends on the length. Both are free once specialized.
+    let pv = [0.0, π / 3]
+        Test.@test _alloc(G.scale_factors, sg, pv, Val(2)) == 0
+        Test.@test !isconcretetype(
+            Base.return_types(G.scale_factors, (typeof(sg), typeof(pv)))[1],
+        )
+        Test.@test isconcretetype(
+            Base.return_types(G.scale_factors, (typeof(sg), typeof(pv), Val{2}))[1],
+        )
+    end
+    # And a width the point does not have is refused, from either spelling.
+    Test.@test_throws ArgumentError G.as_ntuple([0.0, π / 3], Val(3))
+    Test.@test_throws ArgumentError G.as_ntuple((0.0, π / 3), Val(3))
+    Test.@test_throws ArgumentError G.scale_factors(sg, [0.0, π / 3], Val(3))
 end
 
 Test.@testset "Oblate spheroid geometry" begin
@@ -752,7 +796,19 @@ Test.@testset "Pole rotation" begin
     Test.@test all(o32λ[i] === G.rotate(r32, λ32[i], φ32[i])[1] for i in eachindex(λ32))
     λ64, φ64 = Float64.(λ32), Float64.(φ32)
     Test.@test eltype(first(G.rotate(rot, λ64, φ64))) === Float64
-    # The in-place form writes into the caller's own arrays, so their width is theirs.
-    G.rotate!(λ32, φ32, rot)
-    Test.@test eltype(λ32) === Float32
+
+    # The scalar form takes the point's width too, so all three forms are one numeric path: a Float32
+    # point through a Float64 frame gives what the frame carried to Float32 gives, bit for bit.
+    Test.@test G.rotate(rot, λ32[1], φ32[1]) === G.rotate(r32, λ32[1], φ32[1])
+    Test.@test G.unrotate(rot, λ32[1], φ32[1]) === G.unrotate(r32, λ32[1], φ32[1])
+    Test.@test G.rotate(rot, λ32[1], φ32[1]) isa NTuple{2,Float32}
+    Test.@test G.rotate(rot, 0, 0) isa NTuple{2,Float64}
+
+    # The in-place form writes into the caller's own arrays, so their width is theirs — and it writes
+    # exactly what the allocating and scalar forms give.
+    ipλ, ipφ = copy(λ32), copy(φ32)
+    G.rotate!(ipλ, ipφ, rot)
+    Test.@test eltype(ipλ) === Float32
+    Test.@test ipλ == o32λ && ipφ == o32φ
+    Test.@test all(ipλ[i] === G.rotate(rot, λ32[i], φ32[i])[1] for i in eachindex(λ32))
 end

@@ -2,18 +2,16 @@
 # Metric neighbourhoods — queries by physical distance
 # ---------------------------------------------------------------------------
 #
-# A stencil query reads only `(size, periodic, mask)`. A distance query cannot: it needs coordinates and
-# the geometry's own `distance`, so these take the grid rather than an `IndexTopology`. That is the whole
-# reason they are a separate entry point instead of another `stencil` keyword — a
-# [`Stencils.MetricBall`](@ref) has no fixed offset set, because how many cells lie within a given
-# distance varies from cell to cell.
+# A distance query needs coordinates and the geometry's own `distance`, so these take the grid; a
+# stencil query reads only `(size, periodic, mask)`. A [`Stencils.MetricBall`](@ref) has no fixed
+# offset set: how many cells lie within a given distance varies from cell to cell.
 
 @inline _ball_radius(b::Stencils.MetricBall) = Stencils.radius(b)
 @inline _ball_radius(r::Real) = r ≥ 0 ? r : throw(ArgumentError("a search radius must be ≥ 0, got $r"))
 
-# Index half-width covering physical distance `r` when one index step spans AT LEAST `s`: a cell more
-# than `w` steps out is then at least `w·s ≥ r` away. Clamped to the axis, and a degenerate direction
-# (single sample, or no positive spacing) opens to the whole axis rather than silently excluding cells.
+# Index half-width covering physical distance `r` when one index step spans at least `s`: a cell more
+# than `w` steps out is then at least `w·s ≥ r` away. Clamped to the axis. A degenerate direction —
+# one sample, or no positive spacing — opens to the full axis.
 @inline function _steps(r::T, s::T, n::Int) where {T<:AbstractFloat}
     (s > 0 && isfinite(s)) || return n
     w = ceil(r / s)
@@ -21,9 +19,9 @@
 end
 
 # The chord between points at radii ≥ ρ separated by central angle σ is ≥ 2ρ·c·sin(σ/2), with `c` the
-# `cosφ` attenuation (1 where none applies). Inverting it: the angle beyond which every cell is farther
-# than `r` in the chord metric — and in the arc metric too, since arc ≥ chord. `n` when no angle is far
-# enough, e.g. `r` reaching the antipode.
+# `cosφ` attenuation (1 where none applies). Inverted, that is the angle beyond which every cell is
+# farther than `r` in the chord metric, and so in the arc metric too since arc ≥ chord. Returns `n`
+# where no angle is far enough, as when `r` reaches the antipode.
 @inline function _angle_steps(r::T, scale::T, Δ::T, n::Int) where {T<:AbstractFloat}
     (scale > 0 && isfinite(scale)) || return n
     x = r / scale
@@ -31,13 +29,11 @@ end
     return _steps(one(T), Δ / (2 * asin(x)), n)   # w = ceil(σ_cut / Δ), through the same clamp
 end
 
-# The smallest interior gap of direction `d`, including the seam gap where it wraps — a periodic axis's
-# seam can be its narrowest gap, and a window bound built without it could under-cover across the seam.
+# The smallest interior gap of direction `d`, including the seam gap where it wraps: a periodic axis's
+# seam can be its narrowest gap, and a window bound omitting it under-covers across the seam.
 #
-# `Grids.minimum_spacing` is `O(1)` on a uniform axis and an `O(N)` scan on a stretched one, so this is
-# computed ONCE into a `MetricTopology` rather than per query. Called per query it made a stretched-axis
-# ball 53.6× slower than a uniform one at N = 16384, growing without bound, for a window holding the same
-# number of cells either way.
+# `Grids.minimum_spacing` is an `O(N)` scan on a stretched axis, so this is computed once into a
+# `MetricTopology` and read from there by every query.
 @inline function _min_step_scan(grid::Grids.AbstractGrid{G,T}, d::Int) where {G,T}
     s = T(Grids.minimum_spacing(grid, d))
     if Grids.isperiodic(grid, d)
@@ -53,25 +49,17 @@ end
 """
     MetricTopology(grid; index = nothing)
 
-Everything a distance query reads that depends on the grid alone — the counterpart of
-[`IndexTopology`](@ref) for the metric path.
+What a distance query reads that depends on the grid alone: the tightest per-direction step bound,
+which sizes the search window, the coordinate span, and a spatial index where the layout has no
+separable axes to bound with. [`IndexTopology`](@ref) is its counterpart for a stencil query.
 
-A stencil query reads `(size, periodic, mask)` and `IndexTopology` carries it. A ball query additionally
-needs the tightest per-direction step bound, which sizes the search window, and — where there are no
-separable axes to bound with — a spatial index.
+Constructing one is `O(1)` on a rectilinear grid, so passing `topology` to a query is optional. The
+**index** is worth hoisting: building a k-d tree for a single query costs more than the scan it
+replaces, so it is left out by default. [`foreach_within`](@ref) and [`mapreduce_within`](@ref) hoist
+one for a sweep, and [`indexed`](@ref) builds one explicitly.
 
-Constructing one is `O(1)` and allocates nothing: it reads the per-axis reductions through
-[`Grids.minimum_spacing`](@ref), [`Grids.bounds`](@ref) and [`Grids.extent`](@ref), each of which a
-layout answers without a scan. So the default `topology` on every query costs nothing and there is no
-hoisting to remember. What is still worth hoisting is the **index**, which
-is not built by default because a k-d tree inside a single query would cost more than the scan it
-replaces — [`foreach_within`](@ref) and [`mapreduce_within`](@ref) do that hoisting for a sweep, and
-[`indexed`](@ref) does it explicitly.
-
-It is not cached on the grid: grid types are immutable and the `Adapt` extension reconstructs them
-field-by-field for a device, so a mutable cache field would break both that and thread safety.
-
-`index` holds a spatial index when one is available, for the architectures with no separable axes to bound.
+Grid types are immutable and the `Adapt` extension reconstructs them field by field for a device, so
+this is a separate value and never a cache field on the grid.
 """
 struct MetricTopology{N,T,S}
     steps::NTuple{N,T}   # smallest index step per direction, seam included
@@ -80,10 +68,9 @@ struct MetricTopology{N,T,S}
     index::S
 end
 
-# The per-direction extent, reduced ONCE here. On a rectilinear grid it is two endpoint reads, but off
-# one the coordinates are per-cell fields with no order, so it is a scan — and a `k`-nearest query
-# needs it to size its opening radius. This is where such a reduction belongs: the invariants a query
-# reads, built once, rather than a field on every grid that every construction pays for.
+# The per-direction extent, reduced once here and read by every query. On a rectilinear grid it is two
+# endpoint reads; off one the coordinates are per-cell fields with no order, so it is a scan, and a
+# `k`-nearest query needs it to size its opening radius.
 @inline _span_of(grid::Grids.AbstractGrid{G,T}, ::Val{N}) where {G,T,N} =
     ntuple(d -> T(Grids.extent(grid, d)), Val(N))
 
@@ -97,7 +84,7 @@ function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.SeparableW
     return MetricTopology{N,T,typeof(index)}(steps, m3, _span_of(grid, Val(N)), index)
 end
 
-# With no separable axes there is no step bound to carry, and the topology exists to hold the index.
+# With no separable axes there is no step bound to carry, and the topology holds only the index.
 function MetricTopology(grid::Grids.AbstractGrid{G,T}, index, ::Grids.IndexedCandidates) where {G,T}
     N = Grids.ncoordinates(grid)
     return MetricTopology{N,T,typeof(index)}(ntuple(_ -> zero(T), Val(N)), zero(T),
@@ -112,16 +99,16 @@ end
 Whether an index has to materialize a candidate list to be queried.
 
 A cell list folds its bins directly and a bare scan has nothing to buffer, so both answer a query with
-no per-task storage — which is what lets a sweep over them run per index, on a device included. A tree
-deduplicates the periodic images it searches over, so it needs a buffer and its sweep needs chunks to
-give each task one.
+no per-task storage, and a sweep over them runs per index, on a device included. A tree deduplicates
+the periodic images it searches over, so it needs a buffer, and its sweep needs chunks to give each
+task one.
 """
 @inline _buffered_candidates(::Nothing) = false
 @inline _buffered_candidates(::Grids.CellListIndex) = false
 @inline _buffered_candidates(_index) = true
 
-# An index built over the active region alone is a superset of the ACTIVE ball. A query wanting masked
-# cells needs one built over every cell, and gets an error instead of a short answer.
+# An index built over the active region alone is a superset of the active ball only. A query for
+# masked cells needs one built over every cell, and raises where it has the wrong one.
 @inline _check_index_covers(_index, _active_only::Bool) = nothing
 @inline function _check_index_covers(ix::Grids.CellListIndex, active_only::Bool)
     (active_only || !ix.active_only) || throw(ArgumentError(
@@ -134,31 +121,31 @@ end
 """
     indexed(grid) -> MetricTopology
 
-A [`MetricTopology`](@ref) carrying a spatial index, so ball queries on it cost `O(log n + m)` instead of
-scanning every cell. Requires `NearestNeighbors`; without it [`Grids.spatial_index`](@ref) raises and the
-unindexed topology still works, just linearly.
+A [`MetricTopology`](@ref) carrying a spatial index, which brings a ball query to `O(log n + m)`.
+
+Requires `NearestNeighbors`; [`Grids.spatial_index`](@ref) raises without it, and an unindexed
+topology answers the same queries in `O(n)`.
 """
 indexed(grid::Grids.AbstractGrid) = MetricTopology(grid; index = Grids.spatial_index(grid))
 
 # Candidate enumeration. Without an index every cell is a candidate; with one, the index returns a
 # superset of the ball and the caller's exact gate does the rest.
 #
-# `scratch` is the index's candidate buffer, owned by the CALLER rather than by the topology: one
-# `MetricTopology` is shared by every task in a threaded sweep, so a buffer inside it would be a data
-# race. Read-only sharing is the property that makes that safe, and it is worth one argument to keep.
+# `scratch` is the index's candidate buffer and belongs to the caller. One `MetricTopology` is shared
+# by every task in a threaded sweep, so it stays read-only.
 @inline _candidates(mt::MetricTopology, grid, I, r, scratch) =
     _index_candidates(mt.index, grid, I, r, scratch)
 
 @inline _index_candidates(::Nothing, grid, _I, _r, _scratch) = Base.OneTo(length(Grids.mask(grid)))
 
-# `scratch === nothing` is a type test, not a runtime one, so the branch is resolved at compile time.
+# `scratch === nothing` is a type test, so the branch resolves at compile time.
 @inline _index_candidates(index, grid, I, r, scratch) =
     scratch === nothing ? Grids.index_within(index, grid, I, r) :
                           Grids.index_within!(scratch, index, grid, I, r)
 
-# Threading the accumulator over the candidates rather than over a list of them. An index that can
-# enumerate without materializing says so by defining `Grids.fold_candidates`, and then the whole
-# traversal holds no buffer — which is what makes it runnable inside a kernel.
+# Threads the accumulator through the candidates as they are enumerated. An index that can enumerate
+# without materializing defines `Grids.fold_candidates`; the traversal then holds no buffer and runs
+# inside a kernel.
 @inline _fold_candidates(f::F, acc, mt::MetricTopology, grid, I, r, scratch) where {F} =
     _fold_over_index(f, acc, mt.index, grid, I, r, scratch)
 
@@ -183,13 +170,13 @@ end
 """
     ball_scratch() -> Vector{Int}
 
-A candidate buffer to hand to repeated ball queries through their `scratch` argument, so an indexed
-query reuses one allocation instead of making one per call. One buffer per task.
+A candidate buffer to hand to repeated ball queries through their `scratch` argument. One buffer per
+task; an indexed query then holds one allocation across any number of calls.
 """
 ball_scratch() = Int[]
 
-# The smallest `f(x[j])` over the index window, which is what bounds a scale factor that varies across
-# it. Walks the clamped window; a periodic direction can reach every sample, so it walks all of them.
+# The smallest `f(x[j])` over the index window, bounding a scale factor that varies across it. Walks
+# the clamped window; a periodic direction can reach every sample, so it walks all of them.
 @inline function _window_min(f::F, x::AbstractVector{T}, i::Int, w::Int, periodic::Bool) where {F,T}
     n = length(x)
     lo, hi = periodic || w ≥ n ? (1, n) : (max(1, i - w), min(n, i + w))
@@ -212,40 +199,37 @@ where the direction wraps — which is one number on a uniform axis and an `O(N)
 three-argument form builds a topology per call. On a spherical or ellipsoidal grid the longitude cut
 additionally walks the latitude window for its smallest `cosφ`, so it costs the window it returns.
 
-This is a *bound*, not the answer: it is the window [`neighbors_within!`](@ref) scans before filtering on
-the geometry's own `distance`. It never under-covers, which is why it is geometry-specific. On a
-spherical grid one longitude step spans `R·cosφ·Δλ`, so the λ half-width is taken at the latitude in the
-window nearest a pole rather than at the cell's own latitude — at a polar cell every longitude is in
-range, and the window says so.
+The window is a bound: [`neighbors_within!`](@ref) scans it and then filters on the geometry's own
+`distance`. Covering the ball for every geometry is what makes it geometry-specific. On a spherical grid
+one longitude step spans `R·cosφ·Δλ`, so the λ half-width is taken at the latitude in the window nearest
+a pole; at a polar cell every longitude is in range, and the window says so.
 """
 function metric_window end
 
-metric_window(grid::Grids.StructuredGrid, I::NTuple, ball) =
+metric_window(grid::Grids.AbstractStructuredGrid, I::NTuple, ball) =
     metric_window(grid, I, ball, MetricTopology(grid))
 
-# A radius, however it is spelled. The grid-level forms below take this rather than an untyped `ball`
-# so they cannot be confused with the per-cell forms, whose second argument is the cell index.
+# A radius, however it is spelled. The grid-level forms below take this type to keep them apart from
+# the per-cell forms, whose second argument is the cell index.
 const _BallLike = Union{Real,Stencils.MetricBall}
 
 """
     metric_window(grid, ball) -> NTuple{N,Int}
     metric_window(grid, ball, topology) -> NTuple{N,Int}
 
-The window valid for **every** cell of `grid`, rather than for one of them: the per-cell form
-maximised over the grid, which is what sizing a cache or a footprint table needs.
+The per-cell window maximised over every cell of `grid`, for sizing a cache or a footprint table.
 
-`O(1)`. Taking `maximum` of the per-cell form would be `O(N)` for something the per-axis reductions
-already determine: [`Grids.minimum_spacing`](@ref) gives the smallest gap per axis, and the extreme
-`|cos φ|` over a latitude axis is at one of its two ends, since `|cos|` on `[-π/2, π/2]` is largest in
-the middle. No `cos` per row, and no scan.
+`O(1)`: [`Grids.minimum_spacing`](@ref) gives the smallest gap per axis, and the extreme `|cos φ|` over
+a latitude axis is at one of its two ends, since `|cos|` on `[-π/2, π/2]` peaks in the middle. No `cos`
+per row, and no scan.
 
-Conservative by construction — it is the per-cell window at the worst cell — so it never under-covers.
+The result is the per-cell window at the worst cell, so it covers the ball at every cell.
 """
-metric_window(grid::Grids.StructuredGrid, ball::_BallLike) =
+metric_window(grid::Grids.AbstractStructuredGrid, ball::_BallLike) =
     metric_window(grid, ball, MetricTopology(grid))
 
 function metric_window(
-    grid::Grids.StructuredGrid{T, G,N}, ball::_BallLike, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, ball::_BallLike, mt::MetricTopology{N,T},
 ) where {G<:Geometry.AbstractCartesianGeometry,T,N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -253,7 +237,7 @@ function metric_window(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{T, G,N}, ball::_BallLike, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, ball::_BallLike, mt::MetricTopology{N,T},
 ) where {G<:Geometry.AbstractSphericalGeometry,T,N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -271,7 +255,7 @@ function metric_window(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{T, G,N}, ball::_BallLike, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, ball::_BallLike, mt::MetricTopology{N,T},
 ) where {G<:Geometry.AbstractEllipsoidalGeometry,T,N}
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
@@ -294,7 +278,7 @@ end
 # The smallest `|cos φ|` anywhere on the latitude axis, in `O(1)`. `|cos|` on `[-π/2, π/2]` falls away
 # from the middle in both directions, so over an interval its minimum is at whichever end is farther
 # from the equator — the two stored extremes are enough, and no row is visited.
-@inline function _cos_extreme(grid::Grids.StructuredGrid{T, G,N}, ::Val{N}) where {G,T,N}
+@inline function _cos_extreme(grid::Grids.AbstractStructuredGrid{G,T}, ::Val{N}) where {G,T,N}
     N ≥ 2 || return one(T)
     lo, hi = Grids.bounds(grid, 2)
     return min(abs(cos(T(lo))), abs(cos(T(hi))))
@@ -308,10 +292,9 @@ The **exact** half-width along direction `dim` of the part of the row at `coord_
 `ball` of a point at `coord_t`, in that direction's own coordinate units. `coord_t` and `coord_n` are
 coordinates on the *other* direction of a two-direction grid.
 
-[`metric_window`](@ref) returns a bounding box, which is the right answer for a query that then filters
-on distance. A **separable sweep** — a prefix sum along a row, a row-by-row convolution — cannot filter,
-and using the box instead of the exact extent costs it the exactness that made it worth doing. This is
-the same geodesic solve, resolved per row rather than maximised into a box.
+[`metric_window`](@ref) returns a bounding box, which suits a query that then filters on distance. A
+**separable sweep** — a prefix sum along a row, a row-by-row convolution — has no filtering step and
+needs the exact extent. This is the same geodesic solve, resolved per row.
 
 Returns a negative number where the row is out of reach entirely, so `band < 0` is the empty test. A
 row the ball covers completely gives the half-width of the whole direction (`π` in longitude).
@@ -322,14 +305,14 @@ On a sphere, for `dim = 1`, this inverts the spherical law of cosines:
 |Δλ| ≤ \\arccos\\left(\\frac{\\cos(r/R) - \\sin φ_t \\sin φ_n}{\\cos φ_t \\cos φ_n}\\right)
 ```
 
-with the empty band, the whole circle and a pole at either end all falling out of the same expression —
-the pole case being where the denominator vanishes and the separation stops depending on `λ` at all,
-handled here once rather than by each caller.
+The empty band, the full circle and a pole at either end all fall out of that one expression. At a pole
+the denominator vanishes and the separation stops depending on `λ`; this returns the full half-width
+there, so no caller handles it.
 """
 function metric_band end
 
 function metric_band(
-    grid::Grids.StructuredGrid{T, G,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
+    grid::Grids.AbstractStructuredGrid{G,T}, dim::Integer, coord_t::Real, coord_n::Real, ball,
 ) where {G<:Geometry.AbstractCartesianGeometry,T}
     r = T(_ball_radius(ball))
     d = abs(T(coord_n) - T(coord_t))
@@ -338,7 +321,7 @@ function metric_band(
 end
 
 function metric_band(
-    grid::Grids.StructuredGrid{T, G,2}, dim::Integer, coord_t::Real, coord_n::Real, ball,
+    grid::Grids.AbstractStructuredGrid{G,T}, dim::Integer, coord_t::Real, coord_n::Real, ball,
 ) where {G<:Geometry.AbstractSphericalGeometry,T}
     dim == 1 || throw(ArgumentError(
         "a spherical band is solved along longitude; got dim = $dim. The latitude extent at fixed " *
@@ -364,7 +347,7 @@ function metric_band(
 end
 
 function metric_window(
-    grid::Grids.StructuredGrid{T, G,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -378,7 +361,7 @@ end
 # smallest `cosφ` in the latitude window (`sin(σ/2) ≥ cosφ·sin(|Δλ|/2)` with both endpoint latitudes in
 # that window).
 function metric_window(
-    grid::Grids.StructuredGrid{T, G,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractSphericalGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -408,7 +391,7 @@ end
 #       (|Δφ| ≤ r/M(0) along any path of length ≤ r). 3-D: the chord bound with geocentric radius
 #       ≥ b²/a + hmin and cosψ ≥ cosφ (geocentric latitude is nearer the equator than geodetic).
 function metric_window(
-    grid::Grids.StructuredGrid{T, G,N}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, I::NTuple{N,Integer}, ball, mt::MetricTopology,
 ) where {G<:Geometry.AbstractEllipsoidalGeometry, T, N}
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
@@ -442,9 +425,8 @@ end
 
 How a ball query treats a periodic direction: [`NearestImage`](@ref) or [`AllImages`](@ref).
 
-Singleton **types** rather than a `Bool`, for the reason given above about stencils: the traversal branches
-on this per candidate, so a runtime value leaves the coordinate expression unresolved and the whole walk
-allocates — measured at 14 KB for one query on a 32² grid, against nothing when it is a type.
+Singleton types, like a stencil. The traversal branches on this per candidate; as a type the branch and
+the coordinate expression behind it resolve at compile time, and the walk allocates nothing.
 """
 abstract type AbstractImageConvention end
 
@@ -458,8 +440,8 @@ struct NearestImage <: AbstractImageConvention end
 """
     AllImages()
 
-Visit every image of a cell that lands inside the ball, each carrying its own displacement rather than a
-reduced one — what a periodic convolution sums over. See [`fold_within`](@ref).
+Visit every image of a cell that lands inside the ball, each carrying its own displacement. This is what
+a periodic convolution sums over. See [`fold_within`](@ref).
 """
 struct AllImages <: AbstractImageConvention end
 
@@ -469,9 +451,8 @@ struct AllImages <: AbstractImageConvention end
 Which of the cells within `ball` a query returns: [`Unrestricted`](@ref), every one of them, or
 [`Connected`](@ref), those reachable from the seed without leaving the ball.
 
-A **type** rather than a flag, like [`AbstractImageConvention`](@ref): the two are different sets computed
-by different algorithms, so which one you get should be visible in the call and fixed at compile time,
-never inferred from a runtime value.
+A type, like [`AbstractImageConvention`](@ref). The two are different sets computed by different
+algorithms, so the choice is visible in the call and fixed at compile time.
 """
 abstract type AbstractReach end
 
@@ -505,8 +486,8 @@ latter, which has no index space for a stencil to mean anything in.
 
 **This is not a cheaper way to compute `Unrestricted`.** Take cells `P` (the seed), `Q` and `R`, adjacent
 only as `P–Q–R`, with `d(P,Q) = 1.2r` and `d(P,R) = 0.8r`. A walk outward from `P` that drops any cell
-farther than `r` stops at `Q` and never reaches `R`, though `R` is inside the ball. That walk is not a
-broken `Unrestricted` — it is exactly `Connected`, which is why it cannot produce the other one.
+farther than `r` stops at `Q` and never reaches `R`, though `R` is inside the ball. Such a walk computes
+`Connected`; the ball is a different set, reached only by a spatial query.
 """
 struct Connected{S} <: AbstractReach
     adjacency::S
@@ -517,9 +498,9 @@ Connected() = Connected(nothing)
 @inline _reach_stencil(c::Connected) = _stencil_val(c.adjacency)
 
 # Per-direction candidate offsets. Bounded: the window, clipped at the walls. Periodic under
-# `NearestImage`: the window clamped to one full turn — offsets congruent mod `n` are the same cell, and
-# the coordinate each is measured at is decided by minimum image, not by which offset reached it.
-# Periodic under `AllImages`: no clamp, because each offset is then a distinct POSITION of that cell.
+# `NearestImage`: the window clamped to one full turn, since offsets congruent mod `n` are the same cell
+# and minimum image fixes the coordinate it is seen at. Periodic under `AllImages`: no clamp, since each
+# offset is then a distinct position of that cell.
 @inline function _delta_range(w::Int, i::Int, n::Int, periodic::Bool, ::NearestImage)
     if periodic
         2w + 1 ≤ n && return (-w):w
@@ -534,7 +515,7 @@ end
 
 # Consecutive images of one cell are `period` apart, which is the relevant step for a direction holding a
 # single sample — there `_min_step` has no interior gap to report.
-@inline function _image_step(grid::Grids.StructuredGrid{T, G}, d::Int, mt::MetricTopology) where {G,T}
+@inline function _image_step(grid::Grids.AbstractStructuredGrid{G,T}, d::Int, mt::MetricTopology) where {G,T}
     s = _min_step(mt, d)
     if Grids.isperiodic(grid, d)
         p = T(Grids.period(grid, d))
@@ -548,7 +529,7 @@ end
 # turns out, and capping at `n` drops every one of them. So a periodic direction gets the UNCAPPED
 # `ceil(r/s)`; a bounded one is unchanged, its offsets being clipped at the walls anyway.
 function _image_window(
-    grid::Grids.StructuredGrid{T, G,N}, ball, mt::MetricTopology,
+    grid::Grids.AbstractStructuredGrid{G,T}, ball, mt::MetricTopology{N,T},
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
@@ -562,11 +543,10 @@ function _image_window(
     end
 end
 
-# Summing images treats a periodic direction as a TRANSLATION of the domain, which it is on a Cartesian
-# torus: `x` and `x+L` are distinct positions of the same cell, so a convolution must count each. An
-# angular direction is an IDENTIFICATION instead — `λ` and `λ+2π` are the same point, and the geometry's
-# distance is already `2π`-periodic in it — so the images are not distinct positions and summing them
-# would count one cell repeatedly. Refused rather than silently wrong.
+# Summing images treats a periodic direction as a translation of the domain, as it is on a Cartesian
+# torus: `x` and `x+L` are distinct positions of the same cell, and a convolution counts each. An angular
+# direction is an identification: `λ` and `λ+2π` are one point, the geometry's distance is already
+# `2π`-periodic in it, and its images coincide. Summing them counts one cell repeatedly, so it raises.
 @inline _check_images(::Grids.AbstractGrid, ::NTuple{N,Bool}, ::NearestImage) where {N} = nothing
 
 @inline function _check_images(
@@ -587,8 +567,8 @@ end
 
 # The candidate's position. Under `NearestImage` the stored coordinate reduced to the image nearest the
 # centre; under `AllImages` the image the offset actually names, built as
-# `x[mod1(raw, n)] + (periods wrapped)·L` — the same construction `Discretization.axis_stencils` uses for
-# a wrapped stencil node. Reducing that by minimum image is exactly what must not happen.
+# `x[mod1(raw, n)] + (periods wrapped)·L`, the same construction `Discretization.axis_stencils` uses for
+# a wrapped stencil node. Minimum image is not applied to it.
 @inline _cand_coords(
     grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::NearestImage,
 ) where {N} = _min_image(p0, Grids._raw_coords(grid, J...), prd)
@@ -604,8 +584,6 @@ end
     end
 end
 
-# Minimum image and the per-direction wrap lengths live in `Grids`, which owns coordinates and periods,
-# and are what `Geometry.distance(grid, I, J)` is built on as well.
 using ..Grids: _min_image, _wrap_lengths
 
 """
@@ -615,30 +593,28 @@ Write the linear indices of every cell whose centre lies within `ball` of cell `
 [`Stencils.MetricBall`](@ref) or a bare radius in the geometry's length units.
 
 Distance is the geometry's own — great-circle on a sphere, Vincenty on a spheroid, the chord where a
-third direction is present — so the neighbourhood is a genuine metric ball, not a box. The cell itself
-is excluded, matching stencil semantics where the zero offset is not a neighbour. A periodic direction
+third direction is present — so the neighbourhood is a metric ball in that distance. The cell itself is
+excluded, matching stencil semantics where the zero offset is no neighbour. A periodic direction
 wraps, each cell appears at most once, and its coordinate is taken by minimum image, so the seam
 neither shortens nor lengthens a distance.
 
-Cost is [`metric_window`](@ref) — `O(1)` per direction on **any** separable axis, uniform or stretched,
+Cost is [`metric_window`](@ref) — `O(1)` per direction on any separable axis, uniform or stretched,
 given the per-direction minimum steps that `topology` carries — times one distance evaluation per
-candidate. Size the buffer with [`nneighbors_within`](@ref); there is no fixed count, since how many
-cells fall within a fixed distance varies from cell to cell on any non-uniform or curved grid.
+candidate. Size the buffer with [`nneighbors_within`](@ref): on a non-uniform or curved grid the number
+of cells within a fixed distance varies from cell to cell.
 
 Three arguments matter for anything beyond a single query:
 
   * `topology` — a [`MetricTopology`](@ref), the grid invariants a ball query reads. The default is `O(1)`
-    and allocation-free, so leaving it out costs nothing. On a curvilinear or node grid, pass
-    [`indexed`](@ref) to make each query `O(log n + m)` rather than a scan of every cell — or use
-    [`foreach_within`](@ref), which builds the index once for a whole sweep.
+    and allocation-free. On a curvilinear or node grid, pass [`indexed`](@ref) to bring each query to
+    `O(log n + m)`, or use [`foreach_within`](@ref), which builds the index once for a whole sweep.
   * `scratch` — a candidate buffer from [`ball_scratch`](@ref), one per task. Accepted on every grid type
     and used where a query goes through a spatial index, i.e. on a curvilinear or node grid; a separable
-    window has no candidate list to buffer. With one an indexed query allocates **nothing**; without one
-    it allocates its candidate list per call, 480 bytes whatever the grid size. The time difference is
-    within noise — the allocation is the reason to pass one.
+    window has no candidate list to buffer. With one, an indexed query allocates nothing; without one it
+    allocates its candidate list per call.
   * `reach` — [`Unrestricted`](@ref) (the ball, and the default) or [`Connected`](@ref) (the part of it
-    reachable from `I` without leaving it). Note that a ball is **not** a connected patch: with a mask or
-    a concave domain it can contain cells reachable from the seed only by going outside `ball`.
+    reachable from `I` without leaving it). A ball is not a connected patch: with a mask or a concave
+    domain it can contain cells reachable from the seed only by going outside `ball`.
 """
 function neighbors_within! end
 
@@ -660,23 +636,22 @@ function neighbors_within end
     fold_within(f, init, grid, I...; ball, images=NearestImage(), self=false, active_only=true)
 
 Fold `acc = f(acc, J, d)` over every cell `J` within `ball` of cell `I`, `d` being its distance. The
-traversal every distance query here is built on; the accumulator is threaded through as a value rather
-than mutated, so nothing is captured and nothing is boxed.
+traversal every distance query here is built on; the accumulator is threaded through as a value, so
+nothing is captured and nothing is boxed.
 
 `images` selects how a periodic direction is treated — [`NearestImage`](@ref) (the default, each cell
 once, the convention [`neighbors_within!`](@ref) exposes) or [`AllImages`](@ref), which visits every
-image of a cell that lands inside the ball, each carrying its own displacement rather than a reduced one.
+image of a cell that lands inside the ball, each carrying its own displacement.
 
 `AllImages` is what a periodic convolution needs: on a torus of period `L`,
 `f̄(x) = Σₖ ∫ K(x − y − kL) f(y) dy`, so where the kernel support exceeds `L/2` one cell contributes
 through several images at different displacements, and keeping only the nearest drops the rest. Below
-`L/2` the two conventions coincide exactly. It also widens the search — the window becomes the uncapped
-`ceil(r/s)` per periodic direction rather than [`metric_window`](@ref)'s one-turn cap — and it is refused
-where a periodic direction is angular rather than a translation.
+`L/2` the two conventions coincide exactly. It also widens the search: the window becomes the uncapped
+`ceil(r/s)` per periodic direction, in place of [`metric_window`](@ref)'s one-turn cap. It raises where
+a periodic direction is an angular identification.
 
-`self = true` also folds the centre cell, at distance zero. A neighbour set excludes it, which is the
-default; a convolution needs it, and it carries the kernel's largest weight, so omitting it is not a
-small error.
+`self = true` also folds the centre cell, at distance zero. The default excludes it, matching a
+neighbour set; a convolution needs it, and it carries the kernel's largest weight.
 
 `reach` selects the ball ([`Unrestricted`](@ref)) or the part of it reachable from the seed without
 leaving it ([`Connected`](@ref)); `topology` and `scratch` are as in [`neighbors_within!`](@ref).
@@ -729,9 +704,8 @@ function fold_within end
     return acc
 end
 
-# `f::F` rather than a bare `f`: Julia does not specialize on a function-typed argument that is only
-# passed through, so the inner call would be dynamic and box the grid, the index tuple and the radius —
-# 224 bytes per query, against nothing once `F` forces a specialization.
+# `f::F` forces a specialization: Julia does not specialize on a function-typed argument that is only
+# passed through, and the inner call then goes dynamic and boxes the grid, the index tuple and the radius.
 # Every entry point takes the same arguments on every layout — a separable window enumerates candidates
 # without a buffer, so `scratch` reaches it and goes unused.
 fold_within(
@@ -758,8 +732,8 @@ fold_within(
     end
 end
 
-# Appending fold, for the allocating `neighbors_within` where a counting pass would be a second index
-# query or a second full scan rather than a cheap window walk.
+# Appending fold, for the allocating `neighbors_within` where a counting pass costs a second index query
+# or a second full scan.
 @inline function _within_push(
     grid::Grids.AbstractGrid, I, ball, active_only::Bool, mt::MetricTopology, scratch,
     reach::AbstractReach,
@@ -795,9 +769,8 @@ function neighbors_within(
     reach::AbstractReach = Unrestricted(), scratch = nothing,
 ) where {NI}
     cell = _seed_cell(grid, I)
-    # `Connected` materializes its component to walk it, so a counting pass would repeat the whole walk.
-    # A separable window is cheap to count and an exact size beats growing the output; an indexed query
-    # is not, so it appends in one pass.
+    # `Connected` materializes its component to walk it, and an indexed query pays a second range query,
+    # so both append in one pass. A separable window is cheap to count, so it sizes the output exactly.
     if reach isa Connected || Grids.candidate_source(grid) isa Grids.IndexedCandidates
         return _within_push(grid, cell, ball, active_only, topology, scratch, reach)
     end
@@ -814,9 +787,8 @@ end
 #   * no index — every cell, `O(n)` per query.
 #   * a spatial index — a range query, `O(log n + m)`.
 #
-# The index only has to return a SUPERSET of the ball: the exact `distance ≤ r` gate below is unchanged
-# and decides membership either way. That is what makes the indexed and unindexed results identical by
-# construction rather than by agreement of two implementations.
+# The index only has to return a superset of the ball. Membership is decided by the exact `distance ≤ r`
+# gate below, which is the same code on both paths, so the indexed and unindexed results agree.
 
 @inline function _keep!(out, n::Int, lin::Int)
     n ≤ length(out) ||
@@ -825,17 +797,16 @@ end
     return nothing
 end
 
-# A neighbour list is a SET of cells. Which order they come out in is whatever enumerated them — a window
-# walks index order, a tree walks tree order, a cell list walks bin order — and no entry point sorts,
-# because that would put an `O(m log m)` pass on top of an `O(m)` query for a property nothing needs.
-# `sort_neighbors!` is there for callers who do want it.
+# A neighbour list is a set of cells in whatever order enumerated them: a window walks index order, a
+# tree walks tree order, a cell list walks bin order. No entry point sorts, which would put an
+# `O(m log m)` pass on an `O(m)` query. `sort_neighbors!` sorts on request.
 
 # One body for every layout with no separable axes to bound a window with — a curvilinear mesh and a node
-# set alike, which differ only in how a cell is named (`Grids.cell_address`). Sharing the body is what
-# makes their enumeration and distance gate the same by construction.
+# set alike, which differ only in how a cell is named (`Grids.cell_address`) — so their enumeration and
+# distance gate are the same code.
 #
-# A non-nearest image convention is refused rather than ignored: summing images needs a periodic
-# direction to be a translation of the domain, and these layouts visit each cell once.
+# A non-nearest image convention raises here: summing images needs a periodic direction to be a
+# translation of the domain, and these layouts visit each cell once.
 @inline function _fold_within(
     f::F, init, grid::Grids.AbstractGrid, I, ball, images::AbstractImageConvention,
     active_only::Bool, self::Bool, mt::MetricTopology, scratch, ::Grids.IndexedCandidates,

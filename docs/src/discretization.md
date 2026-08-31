@@ -8,9 +8,8 @@ The geometric inputs a numerical method needs from a grid: where a point falls, 
 interpolate to it, where a cell's faces are, the metric factors of the coordinate system, and the
 finite-difference weights of any stencil.
 
-All of it is a function of coordinates alone. **Applying** weights to a field is not here — that needs
-a result location, a boundary-condition policy and a halo convention, which are the caller's to
-choose, not this package's to impose.
+All of it is a function of coordinates alone. **Applying** weights to a field is not here: that needs a
+result location, a boundary-condition policy and a halo convention, all of them the caller's to choose.
 
 ## Centres and faces
 
@@ -51,7 +50,7 @@ xs = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
 D.local_spacing(xs, 3), D.cell_width(xs, 3)
 ```
 
-`cell_width` is exactly the distance between the cell's two faces — that is what it means:
+`cell_width` is the distance between the cell's two faces:
 
 ```@example disc
 f = D.faces(xs)
@@ -69,7 +68,7 @@ D.local_spacing(xr, 4), D.cell_width(xr, 4)
 ```
 
 At a bounded end the outward gap is `0` and the caller falls back to a one-sided stencil. Given a
-`period` it wraps instead, which is what makes a seam no different from the interior:
+`period` it wraps, so a seam behaves like the interior:
 
 ```@example disc
 λ = collect(range(0, 2π * (1 - 1/8); length = 8))
@@ -101,10 +100,10 @@ spacing living in the type — and `O(log n)` by bisection on a stretched one. B
 D.locate(xs, 2.0), D.nearest_index(xs, 2.0)
 ```
 
-`nearest_index` always returns a valid index, clamping rather than reporting "outside"; exact ties go
-to the lower index. It brackets and compares rather than scanning, so it is `O(log n)` on a stretched
-axis and `O(1)` on a uniform one, and both paths compare the same two samples — a uniform axis and its
-`collect` hold the same numbers, so they must not disagree about which is nearest.
+`nearest_index` always returns a valid index, clamping a coordinate outside the axis to the nearer end;
+exact ties go to the lower index. It brackets and compares, so it is `O(log n)` on a stretched axis and
+`O(1)` on a uniform one, and both paths compare the same two samples: a uniform axis and its `collect`
+hold the same numbers and agree about which is nearest.
 
 ## Interpolation weights
 
@@ -147,7 +146,7 @@ D.fd_weights([-1.7, -0.4, 0.9], 0.0, 1)     # same order, unequal nodes
 ```
 
 The axis form centres the stencil on a sample and shifts it inward at a boundary, so the node count —
-and therefore the accuracy order — is the same everywhere, rather than degrading at the two ends:
+and therefore the accuracy order — holds at the two ends as well as the interior:
 
 ```@example disc
 xg = collect(range(0.0, 1.0; length = 11))
@@ -168,8 +167,8 @@ maximum(abs(FG.Geometry.nonuniform_first_derivative(
         for i in 2:length(xs)-1)
 ```
 
-The gaps are signed for exactly this reason: the same expression on a descending axis differentiates
-with respect to the coordinate, not the index, without the caller correcting anything:
+Signed gaps are what carry that through: the same expression on a descending axis differentiates with
+respect to the coordinate, with no correction at the call site:
 
 ```@example disc
 maximum(abs(FG.Geometry.nonuniform_first_derivative(
@@ -192,7 +191,7 @@ O.apply_stencil!(out, f, x, 1; order = 1, nodes = 3)
 maximum(abs, out .- (6x .- 2))          # exact for a quadratic, ends included
 ```
 
-A stretched axis is equally exact, because the weights are built per sample rather than one set reused:
+A stretched axis is equally exact, the weights being built per sample:
 
 ```@example disc
 xs = [0.0, 0.11, 0.37, 0.9, 1.05, 1.6, 1.62, 2.0]
@@ -212,8 +211,8 @@ maximum(abs, o .- cos.(λ)), abs(o[1] - cos(λ[1]))
 ```
 
 The grid form takes the axis, the wrap period and the mask from the grid, so a periodic direction wraps
-without being told. Where a mask bites, a value whose stencil would read an inactive cell is written as
-`masked` rather than invented:
+without being told. Where a mask bites, a cell whose stencil reads an inactive sample is written as
+`masked`:
 
 ```@example disc
 geo = FG.Geometry.CartesianGeometry()
@@ -257,13 +256,13 @@ Every cell is blanked in the first, and every active cell is exact in the second
 | [`ShiftWithinRun`](@ref FlowGeometries.Operators.ShiftWithinRun) | shift the window to fit inside the run, keeping `nodes` and the accuracy order; `masked` only where the run is shorter than `nodes` |
 | [`ReduceInRun`](@ref FlowGeometries.Operators.ReduceInRun) | as above, and where the run cannot hold `nodes`, use the largest window it can, down to `order + 1` |
 
-`ReduceInRun` is the only one that will silently lower the accuracy order, which is why it is a
-separate policy rather than a fallback inside `ShiftWithinRun`: a narrow strait genuinely wants an
-answer at reduced order, and everywhere else wants to be told the run is too short.
+`ReduceInRun` is the one policy that lowers the accuracy order without saying so, hence its own name: a
+narrow strait wants an answer at reduced order, and elsewhere `ShiftWithinRun` reports a run too short
+by writing `masked`.
 
 A cell whose window already lies inside its run reuses the precomputed row, so a run's interior is
 bit-for-bit what `BlankMasked` gives, and only the cells within `nodes - 1` of an edge cost anything
-extra. A run that wraps a periodic seam is one run, not two.
+extra. A run that wraps a periodic seam is a single run.
 
 Build the weights once with [`axis_stencils`](@ref) to reuse them across many fields; applying a
 precomputed set allocates nothing.
@@ -291,8 +290,8 @@ O.derivative!(dn, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
 dn[1, 12], cos(lat[12]) / R
 ```
 
-Where the metric degenerates the derivative does not exist, and `masked` is written rather than a
-number invented. Longitude at a pole is that case — `h_λ = R cos φ → 0`:
+Where the metric degenerates the derivative does not exist, and `masked` is written. Longitude at a pole
+is that case — `h_λ = R cos φ → 0`:
 
 ```@example disc
 de = zeros(48, 25)
@@ -320,8 +319,8 @@ different expression, and a wrong one.
 ## Off a rectilinear grid: the least-squares gradient
 
 `apply_stencil!` needs a separable axis to difference along. A `CurvilinearGrid` has none, and a node
-set's neighbours come from connectivity rather than an index offset, so neither has a stencil.
-`Operators.gradient_plan` builds a least-squares gradient for them instead, and
+set's neighbours come from connectivity, so neither has a stencil.
+`Operators.gradient_plan` builds a least-squares gradient for them, and
 [`gradient!`](@ref FlowGeometries.Operators.gradient!) applies it:
 
 ```@example disc
@@ -346,12 +345,12 @@ apply.
 
 `A` depends only on the geometry, so the plan holds the per-neighbour coefficients and each apply is
 one dot product per cell, allocating nothing. Where `A` is rank deficient — every neighbour on one
-line, at a boundary or beside a mask — that component is **zeroed rather than invented**, the same rule
-`apply_stencil!` states for a mask.
+line, at a boundary or beside a mask — that component is **zeroed**, under the rule `apply_stencil!`
+states for a mask.
 
 ## Evaluating a field at a coordinate
 
-Observational data has a coordinate, not a cell index. [`interpolate`](@ref FlowGeometries.Operators.interpolate) answers for one:
+Observational data arrives with a coordinate. [`interpolate`](@ref FlowGeometries.Operators.interpolate) evaluates a field there:
 
 ```@example disc
 xa = collect(range(0, 2; length = 11)); ya = collect(range(-1, 3; length = 9))
@@ -362,8 +361,7 @@ O.interpolate(fa, ga, (0.7, 1.1)), 2*0.7 - 3*1.1 + 0.5*0.7*1.1 + 7
 
 Multilinear on a rectilinear grid; a weighted least-squares plane on a curvilinear grid or a node set,
 which is exact for a linear field and reproduces a cell's own value at its centre. A **periodic
-direction interpolates across its seam** rather than clamping at the last sample — composing the
-per-axis weights by hand gets that wrong by half a cell everywhere on the seam.
+direction interpolates across its seam**, so a coordinate past the last sample wraps to the first.
 
 The mask policies mean here what they mean for a stencil: [`BlankMasked`](@ref FlowGeometries.Operators.BlankMasked) returns `masked` when a
 contributor is inactive, [`ReduceInRun`](@ref FlowGeometries.Operators.ReduceInRun) renormalizes over the active ones, and
@@ -378,7 +376,7 @@ below.
 
 A field may carry trailing axes beyond the grid's own — many tracers, an ensemble, a time window —
 sharing one geometry. Those axes are **batch**: every entry point takes them, differencing only along
-`dim`, which indexes the grid and not the array.
+`dim`, which indexes the grid's directions.
 
 ```@example disc
 gb = FG.Grids.StructuredGrid(cart, xa, ya)
@@ -388,10 +386,9 @@ O.derivative!(ob, fb, gb, 1; order = 1, nodes = 3)
 size(ob), ob[5, 4, 1] ≈ ob[5, 4, 4]                   # same derivative, offset field
 ```
 
-Nothing about the grid depends on the batch, so the work that does not either — the stencil table, the
-metric factors, the interpolation weights, a gradient plan's coefficients — is computed once and reused
-across it. One pass over the batch is therefore *less* work than a pass per slice, not the same work
-rearranged.
+Nothing about the grid depends on the batch, so the grid-only work — the stencil table, the metric
+factors, the interpolation weights, a gradient plan's coefficients — is computed once and reused across
+it. One pass over the batch is therefore *less* work than a pass per slice.
 
 It also matters for a device backend. `apply_stencil!` launches over the whole output, batch included,
 so a batched call is one launch over `prod(spatial) · prod(batch)` work items where a slice loop is one

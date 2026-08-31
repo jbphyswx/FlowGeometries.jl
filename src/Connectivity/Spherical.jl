@@ -22,8 +22,8 @@ return the surviving count (left packed at the front of the slice).
 @inline function _sort_unique_filter!(buf::AbstractVector{<:Integer}, lo::Int, m::Int, self::Int, n::Int)
     m == 0 && return 0
     v = view(buf, (lo + 1):(lo + m))
-    # Insertion sort inline rather than `sort!`: these slices are stencil-short (≤ 8), so the generic
-    # entry point's algorithm selection and scratch handling cost more than the ordering itself.
+    # An inline insertion sort: these slices are stencil-short (≤ 8), where `sort!`'s algorithm
+    # selection and scratch handling cost more than the ordering itself.
     @inbounds for a in 2:m
         x = v[a]
         b = a - 1
@@ -55,6 +55,10 @@ node — once to count the row, once to fill it — so it must be a pure functio
 
 Count, scan, fill. The scratch is one `maxdeg` buffer per task, and both node passes write only slots
 their own node owns, so both parallelize under a threaded `backend`.
+
+Host backends only: a work-item-per-node form needs `maxdeg` slots per item, an `n · maxdeg` scratch,
+and a device backend raises here. The grid layouts reach the same graph through
+[`build_connectivity`](@ref) on [`Grids.FormulaNeighbors`](@ref), which is device-resident end to end.
 """
 function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = nothing) where {F}
     n = Int(n); maxdeg = Int(maxdeg)
@@ -65,13 +69,23 @@ function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = n
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
         end
     end
-    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, backend)
-    nbrs = Vector{Int}(undef, ptr[end] - 1)
+    # The width is a runtime value, so the filling pass is entered through a CONCRETE one, from a
+    # branch that leaves each call site one method — see `_csr_total`.
+    return _index_type(max(n + 1, sum(deg))) === Int32 ?
+        _csr_fill(Int32, emit!, deg, n, maxdeg, backend) :
+        _csr_fill(Int, emit!, deg, n, maxdeg, backend)
+end
+
+function _csr_fill(
+    ::Type{I}, emit!::F, deg::Vector{Int}, n::Int, maxdeg::Int, backend,
+) where {I<:Integer,F}
+    ptr = Execution.exclusive_scan!(Vector{I}(undef, n + 1), deg, backend)
+    nbrs = Vector{I}(undef, ptr[end] - 1)
     Execution.run_chunks(n, backend) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             d = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
-            slot = ptr[i] - 1
+            slot = Int(ptr[i]) - 1
             for k in 1:d
                 nbrs[slot + k] = buf[k]
             end
@@ -88,28 +102,37 @@ range directly — no intermediate per-node vectors, and no reallocation while f
 """
 function _csr_from_undirected_edges(nnodes::Integer, edges)
     n = Int(nnodes)
-    ptr = zeros(Int, n + 1)
+    # Counted at full width, since the total is what fixes the CSR's own — see `_index_type`.
+    cnt = zeros(Int, n + 1)
     @inbounds for (a, b) in edges
         (1 ≤ a ≤ n && 1 ≤ b ≤ n && a != b) || continue
-        ptr[a + 1] += 1
-        ptr[b + 1] += 1
+        cnt[a + 1] += 1
+        cnt[b + 1] += 1
     end
+    return _index_type(max(n + 1, sum(cnt))) === Int32 ?
+        _edge_csr_fill(Int32, cnt, n, edges) :
+        _edge_csr_fill(Int, cnt, n, edges)
+end
+
+function _edge_csr_fill(::Type{I}, cnt::Vector{Int}, n::Int, edges) where {I<:Integer}
+    ptr = Vector{I}(undef, n + 1)
     @inbounds ptr[1] = 1
     @inbounds for i in 1:n
-        ptr[i + 1] += ptr[i]
+        ptr[i + 1] = ptr[i] + cnt[i + 1]
     end
-    nbrs = Vector{Int}(undef, ptr[end] - 1)
+    nbrs = Vector{I}(undef, ptr[end] - 1)
     cursor = copy(ptr)
     @inbounds for (a, b) in edges
         (1 ≤ a ≤ n && 1 ≤ b ≤ n && a != b) || continue
         nbrs[cursor[a]] = b; cursor[a] += 1
         nbrs[cursor[b]] = a; cursor[b] += 1
     end
-    # An edge list may repeat an edge; dedup each row in place and re-tighten the offsets.
+    # An edge list may repeat an edge; dedup each row in place and re-tighten the offsets. The row
+    # bounds come off `ptr`, which is stored at the CSR's own width; the filter counts in `Int`.
     write = 1
     @inbounds for i in 1:n
-        lo = ptr[i] - 1
-        m = ptr[i + 1] - ptr[i]
+        lo = Int(ptr[i]) - 1
+        m = Int(ptr[i + 1]) - Int(ptr[i])
         deg = _sort_unique_filter!(nbrs, lo, m, i, n)
         for k in 1:deg
             nbrs[write + k - 1] = nbrs[lo + k]
@@ -133,9 +156,9 @@ Build a spherical `StructuredGrid` from a tensor-product sampling (Clenshaw–Cu
 Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). Longitude periodicity is
 auto-detected unless `periodic` is set.
 
-`T` is the element type to build in, and defaults to the `geometry`'s own — a geometry fixes the
-width of every coordinate and metric factor computed against it. Naming `T` carries the geometry to
-that width rather than letting it promote the grid back.
+`T` is the element type to build in, and defaults to the `geometry`'s own, a geometry fixing the width
+of every coordinate and metric factor computed against it. Naming `T` converts the geometry to that
+width, so the grid is `T` throughout.
 """
 structured_grid(
     s::SphericalSampling.AbstractTensorProductSphericalSampling, nlat::Integer;
@@ -279,9 +302,8 @@ end
 
 Panel-local face/vertex stencils on yin then yang. Global ordering matches
 [`SphericalSampling.spherical_points!`](@ref) for Yin–Yang: yin (`nlon×nlat`, lon
-fastest), then yang with the same panel indexing. Overlap is *not* cross-linked —
-that is the standard Yin–Yang discrete topology (panels couple through
-interpolation, not shared mesh edges).
+fastest), then yang with the same panel indexing. The overlap is *not* cross-linked: this is the
+standard Yin–Yang discrete topology, where the panels couple through interpolation.
 """
 function build_connectivity(
     ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
@@ -356,9 +378,8 @@ const _HP_NB_SWAP = (
 Thread `acc = f(acc, ipix)` over the RING-scheme topological neighbours of 0-based pixel `ipix0`, in the
 order SW, W, NW, N, NE, E, SE, S, skipping the ones that do not exist at the eight singular pixels.
 
-The walk itself, so the buffer form and the tuple form are the same arithmetic rather than two copies of
-it. The accumulator is threaded as a value, which is what lets the tuple form build its result on the
-stack.
+The walk itself, so the buffer form and the tuple form share one copy of the arithmetic. The
+accumulator is threaded as a value, so the tuple form builds its result on the stack.
 """
 @inline function _fold_healpix_neighbors(f::F, acc, nside::Integer, ipix0::Integer) where {F}
     nside = Int(nside)
@@ -466,10 +487,38 @@ end
 
 Undirected edges of the frequency-`ν` geodesic triangulation (same vertex set as
 [`SphericalSampling.icosahedral_vertices`](@ref)).
+
+A vertex's neighbours are arithmetic in `(ν, id)` — see [`_ico_neighbor_ids`](@ref) — so this is the
+same count, scan, fill the layout's own builder makes, over `10ν² + 2` vertices. The triangulation's
+`20ν²` triangles and `30ν²` edges are never formed.
 """
-function build_connectivity(s::SphericalSampling.IcosahedralSampling; _...)
-    mesh = SphericalSampling.icosahedral_mesh(s.frequency)
-    return _csr_from_undirected_edges(length(mesh.λ), mesh.edges)
+function build_connectivity(s::SphericalSampling.IcosahedralSampling; backend = nothing, _...)
+    ν = Int(s.frequency)
+    n = SphericalSampling.icosahedral_nvertices(ν)
+    deg = Execution.allocate(backend, Int, n)
+    Execution.run_indices(n, backend) do k
+        @inbounds deg[k] = _ico_neighbor_ids(k, ν)[2]
+    end
+    total = _csr_total(deg, n, backend)
+    return _index_type(max(n + 1, total)) === Int32 ?
+        _ico_fill(Int32, total, deg, n, ν, backend) :
+        _ico_fill(Int, total, deg, n, ν, backend)
+end
+
+function _ico_fill(::Type{I}, total::Int, deg, n::Int, ν::Int, backend) where {I<:Integer}
+    ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
+    nbrs = Execution.allocate(backend, I, total)
+    Execution.run_indices(n, backend) do k
+        @inbounds begin
+            ids, m = _ico_neighbor_ids(k, ν)
+            slot = Int(ptr[k])
+            for t in 1:m
+                nbrs[slot] = ids[t]
+                slot += 1
+            end
+        end
+    end
+    return csr_connectivity(nbrs, ptr; validate = false)
 end
 
 # ---------------------------------------------------------------------------
@@ -485,11 +534,11 @@ from the sampling's own tessellation. Pass `areas` to supply them instead.
 `T` is the element type to build in, and defaults to the `geometry`'s own, as for
 [`structured_grid`](@ref).
 
-The spherical pixelizations are layouts rather than node sets — [`Grids.HEALPixGrid`](@ref),
+The spherical pixelizations have their own layouts — [`Grids.HEALPixGrid`](@ref),
 [`Grids.CubedSphereGrid`](@ref), [`Grids.YinYangGrid`](@ref), [`Grids.RingGrid`](@ref) — with
-coordinates, adjacency and measure arithmetic in their resolution parameters.
-[`Grids.materialize`](@ref) turns one into the dense point cloud. What is left here is the genuinely
-arbitrary mesh: the icosahedral geodesic, and a caller's own points.
+coordinates, adjacency and measure arithmetic in their resolution parameters, and
+[`Grids.materialize`](@ref) turns one into a dense point cloud. This entry point covers the arbitrary
+mesh: the icosahedral geodesic, and a caller's own points.
 """
 function unstructured_grid end
 

@@ -37,7 +37,7 @@ function Grids._voronoi_tessellation(
         "a spherical Voronoi tessellation needs at least 4 non-coplanar points (got $N)",
     ))
 
-    # Hull input as a contiguous 3×N matrix: one allocation rather than one tuple per node.
+    # Hull input as a contiguous 3×N matrix: one allocation for the whole node set.
     pts = Matrix{T}(undef, 3, N)
     @inbounds for i in 1:N
         sinλ, cosλ = sincos(x[i])
@@ -124,20 +124,23 @@ function Grids._voronoi_tessellation(
         areas[i] = Geometry.radius(geo)^2 * A
     end
     # The hull's facets ARE the mesh's cells and `ptr`/`adj` is already the node→cell transpose, both
-    # built above for the areas. 
-    # The narrowest integer that indexes this node set, as the neighbour arrays use: the mesh is
-    # `O(n)` entries either way and every traversal of it reads them.
+    # built above for the areas.
+    #
+    # The narrowest integer that indexes this node set types the IDS — node numbers in `cell_nodes`,
+    # facet numbers in `adj`, both bounded by the counts they name. The two OFFSET arrays run to the
+    # entry count, `3·nf ≈ 6N`, so they stay `Int`: there are `O(n)` of them against the ids' `O(n)`
+    # either way, and every traversal of the mesh reads the ids.
     I = N ≤ typemax(Int32) ? Int32 : Int
-    cell_ptr = Vector{I}(undef, nf + 1)
+    cell_ptr = Vector{Int}(undef, nf + 1)
     cell_nodes = Vector{I}(undef, 3 * nf)
     @inbounds for fi in 1:nf
-        cell_ptr[fi] = I(3 * (fi - 1) + 1)
+        cell_ptr[fi] = 3 * (fi - 1) + 1
         cell_nodes[3 * (fi - 1) + 1] = I(fv[1, fi])
         cell_nodes[3 * (fi - 1) + 2] = I(fv[2, fi])
         cell_nodes[3 * (fi - 1) + 3] = I(fv[3, fi])
     end
-    @inbounds cell_ptr[nf + 1] = I(3 * nf + 1)
-    return areas, Grids.CellMesh(cell_ptr, cell_nodes, Vector{I}(ptr), Vector{I}(adj))
+    @inbounds cell_ptr[nf + 1] = 3 * nf + 1
+    return areas, Grids.CellMesh(cell_ptr, cell_nodes, ptr, Vector{I}(adj))
 end
 
 end # module

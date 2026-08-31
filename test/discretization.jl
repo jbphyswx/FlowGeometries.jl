@@ -1540,72 +1540,72 @@ Test.@testset "derivative! fuses the metric into the sweep, identically" begin
     O = FG.Operators
     D = FG.Discretization
 
-    # The fused path applies only where the factor is constant across the span the inner loop writes.
+    # The factor has to be constant across each direction-1 run the sweep writes, which for a geometry
+    # declaring direction 1 metric-invariant it is — in every direction, on any axis spacing.
     let cart = GE.CartesianGeometry(), sph = GE.SphericalGeometry()
-        ax = range(0.0, 1.0; length = 12)
-        gc = GD.StructuredGrid(cart, ax, ax)
-        gs = GD.StructuredGrid(sph, range(0, 2π * (1 - 1 / 12); length = 12), ax;
-                               periodic = (true, false), period = (2π, 0.0))
-        g3 = GD.StructuredGrid(sph, range(0, 2π * (1 - 1 / 12); length = 12), ax, ax;
-                               periodic = (true, false, false), period = (2π, 0.0, 0.0))
         f2 = zeros(12, 12)
         f3 = zeros(12, 12, 12)
-        upl(g, d) = D.stencil_plan(g, d; order = 1, nodes = 3)
         # a Cartesian metric is the identity: nothing to fuse
-        Test.@test !O._fusable(f2, f2, upl(gc, 1), cart, 1, nothing)
-        # a sphere fuses in directions 1 and 2, not 3 — there the span covers a direction the factor
-        # varies along
-        Test.@test O._fusable(f2, f2, upl(gs, 1), sph, 1, nothing)
-        Test.@test O._fusable(f2, f2, upl(gs, 2), sph, 2, nothing)
-        Test.@test !O._fusable(f3, f3, upl(g3, 3), sph, 3, nothing)
-        # a stretched axis has no constant row to carry
-        gst = GD.StructuredGrid(sph, range(0, 2π * (1 - 1 / 12); length = 12),
-                                collect(cumsum(fill(0.1, 12))); periodic = (true, false),
-                                period = (2π, 0.0))
-        Test.@test !O._fusable(f2, f2, upl(gst, 2), sph, 2, nothing)
-        # and a geometry that does not declare direction 1 invariant
-        gt = GD.StructuredGrid(TiltedSphere{Float64}(), range(0, 2π * (1 - 1 / 12); length = 12), ax;
-                               periodic = (true, false), period = (2π, 0.0))
-        Test.@test !O._fusable(f2, f2, upl(gt, 1), TiltedSphere{Float64}(), 1, nothing)
+        Test.@test !O._fusable(f2, f2, cart, nothing)
+        Test.@test O._fusable(f2, f2, sph, nothing)
+        Test.@test O._fusable(f3, f3, sph, nothing)
+        # a geometry that does not declare direction 1 invariant
+        Test.@test !O._fusable(f2, f2, TiltedSphere{Float64}(), nothing)
+        # and the run addressing needs the linear layout
+        Test.@test !O._fusable(view(f3, 1:2:11, :, :), f3, sph, nothing)
     end
 
-    # Where it does fuse, the answer must be what the two passes gave — bit for bit, being the same
-    # multiplication by the same factor.
+    # Where it fuses, the answer must be what the two passes gave — bit for bit, being the same
+    # multiplication by the same factor. Uniform and stretched axes, every direction, each with a mask
+    # and without one, with a batch axis and without one, through all three entry points.
     fused_seen = 0
     for geo in (GE.SphericalGeometry(), GE.SpheroidGeometry())
         for (nx, ny, nz, nb) in ((16, 12, 0, 0), (9, 7, 0, 3), (8, 6, 5, 0), (8, 6, 5, 2))
             λ = range(0, 2π * (1 - 1 / nx); length = nx)
-            φ = range(-1.4, 1.4; length = ny)
-            axs = nz == 0 ? (λ, φ) : (λ, φ, range(1.0, 2.0; length = nz))
-            szs = nz == 0 ? (nx, ny) : (nx, ny, nz)
-            fsz = nb == 0 ? szs : (szs..., nb)
-            fld = reshape(collect(Float64, 1:prod(fsz)), fsz) ./ prod(fsz)
-            msk = trues(szs)
-            msk[CartesianIndices(szs)[2]] = false
-            for gg in (GD.StructuredGrid(geo, axs...;
-                            periodic = (true, false, false)[1:length(axs)],
-                            period = (2π, 0.0, 0.0)[1:length(axs)]),
-                       GD.StructuredGrid(geo, axs...; mask = msk,
-                            periodic = (true, false, false)[1:length(axs)],
-                            period = (2π, 0.0, 0.0)[1:length(axs)]))
-                for dim in 1:length(axs)
-                    pl = D.stencil_plan(gg, dim; order = 1, nodes = 5)
-                    mk = GD.mask(gg) isa GD.AllActive ? nothing : GD.mask(gg)
-                    O._fusable(fld, fld, pl, geo, dim, mk) && (fused_seen += 1)
-                    a = fill(NaN, fsz)
-                    b = fill(NaN, fsz)
-                    c = fill(NaN, fsz)
-                    O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
-                    O.apply_stencil!(b, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
-                    O._scale_by_metric!(b, gg, dim, -3.0)
-                    O.derivative!(c, fld, gg, pl, dim; masked = -3.0)
-                    Test.@test isequal(a, b)
-                    Test.@test isequal(c, b)
+            for φ in (range(-1.4, 1.4; length = ny),
+                      [-1.4 + 2.8 * (t / (ny - 1))^1.3 for t in 0:(ny - 1)])
+                axs = nz == 0 ? (λ, φ) : (λ, φ, range(1.0, 2.0; length = nz))
+                szs = nz == 0 ? (nx, ny) : (nx, ny, nz)
+                fsz = nb == 0 ? szs : (szs..., nb)
+                fld = reshape(collect(Float64, 1:prod(fsz)), fsz) ./ prod(fsz)
+                msk = trues(szs)
+                msk[CartesianIndices(szs)[2]] = false
+                for gg in (GD.StructuredGrid(geo, axs...;
+                                periodic = (true, false, false)[1:length(axs)],
+                                period = (2π, 0.0, 0.0)[1:length(axs)]),
+                           GD.StructuredGrid(geo, axs...; mask = msk,
+                                periodic = (true, false, false)[1:length(axs)],
+                                period = (2π, 0.0, 0.0)[1:length(axs)]))
+                    for dim in 1:length(axs)
+                        pl = D.stencil_plan(gg, dim; order = 1, nodes = 5)
+                        mk = GD.mask(gg) isa GD.AllActive ? nothing : GD.mask(gg)
+                        O._fusable(fld, fld, geo, mk) && (fused_seen += 1)
+                        a = fill(NaN, fsz)
+                        b = fill(NaN, fsz)
+                        c = fill(NaN, fsz)
+                        O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
+                        O.apply_stencil!(b, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
+                        O._scale_by_metric!(b, gg, dim, -3.0)
+                        O.derivative!(c, fld, gg, pl, dim; masked = -3.0)
+                        Test.@test isequal(a, b)
+                        Test.@test isequal(c, b)
+
+                        # The table entry point fuses too, against a table-built reference: on a
+                        # uniform axis a plan's weights are translation-invariant where a table's are
+                        # rebuilt per row, so the two differ in the last bits by construction.
+                        ix, wt = D.axis_stencils(gg, dim; order = 1, nodes = 5)
+                        e = fill(NaN, fsz)
+                        t = fill(NaN, fsz)
+                        O.derivative!(e, fld, gg, ix, wt, dim; order = 1, masked = -3.0)
+                        O.apply_stencil!(t, fld, gg, ix, wt, dim; order = 1, masked = -3.0)
+                        O._scale_by_metric!(t, gg, dim, -3.0)
+                        Test.@test isequal(e, t)
+                    end
                 end
             end
         end
     end
-    Test.@test fused_seen > 0            # the gate above actually exercised the fused path
+    Test.@test fused_seen == 80           # every case above took the fused path
 end
 
 Test.@testset "The ! forms write into the caller's buffers and allocate nothing" begin
@@ -1648,7 +1648,10 @@ Test.@testset "The ! forms write into the caller's buffers and allocate nothing"
                 gi, gw = D.lagrange_weights!(w, x, v, k)
                 Test.@test gi == ri
                 Test.@test gw == rw
-                Test.@test sum(gw) ≈ 1.0 atol = 1e-12      # a partition of unity, so it interpolates
+                # A partition of unity, so it interpolates. The weights alternate in sign and grow
+                # with the Lebesgue constant once `v` sits outside the axis, so the cancellation
+                # error scales with `Σ|w|`
+                Test.@test sum(gw) ≈ 1.0 atol = 8 * eps(Float64) * sum(abs, gw)
             end
             Test.@test _alloc(q_lagr!, Vector{Float64}(undef, k), x, 1.7, k) == 0
         end
@@ -1788,4 +1791,104 @@ Test.@testset "Staggered gradient, divergence and curl" begin
 
     Test.@test_throws DimensionMismatch O.divergence!(zeros(3, 3), (u, v), sg)
     Test.@test_throws DimensionMismatch O.gradient!((zeros(3, 3), zeros(3, 3)), f, sg)
+end
+
+Test.@testset "In three directions the curl is a vector, at three vorticity points" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    O = FG.Operators
+    D = FG.Discretization
+    C, F = D.Center(), D.Face()
+    cart = GE.CartesianGeometry{Float64}()
+
+    smp(sg, loc, f) = [f(ntuple(e -> GD.axis_at(sg, e, loc[e])[I[e]], ndims(sg))...)
+                       for I in CartesianIndices(ntuple(e -> length(GD.axis_at(sg, e, loc[e])),
+                                                        ndims(sg)))]
+
+    x = collect(range(0.0, 2.0; length = 11))
+    y = collect(range(0.0, 1.5; length = 9))
+    z = collect(range(0.0, 3.0; length = 7))
+    sg = GD.StaggeredGrid(cart, x, y, z)
+    L = ((F, C, C), (C, F, C), (C, C, F))         # where each velocity component lives
+    W = ((C, F, F), (F, C, F), (F, F, C))         # where each vorticity component lives
+
+    # Each term is one difference across one cell, so a linear field is curled exactly.
+    for (u, want) in ((((a, b, c) -> -b, (a, b, c) -> a, (a, b, c) -> 0.0), (0.0, 0.0, 2.0)),
+                      (((a, b, c) -> 0.0, (a, b, c) -> 0.0, (a, b, c) -> b), (1.0, 0.0, 0.0)),
+                      (((a, b, c) -> c, (a, b, c) -> 0.0, (a, b, c) -> 0.0), (0.0, 1.0, 0.0)),
+                      (((a, b, c) -> 0.0, (a, b, c) -> c, (a, b, c) -> 0.0), (-1.0, 0.0, 0.0)))
+        us = ntuple(d -> smp(sg, L[d], u[d]), Val(3))
+        ws = O.curl(us, sg)
+        for i in 1:3
+            Test.@test size(ws[i]) == size(smp(sg, W[i], (a, b, c) -> 0.0))
+            fin = filter(isfinite, vec(ws[i]))
+            Test.@test !isempty(fin)
+            Test.@test maximum(abs, fin .- want[i]) < 1e-11
+        end
+    end
+
+    # ∇×∇f vanishes to round-off: the curl differences the very quantities the gradient built, so the
+    # terms cancel identically.
+    let ψ = smp(sg, (C, C, C), (a, b, c) -> sin(1.3a) * cos(0.9b) * exp(-0.2c))
+        gr = O.gradient(ψ, sg; masked = 0.0)
+        scale = maximum(abs, filter(isfinite, vcat(vec.(gr)...)))
+        ws = O.curl(gr, sg; masked = 0.0)
+        for i in 1:3
+            Test.@test maximum(abs, filter(isfinite, vec(ws[i]))) < 1e-9 * scale
+        end
+    end
+
+    # On a sphere the same call is the metric form, built from the geometry's own scale factors.
+    let sph = GE.SphericalGeometry(6.371e6),
+        λs = collect(range(0, 2π; length = 25)[1:24]),
+        φs = collect(range(-1.2, 1.2; length = 13)),
+        rs = collect(range(6.371e6, 6.4e6; length = 7))
+        s = GD.StaggeredGrid(sph, λs, φs, rs)
+        ψ = smp(s, (C, C, C), (l, p, r) -> sin(2l) * cos(p) * (r / 6.4e6))
+        gr = O.gradient(ψ, s; masked = 0.0)
+        scale = maximum(abs, filter(isfinite, vcat(vec.(gr)...)))
+        ws = O.curl(gr, s; masked = 0.0)
+        for i in 1:3
+            Test.@test maximum(abs, filter(isfinite, vec(ws[i]))) < 1e-9 * scale
+        end
+        # A zonal flow `u_λ = cosφ` has `(∇×u)_r = 2 sinφ / r`. Gated by CONVERGENCE — second order —
+        # at each point's OWN radius; a fixed one floors the error at the radial axis's width.
+        errs = map((16, 32, 64)) do nlon
+            λ2 = collect(range(0, 2π; length = nlon + 1)[1:nlon])
+            φ2 = collect(range(-1.2, 1.2; length = nlon ÷ 2))
+            r2 = collect(range(6.371e6, 6.4e6; length = 5))
+            ss = GD.StaggeredGrid(sph, λ2, φ2, r2)
+            us = (smp(ss, (F, C, C), (l, p, r) -> cos(p)),
+                  smp(ss, (C, F, C), (l, p, r) -> 0.0),
+                  smp(ss, (C, C, F), (l, p, r) -> 0.0))
+            w = O.curl(us, ss)[3]
+            want = smp(ss, (F, F, C), (l, p, r) -> 2 * sin(p) / r)
+            fin = [(a, b) for (a, b) in zip(w, want) if isfinite(a)]
+            return maximum(abs(a - b) for (a, b) in fin) / maximum(abs(b) for (_, b) in fin)
+        end
+        Test.@test errs[3] < 1e-2
+        Test.@test errs[1] / errs[2] > 3.5 && errs[2] / errs[3] > 3.5
+    end
+
+    # A hole takes with it every value that depended on it.
+    let mk = trues(11, 9, 7)
+        mk[5, 4, 3] = false
+        s = GD.StaggeredGrid(GD.StructuredGrid(cart, x, y, z, mk))
+        us = ntuple(d -> smp(s, L[d], (a, b, c) -> a + b + c), Val(3))
+        ws = O.curl(us, s)
+        Test.@test isnan(ws[1][5, 4, 3]) && isnan(ws[1][5, 5, 4])
+        Test.@test isfinite(ws[1][5, 7, 6])
+    end
+
+    # In two directions the tuple form is the two-argument one.
+    let s2 = GD.StaggeredGrid(cart, x, y)
+        u1 = smp(s2, (F, C), (a, b) -> -b)
+        u2 = smp(s2, (C, F), (a, b) -> a)
+        Test.@test isequal(O.curl((u1, u2), s2), O.curl(u1, u2, s2))
+    end
+
+    let us = ntuple(d -> smp(sg, L[d], (a, b, c) -> 0.0), Val(3))
+        Test.@test_throws DimensionMismatch O.curl!((zeros(2, 2, 2), zeros(2, 2, 2),
+                                                     zeros(2, 2, 2)), us, sg)
+    end
 end

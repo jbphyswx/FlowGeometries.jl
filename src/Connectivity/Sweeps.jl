@@ -12,7 +12,7 @@
 @inline _sweep_index(_grid, k::Integer, ::Grids.FlatCells) = Int(k)
 
 
-# Only the separable architectures carry an image convention; refused rather than ignored elsewhere.
+# Only the separable architectures carry an image convention; elsewhere a non-default one raises.
 @inline _check_sweep_images(::Grids.StructuredGrid, ::AbstractImageConvention) = nothing
 @inline _check_sweep_images(grid, images::AbstractImageConvention) =
     images isa NearestImage || throw(ArgumentError(
@@ -25,13 +25,18 @@
 Reduce `f(I, J, d)` with `op` over every cell `I` of `grid` and every cell `J` within `ball` of it, `d`
 being the distance. The bulk counterpart of [`fold_within`](@ref).
 
-Everything that depends on the grid rather than the query is built **once** and reused across all `n`
-cells — above all the spatial index, which is what makes the sweep `O(n log n)` instead of `O(n²)` on a
-curvilinear or node grid. Writing the loop by hand gets the topology for free, since that is `O(1)`, but
-not the index; measured at 9× on a 9 216-cell curvilinear grid.
+Everything that depends on the grid alone is built **once** and reused across all `n` cells — above all
+the spatial index, which brings the sweep to `O(n log n)` on a curvilinear or node grid. A hand-written
+loop gets the topology for free, that being `O(1)`, and rebuilds the index per cell.
+
+That hoisting covers one call. The default index is binned at this call's `ball`, so a second sweep
+builds a second one; several sweeps at one radius should share a topology built once:
+
+    top = MetricTopology(grid; index = Grids.cell_list(grid; ball = r))
+    mapreduce_within(f, op, init, grid; ball = r, topology = top)
 
 `op` must be associative and `init` its identity; partials are combined in cell order, so the answer is
-deterministic and independent of scheduling rather than dependent on how the work was split.
+deterministic and independent of scheduling.
 
 Which form the reduction takes is [`_buffered_candidates`](@ref), as for [`foreach_within`](@ref): where
 the candidates need no per-task buffer this is [`Execution.reduce_indices`](@ref), so a grid integral runs
@@ -73,7 +78,7 @@ end
     foreach_within(f, grid; ball, …) -> nothing
 
 Call `f(I, J, d)` for every cell `I` of `grid` and every cell `J` within `ball` of it. The same hoisting
-as [`mapreduce_within`](@ref); use this one when `f` writes rather than reduces.
+as [`mapreduce_within`](@ref), for an `f` that writes.
 
 Under a threaded `backend`, `f` runs on disjoint spans of cells concurrently, so what it writes has to be
 determined by `I` — the same contract the connectivity builders keep.

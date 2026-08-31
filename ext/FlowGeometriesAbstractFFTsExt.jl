@@ -19,9 +19,9 @@ using FlowGeometries.SphericalSampling: SphericalSampling, OpenNodes, ClosedNode
 @inline _twiddle(::OpenNodes, k::Int, nlat::Int, ::Type{T}) where {T} =
     cis(T(π) * T(k) / T(nlat))
 
-# `AbstractFFTs` is an interface, not an implementation: it can be loaded with nothing able to plan a
-# transform. Tests the two-argument `plan_bfft!(x, dims)` that `bfft!` dispatches to; the one-argument
-# form exists generically and would answer yes.
+# `AbstractFFTs` is an interface, so it can be loaded with nothing able to plan a transform. This tests
+# the two-argument `plan_bfft!(x, dims)` that `bfft!` dispatches to; the one-argument form is defined
+# generically and answers yes with no backend present.
 @inline _has_fft(::Type{T}) where {T} =
     hasmethod(AbstractFFTs.plan_bfft!, Tuple{Vector{Complex{T}},UnitRange{Int}})
 
@@ -35,13 +35,12 @@ SphericalSampling._equiangular_algorithm(::Type{T}) where {T<:AbstractFloat} =
 
 The in-place length-`nlat` backward transform, and the buffer it was planned against, held across calls.
 
-`bfft!` plans afresh every time, and planning dominates a transform this small — a set of latitude
-weights is built once per grid, so the same `(T, nlat)` recurs. The BUFFER is cached alongside the plan
-rather than allocated per call because an FFTW plan records the alignment of the array it was planned
-for and refuses another.
+`bfft!` plans afresh every time, and planning dominates a transform this small, while a set of latitude
+weights is built once per grid, so the same `(T, nlat)` recurs. The buffer is cached alongside the plan
+because an FFTW plan records the alignment of the array it was planned for and refuses another.
 
-The cache is TASK-local: a plan and its buffer are mutable state, and two tasks weighting the same
-`nlat` concurrently would otherwise transform into the same array.
+The cache is task-local: a plan and its buffer are mutable state, and two tasks weighting the same
+`nlat` concurrently need one each.
 """
 function _sum_plan(::Type{T}, nlat::Int) where {T<:AbstractFloat}
     store = get!(() -> Dict{Tuple{DataType,Int},Any}(), task_local_storage(),

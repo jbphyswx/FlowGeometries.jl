@@ -722,6 +722,20 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             λ, φ = G.materialize(g)
             Test.@test λ == pts.λ
             Test.@test φ == pts.φ
+
+            # The nested ids are the ring order permuted, so the same ring walk serves that scheme:
+            # `4·nside − 1` `acos` calls for the whole cloud. Both are powers of two here, which the
+            # nested quadtree needs.
+            gn = G.HEALPixGrid(geo, ns; scheme = SS.Nested())
+            nλ, nφ = G.materialize(gn)
+            Test.@test all(nλ[SS.ring2nest(ns, r) + 1] === λ[r + 1] for r in 0:(npix - 1))
+            Test.@test all(nφ[SS.ring2nest(ns, r) + 1] === φ[r + 1] for r in 0:(npix - 1))
+            # The reorder carries the ring walk's own numbers, so a nested pixel agrees with its
+            # per-cell coordinate exactly as far as the ring pixel it came from does.
+            Test.@test count(i -> nλ[i] === G.coords(gn, i).λ, 1:npix) ==
+                       count(i -> λ[i] === G.coords(g, i).λ, 1:npix)
+            Test.@test maximum(abs(nλ[i] - G.coords(gn, i).λ) for i in 1:npix) < 1e-14
+            Test.@test all(nφ[i] === G.coords(gn, i).φ for i in 1:npix)
         end
     end
 
@@ -1225,6 +1239,22 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
             Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
             # A pentagon is the smallest cell on the mesh.
             ν ≥ 4 && Test.@test maximum(m[k] for k in 1:12) < minimum(m[k] for k in 13:n)
+
+            # The area is a property of the vertex's SYMMETRY CLASS, so it is evaluated once per class
+            # and every member reports that number. The claim under test is that a vertex's own fan
+            # gives its class's area: were the twenty faces not congruent, or the face's threefold
+            # symmetry not exact, this is where it would show.
+            #
+            # A dual cell covers `O(1/ν²)` of the sphere and its excess is accumulated from unit
+            # vectors, so the ABSOLUTE round-off is `O(eps)` and the relative bound carries the `ν²`.
+            for k in 1:n
+                Test.@test G._ico_vertex_measure(g, k, ν) ≈ m[k] rtol = 8 * eps(Float64) * ν^2
+            end
+            Test.@test all(m[j] === m[k] for k in 1:n for j in 1:n
+                           if G._ico_class(k, ν) == G._ico_class(j, ν))
+            Test.@test G.measure_array(g) == collect(m)
+            # …and the classes are far fewer than the vertices, which is the saving.
+            Test.@test length(unique(G._ico_class(k, ν) for k in 1:n)) ≤ (ν + 2)^2 ÷ 6 + 1
         end
     end
 
@@ -1346,7 +1376,7 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
     end
 end
 
-Test.@testset "Span and spacing are computed from the axis, not cached on the grid" begin
+Test.@testset "Span and spacing agree with the axis, and cost one pass to summarise" begin
     GD = FG.Grids
     GE = FG.Geometry
     C = FG.Connectivity
@@ -1370,9 +1400,8 @@ Test.@testset "Span and spacing are computed from the axis, not cached on the gr
         Test.@test GD.isuniform(g, 1) == FG.Axes.isuniform(a)
     end
 
-    # The cache existed because indexing the heterogeneous coordinate tuple with a RUNTIME direction
-    # is a dynamic lookup. The tail-split answers that instead, so these stay concrete and free —
-    # which is what makes the cache unnecessary rather than merely removable.
+    # Indexing the heterogeneous coordinate tuple with a runtime direction is a dynamic lookup, and
+    # the per-direction summaries are a homogeneous tuple, so a runtime `d` reads one concretely.
     let g = GD.StructuredGrid(cart, [0.0, 1.0, 3.0, 6.0], 0.0:1.0:4.0)   # two different axis types
         qb(gg, d) = FG.Grids.bounds(gg, d)
         qo(gg, d) = FG.Grids.origin(gg, d)
@@ -1384,7 +1413,15 @@ Test.@testset "Span and spacing are computed from the axis, not cached on the gr
             f(g, 1)
             Test.@test @allocated(f(g, 1)) == 0
         end
-        Test.@test !(:stats in fieldnames(typeof(g)))
+    end
+
+    let n = 512
+        c1 = CountingAxis(cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n))))
+        c2 = CountingAxis(cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = 4n))))
+        r1 = reads(() -> GD.StructuredGrid(cart, c1, 0.0:1.0:4.0), c1)
+        r2 = reads(() -> GD.StructuredGrid(cart, c2, 0.0:1.0:4.0), c2)
+        Test.@test r1 ≤ 4n                       # a few passes, never a scan per cell
+        Test.@test r2 ≤ 4.5 * r1                 # linear in the axis, so 4× the axis is ~4× the reads
     end
 
     # Off a rectilinear grid the coordinates are per-cell FIELDS with no order, so a span is a genuine

@@ -1,15 +1,14 @@
 module Stencils
 
-# Neighbourhood SHAPES, in index space, for any dimension and any radius.
+# Neighbourhood shapes, in index space, for any dimension and any radius.
 #
 # A stencil describes a shape but not a dimensionality: the same `Face(2)` applies to a 2-D and a 5-D
 # grid, and `offsets(s, Val(N))` materializes it for the `N` the grid has. Radius and shape live in the
 # type, so the offset tuple is built at compile time and a loop over it unrolls.
 #
-# Two different things are called a "radius" and they are kept apart deliberately:
-# `CellRadius` counts CELLS along the index directions, and `MetricBall` is a physical distance
-# measured through the geometry. `Axial(1)` is the four face neighbours of a 2-D cell;
-# `MetricBall(500e3)` is everything within 500 km.
+# Two different things are called a radius. `CellRadius` counts cells along the index directions, and
+# `MetricBall` is a physical distance measured through the geometry. `Axial(1)` is the four face
+# neighbours of a 2-D cell; `MetricBall(500e3)` is everything within 500 km.
 
 """
     AbstractStencil
@@ -33,7 +32,7 @@ abstract type AbstractStencil end
     CellRadius(r)
 
 A stencil extent of `r` cells, as distinct from a physical [`MetricBall`](@ref). Stencil constructors
-accept a bare `Integer` too; this exists to name the distinction where it matters.
+accept a bare `Integer` too; this names the distinction at a call site where it is worth naming.
 """
 struct CellRadius
     r::Int
@@ -43,9 +42,9 @@ struct CellRadius
     end
 end
 
-# `Base.@constprop :aggressive` is what makes `Moore(2)` infer to `Moore{2}` rather than to the abstract
-# `Moore`: the radius is a type parameter, so it has to be constant-folded from the call site or the
-# stencil — and every iterator built from it — is not concretely typed.
+# The radius is a type parameter, so `Base.@constprop :aggressive` folds it from the call site and
+# `Moore(2)` infers to `Moore{2}`. Without that the stencil, and every iterator built from it, infers
+# to the abstract `Moore`.
 Base.@constprop :aggressive @inline function _radius(r::Integer)
     r ≥ 1 || throw(ArgumentError("a stencil radius must be ≥ 1, got $r"))
     return Int(r)
@@ -56,8 +55,8 @@ Base.@constprop :aggressive @inline _radius(r::CellRadius) = r.r
     Axial(r = 1)
 
 Axis-aligned neighbours out to `r` cells: `±k·ê_d` for every direction `d` and `k = 1…r`. `2·N·r`
-offsets. `Axial(1)` is the classic 4-in-2-D / 6-in-3-D face stencil; beyond radius 1 "face" would be a
-misnomer, since these are the axis lines rather than the touching faces.
+offsets. `Axial(1)` is the classic 4-in-2-D / 6-in-3-D face stencil; beyond radius 1 the offsets run
+along the axis lines, past the touching faces.
 """
 struct Axial{R} <: AbstractStencil end
 Base.@constprop :aggressive @inline Axial(r = 1) = Axial{_radius(r)}()
@@ -157,12 +156,12 @@ Whether the offset set is closed under negation: `δ` is an offset exactly when 
 
 A graph built from a symmetric stencil is a symmetric graph, and stays one under masking and under
 clipping at a boundary — an edge and its reverse are dropped together, both being the same pair of
-cells. That lets a symmetric adjacency be READ as its own transpose instead of built again.
+cells. A symmetric adjacency is then read as its own transpose.
 
 `Axial`, `VonNeumann`, `Moore`, `Diagonal` and `Anisotropic` are symmetric by construction: each is
 defined by a condition on `|δ|` and so contains `−δ` with `δ`. `Custom` is whatever it was given, and
-is checked once at compile time. A caller's own shape answers `false` unless it says otherwise, which
-costs it a transpose and never a wrong answer — see [`AbstractStencil`](@ref).
+is checked once at compile time. A caller's own shape answers `false` until it says otherwise, at the
+cost of a transpose — see [`AbstractStencil`](@ref).
 """
 function is_symmetric end
 
@@ -177,11 +176,11 @@ end
 
 @inline _axis_unit(N::Int, d::Int, k::Int) = ntuple(i -> i == d ? k : 0, N)
 
-# Built at generation time, never at run time. `offsets` returns the whole tuple, which is convenient
-# but heap-allocates once it outgrows a register — measured at 400 bytes per call for `Moore(2)` in 2-D
-# and 76,864 for `Moore(3)` in 4-D. `foreach_offset` exists for that reason: it unrolls the body over the
-# offsets, so each reaches the body as a literal register-sized tuple and nothing is materialized. That
-# holds for a caller's own shape too, whose offsets arrive as a tuple that then never escapes.
+# Built at generation time, never at run time. `offsets` returns the whole tuple, which heap-allocates
+# once it outgrows a register: `Moore(3)` in 4-D is 2400 offsets. `foreach_offset` unrolls the body
+# over them instead, so each offset reaches the body as a literal register-sized tuple and nothing is
+# materialized. The same holds for a caller's own shape, whose offsets arrive as a tuple that never
+# escapes.
 function _offset_list(::Type{Axial{R}}, N::Int) where {R}
     offs = NTuple{N,Int}[]
     for d in 1:N, k in 1:R
@@ -255,8 +254,8 @@ Every bulk neighbour kernel goes through this.
     return Expr(:block, (:(f($(o))) for o in offs)..., :nothing)
 end
 
-# Generated on the TUPLE's type, not the stencil's: a shape defined anywhere answers `offsets` by
-# ordinary dispatch, and the unroll over what it returns is still flat and compile-time.
+# Generated on the tuple's type: a shape defined anywhere answers `offsets` by ordinary dispatch, and
+# the unroll over what it returns is still flat and compile-time.
 @generated function _foreach_tuple(f, t::Tuple)
     K = length(t.parameters)
     return Expr(:block, (:(f(@inbounds t[$i])) for i in 1:K)..., :nothing)
@@ -267,9 +266,8 @@ end
 
 Fold `f(acc, δ)` over the stencil's offsets, unrolled at compile time.
 
-The accumulator is threaded through as a value rather than mutated, so nothing is captured and nothing
-is boxed — which is what a counting or filling kernel needs, and what a closure over a mutated local
-would cost.
+The accumulator is threaded through as a value, so nothing is captured and nothing is boxed. This is
+the form a counting or filling kernel takes.
 """
 @inline fold_offsets(f, init, s::AbstractStencil, ::Val{N}) where {N} =
     _fold_tuple(f, init, offsets(s, Val(N)))
@@ -327,9 +325,9 @@ end
 """
     MetricBall(r)
 
-Every cell within physical distance `r`, measured through the geometry rather than in cells. Distinct
-from a [`CellRadius`](@ref): on a stretched or spherical grid the number of cells within `r` varies
-across the grid, so this cannot be reduced to a fixed offset set.
+Every cell within physical distance `r`, measured through the geometry. Distinct from a
+[`CellRadius`](@ref): on a stretched or spherical grid the number of cells within `r` varies from cell
+to cell, so this reduces to no fixed offset set.
 
 Query it with `Connectivity.neighbors_within!` / `nneighbors_within` / `neighbors_within`, which take
 it as their `ball` keyword.

@@ -5,8 +5,7 @@
     float_type(geo) -> Type{<:AbstractFloat}
 
 The element type `geo` computes in. Anything that pairs a geometry with an optional element type
-should default to this rather than to `Float64`, or supplying a geometry of one width and no element
-type silently rebuilds it at the other.
+defaults to this, so a geometry given without one keeps its own width.
 """
 float_type(::AbstractGeometry{T}) where {T<:AbstractFloat} = T
 
