@@ -59,8 +59,8 @@ SphericalGeometry() = SphericalGeometry(6.371e6)
 # Point representation
 # ---------------------------------------------------------------------------
 # Points are accepted as a `Tuple`, `NamedTuple`, or `AbstractVector` of any `Real` element type,
-# and converted to the geometry's float type on entry. Points and vectors are RETURNED as a named
-# `NamedTuple`, or as any representation the caller names via a leading type argument — mirroring
+# and converted to the geometry's float type on entry. They come back as a named `NamedTuple`, or as
+# any representation the caller names via a leading type argument — mirroring
 # `Grids.coords(grid, I...)` / `Grids.coords(S, grid, I...)`:
 #
 #     project_to_tangent_plane(geo, c, n)                      # (; x = …, y = …)
@@ -82,7 +82,7 @@ point_names(::AbstractSphericalGeometry, ::Val{3}) = (:λ, :φ, :r)
 
 # Past the named directions the letters run out, so they are numbered from where each convention ends.
 # Generated, so the symbols are built once at compile time: `Symbol(:x, d)` goes through `string`, and
-# these are reached per-cell by `getproperty`, where a runtime symbol build would allocate on every access.
+# `getproperty` reaches these per cell, where an allocation on every access is felt.
 @generated point_names(::AbstractCartesianGeometry, ::Val{N}) where {N} =
     :($(ntuple(d -> Symbol(:x, d), N)))
 @generated point_names(::AbstractSphericalGeometry, ::Val{N}) where {N} =
@@ -116,9 +116,9 @@ Build the geometry-appropriate named point from positional values (axis order).
 @inline named_point(geo::AbstractGeometry, vals::NTuple{N,Any}) where {N} =
     build_point(NamedTuple, point_names(geo, Val(N)), vals)
 
-# The point spellings that are NOT a `Tuple`. An entry point takes a tuple method plus one forwarding
-# method over this union: writing the forwarder for `Any` instead makes it ambiguous with the tuple
-# method, since a `Tuple` matches both.
+# The point spellings other than a `Tuple`. An entry point takes a tuple method plus one forwarding
+# method over this union; a forwarder written for `Any` is ambiguous with the tuple method, a `Tuple`
+# matching both.
 const PointLike = Union{NamedTuple,AbstractVector{<:Real}}
 
 """

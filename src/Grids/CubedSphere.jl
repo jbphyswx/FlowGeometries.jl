@@ -120,6 +120,9 @@ coordinates(grid::CubedSphereGrid) = throw(ArgumentError(
 
 # ---- measure ----------------------------------------------------------------
 
+# The solid angle of the rectangle from the panel centre out to the gnomonic corner `(X, Y)`.
+@inline _gnomonic_corner(X::T, Y::T) where {T} = atan(X * Y / sqrt(one(T) + X * X + Y * Y))
+
 """
     _gnomonic_solid_angle(X1, X2, Y1, Y2) -> T
 
@@ -128,8 +131,6 @@ The solid angle subtended by the gnomonic rectangle `[X1, X2] × [Y1, Y2]` on th
 `atan(XY / √(1 + X² + Y²))` at a corner is the solid angle of the rectangle from the panel centre to
 that corner, so the four corners combine by inclusion–exclusion. Over a whole panel it gives `4π/6`.
 """
-@inline _gnomonic_corner(X::T, Y::T) where {T} = atan(X * Y / sqrt(one(T) + X * X + Y * Y))
-
 @inline _gnomonic_solid_angle(X1::T, X2::T, Y1::T, Y2::T) where {T} =
     _gnomonic_corner(X2, Y2) - _gnomonic_corner(X1, Y2) -
     _gnomonic_corner(X2, Y1) + _gnomonic_corner(X1, Y1)

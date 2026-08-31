@@ -109,7 +109,7 @@ coordinates(grid::YinYangGrid) = throw(ArgumentError(
 
 # ---- topology and span ------------------------------------------------------
 
-# Yin's own frame spans three quarters of the circle, so no direction of the CELL numbering wraps: the
+# Yin's own frame spans three quarters of the circle, so no direction of the cell numbering wraps: the
 # two panels are separate patches and neither closes on itself.
 @inline topology(::YinYangGrid) = (Bounded(), Bounded())
 @inline period(grid::YinYangGrid{T}, d::Integer) where {T} =

@@ -61,8 +61,8 @@ struct TabulatedStencilPlan{
     order::Int
 end
 
-# `K` is the node count, in the type: `plan_row` returns a `K`-tuple, and reading `K` from `size` would
-# make its width a runtime value — 96 bytes and an abstract return type, measured.
+# `K` is the node count, carried in the type so that `plan_row`'s `K`-tuple has a width the compiler
+# knows and a concrete return type. Read from `size`, that width is a runtime value.
 function TabulatedStencilPlan(
     idx::AbstractMatrix{<:Integer}, w::AbstractMatrix{T}, order::Integer,
 ) where {T}
@@ -165,8 +165,8 @@ end
 
 The weights of a row whose first node sits `s` steps of size `h` from the sample it is evaluated at.
 
-`s = -left` is the centred row. Only the OFFSETS enter, so this is the exact weight set for every sample
-sharing that offset — which on a uniform axis is all of them away from a shifted end.
+`s = -left` is the centred row. Only the offsets enter, so this is the exact weight set for every sample
+sharing that offset — on a uniform axis, all of them away from a shifted end.
 """
 function _uniform_row(::Type{T}, h::T, s::Int, ::Val{K}, ord::Int) where {T,K}
     nodes = ntuple(q -> T(s + q - 1) * h, Val(K))

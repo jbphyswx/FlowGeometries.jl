@@ -14,8 +14,8 @@
 # `(1/(R cosφ))[∂u_φ/∂λ − ∂(cosφ·u_λ)/∂φ]`; on a plane they are the plain differences. Nothing here is
 # specific to either — a geometry that answers `scale_factors` gets all three.
 #
-# The differences are the ones the C arrangement makes exact: each is a single difference across ONE
-# cell, evaluated where the result lives, with no averaging and so no dispersive error from it.
+# The differences are the ones the C arrangement makes exact: each spans a single cell and is evaluated
+# where the result lives, with no averaging and so no dispersive error from it.
 
 """
     _face_span(nc, periodic) -> Int
@@ -26,7 +26,7 @@ face being its first, and `nc + 1` where it does not.
 @inline _face_span(nc::Int, periodic::Bool) = periodic ? nc : nc + 1
 
 # The centres that face `k` of a direction lies between, and whether that pair is complete. Incomplete
-# only at the outer two faces of a BOUNDED direction, which have a cell on one side only.
+# only at the outer two faces of a bounded direction, which have a cell on one side only.
 @inline function _face_pair(k::Int, nc::Int, periodic::Bool)
     periodic && return (true, mod1(k - 1, nc), k)
     (k == 1 || k == nc + 1) && return (false, 1, 1)
@@ -218,14 +218,14 @@ end
     Ihi = _set(It, d, fhi)
     # A face is active where every centre it is built from is — the same rule the grid's own face masks
     # use, so an operator and a mask cannot disagree about which points exist. At a bounded boundary
-    # that is the one cell inside it: the flux THROUGH that face is data the caller supplies.
+    # that is the one cell inside it: the flux through that face is data the caller supplies.
     alo, blo = Grids._stagger_sources(flo, nc_d, per_d)
     ahi, bhi = Grids._stagger_sources(fhi, nc_d, per_d)
     ok = @inbounds(msk[_set(It, d, alo)...] && msk[_set(It, d, blo)...] &&
                    msk[_set(It, d, ahi)...] && msk[_set(It, d, bhi)...])
     hlo = Geometry.scale_factors(geo, _point_at(sg, loc_d, Ilo))
     hhi = Geometry.scale_factors(geo, _point_at(sg, loc_d, Ihi))
-    # The SIGNED face-to-face gap: on a descending axis the flux difference and the coordinate
+    # The face-to-face gap keeps its sign: on a descending axis the flux difference and the coordinate
     # difference change sign together, so the derivative does not.
     _, gap = Discretization.local_spacing(fax, flo, pd)
     val = @inbounds (_omit_prod(hhi, d) * u_d[Ihi...] - _omit_prod(hlo, d) * u_d[Ilo...]) / gap

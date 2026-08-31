@@ -131,7 +131,8 @@ end
 
 # ---- HEALPix ----------------------------------------------------------------
 
-# Eight compass directions, of which the eight pixels at a face corner have only seven.
+# Eight compass directions. The base tessellation has 8 vertices where only three pixels meet, and the
+# three pixels at each reach seven neighbours — 24 in all, whatever `nside` is.
 @inline Grids.max_neighbors(::Grids.HEALPixGrid) = 8
 
 @inline function Grids.formula_neighbors(grid::Grids.HEALPixGrid, i::Integer)
@@ -177,9 +178,9 @@ end
 """
     Grids.formula_neighbors(grid::YinYangGrid, k)
 
-A Yin–Yang cell's four edge neighbours WITHIN its own panel. Neither panel wraps and the two are not
-cross-linked, so a cell on a panel edge reports fewer — the panels couple through interpolation, which
-is the standard Yin–Yang discrete topology.
+A Yin–Yang cell's four edge neighbours within its own panel. Neither panel wraps and the two are not
+cross-linked, so a cell on a panel edge reports fewer; the panels couple through interpolation, the
+standard Yin–Yang discrete topology.
 """
 @inline function Grids.formula_neighbors(grid::Grids.YinYangGrid, k::Integer)
     nlon, nlat = Grids.panel_shape(grid)
@@ -196,6 +197,17 @@ is the standard Yin–Yang discrete topology.
         ids = Base.setindex(ids, base + (jj - 1) * nlon + ii, m)
     end
     return (ids, m)
+end
+
+# Appends `id` unless it is the cell itself or already present. The tuple is six wide and lives on the
+# stack, so the scan is six compares and no memory. Shared by the geodesic and ring adjacencies below,
+# both of which reach one neighbour by more than one route.
+@inline function _push_unique(ids::NTuple{K,Int}, n::Int, self::Int, id::Int) where {K}
+    id == self && return (ids, n)
+    @inbounds for t in 1:n
+        ids[t] == id && return (ids, n)
+    end
+    return (Base.setindex(ids, id, n + 1), n + 1)
 end
 
 # ---- Icosahedral geodesic ---------------------------------------------------
@@ -243,16 +255,6 @@ end
 
 # Two along the ring and two on each adjacent one.
 @inline Grids.max_neighbors(::Grids.RingGrid) = 6
-
-# Appends `id` unless it is the cell itself or already present. The tuple is six wide and lives on the
-# stack, so the scan is six compares and no memory.
-@inline function _push_unique(ids::NTuple{K,Int}, n::Int, self::Int, id::Int) where {K}
-    id == self && return (ids, n)
-    @inbounds for t in 1:n
-        ids[t] == id && return (ids, n)
-    end
-    return (Base.setindex(ids, id, n + 1), n + 1)
-end
 
 """
     Grids.formula_neighbors(grid::RingGrid, i)

@@ -64,8 +64,8 @@ function Grids._voronoi_tessellation(
     vorn = DT.voronoi(tri; clip = true)
 
     # `zeros`, never `undef`: the triangulation skips duplicate input points, which are then assigned
-    # no polygon. A skipped point owns no region, so zero is its area, and an unwritten `undef` slot
-    # would escape as a plausible-looking one.
+    # no polygon. A skipped point owns no region, so zero is its area, and every slot the loop below
+    # leaves unwritten already holds it.
     areas = zeros(T, N)
     @inbounds for i in DT.each_polygon_index(vorn)
         (1 ≤ i ≤ N) || continue

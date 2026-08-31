@@ -34,9 +34,9 @@ kernel wants.
 
 The CSR's edge count, `sum(deg)`, reduced wherever the counting pass ran.
 
-A builder takes `_index_type(max(n + 1, total))` from it and calls its filling pass through that
-CONCRETE type: `Vector{I}` for an `I` the compiler cannot see is a dynamic call whose buffers are
-typed abstractly for the whole of that pass.
+A builder takes `_index_type(max(n + 1, total))` from it and calls its filling pass through a branch
+that fixes the type at each call site. `Vector{I}` for an `I` the compiler cannot see is a dynamic
+call whose buffers are typed abstractly for the whole of that pass.
 """
 @inline function _csr_total(deg::AbstractVector, n::Int, backend)
     return Execution.reduce_indices(+, 0, n, backend) do k

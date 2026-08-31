@@ -83,12 +83,13 @@ Base.argmin(m::SeparableMeasure) = findmin(m)[2]
 # ---------------------------------------------------------------------------
 #
 # Converting a 2000×2000 grid's measure to other units is `c .* m`, which through the generic array
-# path turns 32 bytes into 32 MB. The operations that keep the measure a PRODUCT of per-axis factors
-# stay a measure; everything else falls through to Base and materializes, which is correct, just dense.
+# path materializes 4×10⁶ elements from the handful of numbers a separable measure stores. The
+# operations that keep the measure a product of per-axis factors stay a measure; everything else falls
+# through to Base and materializes, correct and dense.
 #
 # Non-negative factors are an invariant of this type — widths are `abs`-ed at construction — and
 # `findmax`/`findmin` above rely on it, since "largest cell at the per-axis argmax" is a statement
-# about non-negative factors only. A scale that would break it therefore does NOT stay lazy.
+# about non-negative factors only. Scaling by a negative constant therefore materializes.
 
 @inline _scaled_factor(w::Axes.ConstantVector, c) = Axes.ConstantVector(w.value * c, length(w))
 @inline _scaled_factor(w::AbstractVector, c) = w .* c

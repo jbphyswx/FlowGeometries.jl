@@ -8,13 +8,13 @@ using ..Discretization: Discretization
 using ..Grids: Grids
 using ..Connectivity: Connectivity
 
-# Everything that reads or writes a FIELD.
+# Everything that reads or writes a field.
 #
 # `Discretization` turns geometry into numbers — where a point falls, the gaps around a sample, the
 # weights of a stencil — and never touches data. Applying those weights does, and so does interpolating,
-# differentiating and taking a gradient. Separating the two is what lets the weights be computed, cached
-# and reasoned about without a field in hand, and it is why this module loads last: a field operation
-# needs the grid types, and the grid modules need the weights.
+# differentiating and taking a gradient. The separation keeps the weights computable, cacheable and
+# checkable with no field in hand, and it fixes the load order: a field operation needs the grid types,
+# and the grid modules need the weights.
 #
 
 include("Operators/Policies.jl")

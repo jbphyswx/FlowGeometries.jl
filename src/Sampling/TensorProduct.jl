@@ -438,8 +438,8 @@ has no spectral quadrature at all, and `McEwenWiauxSampling`'s is a different co
 The equiangular families — Driscoll–Healy and Clenshaw–Curtis — additionally take
 `algorithm::`[`AbstractEquiangularAlgorithm`](@ref), which pins the construction of their sine sums.
 The two constructions agree only to round-off, so naming one fixes the result across machines that
-differ in whether an FFT backend is installed. Gauss–Legendre's weights come from a root solve rather
-than the sine-series rule and take no `algorithm`.
+differ in whether an FFT backend is installed. Gauss–Legendre's weights come from a root solve, so it
+takes no `algorithm`.
 """
 latitude_weights(s::AbstractSphericalSampling, nlat::Integer; kwargs...) =
     latitude_weights(Float64, s, nlat; kwargs...)
@@ -471,8 +471,8 @@ function spherical_points!(
         throw(DimensionMismatch("buffers must have length nlon*nlat = $n"))
     n == 0 && return (; λ = Λ, φ = Φ)
     # The axes are built into the leading elements of the outputs and expanded in place, so no scratch
-    # is needed. Expanding backwards is what makes that safe: cell (i, j) lands at
-    # k = (j-1)·nlon + i ≥ max(i, j), so a write never lands on an axis element still to be read.
+    # is needed. The expansion runs backwards, and cell (i, j) lands at k = (j-1)·nlon + i ≥ max(i, j),
+    # so a write never lands on an axis element still to be read.
     spherical_axes!(view(Λ, 1:sz.nlon), view(Φ, 1:sz.nlat), s, nlat; kwargs...)
     @inbounds for j in sz.nlat:-1:1
         φj = Φ[j]

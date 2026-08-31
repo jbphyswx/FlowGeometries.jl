@@ -25,8 +25,8 @@ end
 
 Execution.run_indices(f::F, n::Integer, ::AbstractSerialBackend) where {F} = Execution.run_indices(f, n, nothing)
 
-# Per-index semantics, chunked granularity: these bodies are short, so scheduling each index would cost
-# more than running it.
+# Per-index semantics, chunked granularity: these bodies are short enough that per-index scheduling
+# dominates the work.
 function Execution.run_indices(f::F, n::Integer, backend::AbstractThreadedBackend) where {F}
     return Execution.run_chunks(n, backend) do rng
         @inbounds for i in rng
@@ -42,11 +42,11 @@ Execution.map_chunks(f::F, n::Integer, ::AbstractSerialBackend) where {F} = Exec
 Execution._reduce_chunks(f::F, op::O, n::Integer, ::AbstractSerialBackend) where {F,O} =
     Execution._reduce_chunks(f, op, n, nothing)
 
-# Results stay in chunk order, so the caller's combine sees the same sequence it would serially.
+# Results stay in chunk order, so the caller's combine sees the sequence the serial path produces.
 #
 # The output vector is typed from `f` on an empty range, which the contract already requires it to
-# accept: a concrete vector holds the partials directly, where an `Any` one boxes each of them and then
-# needs a second vector to narrow into — on the reduction path, whose serial form allocates nothing.
+# accept: a concrete vector holds the partials directly, keeping the reduction path free of the boxing
+# and the narrowing pass an `Any` vector carries.
 function Execution.map_chunks(f::F, n::Integer, ::AbstractThreadedBackend) where {F}
     n = Int(n)
     n > 0 || return Execution.map_chunks(f, 0, nothing)

@@ -34,8 +34,9 @@ active `mask`, per-direction `topology`, and the wrap `period` of each periodic 
 
 # Type parameters
 - `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
-  raises a type error. `T` therefore precedes `G`, Julia forbidding the forward reference a `{G,T}`
-  order would need. [`CurvilinearGrid`](@ref) and [`UnstructuredGrid`](@ref) carry the same convention.
+  raises a type error. `T` therefore precedes `G`: Julia binds type parameters left to right, and
+  `G<:AbstractGeometry{T}` requires `T` already bound. [`CurvilinearGrid`](@ref) and
+  [`UnstructuredGrid`](@ref) carry the same convention.
 - `N`: number of coordinate directions.
 - `S`: the `SphericalSampling` recipe the axes came from, or `Nothing` for axes given directly.
   A zero-size singleton, so it costs nothing to carry and lets quadrature exactness, the matching
@@ -197,8 +198,8 @@ Write positional coordinates into a preallocated `AbstractVector` (`length(out) 
 end
 
 # Auto-detect axis-1 periodicity: on a spherical grid axis 1 is longitude, and a longitude axis
-# that closes the full 2π circle (to within one cell) is periodic; a regional span is NOT.
-# Cartesian axes are opt-in only (there's no analogous auto-detectable physical closure).
+# that closes the full 2π circle (to within one cell) is periodic; a regional span is bounded.
+# Cartesian axes are opt-in only, having no analogous auto-detectable physical closure.
 #
 # Compares magnitudes, so the answer is the same in either storage order.
 _auto_periodic_x(::Geometry.AbstractCartesianGeometry, x::AbstractVector) = false
@@ -255,10 +256,9 @@ _to_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = copyto!(simila
 """
     _min_gap(x) -> minimum consecutive |gap|, or Inf if length(x) < 2
 
-Smallest spacing found anywhere on axis `x`. Used to build a conservative (safe, never
-under-covering) search-radius bound for a genuinely nonuniform axis: since real distance checks
-still gate what's actually included, using the smallest gap anywhere can only widen the search
-window, never cause a missed in-range cell.
+Smallest spacing found anywhere on axis `x`. It bounds the search radius for a genuinely nonuniform
+axis: a distance check still gates what is included, so the smallest gap anywhere can only widen the
+search window, and no in-range cell is missed.
 """
 function _min_gap(x::AbstractVector{T}) where {T<:AbstractFloat}
     n = length(x)
@@ -325,7 +325,7 @@ function _axis_summary(x::AbstractRange{T}) where {T<:AbstractFloat}
     return AxisSummary{T}(f, lo, hi, g[1], g[2])
 end
 
-# A period is a LENGTH, so this is a magnitude and does not change sign with the axis's storage
+# A period is a length, so this is a magnitude and does not change sign with the axis's storage
 # order. On a uniform axis it is exactly `n·|Δ|`, the axis's own closure.
 @inline _cartesian_period(x::AbstractVector{T}) where {T} =
     length(x) < 2 ? one(T) : @inbounds(abs(x[end] - x[1]) + abs(x[2] - x[1]))
@@ -474,9 +474,9 @@ The grid's stored measure: a [`SeparableMeasure`](@ref) wherever the metric fact
 """
 _cell_measure(geometry, ax, per) = SeparableMeasure(_measure_factors(geometry, ax, per))
 
-# Geodetic `(λ, φ, h)`: the volume element `(N(φ)+h)cosφ·(M(φ)+h)` offsets BOTH curvature radii by the
+# Geodetic `(λ, φ, h)`: the volume element `(N(φ)+h)cosφ·(M(φ)+h)` offsets each curvature radius by the
 # height, so φ and h are coupled and no product of per-axis factors reproduces it. Longitude enters
-# none of it, so only that PAIR is stored together — see [`SlabMeasure`](@ref). Further directions
+# none of it, so φ and h alone are stored together — see [`SlabMeasure`](@ref). Further directions
 # still enter as plain widths.
 function _cell_measure(
     geometry::G, ax::NTuple{N,AbstractVector{T}}, per::NTuple{N,Union{Nothing,Real}},

@@ -28,7 +28,7 @@ wgs  = FG.Geometry.SpheroidGeometry()           # WGS 84 oblate spheroid
 ## Element type
 
 A geometry is parameterized by the float type it computes in, and that type fixes the width of
-everything measured against it — coordinates, distances, metric factors. [`float_type`](@ref) reads
+everything expressed against it — coordinates, distances, metric factors. [`float_type`](@ref) reads
 it and [`similar_geometry`](@ref) carries a geometry to another width, keeping its shape:
 
 ```@example geometry

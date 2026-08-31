@@ -18,8 +18,8 @@ using FlowGeometries.Grids: _ghost_points
     _accept_candidates!(nbrs, base, cands, i, N, kmax) -> Int
 
 Append the candidates for node `i` to `nbrs` (which already holds `base` entries for this node),
-mapping periodic images back to ORIGINAL indices and dropping self-references and repeats — one node
-can be reached through several images. Nearest-first order is preserved. Returns the new count for
+mapping periodic images back to their original indices and dropping self-references and repeats — one
+node can be reached through several images. Nearest-first order is preserved. Returns the new count for
 this node, stopping at `kmax`.
 """
 @inline function _accept_candidates!(
@@ -43,8 +43,8 @@ this node, stopping at `kmax`.
     return m
 end
 
-# `Connectivity._index_type`, applied here to the NEIGHBOUR ids alone: their values are node numbers,
-# so `N` bounds them. A CSR's offsets run to the EDGE count, which a radius query leaves unbounded by
+# `Connectivity._index_type`, applied here to the neighbour ids alone: their values are node numbers,
+# so `N` bounds them. A CSR's offsets run to the edge count, which a radius query leaves unbounded by
 # `N`, so those stay `Int` — `N + 1` of them against the neighbour list's `nnz`, so the width there
 # costs almost nothing. `UnstructuredGrid` stores the two arrays under free `Integer` type parameters,
 # so they need not agree.
@@ -53,14 +53,14 @@ end
 # Queries go one point at a time through `knn!`/`inrange!` into reused buffers; the batch forms
 # return a `Vector{Vector{…}}`, i.e. two heap vectors per query point.
 #
-# The loops sit behind a FUNCTION BARRIER: `KDTree(pts)` infers only to
+# The loops sit behind a function barrier: `KDTree(pts)` infers only to
 # `KDTree{V,Euclidean,Float64,V1} where {V<:SVector{_,Float64}, V1<:AbstractVector}`, so calling
 # `knn!` on it in the same function is a dynamic dispatch costing two allocations per query.
 # Passing the tree as an argument makes it concrete.
 #
-# Every query is made in the tree's OWN point type. NearestNeighbors converts anything else per call,
-# and that conversion is the whole per-query allocation: measured against this tree, a column view
-# costs 224 B and a plain `Vector` 176 B, where the static point costs nothing.
+# Every query is made in the tree's own point type. NearestNeighbors converts anything else per call,
+# and that conversion is the whole per-query allocation: a column view or a plain `Vector` each pay
+# it, where the tree's own static point costs nothing.
 @inline _qpoint(::NearestNeighbors.NNTree{V}, q::NTuple) where {V} = V(q)
 
 @inline _qcol(::NearestNeighbors.NNTree{V}, pts::AbstractMatrix, j::Integer) where {V} =
@@ -96,7 +96,7 @@ function _csr_from_knn(pts::AbstractMatrix, k::Integer, ng::Int = 1)
         return I[], ones(Int, N + 1)
     end
     kq = min(Int(k), N - 1)
-    # Ask for enough candidates that `kq` DISTINCT originals survive even when several images of the
+    # Ask for enough candidates that `kq` distinct originals survive even when several images of the
     # same node sit closer than the next real neighbor.
     ask = min(kq * ng + 1, size(pts, 2))
     return _knn_loop!(
@@ -227,9 +227,9 @@ end
 @inline _query_radius(ix::BallIndex, r::Real) = Grids.embedded_radius(ix.embedding, r)
 
 # The point form of the tree query. A tree searches replicated points, so one cell can come back through
-# several images and the caller would visit it twice; folding the images back and dropping the repeats
-# keeps the contract that a candidate is offered once. Below half the shortest period no two images can
-# both be within `r`, so there is nothing to drop and that pass is skipped.
+# several images; folding the images back and dropping the repeats keeps the contract that a candidate
+# is offered once. Below half the shortest period no two images can both be within `r`, so there is
+# nothing to drop and that pass is skipped.
 function Grids.fold_candidates_at(f::F, acc, ix::BallIndex{TR,T}, q, r, scratch) where {F,TR,T}
     cands = scratch === nothing ? Int[] : empty!(scratch)
     # `inrange!` into a caller-owned buffer, for the same reason the cell form uses it: the batch
@@ -266,8 +266,8 @@ function Grids.index_within!(buf::AbstractVector{<:Integer}, ix::BallIndex, grid
     # period cannot have found both, and there is nothing to remove. Skipping the sort matters: it is
     # `O(m log m)` on an `O(m)` query, and the wide radius that needs it is the rare case.
     2 * r < ix.min_period && return buf
-    # Sorted so the dedup below is a linear pass; `unique!` would build a hash set. `QuickSort` because
-    # the default algorithm allocates a scratch buffer, and this path allocates nothing.
+    # Sorted so the dedup below is a linear pass. `QuickSort` because the default algorithm allocates a
+    # scratch buffer, and this path allocates nothing.
     sort!(buf; alg = Base.Sort.QuickSort)
     return _dedup_sorted!(buf)
 end

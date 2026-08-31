@@ -154,9 +154,8 @@ u isa AbstractRange, step(u)
 ```
 
 Two things follow. Base solves `searchsorted` on a range in closed form, so lookup cost is flat in the
-axis length — 42 ns over `n = 10 … 10⁷`, against 35→69 ns for the equivalent `Vector`. And any package
-that already tests `isa AbstractRange` to pick a uniform-grid fast path accepts this type without
-knowing it exists.
+axis length where the equivalent `Vector` bisects. And any package that already tests
+`isa AbstractRange` to pick a uniform-grid fast path accepts this type without knowing it exists.
 
 ```@example axes
 big = A.UniformAxis(0.0, 1e-7, 10^7)

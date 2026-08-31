@@ -297,7 +297,7 @@ end
 """
     interpolate!(out, field, grid, p; k=8, …) -> out
 
-[`interpolate`](@ref) off a rectilinear grid for a field carrying trailing BATCH axes,
+[`interpolate`](@ref) off a rectilinear grid for a field carrying trailing batch axes,
 writing one value per batch element.
 
 The `k` nearest cells and the mask verdict are a property of the point and the geometry — and the k-d
@@ -332,9 +332,9 @@ function interpolate!(
         fill!(out, masked)
         return out
     end
-    # The cell and its weights are a property of the POINT, so they are solved once and applied to
-    # every batch element — the same structure the k-d tree query above already has, and tried before
-    # the neighbourhood mask test for the same reason the scalar form does.
+    # The cell and its weights are a property of the point alone, so they are solved once and applied
+    # to every batch element — the same structure the k-d tree query above already has, and tried
+    # before the neighbourhood mask test as the scalar form does.
     ba, bb, bc, bw = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
     if ba != 0
         @inbounds for b in 1:nb

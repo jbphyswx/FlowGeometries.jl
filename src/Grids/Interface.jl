@@ -204,13 +204,13 @@ function candidate_source end
 # ---------------------------------------------------------------------------
 # Common interface
 # ---------------------------------------------------------------------------
-# Coordinate STORAGE is positional: every grid holds an `NTuple{N,<:AbstractArray{T}}` of coordinate
+# Coordinate storage is positional: every grid holds an `NTuple{N,<:AbstractArray{T}}` of coordinate
 # arrays, one per coordinate direction, reached by index through `coordinates(grid, d)`. Coordinate
-# NAMES come from the geometry (`Geometry.point_names`), so `grid.x` exists on a Cartesian grid and
+# names come from the geometry (`Geometry.point_names`), so `grid.x` exists on a Cartesian grid and
 # `grid.λ` on a spherical one — never both, and never one standing in for the other.
 
-# These reach fields with `getfield`, never `grid.field`: `getproperty` below is overloaded to
-# resolve coordinate names, so property access from inside the interface would recurse.
+# These reach fields with `getfield`, never `grid.field`: `getproperty` below resolves coordinate names
+# by calling back into these accessors, so property access from inside the interface recurses.
 @inline grid_geometry(grid::AbstractGrid) = getfield(grid, :geometry)
 
 """

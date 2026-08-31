@@ -47,7 +47,7 @@ Ask a sampling what it is, and do not test its type:
 FG.SphericalSampling.is_tensor_product(s)                       # fits an (nlon × nlat) structured grid?
 FG.SphericalSampling.is_iso_latitude(s)                          # points lie on rings of constant φ?
 FG.SphericalSampling.is_equal_area(s)                            # every cell the same area?
-FG.SphericalSampling.admits_exact_bandlimited_quadrature(s)      # weights integrate PRODUCTS exactly at `bandlimit`?
+FG.SphericalSampling.admits_exact_bandlimited_quadrature(s)      # weights integrate products exactly at `bandlimit`?
 ```
 
 That last one is strict. Spectral analysis forms products of two degree-`lmax` fields, so it needs

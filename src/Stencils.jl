@@ -297,7 +297,7 @@ How many offsets the stencil has in `N` dimensions — the buffer length a `neig
 """
 @inline nstencil(s::AbstractStencil, ::Val{N}) where {N} = length(offsets(s, Val(N)))
 
-# Both counts below are properties of the SHAPE, so for the shapes defined here they are literals: the
+# Both counts below are properties of the shape alone, so for the shapes defined here they are literals: the
 # offset list exists at generation time, and neither answer needs it to reach inference as a value.
 @generated nstencil(s::_BuiltinStencil, ::Val{N}) where {N} = length(_offset_list(s, N))
 

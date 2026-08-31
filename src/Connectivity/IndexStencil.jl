@@ -43,7 +43,7 @@ function neighbors! end
 """
     nneighbors(grid, I...; stencil=Axial(1), active_only=true) -> Int
 
-How many neighbors [`neighbors!`](@ref) would write for cell `I`, without writing them.
+How many neighbors [`neighbors!`](@ref) writes for cell `I`, counted without writing them.
 """
 function nneighbors end
 
@@ -98,8 +98,7 @@ end
 Lazy neighbour sequence of one node of a stored-incidence layout: iterating it walks the node's CSR
 block and yields each active neighbour.
 
-The counterpart of [`StencilNeighbors`](@ref), and lazy for the same reason — a traversal over every
-node allocates nothing, where a freshly filtered `Vector` per node would cost one allocation each.
+The counterpart of [`StencilNeighbors`](@ref): a traversal over every node allocates nothing.
 """
 struct MeshNeighbors{GR}
     grid::GR
@@ -243,9 +242,8 @@ end
 Lazy neighbor sequence of one cell of an index-topology grid: iterating it walks the stencil offsets
 and yields the linear index of each in-range, active neighbor.
 
-Nothing is stored, so a traversal that visits every cell allocates nothing at all — where returning a
-freshly built `Vector` per cell would cost two heap allocations per cell. Use [`neighbors!`](@ref) to
-write into a caller-supplied buffer, or `collect` this to materialize it.
+Nothing is stored, so a traversal that visits every cell allocates nothing at all. Use
+[`neighbors!`](@ref) to write into a caller-supplied buffer, or `collect` this to materialize it.
 """
 struct StencilNeighbors{GR,N,S<:Stencils.AbstractStencil}
     grid::GR

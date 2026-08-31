@@ -9,7 +9,7 @@ using ..Geometry: Geometry
 # finite-difference weights of an arbitrary stencil.
 #
 # Nearly all of it is a function of coordinates alone. The one exception is `apply_stencil!`, which
-# applies a weight set along ONE direction leaving the result where the input was — a case in which
+# applies a weight set along a single direction leaving the result where the input was — a case in which
 # every convention is already fixed (no staggering to pick, `fd_weights`' inward shift at a bounded end,
 # wrapping on a periodic one, hence no halo). Operators that genuinely do need a result location and a
 # boundary-condition policy — a staggered difference, a divergence, a curl — are the caller's to

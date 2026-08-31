@@ -43,7 +43,7 @@ D.nodes(u, D.Center()) === u, length(D.nodes(u, D.Face()))
 
 [`local_spacing`](@ref) is the gap either side of one sample, and [`cell_width`](@ref) the width of one
 cell. Both are a scalar subtraction of two stored numbers — no array is built — so they are the forms
-to call per grid point, where `faces` would materialize the whole axis to answer about one cell.
+to call per grid point. `faces` materializes the whole axis, which suits a sweep over all of it.
 
 ```@example disc
 xs = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
@@ -418,9 +418,8 @@ G.scale_factors(sph, (0.0, π/3)), G.scale_factors(sph, (0.0, π/3, 5.0))
 
 `scale_factors` gives the physical length of a unit coordinate step in each direction — `(R cosφ, R)`
 on a sphere's surface, `(r cosφ, r, 1)` with a radius direction, and `1` throughout for a Cartesian
-metric. That is what turns a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`, so a
-divergence or a curl is assembled from these plus `fd_weights` with its conventions stated at the call
-site.
+metric. They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`, so a divergence
+or a curl is assembled from these plus `fd_weights` with its conventions stated at the call site.
 
 ```@example disc
 G.jacobian(sph, (0.0, 0.5)), 4cos(0.5)

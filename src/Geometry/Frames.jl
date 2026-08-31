@@ -179,7 +179,7 @@ The inverse of [`tensor_to_local`](@ref): `τ = Rᵀ τ' R`, returning the ambie
     ll, ff, rr = convert(T, τλλ), convert(T, τφφ), convert(T, τrr)
     lf, lr, fr = convert(T, τλφ), convert(T, τλr), convert(T, τφr)
     êλ, êφ, êr = _enu_frame(geo, λ, φ)
-    # The COLUMNS of `R`, which are the rows of `Rᵀ`, so the same contraction serves both directions.
+    # The columns of `R`, which are the rows of `Rᵀ`, so the same contraction serves both directions.
     u1, u2, u3 = êλ[1], êφ[1], êr[1]
     v1, v2, v3 = êλ[2], êφ[2], êr[2]
     w1, w2, w3 = êλ[3], êφ[3], êr[3]
@@ -255,9 +255,9 @@ Tangent-plane displacement of `neighbor` relative to `center` along the local co
 [`local_tangent_basis`](@ref): the ambient chord between the two [`embed`](@ref)ded positions, resolved
 on that basis.
 
-This is what a least-squares gradient and a scattered interpolation are built on, so both work on any
-geometry supplying those two primitives — a spheroid included, where the chord runs between geodetic
-positions and the basis is the same triad.
+A least-squares gradient and a scattered interpolation are built on this, so both work on any geometry
+supplying those two primitives — a spheroid included, where the chord runs between geodetic positions
+and the basis is the same triad.
 """
 @inline project_to_tangent_plane(geo::AbstractGeometry, center, neighbor) =
     _project_to_tangent_plane(geo, as_ntuple(center), as_ntuple(neighbor))
@@ -276,8 +276,8 @@ end
 end
 
 # Written against [`embed`](@ref) and the frame, so it holds on a sphere and on a spheroid alike: the
-# chord between the two ambient positions, resolved on the tangent basis at the centre. Only where each
-# `(λ, φ)` SITS differs between the two.
+# chord between the two ambient positions, resolved on the tangent basis at the centre. The two differ
+# only in where each `(λ, φ)` sits.
 @inline function _project_to_tangent_plane(
     geo::AbstractLonLatGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
 ) where {T}

@@ -18,27 +18,25 @@ function spherical_points!(
     n = npoints(s)
     length(λ) == n && length(φ) == n ||
         throw(DimensionMismatch("buffers must have length npoints = $n"))
-    # The Gaussian latitudes come from the same solve every other spectral sampling uses. They cannot
-    # live in the output's leading elements the way a tensor-product grid's axes do: those are
-    # expanded BACKWARDS, so a write never lands on an axis element still to be read, whereas the
-    # rings here are written forwards and ring 1's block would overwrite nodes belonging to rings near
-    # the south pole. Hence a buffer — `O(nrings) = O(√n)` against an `O(n)` output, and the caller
-    # can supply one to make the fill allocation-free outright.
+    # The Gaussian latitudes come from the same solve every other spectral sampling uses. The rings are
+    # filled forwards, so ring 1's block lands on output elements holding latitudes that rings near the
+    # south pole have yet to read: the latitudes need a buffer of their own, `O(nrings) = O(√n)`
+    # against an `O(n)` output. A caller can supply one to make the fill allocation-free outright.
     scratch === nothing && return _reduced_gaussian_points!(λ, φ, s, Vector{T}(undef, nring), nring)
     length(scratch) ≥ nring ||
         throw(DimensionMismatch("scratch must hold nrings = $nring latitudes"))
     return _reduced_gaussian_points!(λ, φ, s, scratch, nring)
 end
 
-# Behind a function barrier so the buffer's type is concrete in the loop: resolved once here rather
-# than left as a `Union{Nothing,…}` for every ring to re-dispatch on.
+# Behind a function barrier so the buffer's type is concrete in the loop, resolved once here for every
+# ring that reads it.
 function _reduced_gaussian_points!(
     λ::AbstractVector{T}, φ::AbstractVector{T}, s::AbstractReducedGaussianSampling,
     μ::AbstractVector{T}, nring::Int,
 ) where {T<:AbstractFloat}
     _gauss_legendre!(T, view(μ, 1:nring), nothing, nring)
     @inbounds for j in 1:nring
-        # `μ` ascends, so ring 1 (north) is the LAST entry.
+        # `μ` ascends, so ring 1 (north) is its last entry.
         φj = asin(μ[nring + 1 - j])
         rng = ring_range(s, j)
         dλ = T(2π) / T(length(rng))

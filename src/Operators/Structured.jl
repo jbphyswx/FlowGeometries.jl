@@ -71,7 +71,8 @@ end
 end
 
 # One batch element, at linear offset `off` into the field. The bracketing cell and its weights are a
-# property of the POINT and the grid, so a batched call solves them once and calls this per element.
+# property of the point and the grid alone, so a batched call solves them once and calls this per
+# element.
 function _interp_at(
     field::AbstractArray{S}, grid::Grids.StructuredGrid{T, G,N}, p::NTuple{N,Real}, off::Int,
     active_only::Bool, masked, policy,

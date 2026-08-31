@@ -39,7 +39,7 @@ abstract type AbstractLatLonSampling <: AbstractTensorProductSphericalSampling e
 """
     AbstractRingSampling <: AbstractSphericalSampling
 
-Iso-latitude rings whose longitude count VARIES by ring, so the layout is not a tensor product. A
+Iso-latitude rings whose longitude count varies by ring, so the layout is not a tensor product. A
 reduced Gaussian grid is the canonical case: latitudes are the Gaussian ones, but each ring carries
 only as many longitudes as its circumference warrants.
 """
@@ -256,7 +256,7 @@ is_equal_area(::AbstractEqualAreaSphericalSampling) = true
 """
     admits_exact_bandlimited_quadrature(sampling) -> Bool
 
-Whether this sampling's [`latitude_weights`](@ref) integrate the PRODUCTS that spectral analysis
+Whether this sampling's [`latitude_weights`](@ref) integrate the products that spectral analysis
 actually forms — two degree-`lmax` functions, hence degree `2·lmax` — exactly at the sampling's own
 [`bandlimit`](@ref).
 
@@ -269,7 +269,7 @@ distinction decides the answer here. Measured exactness of the weights in this p
 | Driscoll–Healy | `N−1` | `N/2−1` | `N−2` | yes |
 | Clenshaw–Curtis | `N−1` | `N−1` | `2N−2` | **no** |
 
-Clenshaw–Curtis's band limit describes what its grid can REPRESENT; its quadrature supports
+Clenshaw–Curtis's band limit describes what its grid can *represent*; its quadrature supports
 quadrature-based analysis only to `lmax ≈ (N−1)/2`. Use `GaussLegendreSampling` when analysis must
 be exact at the stated band limit.
 """
@@ -394,7 +394,7 @@ nlon_per_ring(s::AbstractTensorProductSphericalSampling, nlat::Integer; kwargs..
     nlon_in_ring(sampling, ring) -> Int
     nlon_in_ring(sampling, nlat, ring) -> Int
 
-Longitudes on ONE iso-latitude ring, counted from the north pole, in `O(1)` and allocating nothing.
+Longitudes on a single iso-latitude ring, counted from the north pole, in `O(1)` and allocating nothing.
 
 The per-ring form of [`nlon_per_ring`](@ref), and the one a ring-by-ring loop wants: the table costs
 an allocation and an `O(nrings)` build per call, which a loop over rings pays again on every

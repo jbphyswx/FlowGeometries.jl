@@ -69,7 +69,7 @@ function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = n
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
         end
     end
-    # The width is a runtime value, so the filling pass is entered through a CONCRETE one, from a
+    # The width is a runtime value, so the filling pass is entered through a concrete one, from a
     # branch that leaves each call site one method — see `_csr_total`.
     return _index_type(max(n + 1, sum(deg))) === Int32 ?
         _csr_fill(Int32, emit!, deg, n, maxdeg, backend) :
@@ -188,7 +188,7 @@ end
     build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only)
 
 Sampling topology straight to CSR. A tensor-product sampling's neighbor graph is fixed by its axis
-LENGTHS and longitude wrapping alone, so the axes themselves are never evaluated — for
+lengths and longitude wrapping alone, so the axes themselves are never evaluated — for
 Gauss–Legendre that is an O(n²) root solve.
 """
 function build_connectivity(
@@ -201,8 +201,8 @@ function build_connectivity(
     active_only::Bool = true,
 )
     sz = SphericalSampling.axes_lengths(s, nlat; nlon = nlon)
-    # These samplings tile the full circle in longitude and stop at the poles in latitude, which is
-    # what `StructuredGrid`'s auto-detection concludes from the axes themselves.
+    # These samplings tile the full circle in longitude and stop at the poles in latitude, the same
+    # closure `StructuredGrid`'s auto-detection reaches from the axes themselves.
     per = periodic === nothing ? (true, false) : periodic
     return build_connectivity(
         IndexTopology((sz.nlon, sz.nlat), per, mask);
@@ -340,12 +340,10 @@ end
 const _HP_NB_X = (-1, -1, 0, 1, 1, 1, 0, -1)
 const _HP_NB_Y = (0, 1, 1, 1, 0, -1, -1, -1)
 
-# Order in which to WALK the eight offsets above. RING indices increase north-to-south and, within a
-# ring, with φ — so visiting the compass directions in this order emits ascending pixel ids. Measured
-# at nside = 32: this single order already sorts 10,684 of the 10,800 interior pixels. The rest are
-# the ring seam, where φ wraps inside a ring and the ids jump; `_sort_unique_filter!` still runs and
-# still guarantees the result, it just has almost nothing left to move (9.01 inversions per node
-# before, 0.04 after).
+# Order in which to walk the eight offsets above. RING indices increase north-to-south and, within a
+# ring, with φ, so visiting the compass directions in this order emits an interior pixel's neighbours
+# already ascending. The ring seam, where φ wraps inside a ring and the ids jump, is what remains;
+# `_sort_unique_filter!` runs regardless and is what guarantees the order.
 const _HP_NB_ORDER = (4, 3, 5, 2, 6, 1, 7, 8)
 # nb_facearray[nbnum+1][face+1]; nbnum in 0:8 → rows S,SE,E,SW,center,NE,W,NW,N
 const _HP_NB_FACE = (

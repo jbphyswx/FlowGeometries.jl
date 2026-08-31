@@ -117,8 +117,8 @@ FG.Geometry.distance(geo, p1, p2)
 FG.Geometry.project_to_tangent_plane(SVector{2,Float64}, geo, centre, neighbour)
 ```
 
-Measured over 10⁶ points against the generic path: `distance` is a wash (0.96–1.02×),
-`project_to_tangent_plane` is 1.36×.
+A caller already working in `SVector`s keeps that type through both calls, with no conversion at
+either end. See [Performance](@ref performance-page) for the measured effect.
 
 ## AbstractFFTs — fast equiangular weights
 
@@ -127,10 +127,10 @@ any FFT implementation turns it into one length-`nlat` transform:
 
 ```julia
 using FFTW      # or any AbstractFFTs backend
-FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), 4096)   # ~106× faster than the fallback
+FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), 4096)   # one length-4096 transform
 ```
 
-The trigger is `AbstractFFTs`, not FFTW, so any backend serves. Without one, an angle-addition
+The trigger is `AbstractFFTs`, so any backend serves. With no backend loaded, an angle-addition
 recurrence gives the same weights to 1.4e-14 — correctness never depends on the extension.
 
 ## Adapt — device transfer

@@ -4,8 +4,8 @@ using StaticArrays: StaticArrays as SA
 using FlowGeometries.Geometry: Geometry
 using FlowGeometries.Grids: Grids
 
-# Static-vector points and returns, in vector form end to end. Measured against the generic path
-# over 10⁶ points: `distance` is a wash (0.96–1.02×), `project_to_tangent_plane` is 1.36×.
+# Static-vector points and returns, in vector form end to end: a caller working in `SVector`s keeps
+# that type through `distance` and `project_to_tangent_plane` with no conversion at either end.
 
 @inline _dot3(a, b) = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
 

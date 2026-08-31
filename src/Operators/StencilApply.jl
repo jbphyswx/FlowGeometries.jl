@@ -113,8 +113,8 @@ function _apply_stencil_degrade!(
     n = sz[dim]
     P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
     wrap = period !== nothing
-    # A caller's buffers are usable only where there is one chunk: they are written per cell, so
-    # concurrent chunks would race on them. The threaded path allocates its own set per chunk.
+    # A caller's buffers are written per cell, so they hold only under a single chunk. The threaded
+    # path allocates its own set per chunk.
     if backend === nothing && scratch isa Discretization.StencilScratch{T}
         _fits(scratch, k, ord) || throw(DimensionMismatch(
             "scratch holds $(length(scratch.w)) nodes × $(size(scratch.c, 2)) orders; this call " *
@@ -250,21 +250,21 @@ function apply_stencil!(
     ))
     _check_mask_extent(mask, size(field), Int(dim))
     k = size(indices, 2)
+    # The switch walks the spatial rank, since `dim` is one of those, so a trailing batch axis adds no
+    # specializations.
+    vm = _mask_rank(mask, Val(N))
     if backend === nothing
         # On the host the loop shape is ours to choose, and the index-parallel one is the wrong shape:
         # see `_stencil_sweep_host!`. Both paths are the same arithmetic in the same order, so they
-        # agree bit for bit. The switch walks the SPATIAL rank, since `dim` is one of those, so a
-        # trailing batch axis adds no specializations.
-        return _dispatch_dim(Int(dim), _mask_rank(mask, Val(N))) do vdim
+        # agree bit for bit.
+        return _dispatch_dim(Int(dim), vm) do vdim
             _dispatch_nodes(k) do vk
-                _stencil_sweep_host!(out, field, indices, weights, mask, masked, vdim, vk, Val(N),
-                                     _mask_rank(mask, Val(N)))
+                _stencil_sweep_host!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm)
             end
         end
     end
     # The differenced direction and the node count are properties of the weight set, so they resolve to
     # types once before the launch, as they do once per sweep on the host.
-    vm = _mask_rank(mask, Val(N))
     return _dispatch_dim(Int(dim), vm) do vdim
         _dispatch_nodes(k) do vk
             _launch_stencil!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm,
@@ -375,11 +375,10 @@ function _stencil_sweep_host!(
     return out
 end
 
-# A field may carry trailing BATCH axes beyond the ones the mask spans: `(nx, ny, nb)` differenced
+# A field may carry trailing batch axes beyond the ones the mask spans: `(nx, ny, nb)` differenced
 # against a 2-D grid, where the same mask applies to every slice. The mask's own rank is therefore the
 # spatial rank — nothing else has to be declared — and a cell's mask index is the leading `M`
-# components of its index. With no mask, or a mask of the field's own rank, `M == N` and every
-# expression below is what it was.
+# components of its index. With no mask, or a mask of the field's own rank, `M == N`.
 @inline _mask_rank(::Nothing, ::Val{N}) where {N} = Val(N)
 @inline _mask_rank(::AbstractArray{Bool,M}, ::Val{N}) where {M,N} = Val(M)
 
@@ -436,6 +435,8 @@ end
     return nothing
 end
 
+# The same body above the specialization cap, where `k` stays a runtime value: the node loop keeps its
+# literal trip count in the `Val` method and unrolls there, and runs as an ordinary loop here.
 @inline function _stencil_first_linear!(
     out::AbstractArray{S}, field, indices, weights, mask, masked, off::Int, moff::Int, n::Int,
     k::Int,
@@ -587,8 +588,6 @@ end
     return nothing
 end
 
-# One output cell, written from its own inputs only, so the loop above is index-parallel and the same
-# body serves a host loop and a device launch.
 """
     _nodecount(nodes) -> Int
 
@@ -601,9 +600,10 @@ loop.
 @inline _nodecount(::Val{k}) where {k} = k
 @inline _nodecount(k::Int) = k
 
-# One cell, by its own index and nothing else — the body a launch runs. `dim` and the node count arrive
-# as type parameters, so the index construction folds and the node loop unrolls: resolved as runtime
-# values, `d == dim` is a comparison per node per cell and the loop has no known trip count.
+# One output cell, written from its own inputs alone, so the loop over cells is index-parallel and this
+# body serves a host loop and a device launch. `dim` and the node count arrive as type parameters, so
+# the index construction folds and the node loop unrolls; as runtime values `d == dim` costs a
+# comparison per node per cell and the loop has no known trip count.
 @inline function _stencil_cell!(
     out::AbstractArray{S,N}, field, indices, weights, ::Val{dim}, mask, masked, nodes,
     I::NTuple{N,Int}, ci, ::Val{M},

@@ -6,7 +6,7 @@
     AbstractEllipsoidalGeometry{T} <: AbstractGeometry{T}
 
 Oblate-spheroid metrics. Default: [`SpheroidGeometry`](@ref). Coordinate names match the spherical
-convention, `(λ, φ[, h])`, with `φ` the GEODETIC latitude.
+convention, `(λ, φ[, h])`, with `φ` the *geodetic* latitude.
 
 A subtype implements [`semimajor_axis`](@ref) and [`flattening`](@ref); the rest — `semiminor_axis`,
 `eccentricity²`, the curvature radii, `distance`, `area_element`, `scale_factors` — follow from those
@@ -180,7 +180,7 @@ end
 """
     spherical_excess(a, b, c) -> T
 
-Spherical excess of the triangle spanned by three UNIT vectors, via Van Oosterom & Strackee (1983):
+Spherical excess of the triangle spanned by three unit vectors, via Van Oosterom & Strackee (1983):
 
     tan(E/2) = |a · (b × c)| / (1 + a·b + b·c + c·a)
 
@@ -313,7 +313,7 @@ function _cartesian_to_geodetic(
     p = sqrt(x * x + y * y)
     λ = atan(y, x)
     # The centre has no normal to stand on. It also has to be taken out before the loop: there
-    # `N(1-e²)+h` is negative, so `p·(N(1-e²)+h)` is a NEGATIVE zero, and `atan(+0, -0)` is `π`.
+    # `N(1-e²)+h` is negative, so `p·(N(1-e²)+h)` is a negative zero, and `atan(+0, -0)` is `π`.
     (iszero(p) && iszero(z)) && return (; λ = zero(T), φ = zero(T), h = -a)
     # `atan(z, (1-e²)p)` is the latitude of the point's reduced (parametric) position, which is within
     # `f` of the geodetic one — one Newton step of the loop below then already carries most of the way.

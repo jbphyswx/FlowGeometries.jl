@@ -75,8 +75,8 @@ _cell_indices(grid, c, ::FlatCells) = throw(ArgumentError(
     _cell_named_by(grid, I::Tuple) -> cell
 
 The cell a caller named with the indices `I`: the tuple itself where cells are [`CartesianCells`](@ref),
-and its single element where they are [`FlatCells`](@ref). This is what an entry point taking
-`I::Vararg{Integer}` hands the traversals.
+and its single element where they are [`FlatCells`](@ref). An entry point taking `I::Vararg{Integer}`
+hands the traversals this.
 """
 @inline _cell_named_by(grid::AbstractGrid, I::Tuple{Vararg{Integer}}) =
     _cell_named_by(grid, I, cell_address(grid))

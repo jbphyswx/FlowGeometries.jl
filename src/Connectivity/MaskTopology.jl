@@ -50,11 +50,10 @@ end
 """
     boundary_cells(grid; stencil = Stencils.Axial(1), backend = nothing) -> Array{Bool}
 
-Which active cells are NOT [`interior`](@ref): the active cells that touch an edge or a masked-out
-neighbour.
+The active cells [`interior`](@ref) excludes: those touching an edge or a masked-out neighbour.
 
 One pass and one array: a cell is a boundary cell exactly when it is active and its stencil is not
-closed, which is the same predicate `interior` reads.
+closed, the same predicate `interior` reads.
 """
 function boundary_cells(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1), backend = nothing)
     return _boundary_cells(IndexTopology(grid), _stencil_val(stencil); backend = backend)

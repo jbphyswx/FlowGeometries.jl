@@ -6,8 +6,8 @@
     AbstractEmbedding
 
 How a grid's cell centres sit in the Euclidean space an index searches, and therefore what a physical
-radius means there. A **type**, for the reason stencils are: the conversion is applied once per query,
-so a runtime tag would leave it unresolved and put a branch — and a boxed radius — in the hot path.
+radius means there. A **type**, as stencils are: the conversion is applied once per query, and being
+resolved at compile time it leaves no branch and no boxed radius in the hot path.
 
 [`CartesianEmbedding`](@ref), [`ChordEmbedding`](@ref), [`ArcEmbedding`](@ref).
 """
@@ -25,8 +25,8 @@ struct CartesianEmbedding <: AbstractEmbedding end
 
 The embedded distance already is the metric, or a lower bound on it: `(λ, φ, r)` on a sphere, where the
 metric is the 3-D chord, and geodetic coordinates on a spheroid, where the ECEF chord is at most the
-geodesic. A radius passes through unchanged; under-approximating means the query over-returns, which is
-what an index is allowed to do.
+geodesic. A radius passes through unchanged; under-approximating means the query over-returns, and an
+index is allowed to over-return.
 """
 struct ChordEmbedding <: AbstractEmbedding end
 

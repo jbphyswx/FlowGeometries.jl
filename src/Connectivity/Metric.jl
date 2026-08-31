@@ -123,12 +123,12 @@ end
 
 A [`MetricTopology`](@ref) carrying a spatial index, which brings a ball query to `O(log n + m)`.
 
-Requires `NearestNeighbors`; [`Grids.spatial_index`](@ref) raises without it, and an unindexed
+Requires `NearestNeighbors` — [`Grids.spatial_index`](@ref) raises when it is not loaded. An unindexed
 topology answers the same queries in `O(n)`.
 """
 indexed(grid::Grids.AbstractGrid) = MetricTopology(grid; index = Grids.spatial_index(grid))
 
-# Candidate enumeration. Without an index every cell is a candidate; with one, the index returns a
+# Candidate enumeration. An unindexed topology makes every cell a candidate; an index returns a
 # superset of the ball and the caller's exact gate does the rest.
 #
 # `scratch` is the index's candidate buffer and belongs to the caller. One `MetricTopology` is shared
@@ -200,9 +200,9 @@ three-argument form builds a topology per call. On a spherical or ellipsoidal gr
 additionally walks the latitude window for its smallest `cosφ`, so it costs the window it returns.
 
 The window is a bound: [`neighbors_within!`](@ref) scans it and then filters on the geometry's own
-`distance`. Covering the ball for every geometry is what makes it geometry-specific. On a spherical grid
-one longitude step spans `R·cosφ·Δλ`, so the λ half-width is taken at the latitude in the window nearest
-a pole; at a polar cell every longitude is in range, and the window says so.
+`distance`. It must cover the ball on the geometry it is asked about, so it is derived per geometry. On
+a spherical grid one longitude step spans `R·cosφ·Δλ`, so the λ half-width is taken at the latitude in
+the window nearest a pole; at a polar cell every longitude is in range, and the window says so.
 """
 function metric_window end
 
@@ -440,8 +440,8 @@ struct NearestImage <: AbstractImageConvention end
 """
     AllImages()
 
-Visit every image of a cell that lands inside the ball, each carrying its own displacement. This is what
-a periodic convolution sums over. See [`fold_within`](@ref).
+Visit every image of a cell that lands inside the ball, each carrying its own displacement — the set a
+periodic convolution sums over. See [`fold_within`](@ref).
 """
 struct AllImages <: AbstractImageConvention end
 
@@ -526,8 +526,8 @@ end
 
 # The window for an image-summing walk. `_steps` caps its half-width at the axis length, which is right
 # when each cell is visited once and wrong here: a kernel wider than the period reaches images several
-# turns out, and capping at `n` drops every one of them. So a periodic direction gets the UNCAPPED
-# `ceil(r/s)`; a bounded one is unchanged, its offsets being clipped at the walls anyway.
+# turns out, and capping at `n` drops every one of them. So a periodic direction gets `ceil(r/s)` with
+# no cap; a bounded one is unchanged, its offsets being clipped at the walls anyway.
 function _image_window(
     grid::Grids.AbstractStructuredGrid{G,T}, ball, mt::MetricTopology{N,T},
 ) where {G<:Geometry.AbstractCartesianGeometry, T, N}
@@ -621,7 +621,7 @@ function neighbors_within! end
 """
     nneighbors_within(grid, I...; ball, active_only=true) -> Int
 
-The count [`neighbors_within!`](@ref) would write — how large its buffer must be.
+The count [`neighbors_within!`](@ref) writes — how large its buffer must be.
 """
 function nneighbors_within end
 
@@ -798,8 +798,8 @@ end
 end
 
 # A neighbour list is a set of cells in whatever order enumerated them: a window walks index order, a
-# tree walks tree order, a cell list walks bin order. No entry point sorts, which would put an
-# `O(m log m)` pass on an `O(m)` query. `sort_neighbors!` sorts on request.
+# tree walks tree order, a cell list walks bin order. No entry point sorts, keeping an `O(m)` query
+# `O(m)`. `sort_neighbors!` sorts on request.
 
 # One body for every layout with no separable axes to bound a window with — a curvilinear mesh and a node
 # set alike, which differ only in how a cell is named (`Grids.cell_address`) — so their enumeration and

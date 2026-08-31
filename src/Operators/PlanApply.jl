@@ -3,9 +3,9 @@
 # ---------------------------------------------------------------------------
 #
 # A uniform axis's interior weights are the same `K` numbers at every sample, so they reach the sweep as
-# a tuple and the innermost loop has constant coefficients. Measured against reading the row from an
-# `n × k` table per cell, on a 5-node first derivative: 3.7–7.0× where the differenced direction is the
-# contiguous one, and level where it is not — there the row is hoisted out of the inner loop either way.
+# a tuple and the innermost loop has constant coefficients. That shape pays where the differenced
+# direction is the contiguous one; where it is a slower-varying one the row is hoisted out of the inner
+# loop either way.
 #
 # A plan reads the same samples as the table — the node indices are identical — and its weights are the
 # exact translation-invariant ones, where the table recomputes each row from its own window's coordinates
@@ -157,7 +157,7 @@ end
 Scale a span the sweep has just written, run by run, while it is still in cache.
 
 The span holds `nruns` contiguous runs of `runlen` cells along direction 1, and the metric factor is
-constant on each of them, direction 1 being metric-invariant. `invh[1:R]` holds one factor per SPATIAL
+constant on each of them, direction 1 being metric-invariant. `invh[1:R]` holds one factor per spatial
 run in column-major order over directions `2:N`, and a batch element repeats that cycle, so the run
 number is taken modulo `R`. `rbase` is the span's first run, counted the same way.
 
@@ -195,7 +195,7 @@ against the geometry's own [`Discretization.metric_floor`](@ref).
 end
 
 # `dim == 1`: the differenced direction is the contiguous one. The interior span carries the weights in
-# registers and reads `field` at a fixed offset per node, which is where the measured 3.7–7.0× is.
+# registers and reads `field` at a fixed offset per node.
 @inline function _plan_first_linear!(
     out::AbstractArray{S}, field, plan::Discretization.UniformStencilPlan{T,K},
     mask, masked, off::Int, moff::Int, n::Int, ::Val{K},

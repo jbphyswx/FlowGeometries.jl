@@ -65,9 +65,9 @@ S.reach(S.Anisotropic((3, 1)), Val(2))     # halo width per direction
 ```
 
 !!! note "A stencil is named by its type, never by a symbol"
-    A symbol could only be resolved at run time, so the neighbour iterator built from it would not be
-    concretely typed and every cell of a traversal would allocate. `stencil = S.Moore(2)` is free;
-    there is no symbol form to reach for.
+    The type resolves at compile time, so the neighbour iterator built from it is concretely typed and
+    a traversal allocates nothing. `stencil = S.Moore(2)` is free; there is no symbol form to reach
+    for.
 
 ### Your own shape
 
@@ -207,7 +207,7 @@ FG.Connectivity.nedges(csr), FG.Connectivity.is_symmetric_adjacency(csr)
 
 The observation the stencil side of the module rests on is that a neighbour computation never looks at a
 coordinate. It reads three things — extent per dimension, wrapping per dimension, and which cells are
-active — and nothing else. That triple is `IndexTopology`, and it is why a curvilinear grid needs no
+active — and nothing else. That triple is `IndexTopology`, under which a curvilinear grid needs no
 separate implementation from a structured one: it is the `N = 2` case of the same algorithm.
 
 A ball query is the one thing that cannot work that way. It needs coordinates, and the smallest step per
@@ -224,9 +224,9 @@ FG.Connectivity.nneighbors_within(g, 5, 7; ball = ball, topology = mt)
 So passing it changes nothing and omitting it costs nothing — the default is already free. There is no
 hoisting to remember here.
 
-The spatial index is different: it *is* worth hoisting, and it is not built for a single query, because
-building one costs more than the one scan it would replace. Curvilinear and node grids have no separable
-axes for a window to bound, so without an index a query tests every cell.
+The spatial index is different: it *is* worth hoisting, and building one costs `O(n)`, so it pays back
+over many queries. Curvilinear and node grids have no separable axes for a window to bound, so an
+unindexed query tests every cell.
 
 [`Grids.cell_list`](@ref) is the one to reach for, and it needs no package at all. It bins the cell
 centres at the radius you mean to query at, and a query visits the bins its ball can reach:
@@ -256,10 +256,9 @@ membership — so an indexed query and a scan return the same cells, and loading
 speed and nothing else.
 
 A neighbour list is a **set**: the cells come back in whatever order enumerated them, and no query
-sorts, which puts an `O(m log m)` pass on an `O(m)` query. [`Connectivity.sort_neighbors!`](@ref) sorts
-on request.
-[`Connectivity.ball_scratch`](@ref) is the candidate buffer, one per task; without it each query
-allocates its own.
+sorts, keeping an `O(m)` query `O(m)`. [`Connectivity.sort_neighbors!`](@ref) sorts on request.
+[`Connectivity.ball_scratch`](@ref) is the candidate buffer, one per task; a query given none allocates
+its own.
 
 ### Sweeping every cell
 
@@ -299,8 +298,8 @@ resolve by linear index, so an indexed query and a scan agree exactly.
 
 Every query above starts at a cell. Observational data does not arrive that way — a station, a ship
 track or a float has a coordinate, and the cell it belongs to is part of the question. Passing a
-coordinate where the cell indices would go asks the same questions about a point — written as a
-`Tuple`, `NamedTuple`, `AbstractVector` or `SVector`, as anywhere else a point is taken:
+coordinate in place of the cell indices asks the same questions about a point — written as a `Tuple`,
+`NamedTuple`, `AbstractVector` or `SVector`, as anywhere else a point is taken:
 
 ```@example conn
 FG.Grids.locate(g, (0.4, 0.1))                    # the cell the point falls in
@@ -443,7 +442,7 @@ of unequal width make its straddling relation directed, so it takes the transpos
 
 ```@example connectivity
 FG.Grids.has_symmetric_adjacency(FG.Grids.HEALPixGrid(4))   # licenses the shortcut, before the build
-FG.Connectivity.is_symmetric_adjacency(conn)                # the same question of a BUILT graph
+FG.Connectivity.is_symmetric_adjacency(conn)                # the same question of a built graph
 FG.Connectivity.sort_neighbors!(conn)                       # order each node's block ascending
 ```
 

@@ -281,7 +281,7 @@ FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())   # 3.7–4.3× on 8 threads
+FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())   # same CSR, built in parallel
 ```
 
 ## Documentation

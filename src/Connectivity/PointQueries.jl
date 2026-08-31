@@ -238,7 +238,7 @@ end
     ncell = length(Grids.mask(grid))
     vol = one(T)
     # The span comes from the topology, which reduced it once. Off a rectilinear grid the coordinates
-    # are fields with no order, so asking the grid would scan them on every query.
+    # are fields with no order, so asking the grid is a scan per query.
     for d in 1:D
         e = @inbounds T(mt.span[d])
         e > 0 && (vol *= e)

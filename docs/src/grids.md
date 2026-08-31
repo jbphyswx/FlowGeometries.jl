@@ -111,7 +111,7 @@ Cartesian `Δx·Δy·Δz`, spherical `R²cosφ·Δλ·Δφ = (Δλ)·(R²cosφ·
 ```@example grids
 m = FG.Grids.measure(grid)           # a SeparableMeasure — a real AbstractArray
 m[3, 5]                        # indexes exactly like the dense outer product
-sum(m)                         # ∏ᵈ ∑ᵢ wᵈᵢ — O(∑ Nᵈ), not O(∏ Nᵈ)
+sum(m)                         # ∏ᵈ ∑ᵢ wᵈᵢ — O(∑ Nᵈ) against the dense O(∏ Nᵈ)
 FG.Grids.measure_factors(grid)       # the per-axis factors, or `nothing`
 FG.Grids.measure_array(grid)         # materialize densely, if you really need it
 ```

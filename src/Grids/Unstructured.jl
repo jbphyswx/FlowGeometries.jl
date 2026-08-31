@@ -101,9 +101,9 @@ Unstructured mesh (e.g. radial data, finite volume, or triangular mesh) where co
 
 # Type parameters
 - `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
-  raises a type error. `T` therefore precedes `G`, Julia forbidding the forward reference
-  `G<:AbstractGeometry{T}, T` a `{G,T}` order would need, on the convention
-  [`CurvilinearGrid`](@ref) follows.
+  raises a type error. `T` therefore precedes `G`: Julia binds type parameters left to right, and
+  `G<:AbstractGeometry{T}` requires `T` already bound. [`CurvilinearGrid`](@ref) follows the same
+  convention.
 - `C`: tuple type of the per-direction node-coordinate vectors.
 - `VA`: vector type of the derived `measure` field, independent of `C`, a Voronoi tessellation having
   no reason to match the coordinate vectors' storage type.
@@ -394,8 +394,8 @@ Wrap length of coordinate direction `d`, meaningful only where [`isperiodic`](@r
 Extension hook: build CSR neighbor adjacency via a k-d tree. Overridden by
 a consumer NearestNeighbors extension (load `using NearestNeighbors`). `radius`, if given,
 switches to an all-neighbors-within-`radius` query (mutually exclusive with `k`); `radius` is in the
-grid's physical distance units (`Geometry.distance` — meters for `SphericalGeometry`, geometry's own
-units for `CartesianGeometry`), NOT a raw chord/angle.
+grid's physical distance units — `Geometry.distance`, so meters for `SphericalGeometry` and the
+geometry's own units for `CartesianGeometry`.
 """
 function _build_kdtree_neighbors(
     geometry::Geometry.AbstractGeometry, coords::NTuple{D,AbstractVector}; _...,

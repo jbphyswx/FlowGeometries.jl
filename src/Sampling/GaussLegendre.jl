@@ -151,8 +151,8 @@ function _gauss_legendre!(
         return nothing
     end
     m = (n + 1) ÷ 2                       # roots are symmetric about 0; solve the upper half only
-    # Work at no less than Float64 and round once: the series below sums ~30 terms, which at Float32
-    # would leave the root short of that type's own precision.
+    # Work at no less than Float64 and round once: the series below sums ~30 terms, so accumulating it
+    # at Float32 leaves the root short of Float32's own precision.
     TW = promote_type(T, Float64)
     # The asymptotic expansions are Float64 coefficient sets truncated at a fixed order, so they are
     # used only where they are actually the better answer: at Float64 width and above n = 60. Wider

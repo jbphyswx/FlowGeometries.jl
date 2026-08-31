@@ -77,8 +77,8 @@ The linear index a cell reports as, and the inverse of [`_cell_from_linear`](@re
     @inbounds LinearIndices(size_tuple(grid))[I...]
 @inline _linear_of(_grid, k::Integer, ::FlatCells) = Int(k)
 
-# Bins in a query window, saturating: a radius far wider than the bin side gives a per-direction reach
-# whose plain product overflows `Int` and would wrap to a small — or negative — number.
+# Bins in a query window, saturating at `typemax(Int)`: a radius far wider than the bin side gives a
+# per-direction reach whose product exceeds `Int`.
 @inline function _window_bins(reach::NTuple{D,Int}) where {D}
     m = 1
     @inbounds for d in 1:D
@@ -92,12 +92,19 @@ end
 
 # Bin coordinate of a point, wrapped where the direction does. A wrapping direction's width divides the
 # period exactly, so `mod` lands on a lattice bin and no partial bin aliases onto bin zero.
-@inline function _bin_of(ix::CellListIndex{D,T}, x::NTuple{D,T}) where {D,T}
-    return ntuple(Val(D)) do d
-        @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - ix.lo[d]) / ix.h[d]))
-        @inbounds ix.wrap[d] ? mod(b, ix.nbins[d]) : b
-    end
+#
+# The build pass and the query pass must place a point in the same bin, so both reach the lattice
+# through this one expression: a cell binned one way and looked up another is a cell a query never
+# returns.
+@inline _bin_coord(
+    x::NTuple{D,T}, lo::NTuple{D,T}, h::NTuple{D,T}, wrap::NTuple{D,Bool}, nbins::NTuple{D,Int},
+) where {D,T} = ntuple(Val(D)) do d
+    @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - lo[d]) / h[d]))
+    @inbounds wrap[d] ? mod(b, nbins[d]) : b
 end
+
+@inline _bin_of(ix::CellListIndex{D,T}, x::NTuple{D,T}) where {D,T} =
+    _bin_coord(x, ix.lo, ix.h, ix.wrap, ix.nbins)
 
 # A cheap integer mix. Only the bucket assignment depends on it: a collision costs a few extra items to
 # skip, never a wrong answer, because the bin coordinate is compared before a point is emitted.
@@ -146,13 +153,8 @@ function _build_cell_list(
     everything = !active_only || mask(grid) isa AllActive
     n = everything ? length(cells(grid)) : count(mask(grid))
 
-    @inline function binof(c)
-        x = map(T, embedded_at(grid, cell_at(grid, c)))
-        return ntuple(Val(D)) do d
-            @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - lo[d]) / hd[d]))
-            @inbounds wrap[d] ? mod(b, nbins[d]) : b
-        end
-    end
+    @inline binof(c) =
+        _bin_coord(map(T, embedded_at(grid, cell_at(grid, c))), lo, hd, wrap, nbins)
 
     nbucket = max(1, nextpow(2, max(n, 1)))
     counts = zeros(Int, nbucket + 1)
@@ -406,9 +408,8 @@ Extension hook: the cells an index reports near `I`, as linear indices. It must 
 the cells within `r`; the caller applies the exact distance gate, so over-returning is safe and
 under-returning is not.
 
-`index_within!` overwrites and returns `buffer`, which is how a sweep over many cells avoids one heap
-allocation per query — nothing at all, against 480 bytes on a small ball and 6.1 KB on a 310-candidate
-one. `index_within` is the same query into a fresh vector.
+`index_within!` overwrites and returns `buffer`, so a sweep over many cells allocates nothing per
+query. `index_within` is the same query into a fresh vector.
 """
 function index_within!(buffer::AbstractVector{<:Integer}, index, grid, I, r)
     throw(ArgumentError("no `index_within!` method for $(typeof(index)); build one with `spatial_index`"))
@@ -420,8 +421,8 @@ index_within(index, grid, I, r) = index_within!(Int[], index, grid, I, r)
     _voronoi_tessellation(geometry, x, y) -> (areas, mesh::CellMesh)
 
 Extension hook: exact per-node Voronoi-cell area from a Delaunay/convex-hull tessellation of the node
-coordinates, AND the triangulation it came from. Dispatched on the geometry type (each needs a
-different tessellation library): overridden for `CartesianGeometry` by a consumer
+coordinates, together with the triangulation it came from. Dispatched on the geometry type (each needs
+a different tessellation library): overridden for `CartesianGeometry` by a consumer
 DelaunayTriangulation extension (load `using DelaunayTriangulation`, planar Voronoi clipped to the
 point set's convex hull) and for `SphericalGeometry` by a consumer Quickhull extension (load
 `using Quickhull`, spherical Voronoi from the dual of the 3D convex hull of the unit-sphere embedding).

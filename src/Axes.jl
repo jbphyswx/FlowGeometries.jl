@@ -67,8 +67,8 @@ and `Base.length` — and everything else here follows: indexing, the `O(1)` red
 reversal, and the affine arithmetic. None of the generic methods touch a field, so a subtype may store
 whatever it likes under whatever names.
 
-Implement [`similar_axis`](@ref) as well to have derived axes keep the subtype; without it they come
-back as a plain `UniformAxis`.
+Implement [`similar_axis`](@ref) as well to have derived axes keep the subtype; the fallback returns a
+plain `UniformAxis`.
 """
 abstract type AbstractUniformAxis{T} <: AbstractRange{T} end
 
@@ -93,9 +93,8 @@ Preferred over `range`/`StepRangeLen` for a grid axis:
 
 - `range(0f0; step = 0.1f0, length = n)` is a `StepRangeLen{Float32, Float64, Float64, Int}` — Float32
   elements over a Float64 offset and step. `UniformAxis{T}` computes in `T` throughout.
-- `StepRangeLen`'s `TwicePrecision` arithmetic costs measurably for exactness a grid axis does not
-  need. Over 2×10⁶ reads it is 24.0 ms against 16.6 ms here for `cos(x[i])`, and 4.40 ms against
-  1.82 ms for the adjacent-gap pattern the grid's per-cell width kernel uses.
+- `StepRangeLen` indexes through `TwicePrecision` arithmetic, buying an exactness a grid axis does not
+  need; `UniformAxis` indexes with one multiply and one add.
 - `isbits`, so moving an axis to another storage backend is free.
 
 `Δ` may be negative, for a descending axis. `n` must be non-negative.
@@ -103,8 +102,8 @@ Preferred over `range`/`StepRangeLen` for a grid axis:
 Unlike `LinRange` this does not pin `last` to a prescribed endpoint: on a grid the spacing is the
 primary datum.
 
-An `AbstractRange`: that gets Base's O(1) `searchsorted` (flat 42 ns over `n = 10 … 10⁷`, against
-35→69 ns as an `AbstractVector`) and `isa AbstractRange` dispatch from other packages.
+An `AbstractRange`: that gets Base's `searchsorted` in closed form, so a lookup is `O(1)` in the axis
+length, and `isa AbstractRange` dispatch from other packages.
 """
 struct UniformAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
     origin::T
@@ -271,7 +270,7 @@ uniform_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = throw(Argu
 """
     AbstractAnalyticAxis{T} <: AbstractVector{T}
 
-An axis whose coordinate is a FORMULA of its index, and whose formula inverts in closed form.
+An axis whose coordinate is a formula of its index, and whose formula inverts in closed form.
 
 The third axis kind. An [`AbstractUniformAxis`](@ref) carries a constant spacing in its type; a plain
 `Vector` has nothing but its samples. A stretched vertical coordinate is neither: the spacing genuinely

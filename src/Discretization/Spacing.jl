@@ -19,10 +19,10 @@ index-versus-coordinate direction: composed with `nonuniform_first_derivative` t
 derivative with respect to the coordinate whichever way the axis is stored. [`cell_width`](@ref) drops
 the sign, a width being a length.
 
-`period`, if given (e.g. `2π` for a periodic longitude axis), makes the boundary gaps *wrap* instead
-of vanishing: at `i == 1`, `h_m` is the gap to the unwrapped previous point `x[n]-period`; at
-`i == n`, `h_p` is the gap to the unwrapped next point `x[1]+period`. Pass `nothing` (the default) for
-a non-periodic axis, where a boundary gap is zero and the caller falls back to a one-sided stencil.
+`period`, if given (e.g. `2π` for a periodic longitude axis), makes the boundary gaps *wrap*: at
+`i == 1`, `h_m` is the gap to the unwrapped previous point `x[n]-period`; at `i == n`, `h_p` is the gap
+to the unwrapped next point `x[1]+period`. Pass `nothing` (the default) for a non-periodic axis, where
+a boundary gap is zero and the caller falls back to a one-sided stencil.
 
 `Grids.local_spacing` is this on a grid direction, taking the period from the grid itself.
 """

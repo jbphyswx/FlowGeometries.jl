@@ -91,9 +91,8 @@ function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:Abstr
         z = one(T) - T(iring * iring) / fact2
         ϕ = (T(iphi) - T(0.5)) * T(π) / (T(2) * T(iring))
     elseif ipix < (npix - ncap)
-        # Every equatorial ring holds 4·nside pixels, so the ring index advances per nl4 — not per
-        # nl2, which would invent twice as many half-width rings. `fodd` staggers alternate rings by
-        # half a pixel: 1 when (iring+nside) is odd, 1/2 when even.
+        # Every equatorial ring holds 4·nside pixels, so the ring index advances per nl4. `fodd`
+        # staggers alternate rings by half a pixel: 1 when (iring+nside) is odd, 1/2 when even.
         ip = ipix - ncap
         tmp = ip ÷ nl4
         iring = tmp + nside
@@ -127,7 +126,7 @@ const _HP_JPLL = (1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7)
 @inline _hp_special_div(a::Int, b::Int) = (t = Int(a ≥ (b << 1)); a2 = a - t * (b << 1); (t << 1) + Int(a2 ≥ b))
 
 @inline function _hp_ncap(nside::Int)
-    # Pixels in the north polar cap ABOVE the ring at iring == nside, as the RING↔XYF conversion
+    # Pixels in the north polar cap above the ring at iring == nside, as the RING↔XYF conversion
     # needs it. Distinct from the classic 2 nside (nside+1) cap count used for pixel centers.
     return 2 * nside * (nside - 1)
 end
@@ -278,7 +277,7 @@ end
     _hp_ang2xyf(nside, θ, ϕ) -> (ix, iy, face)
 
 Face-local coordinates of the pixel containing colatitude `θ`, longitude `ϕ`, by the HEALPix projection
-(Górski et al. 2005). Division and remainder, so it holds for any `nside`; shift and mask would need a
+(Górski et al. 2005). Division and remainder, so it holds for any `nside`, including one that is not a
 power of two.
 """
 function _hp_ang2xyf(nside::Int, θ::T, ϕ::T) where {T<:AbstractFloat}
@@ -346,7 +345,7 @@ end
 
 The 0-based index of the pixel containing colatitude `θ ∈ [0, π]` and longitude `ϕ`.
 
-`θ` is a COLATITUDE, matching the HEALPix convention throughout this section; use
+`θ` is a *colatitude*, matching the HEALPix convention throughout this section; use
 [`colatitude`](@ref) to convert a geographic latitude.
 """
 function ang2pix(nside::Integer, θ::Real, ϕ::Real; scheme::RingScheme = Ring())

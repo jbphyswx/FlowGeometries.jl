@@ -17,8 +17,8 @@ supply: the corner-area kernel is a 2-D algorithm with no N-D generalization her
 
 # Type parameters
 - `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
-  raises a type error. `T` therefore precedes `G`, Julia forbidding the forward reference
-  `G<:AbstractGeometry{T}, T` a `{G,T}` order would need.
+  raises a type error. `T` therefore precedes `G`: Julia binds type parameters left to right, and
+  `G<:AbstractGeometry{T}` requires `T` already bound.
 - `N`: number of coordinate directions.
 - `C`: tuple type of the center coordinate arrays.
 - `KC`: tuple type of the cell-vertex arrays, or `Nothing` where they were not retained.
@@ -218,11 +218,9 @@ end
 
 # Exact spherical quadrilateral area, as the two triangles (p1,p2,p3) and (p1,p3,p4).
 #
-# Each corner's unit vector is computed ONCE — every interior vertex is shared by four cells and,
-# within a cell, by both triangles, so deriving it per triangle would repeat the same trig up to
-# eight times over. Only two ROWS of them are ever live at a time, though: row j is finished as soon
-# as row j+1's cells are done. Holding the whole `(Nx+1)×(Ny+1)` field instead costs O(Nx·Ny) for no
-# extra reuse.
+# Each corner's unit vector is computed once and reused: every interior vertex is shared by four cells
+# and, within a cell, by both triangles. Two rows are live at a time — row j is finished as soon as
+# row j+1's cells are done — so the buffer holds two rows, `O(Nx)`.
 function _corner_areas(
     geometry::G, λc::AbstractMatrix{T}, φc::AbstractMatrix{T}, Nx::Integer, Ny::Integer;
     backend = nothing,

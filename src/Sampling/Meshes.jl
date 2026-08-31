@@ -18,7 +18,7 @@ end
 """
     _cubed_cell_angles(::Type{T}, n, i, j) -> (ξ, η)
 
-Panel-local gnomonic angles of cell `(i, j)`'s CENTRE: `ξ = -π/4 + (i - ½)·(π/2)/n`.
+Panel-local gnomonic angles of cell `(i, j)`'s centre: `ξ = -π/4 + (i - ½)·(π/2)/n`.
 """
 @inline function _cubed_cell_angles(::Type{T}, n::Int, i::Int, j::Int) where {T<:AbstractFloat}
     Δ = T(π) / 2 / T(n)
@@ -28,7 +28,7 @@ end
 """
     _cubed_cell_edges(::Type{T}, n, i, j) -> (X1, X2, Y1, Y2)
 
-Tangents of cell `(i, j)`'s panel-local BOUNDARY angles, `-π/4 + (i-1)·Δ` and `-π/4 + i·Δ`. These are
+Tangents of cell `(i, j)`'s panel-local boundary angles, `-π/4 + (i-1)·Δ` and `-π/4 + i·Δ`. These are
 the gnomonic-plane coordinates its area is the solid angle of.
 """
 @inline function _cubed_cell_edges(::Type{T}, n::Int, i::Int, j::Int) where {T<:AbstractFloat}
@@ -40,7 +40,7 @@ end
 """
     cubed_sphere_points!(λ, φ, panel, n; backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
 
-Gnomonic cubed-sphere CELL CENTRES into caller-owned buffers of length `6n²`, plus each point's panel
+Gnomonic cubed-sphere cell centres into caller-owned buffers of length `6n²`, plus each point's panel
 index. Pass `panel = nothing` when the panel id is not wanted, and it is not computed.
 
 See [`cubed_sphere_points`](@ref) for the allocating form.
@@ -94,7 +94,7 @@ end
 """
     cubed_sphere_points([T = Float64], n; backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
 
-Gnomonic cubed-sphere CELL CENTRES: `6n²` distinct points, plus each point's panel index.
+Gnomonic cubed-sphere cell centres: `6n²` distinct points, plus each point's panel index.
 
 Allocating wrapper around [`cubed_sphere_points!`](@ref). Use
 [`spherical_points`](@ref)`(CubedSphereSampling(), n)` when the panel id is not needed.
@@ -150,7 +150,7 @@ end
 """
     _yin_yang_panel_coords(::Type{T}, nlon, nlat, i, j) -> (λ, φ)
 
-Cell `(i, j)`'s centre in a panel's OWN frame, where the panel is the separable lat–lon patch
+Cell `(i, j)`'s centre in the panel's own frame, where the panel is the separable lat–lon patch
 `[-3π/4, 3π/4] × [-π/4, π/4]`. For yin this frame is the global one.
 """
 @inline function _yin_yang_panel_coords(

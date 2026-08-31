@@ -109,7 +109,7 @@ end
 The index of the axis sample closest to `v`, clamped into range. Unlike [`locate`](@ref) this always
 returns a valid index, since a nearest sample exists for any `v`.
 
-Exact ties go to the LOWER index, and the uniform closed form and the general bisection agree on
+Exact ties go to the lower index, and the uniform closed form and the general bisection agree on
 that, so the two paths never disagree. `O(1)` on a uniform axis, `O(log n)` on a stretched one.
 """
 function nearest_index(x::AbstractVector{T}, v::Real) where {T<:AbstractFloat}

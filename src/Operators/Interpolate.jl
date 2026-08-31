@@ -21,7 +21,7 @@ The mask policies say what an inactive contributor means, as they do for a stenc
 [`ReduceInRun`](@ref) renormalizes over the active ones. [`ShiftWithinRun`](@ref) has no meaning here,
 there being no window to shift, and says so.
 
-A field carrying trailing BATCH axes beyond the grid's own — many tracers, or an ensemble, sharing one
+A field carrying trailing batch axes beyond the grid's own — many tracers, or an ensemble, sharing one
 geometry — is evaluated for every element in one call: see [`interpolate!`](@ref) for the form that
 writes into a caller's buffer, which this one wraps.
 """

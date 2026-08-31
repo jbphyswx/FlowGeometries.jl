@@ -8,7 +8,7 @@ using FlowGeometries.Grids: Grids
 # convex hull of the unit-sphere embedding, so a node's cell is the spherical polygon through the
 # circumcenters of its incident hull facets.
 #
-# Everything stays in UNIT VECTORS from hull to area. The circumcenters come out of the hull as
+# Everything stays in unit vectors from hull to area. The circumcenters come out of the hull as
 # directions already, so converting them to (λ, φ) only to have the area formula convert them back
 # costs four transcendentals per (node, facet) pair and buys nothing.
 
@@ -52,9 +52,8 @@ function Grids._voronoi_tessellation(
     fs = QH.facets(hull)
     nf = length(fs)
 
-    # `facets` is a lazy mapped view that rebuilds a face object on EVERY element access, so the
-    # three passes below would each pay for it. Materialize the vertex indices once into a plain
-    # contiguous 3×nf block and read that instead.
+    # `facets` is a lazy mapped view that rebuilds a face object on each element access, and three
+    # passes below read it. Materialize the vertex indices once into a contiguous 3×nf block.
     fv = Matrix{Int}(undef, 3, nf)
     @inbounds for (fi, f) in enumerate(fs)
         fv[1, fi] = f[1]
@@ -123,11 +122,11 @@ function Grids._voronoi_tessellation(
         end
         areas[i] = Geometry.radius(geo)^2 * A
     end
-    # The hull's facets ARE the mesh's cells and `ptr`/`adj` is already the node→cell transpose, both
+    # The hull's facets are the mesh's cells and `ptr`/`adj` is already the node→cell transpose, both
     # built above for the areas.
     #
-    # The narrowest integer that indexes this node set types the IDS — node numbers in `cell_nodes`,
-    # facet numbers in `adj`, both bounded by the counts they name. The two OFFSET arrays run to the
+    # The narrowest integer that indexes this node set types the ids — node numbers in `cell_nodes`,
+    # facet numbers in `adj`, both bounded by the counts they name. The two offset arrays run to the
     # entry count, `3·nf ≈ 6N`, so they stay `Int`: there are `O(n)` of them against the ids' `O(n)`
     # either way, and every traversal of the mesh reads the ids.
     I = N ≤ typemax(Int32) ? Int32 : Int

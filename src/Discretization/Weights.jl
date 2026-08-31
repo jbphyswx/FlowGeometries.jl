@@ -42,7 +42,7 @@ cell near a mask edge, and holds these buffers across all of them.
 ) where {T<:AbstractFloat} = _fd_weights!(w, c, nodes, length(nodes), x₀, order)
 
 # The node count is separate from `length(nodes)` so a caller holding an oversized buffer can use its
-# first `n` entries without a `view`, which the degrade path would allocate once per cell it rebuilds.
+# first `n` entries without a `view`, keeping the degrade path allocation-free per cell it rebuilds.
 function _fd_weights!(
     w::AbstractVector{T}, c::AbstractMatrix{T}, nodes::AbstractVector{T}, n::Int, x₀::Real,
     order::Integer,
@@ -97,9 +97,9 @@ end
 
 Weights for the `order`-th derivative at sample `i` of axis `x`, using `nodes` of its samples.
 
-The stencil is centred on `i` where the axis allows and shifted inward at a boundary, so the accuracy
-order is the same everywhere — a clipped stencil would silently drop to first order at the two ends.
-Built on the arbitrary-node form above, so a stretched axis costs nothing extra.
+The stencil is centred on `i` where the axis allows and shifted inward at a boundary, holding the
+accuracy order at the two ends as well as the interior. Built on the arbitrary-node form above, so a
+stretched axis costs nothing extra.
 """
 function fd_weights(
     x::AbstractVector{T}, i::Integer, order::Integer, nodes::Integer,

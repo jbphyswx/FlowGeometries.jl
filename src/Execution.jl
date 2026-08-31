@@ -133,8 +133,8 @@ One element of a buffer that may not be host memory.
 Write the exclusive prefix sums of `counts` into `out`, which is one element longer: `out[1] = init` and
 `out[i+1] = out[i] + counts[i]`.
 
-This is a CSR offset array — `out[k]` is where row `k` starts and `out[end] - init` is the total — which
-is what every connectivity builder here needs between its counting pass and its filling pass. Under a
+This is a CSR offset array — `out[k]` is where row `k` starts and `out[end] - init` is the total — and
+every connectivity builder here calls it between its counting pass and its filling pass. Under a
 threaded `backend` it is two passes over `counts` plus a serial scan of one sum per chunk.
 """
 function exclusive_scan!(

@@ -119,7 +119,7 @@ Because the index cannot be built per query, [`Connectivity.foreach_within`](@re
 
 [`Connectivity.ball_scratch`](@ref) supplies the candidate buffer, which takes an indexed query to zero
 allocation whatever the grid size, against 480 bytes on a small ball and 6.1 KB on a 310-candidate one
-without it.
+when the query allocates its own.
 
 ## Quadrature
 

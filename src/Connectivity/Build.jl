@@ -130,7 +130,7 @@ function _build_connectivity_topology(
         _topology_fill(Int, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), backend)
 end
 
-# The filling pass, entered with the CSR's width as a TYPE parameter, so both buffers and every read
+# The filling pass, entered with the CSR's width as a type parameter, so both buffers and every read
 # of them are concrete here — see `_csr_total`.
 function _topology_fill(
     ::Type{I}, total::Int, t, deg, n::Int, ci, offs, sz, per, active_only::Bool, ::Val{N}, backend,
