@@ -96,9 +96,12 @@ end
 # The build pass and the query pass must place a point in the same bin, so both reach the lattice
 # through this one expression: a cell binned one way and looked up another is a cell a query never
 # returns.
+#
+# The coordinate tuples carry no element-type parameter: `NTuple{0,T}` is `Tuple{}`, which names no
+# `T`, so a signature binding one is unbound at `D == 0` (`Test.detect_unbound_args`).
 @inline _bin_coord(
-    x::NTuple{D,T}, lo::NTuple{D,T}, h::NTuple{D,T}, wrap::NTuple{D,Bool}, nbins::NTuple{D,Int},
-) where {D,T} = ntuple(Val(D)) do d
+    x::NTuple{D}, lo::NTuple{D}, h::NTuple{D}, wrap::NTuple{D,Bool}, nbins::NTuple{D,Int},
+) where {D} = ntuple(Val(D)) do d
     @inbounds b = Base.unsafe_trunc(Int, floor((x[d] - lo[d]) / h[d]))
     @inbounds wrap[d] ? mod(b, nbins[d]) : b
 end
