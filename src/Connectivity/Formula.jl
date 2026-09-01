@@ -92,9 +92,14 @@ The adjacency of a layout whose neighbours are arithmetic, materialized.
 Count, scan, fill — the same three passes the index-stencil builder makes, and for the same reason: both
 cell passes write only slots their own cell owns, so they carry no running offset and need no
 coordination. The adjacency is a per-cell formula, so the whole shape it takes is that formula's.
+
+A formula fixes the neighbour set, so `stencil` selects nothing here. The generic entry point resolves
+[`Grids.adjacency_source`](@ref) and forwards one keyword set to whichever builder it lands on, so this
+one absorbs the keywords that shape the others, as [`Grids.StoredMeshNeighbors`](@ref) does.
 """
 function build_connectivity(
     grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true, backend = nothing,
+    _...,
 )
     n = length(Grids.mask(grid))
     # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill

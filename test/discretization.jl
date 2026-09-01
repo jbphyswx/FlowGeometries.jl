@@ -708,6 +708,32 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
                                  areas = ones(8))
         Test.@test_throws ArgumentError O.gradient_plan(g4)
     end
+
+    # `gradient_plan` forwards `stencil` to `build_connectivity` for every architecture, so each
+    # builder accepts it whether or not its adjacency is a stencil shape. A formula layout's adjacency
+    # is arithmetic, and the plan is still built.
+    let sphere = GE.SphericalGeometry()
+        for g in (GD.HEALPixGrid(4), GD.CubedSphereGrid(8), GD.IcosahedralGrid(4),
+                  GD.YinYangGrid(16, 8),
+                  GD.RingGrid(FG.SphericalSampling.OctahedralGaussianSampling(8)))
+            Test.@test GD.adjacency_source(g) isa GD.FormulaNeighbors
+            p = O.gradient_plan(g)
+            Test.@test O.ncomponents(p) == 2
+            # Every cell keeps the neighbours its formula gives it. A degree-0 row reads zero gradient
+            # everywhere and passes a test that only checks for an exception.
+            Test.@test minimum(p.ptr[i + 1] - p.ptr[i] for i in 1:length(GD.mask(g))) ≥ 2
+            # The keyword names offsets this architecture has none of, so it selects nothing.
+            Test.@test O.gradient_plan(g; stencil = FG.Stencils.Moore(2)).nbr == p.nbr
+        end
+        # `sin φ` has gradient magnitude `cos(φ)/R`, recovered to the grid's own resolution.
+        g = GD.HEALPixGrid(32)
+        n = length(GD.mask(g))
+        lat = [GD.coords(g, i).φ for i in 1:n]
+        q1 = zeros(n); q2 = zeros(n)
+        O.gradient!(q1, q2, sin.(lat), O.gradient_plan(g))
+        R = GE.radius(sphere)
+        Test.@test maximum(abs.(sqrt.(q1 .^ 2 .+ q2 .^ 2) .* R .- cos.(lat))) < 0.02
+    end
 end
 
 Test.@testset "The symmetric pseudo-inverse satisfies the Moore-Penrose conditions" begin
