@@ -17,9 +17,9 @@ components alone.
 `pt` brought to the image nearest `p0`, per component, for each direction with a nonzero wrap length.
 
 For an angular coordinate the geometry's own distance is already `2π`-periodic and this changes nothing
-(it also keeps Vincenty inside its `|Δλ| ≤ π` regime); for a periodic Cartesian coordinate it is what
-makes the seam invisible. Per-component minimum image is the global minimum for a separable metric,
-which the Euclidean one is.
+(it also keeps Vincenty inside its `|Δλ| ≤ π` regime); on a periodic Cartesian coordinate it carries a
+pair across the seam. Per-component minimum image is the global minimum for a separable metric, which
+the Euclidean one is.
 """
 @inline function _min_image(p0::NTuple{N,Any}, pt::NTuple{N,Any}, prd::NTuple{N,Any}) where {N}
     return ntuple(Val(N)) do d

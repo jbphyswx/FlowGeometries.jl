@@ -24,8 +24,8 @@ function apply_stencil!(
 end
 
 # The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
-# past the last sample the pair is `(n, 1)` across the seam, where `interpolation_weights` alone would
-# clamp and return the endpoint value.
+# past the last sample the pair is `(n, 1)` across the seam. `interpolation_weights` alone clamps to
+# the endpoint value there.
 @inline function _interp_pair(grid::Grids.StructuredGrid{T, G,N}, d::Int, v::T) where {G,T,N}
     x = Grids.coordinates(grid, d)
     n = length(x)

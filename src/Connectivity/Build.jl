@@ -155,9 +155,9 @@ function _topology_fill(
     return csr_connectivity(nbrs, ptr; validate = false)
 end
 
-# A sweep is where an index pays for itself — it amortizes over `n` rows, where a single query would
-# pay `O(n log n)` to save one `O(n)` scan. So this builds one by default when one can be built, which
-# turns the whole build from `O(n²)` into `O(n log n)`. `topology` overrides that either way.
+# A sweep amortizes an index over `n` rows, so this builds one by default where one can be built, and
+# the whole build is `O(n log n)` against the `O(n²)` of a scan per row. A single query costs
+# `O(n log n)` to build and saves one `O(n)` scan. `topology` overrides the default either way.
 #
 # Which default applies is `Grids.candidate_source`: a separable window needs no index to be `O(1)` per
 # row, and everything else amortizes one.

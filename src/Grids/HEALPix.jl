@@ -113,8 +113,8 @@ coordinates(grid::HEALPixGrid) = throw(ArgumentError(
 
 # ---- measure ----------------------------------------------------------------
 
-# Equal-area is what the pixelization is for: every pixel is the sphere's area over the pixel count, so
-# the measure is one number and a length, not `npix` copies of it.
+# Every pixel carries the sphere's area over the pixel count, so the measure is one number and a
+# length.
 @inline measure(grid::HEALPixGrid{T}) where {T} =
     Axes.ConstantVector(T(4π) * T(Geometry.radius(grid_geometry(grid)))^2 / T(npixels(grid)),
                         npixels(grid))
