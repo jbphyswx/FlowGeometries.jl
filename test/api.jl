@@ -4,8 +4,8 @@ Test.@testset "No method ambiguities or unbound static parameters" begin
 end
 
 Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
-    # An out-of-range index must error rather than read past the end of the array. `@boundscheck`
-    # is elided at an `@inbounds` call site, so a hot loop still pays nothing.
+    # An out-of-range index errors. `@boundscheck` is elided at an `@inbounds` call site, so a hot
+    # loop still pays nothing.
     geom = FG.Geometry.CartesianGeometry()
     g = FG.Grids.StructuredGrid(geom, 0.0:1.0:4.0, 0.0:1.0:3.0, trues(5, 4))
     Test.@test_throws BoundsError FG.Grids.measure(g, 99, 99)
@@ -66,7 +66,7 @@ Test.@testset "Public names the suite had not been calling" begin
     Test.@test C.nnodes(csr) == 3 && C.nedges(csr) == 4
     Test.@test collect(csr.nbrs[csr.ptr[2]:(csr.ptr[3] - 1)]) == [1, 3]
     Test.@test C.is_symmetric_adjacency(csr)
-    # …and it validates, rather than trusting the buffers.
+    # …and it validates the buffers it is handed.
     Test.@test_throws ArgumentError C.csr_connectivity([1], [2, 2])        # ptr[1] != 1
     Test.@test_throws ArgumentError C.csr_connectivity([1, 2], [1, 2])     # length mismatch
 
@@ -118,10 +118,10 @@ Test.@testset "Asking for an element type gives back that element type, knowably
     ic = SS.IcosahedralSampling(2)
     rg = SS.OctahedralGaussianSampling(8)
 
-    # Every entry point that builds values of a chosen element type, inferred with the OTHER
-    # arguments left non-constant. Passing the type as a keyword instead of positionally makes
-    # each of these come back abstract, which then propagates into the caller's own inference —
-    # the reason the whole set takes it positionally.
+    # Every entry point that builds values of a chosen element type, inferred with the remaining
+    # arguments left non-constant. The whole set takes the type positionally: as a keyword it takes
+    # no part in dispatch, and each of these then returns abstract, which propagates into the
+    # caller's own inference.
     for W in (Float64, Float32)
         for (name, f, rest) in (
             ("_gauss_legendre_μ",   t_gl,    Tuple{Int}),
@@ -152,10 +152,10 @@ Test.@testset "Asking for an element type gives back that element type, knowably
         end
     end
 
-    # The two grid constructors are deliberately not in that list. A grid's type records whether
-    # each direction is periodic and whether each axis is uniform, and both are DETECTED from the
-    # axis values, so the type cannot be known before the axes exist. What must still hold is
-    # that the width asked for is the width built — which is a different claim, checked below.
+    # The two grid constructors are absent from that list. A grid's type records whether each
+    # direction is periodic and whether each axis is uniform, and both are detected from the axis
+    # values, so the type cannot be known before the axes exist. The claim that still holds — the
+    # width asked for is the width built — is checked below.
     for W in (Float64, Float32)
         sg = FG.Connectivity.structured_grid(W, gl, 12)
         Test.@test eltype(FG.Grids.axis(sg, 1)) === W
@@ -177,8 +177,8 @@ Test.@testset "Asking for an element type gives back that element type, knowably
     Test.@test FG.Grids.grid_geometry(gsm) === FG.Geometry.SphericalGeometry{Float32}(3.0f6)
     Test.@test eltype(FG.Grids.axis(gsm, 2)) === Float32
 
-    # With no element type named, the GEOMETRY's is the one meant — defaulting to `Float64` here
-    # would quietly rebuild a caller's Float32 geometry at double the width.
+    # With no element type named, the geometry's own is the one meant, so a caller's Float32
+    # geometry keeps its width.
     g32 = FG.Connectivity.structured_grid(gl, 12;
                                           geometry = FG.Geometry.SphericalGeometry(6.371f6))
     Test.@test eltype(FG.Grids.axis(g32, 1)) === Float32
@@ -250,8 +250,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :plan_row, :nnodes, :derivative_order, :axis_length,
     ])
 
-    # Geometry, Axes and Stencils are per-point kernels almost throughout, so each name below is
-    # measured at zero allocation rather than declared to be.
+    # Geometry, Axes and Stencils are per-point kernels almost throughout, so every name below has
+    # its zero-allocation claim measured.
     GEOMETRY_CHECKED = Set([
         :radius, :semimajor_axis, :semiminor_axis, :flattening, :eccentricity²,
         :meridional_radius, :prime_vertical_radius, :as_ntuple, :as_tensor6, :point_names,
@@ -270,9 +270,9 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :ring_info, :admits_exact_bandlimited_quadrature, :nlon_in_ring, :ring_range,
     ])
 
-    # Names whose whole job is to build something, or that name a thing rather than compute one.
+    # Names that build something, and names of things.
     GEOMETRY_NOT_CHECKED = Set(Iterators.flatten((
-        # geometry, axis, stencil and sampling TYPES
+        # geometry, axis, stencil and sampling types
         [:AbstractGeometry, :AbstractCartesianGeometry, :AbstractSphericalGeometry,
          :AbstractEllipsoidalGeometry, :AbstractLonLatGeometry,
          :CartesianGeometry, :SphericalGeometry, :SpheroidGeometry,
@@ -301,9 +301,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         [:build_point],
     )))
 
-    # Adding a public name without putting it in one of the two sets fails this test. That is the
-    # point: what is covered is derived from what the module documents, not from a list someone
-    # remembered to update.
+    # Adding a public name without putting it in one of the two sets fails this test: coverage is
+    # derived from what the module documents.
     NOT_CHECKED_BECAUSE = Set(Iterators.flatten((
         # types and traits
         [:AbstractGrid, :AbstractStructuredGrid, :AbstractCurvilinearGrid, :AbstractUnstructuredGrid,
@@ -320,7 +319,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :MeshNeighbors, :AbstractCellAddress, :CartesianCells, :FlatCells,
          :AbstractAdjacency, :IndexStencilNeighbors, :FormulaNeighbors, :StoredMeshNeighbors,
          :AbstractCandidateSource, :SeparableWindow, :IndexedCandidates],
-        # bulk or one-off operations, not per-cell hot paths
+        # bulk and one-off operations, away from the per-cell hot paths
         [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
          :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
          :sparse_adjacency_coo!, :sparse_adjacency_csc!, :sort_neighbors!, :is_symmetric_adjacency,

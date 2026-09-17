@@ -18,10 +18,8 @@ FG.Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
     ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
 
 # An axis that records how many elements were read from it. Several claims here are about how much of
-# an axis a query touches — "bisects rather than scans", "reads a bounded window" — and a wall-clock
-# threshold is a poor way to assert that: it is decided by a GC pause as much as by the algorithm, and
-# it encodes machine constants that rot. Counting reads states the claim exactly and is deterministic.
-# Wall-clock numbers live in `benchmark/`.
+# an axis a query touches — that it bisects, that it reads a bounded window — and a read count states
+# such a claim exactly and deterministically. Wall-clock numbers live in `benchmark/`.
 mutable struct CountingAxis{T,V<:AbstractVector{T}} <: AbstractVector{T}
     data::V
     reads::Int
@@ -35,10 +33,10 @@ Base.@propagate_inbounds function Base.getindex(c::CountingAxis, i::Int)
 end
 reads(f::F, c::CountingAxis) where {F} = (c.reads = 0; f(); c.reads)
 
-# Element-type entry points, called with NON-constant arguments on purpose. A type given as a keyword
-# takes no part in dispatch, so the moment a call cannot be constant-folded end to end the element
-# type widens to `DataType` and the result comes back abstract — which is why every one of these
-# takes it as a leading positional argument, as `zeros` and `rand` do.
+# Element-type entry points, called with non-constant arguments. A type given as a keyword takes no
+# part in dispatch, so a call that cannot be constant-folded end to end widens the element type to
+# `DataType` and returns an abstract result. Each of these takes the type as a leading positional
+# argument, as `zeros` and `rand` do.
 t_gl(::Type{T}, n) where {T}     = FG.SphericalSampling._gauss_legendre_μ(T, n)
 t_axes(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_axes(T, s, n)
 t_quad(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_quadrature(T, s, n)
@@ -60,8 +58,8 @@ t_sgrid(::Type{T}, s, n) where {T} = FG.Connectivity.structured_grid(T, s, n)
 
 # The HEALPix pixelization as a node set: the layout materialized into dense coordinate vectors and a
 # stored CSR graph. `HEALPixGrid` is how the pixelization is used; this is the explicit "as a cloud"
-# form, and it is what the unstructured code paths below are exercised against — they need a grid whose
-# coordinates and adjacency are DATA, which is exactly what the layout is not.
+# form, and the unstructured code paths below are exercised against it, needing a grid whose
+# coordinates and adjacency are stored data.
 function healpix_node_grid(nside::Integer; geometry = FG.Geometry.SphericalGeometry())
     g = FG.Grids.HEALPixGrid(geometry, nside)
     λ, φ = FG.Grids.materialize(g)
@@ -74,8 +72,8 @@ end
 struct OneSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::OneSphere{T}) where {T} = one(T)
 
-# A geometry whose metric varies along direction 1, which the built-in sphere's never does. It exists to
-# hold the bulk operators to `metric_invariant_directions` rather than to the sphere's own invariance.
+# A geometry whose metric varies along direction 1, which the built-in sphere's never does. It holds
+# the bulk operators to `metric_invariant_directions` alone.
 struct TiltedSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::TiltedSphere{T}) where {T} = one(T)
 FG.Geometry.scale_factors(::TiltedSphere{T}, p::Tuple{Real,Real}) where {T} =
@@ -86,10 +84,10 @@ concrete_return(f::F, argtypes) where {F} =
 
 # The allocation harness. `discretization`, `connectivity` and `allocations` all measure with it, so it
 # sits in the preamble every topic sees. Everything here is an ordinary global: a closure captured
-# into `@allocated` measures itself instead of the function under test.
+# into `@allocated` measures itself.
 
 # Fixed arity, and the cell index travels as a tuple that is splatted inside the callee: forwarding
-# through `args...` allocates 240 bytes on its own, so a vararg harness would measure itself.
+# through `args...` allocates, so a vararg harness measures itself.
 for n in 1:6
     args = [Symbol(:a, i) for i in 1:n]
     @eval function _alloc(f::F, $(args...)) where {F}
@@ -101,9 +99,8 @@ for n in 1:6
     end
 end
 
-# Each entry point is reached through a named top-level function rather than a closure, for the same
-# reason: a closure over a testset local boxes what it captures, and a captured `Module` costs a fixed
-# 144 bytes, so the harness would measure itself instead of the call.
+# Each entry point is a named top-level function. A closure over a testset local boxes what it
+# captures, and a captured `Module` carries a fixed cost, so a closure harness measures itself.
 q_coords(g, I)           = FG.Grids.coords(g, I...)
 q_measure(g, I)          = FG.Grids.measure(g, I...)
 q_active(g, I)           = FG.Grids.isactive(g, I...)
@@ -168,8 +165,8 @@ q_nlon_in_ring(s, r)     = FG.SphericalSampling.nlon_in_ring(s, r)
 q_ring_range(s, r)       = FG.SphericalSampling.ring_range(s, r)
 q_npoints(s)             = FG.SphericalSampling.npoints(s)
 q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; scratch = sc)
-# The HELD-table form. The other overload builds the table per call — that is what `axis_stencils` is
-# for, and it is classified as allocating by contract — so measuring it would measure the table.
+# The held-table form. The other overload builds the table per call and is classified as allocating by
+# contract, so measuring it measures the table.
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
@@ -193,7 +190,7 @@ function check_shape(label, g, I; axes::Bool = true)
     dts = Vector{Float64}(undef, 64)
     mt = FG.Connectivity.MetricTopology(g)
     J = ntuple(d -> I[d] + 1, length(I))
-    # `distance` and `displacement` take a CELL, which is an index tuple or a single integer depending
+    # `distance` and `displacement` take a cell, which is an index tuple or a single integer depending
     # on the layout's `cell_address` — the other entry points here take the indices and splat them.
     cI = FG.Grids._cell_named_by(g, I)
     cJ = FG.Grids._cell_named_by(g, J)
@@ -229,7 +226,7 @@ function check_shape(label, g, I; axes::Bool = true)
         Test.@test a == 0
     end
     for d in 1:FG.Grids.ncoordinates(g)
-        # `spacing` is the constant-spacing accessor and errors on an irregular axis, by design.
+        # `spacing` is the constant-spacing accessor and errors on an irregular axis.
         if axes && FG.Grids.isuniform(g, d)
             a = _alloc(q_spacing, g, d)
             a == 0 || println("    ", label, " / spacing(d=", d, ") -> ", a, " B")

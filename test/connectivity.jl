@@ -219,8 +219,7 @@ Test.@testset "Node-set cell areas are the sampling's own tessellation" begin
     Test.@test all(≈(tot / length(ah)), ah)
     Test.@test sum(ah) ≈ tot rtol = 1e-12
 
-    # A geodesic's dual cells are genuinely non-uniform, so a uniform `4πR²/N` would be silently
-    # wrong: the real dual areas are what it is built with.
+    # A geodesic's dual cells are genuinely non-uniform, and the grid is built from their own areas.
     let g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(4);
                                               geometry = geo)
         a = FG.Grids.measure(g)
@@ -259,7 +258,7 @@ Test.@testset "Icosahedral dual areas are exact and need no tessellation depende
     # smallest cells, and all the rest are hexagons.
     a8 = FG.Grids.measure(FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(8); geometry = geo))
     Test.@test count(x -> x < minimum(a8) * (1 + 1e-9), a8) == 12
-    # A uniform 4πR²/N would be ~±25% wrong here, so it is not the default.
+    # The spread between smallest and largest cell is wide, so a uniform 4πR²/N is no substitute.
     Test.@test minimum(a8) / maximum(a8) < 0.6
 end
 
@@ -307,7 +306,7 @@ Test.@testset "k-d-tree adjacency, open and wrapping" begin
     N = length(xs)
     areas = ones(N)
 
-    # The non-periodic build must work for every input, not only the wrapping one.
+    # The non-periodic build is exercised on the same lattice as the wrapping one.
     g_open = FG.Grids.UnstructuredGrid(cgeo, xs, ys, trues(N); k = 4, areas = areas)
     Test.@test FG.Connectivity.nnodes(FG.Connectivity.build_connectivity(g_open)) == N
     Test.@test all(1 ≤ length(FG.Grids.neighbors(g_open, i)) ≤ 4 for i in 1:N)
@@ -324,7 +323,7 @@ Test.@testset "k-d-tree adjacency, open and wrapping" begin
     Test.@test all(minsep(xs[i], xs[j], L)^2 + minsep(ys[i], ys[j], L)^2 ≈ 1.0
                    for i in 1:N for j in FG.Grids.neighbors(g_per, i))
     Test.@test all(i in FG.Grids.neighbors(g_per, j) for i in 1:N for j in FG.Grids.neighbors(g_per, i))
-    # Wrapping must change the graph, not merely be recorded.
+    # Wrapping changes the graph itself, beyond being recorded on the grid.
     Test.@test any(sort(collect(FG.Grids.neighbors(g_open, i))) != sort(collect(FG.Grids.neighbors(g_per, i)))
                    for i in 1:N)
     # Radius queries honor it too.
@@ -371,7 +370,7 @@ Test.@testset "A symmetric adjacency is read as CSC without transposing a second
     FG.Connectivity.sort_neighbors!(c)
     Test.@test all(issorted(FG.Grids.neighbors(c, i)) for i in 1:FG.Connectivity.nnodes(c))
     Test.@test all(collect(FG.Grids.neighbors(c, i)) == before[i] for i in 1:FG.Connectivity.nnodes(c))
-    # k-nearest adjacency is NOT symmetric in general, so it must not take the shortcut.
+    # A k-nearest adjacency is asymmetric in general, so it takes the transpose path.
     λ = [2π * ((i * 0.6180339887498949) % 1) for i in 1:150]
     φ = [asin(2 * (i / 151) - 1) for i in 1:150]
     ug = FG.Grids.UnstructuredGrid(FG.Geometry.SphericalGeometry(), λ, φ, trues(150); k = 4, areas = ones(150))
@@ -440,7 +439,7 @@ Test.@testset "Spherical Voronoi areas tile the sphere" begin
     Test.@test sum(ai) ≈ 4π * R^2 rtol = 1e-10
     Test.@test minimum(ai) / maximum(ai) < 0.8
 
-    # Float32 all the way through, and a clear error rather than a degenerate hull.
+    # Float32 all the way through, and a named error on a degenerate hull.
     p32 = FG.SphericalSampling.spherical_points(Float32, FG.SphericalSampling.HEALPixSampling(2))
     a32 = FG.Grids._voronoi_areas(FG.Geometry.SphericalGeometry(Float32(R)), p32.λ, p32.φ)
     Test.@test eltype(a32) === Float32
@@ -460,8 +459,8 @@ Test.@testset "Planar Voronoi areas are complete and degeneracy-safe" begin
     Test.@test all(≥(0), a)
     Test.@test 0 < sum(a) < 1.0          # clipped to the hull, inside the unit square
 
-    # A duplicate point is silently dropped by the triangulation, so its slot is never assigned.
-    # It must read as zero, not as whatever happened to be in an `undef` buffer.
+    # A duplicate point is dropped by the triangulation, so its slot is never assigned and reads as
+    # the zero the buffer was created with.
     xd = [0.1, 0.9, 0.5, 0.5, 0.7]
     yd = [0.1, 0.2, 0.9, 0.9, 0.6]
     ad = FG.Grids._voronoi_areas(cgeo, xd, yd)
@@ -469,8 +468,7 @@ Test.@testset "Planar Voronoi areas are complete and degeneracy-safe" begin
     Test.@test all(≥(0), ad)
     Test.@test count(iszero, ad) ≥ 1
 
-    # Degenerate input is rejected up front, by our own precondition, not by an opaque
-    # internal error escaping the triangulator.
+    # Degenerate input is rejected up front by this package's own precondition, with a named error.
     Test.@test_throws ArgumentError FG.Grids._voronoi_areas(cgeo, [0.0, 1.0], [0.0, 1.0])
     Test.@test_throws ArgumentError FG.Grids._voronoi_areas(cgeo, [0.1, 0.2, 0.3, 0.4],
                                                                   [0.1, 0.2, 0.3, 0.4])
@@ -545,8 +543,7 @@ Test.@testset "Distance and displacement between cells honour the topology" begi
     gb = GR.StructuredGrid(geo, range(0.0; step = Δ, length = n),
                            range(0.0; step = Δ, length = 6))
 
-    # The point form on the raw coordinates would give the full extent; across a seam the cells are
-    # one spacing apart.
+    # Across a seam the cells are one spacing apart, taking the minimum image.
     Test.@test GE.distance(gp, (1, 1), (n, 1)) ≈ Δ
     Test.@test GE.distance(gb, (1, 1), (n, 1)) ≈ (n - 1) * Δ
     Test.@test GE.distance(gp, (3, 2), (5, 4)) ≈ sqrt(2 * (2Δ)^2)   # interior is unaffected
@@ -614,8 +611,8 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
         return (num, den, cnt)
     end
 
-    # `rad = 3500 > L` reaches images several turns out, which is what the uncapped window is for:
-    # `metric_window`'s cap at the axis length would drop every one of them.
+    # `rad = 3500 > L` reaches images several turns out, which the uncapped window enumerates;
+    # `metric_window` caps its half-width at the axis length.
     for rad in (1469.0, 3500.0), I in ((1, 1), (5, 9), (17, 32))
         v = fold(I, rad, C.AllImages())
         b = brute(I, rad)
@@ -631,7 +628,7 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
     end
 
     # The physics: filtering one Fourier mode must reproduce the analytic Gaussian transfer.
-    # Projected over the whole field rather than cell-by-cell, since `cos` vanishes at some cells.
+    # Projected over the whole field, since `cos` vanishes at some cells.
     want = exp(-(2π / L)^2 * ℓ^2 / (4α))
     function transfer(rad, conv)
         num = 0.0; den = 0.0
@@ -660,7 +657,7 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
                                                   ball = 2.0e6, images = C.AllImages())
     Test.@test C.fold_within((a, J, d) -> a + 1, 0, gs, 3, 4; ball = 2.0e6) ==
                C.nneighbors_within(gs, 3, 4; ball = 2.0e6)
-    # Nothing periodic ⇒ there are no images, so the request is a no-op rather than an error.
+    # With nothing periodic there are no images, and the request resolves to the plain walk.
     gnp = GR.StructuredGrid(FG.Geometry.CartesianGeometry(), ax, ax)
     Test.@test C.fold_within((a, J, d) -> a + 1, 0, gnp, 5, 5;
                              ball = 300.0, images = C.AllImages()) ==
@@ -682,9 +679,9 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
     φ = collect(range(-π / 2, π / 2; length = nφ))          # poles are rows
     g = GD.StructuredGrid(sph, λ, φ)
 
-    # `metric_band` is the EXACT extent, so it is checked both ways: it must cover every cell of
-    # the row that is genuinely in range, and no cell beyond it may be in range either. A bound
-    # would pass the first and fail the second, which is the whole difference from `metric_window`.
+    # `metric_band` is the exact extent, so it is checked in both directions: it covers every cell
+    # of the row genuinely in range, and no cell beyond it is in range. A mere bound satisfies the
+    # first alone, which is where it parts from `metric_window`.
     dλ = λ[2] - λ[1]
     for frac in (0.02, 0.15, 0.4, 0.9, 1.2), jt in (1, 7, 19, 31, nφ), jn in (1, 5, 18, 30, nφ)
         r = frac * π * R
@@ -700,15 +697,14 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
         end
     end
 
-    # The cases that fall out of the same expression, each of which a caller would otherwise have
-    # to special-case: a pole at either end (where the separation stops depending on longitude),
-    # a band that reaches nothing, and a ball past the antipode.
+    # The cases the one expression covers: a pole at either end, where the separation stops
+    # depending on longitude; a band that reaches nothing; and a ball past the antipode.
     Test.@test C.metric_band(g, 1, 0.0, π / 2, 0.05R) < 0
     Test.@test C.metric_band(g, 1, π / 2 - 0.01, π / 2, 0.05R) ≈ π
     Test.@test C.metric_band(g, 1, π / 2, π / 2, 0.01R) ≈ π
     Test.@test C.metric_band(g, 1, 0.0, 1.4, 0.01R) < 0
     Test.@test C.metric_band(g, 1, 0.0, 0.0, 3.2R) ≈ π
-    # The latitude extent is not the same closed form, and is refused rather than answered wrongly.
+    # The latitude extent has no such closed form, and direction 2 is refused.
     Test.@test_throws ArgumentError C.metric_band(g, 2, 0.0, 0.1, 1.0e5)
 
     # Cartesian: the exact half-chord of a circle at that offset.
@@ -717,8 +713,8 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
         Test.@test C.metric_band(gc, 1, 3.0, 3.0, 2.0) ≈ 2.0
         Test.@test C.metric_band(gc, 1, 3.0, 4.0, 2.0) ≈ sqrt(3.0)
         Test.@test C.metric_band(gc, 1, 3.0, 6.0, 2.0) < 0
-        # The grid-level window is the per-cell one at its worst cell — checked by taking that
-        # maximum, which is the O(N) computation the O(1) form exists to avoid.
+        # The grid-level window equals the per-cell one at its worst cell, checked against that
+        # maximum taken the O(N) way.
         Test.@test C.metric_window(gc, 2.0) ==
                    ntuple(d -> maximum(C.metric_window(gc, (i, j), 2.0)[d] for i in 1:41, j in 1:41), 2)
     end
@@ -805,8 +801,8 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
                                   asin.(range(-1, 1; length = 9)))
     Test.@test agrees(g2s, (4, 8), 2.0e6)
     Test.@test agrees(g2s, (16, 2), 3.0e6)
-    # 3-D is the CHORD metric, shorter than the arc — a window derived for arcs under-covers it,
-    # which is what the near-antipodal radii on the unit shell probe.
+    # 3-D carries the chord metric, shorter than the arc, so a window derived for arcs under-covers
+    # it. The near-antipodal radii on the unit shell are where that gap is widest.
     g3 = FG.Grids.StructuredGrid(sph, λ, φ, range(R, R + 3e5; length = 4))
     for (I, r) in (((5, 7, 2), 2.0e6), ((1, 13, 1), 1.0e6), ((3, 7, 4), 1.5e5))
         Test.@test agrees(g3, I, r)
@@ -904,8 +900,8 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
 end
 
 Test.@testset "An arc longer than half the sphere still finds every node" begin
-    # `2sin(σ/2)` is the chord of an arc σ, and it turns back down past σ = π: a query radius built
-    # from it without a clamp SHRINKS as the requested arc grows, and vanishes at σ = 2π.
+    # `2sin(σ/2)` is the chord of an arc σ, and it turns back down past σ = π, reaching zero at
+    # σ = 2π. The conversion clamps at the diameter so the radius stays monotone in the arc.
     R = 6.371e6
     geo = FG.Geometry.SphericalGeometry(R)
     λ = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
@@ -928,18 +924,17 @@ end
 
 Test.@testset "A ball query recomputes no grid invariant" begin
     C = FG.Connectivity
-    # `MetricTopology` carries the per-direction minimum steps, so bounding the candidate window is
-    # O(1) per direction on a stretched axis rather than a scan of the axis per query.
+    # `MetricTopology` carries the per-direction minimum steps, so bounding the candidate window on
+    # a stretched axis is O(1) per direction, with no per-query scan of the axis.
     geo = FG.Geometry.CartesianGeometry{Float64}()
-    # Spacing ~1 whatever `n` is, so a fixed radius spans a fixed number of cells and any growth in
-    # per-query cost is overhead rather than more candidates.
+    # Spacing ~1 whatever `n` is, so a fixed radius spans a fixed number of cells and the candidate
+    # count stays put as `n` grows.
     function stretched(n)
         x = cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n)))
         return FG.Grids.StructuredGrid(geo, x, trues(n))
     end
-    # What "O(1) per direction rather than a scan" means is that the candidate WINDOW does not
-    # grow with the axis, so that is what is asserted — the window itself, not how long it took
-    # to bound. `metric_window` returns the half-width the traversal will walk.
+    # The claim is that the candidate window does not grow with the axis, so the window itself is
+    # what the assertion reads. `metric_window` returns the half-width the traversal will walk.
     wins = map((256, 4096)) do n
         g = stretched(n)
         mt = C.MetricTopology(g)
@@ -989,9 +984,9 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
         [q for _ in 1:nλ, _ in 1:nφ, q in range(6.371e6, 1.02 * 6.371e6; length = nr)],
         fill(1.0, nλ, nφ, nr), trues(nλ, nφ, nr),
     )
-    # A spheroid, where the ECEF chord the index searches is a LOWER bound on the Vincenty geodesic
-    # the gate applies: the index over-returns, which is what it is allowed to do, and the answer is
-    # still exactly the scan's.
+    # A spheroid, where the ECEF chord the index searches is a lower bound on the Vincenty geodesic
+    # the gate applies. The index over-returns, as its contract allows, and the answer still matches
+    # the scan's cell for cell.
     spd = FG.Geometry.SpheroidGeometry(6.378137e6, 1 / 298.257223563)
     λ2 = [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11]
     φ2 = [f for _ in 1:20, f in range(-1.2, 1.2; length = 11)]
@@ -1033,7 +1028,7 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
         s = C.ball_scratch()
         cl = C.MetricTopology(g; index = GD.cell_list(g; ball = r))
         for I in seeds
-            # The same SET of cells. Order is whatever enumerated them — a window, a tree and a cell
+            # The same set of cells. Order is whatever enumerated them — a window, a tree and a cell
             # list each walk their own way — and no entry point sorts.
             scan = sort(C.neighbors_within(g, I...; ball = r))
             for top in (ix, cl)
@@ -1068,10 +1063,9 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
         Test.@test C.nneighbors_within(gu, idx; ball = r, topology = ixu) == length(scan)
     end
 
-    # Cost: fixed radius, growing n. The scan offers every cell as a candidate; the index must
-    # offer a bounded set. That is the claim, and it is a COUNT — countable exactly through the
-    # public fold, which hands the caller each candidate. A clock would answer the same question
-    # nondeterministically and be decided by whether a collection landed in the sample.
+    # Cost: fixed radius, growing n. The scan offers every cell as a candidate; the index offers a
+    # bounded set. The claim is a count, taken exactly through the public fold, which hands the
+    # caller each candidate.
     # Each index enumerates its candidates its own way — a cell list folds, a tree fills a buffer,
     # because it has to deduplicate the periodic images it searched. Count through whichever it is.
     candidates(g, ix::GD.CellListIndex, r, I) = GD.fold_candidates(0, ix, g, I, r) do acc, _k
@@ -1079,21 +1073,21 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
     end
     candidates(g, ix, r, I) = length(GD.index_within!(Int[], ix, g, I, r))
     small, big = curv(24), curv(96)                      # 576 vs 9216 cells, 16× more
-    # `curv` spans the same extent at every `n`, so the radius has to shrink with the spacing to
-    # hold the ball at a fixed cell count — otherwise what grows is the answer, not the overhead.
+    # `curv` spans the same extent at every `n`, so the radius shrinks with the spacing to hold the
+    # ball at a fixed cell count, leaving the candidate count as the only thing under test.
     cells = 2.5
     r_small, r_big = cells * 10.0 / 23, cells * 10.0 / 95
     Test.@test C.nneighbors_within(small, 12, 12; ball = r_small) ==
                C.nneighbors_within(big, 48, 48; ball = r_big)
-    # A cell list is binned at the radius it will be queried at — bin it wider and each bin holds
-    # more cells as the grid refines, which is a property of the caller's choice, not the index.
+    # A cell list is binned at the radius it will be queried at. Binned wider, each bin holds more
+    # cells as the grid refines, which follows from the caller's chosen bin side.
     for mk in ((g, r) -> GD.spatial_index(g), (g, r) -> GD.cell_list(g; ball = r))
         cs = candidates(small, mk(small, r_small), r_small, (12, 12))
         cb = candidates(big, mk(big, r_big), r_big, (48, 48))
-        # 16× the cells, the same ball: the candidate set must not grow with the grid.
+        # 16× the cells, the same ball: the candidate set stays bounded as the grid refines.
         cb ≤ 3 * cs || println("    candidates grew ", cs, " → ", cb, " over 16× cells")
         Test.@test cb ≤ 3 * cs
-        Test.@test cb < length(GD.mask(big)) ÷ 4         # and is nothing like the scan's every-cell
+        Test.@test cb < length(GD.mask(big)) ÷ 4         # far below the scan's every-cell count
     end
 end
 
@@ -1147,8 +1141,8 @@ Test.@testset "Connected is the reachable part of the ball, not the ball" begin
     Test.@test reaches_seed_within(gm, I, 3.5, St.Moore(1))
     Test.@test reaches_seed_within(g, (5, 5), 2.5, St.Axial(1))
 
-    # P–Q–R: R is inside the ball but its only path there leaves it, so a pruned walk cannot find
-    # it — which is exactly the difference between the two operators, not a bug in either.
+    # P–Q–R: R is inside the ball but its only path there leaves it, so a pruned walk does not
+    # reach it. That separates `Connected` from `Unrestricted`.
     m = trues(5); m[2] = false
     chain = GD.StructuredGrid(geo, collect(0.0:4.0), m)
     Test.@test 3 in C.neighbors_within(chain, 1; ball = 2.0)
@@ -1188,8 +1182,7 @@ Test.@testset "Connected is the reachable part of the ball, not the ball" begin
     Test.@test sort(C.neighbors_within(gcv, 5, 3; ball = 3.5, reach = rc,
                                        topology = C.indexed(gcv))) == cc
 
-    # A node set's adjacency is the one it stores, so a stencil is meaningless there and is refused
-    # rather than ignored.
+    # A node set's adjacency is the one it stores, so a stencil names nothing there and is refused.
     gu = healpix_node_grid(4)
     R = FG.Geometry.radius(GD.grid_geometry(gu))
     Test.@test issubset(sort(C.neighbors_within(gu, 1; ball = 0.4R, reach = C.Connected())),
@@ -1282,7 +1275,7 @@ Test.@testset "Adjacency symmetry is decided by comparison with the transpose" b
         oneway.nbrs[oneway.ptr[j]] == i ? oneway.nbrs[oneway.ptr[j] + 1] : oneway.nbrs[oneway.ptr[j]]
     Test.@test !C.is_symmetric_adjacency(oneway)
 
-    # An out-of-range neighbour is rejected, not used as an index.
+    # An out-of-range neighbour is rejected before it reaches an index.
     oob = C.csr_connectivity(copy(base.nbrs), copy(base.ptr); validate = false)
     oob.nbrs[1] = 10^6
     Test.@test !C.is_symmetric_adjacency(oob)
@@ -1296,7 +1289,7 @@ Test.@testset "k nearest is exact under the geometry's own metric" begin
     cart = GE.CartesianGeometry{Float64}()
     sph = GE.SphericalGeometry(6.371e6)
 
-    # Every candidate ranked by (distance, index), which is what the query promises.
+    # Every candidate ranked by (distance, index), the order the query promises.
     function brute(grid, I, k)
         sz = size(GD.mask(grid))
         node = grid isa GD.UnstructuredGrid
@@ -1358,8 +1351,8 @@ Test.@testset "k nearest is exact under the geometry's own metric" begin
     Test.@test ti == C.k_nearest(gt, 4, 4; k = 4, topology = C.MetricTopology(gt))[1]
 
     # A Cartesian node set indexes by one integer while carrying two coordinate directions, so the
-    # radius the search may widen to has to come from the coordinates, not from the index space.
-    # Tall and narrow, where taking only the first direction would stop the search far too early.
+    # radius the search widens to comes from the coordinates. This one is tall and narrow, where the
+    # first direction alone spans a small fraction of the extent.
     nn = 200
     gcn = GD.UnstructuredGrid(cart, (collect(range(0.0, 1.0; length = nn)),
                                      collect(range(0.0, 500.0; length = nn))),
@@ -1555,12 +1548,12 @@ Test.@testset "A wide ball on a wrapping domain reports each cell once" begin
 end
 
 Test.@testset "Per-query cost does not grow with the grid" begin
-    # The allocation gate cannot see this class: work that scans the grid but allocates nothing
-    # passes it and is still linear per query. Every defect of that kind found here — a rescanned
-    # minimum spacing, an `extrema` under a search radius — was allocation-free.
+    # The allocation gate cannot see this class: work that scans the grid while allocating nothing
+    # passes it and stays linear per query. A rescanned minimum spacing and an `extrema` under a
+    # search radius are both allocation-free.
     #
-    # Fixed work per query, growing grid, and the cost must stay flat. Bounds are loose because this
-    # is wall clock on a shared machine; a linear regression would blow through them by 16×.
+    # Fixed work per query, growing grid, and the cost stays flat. Bounds are loose, this being wall
+    # clock on a shared machine, and a per-query scan exceeds them by the size ratio.
     C = FG.Connectivity
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
@@ -1573,11 +1566,10 @@ Test.@testset "Per-query cost does not grow with the grid" begin
     stretched(n) = GD.StructuredGrid(cart, cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n))),
                                      collect(0.0:3.0))
 
-    # "Recomputes no grid invariant" is a statement about how much of the grid a call READS, so it
-    # is asserted by counting reads. A `CountingAxis` is kept by `_to_axis` unchanged, so a grid
-    # can be built on one and then asked what each entry point touches. Every one of these must be
-    # flat in `n`; the earlier defects — a rescanned minimum spacing, an `extrema` under a search
-    # radius — would each show up here as `n` reads.
+    # Recomputing no grid invariant is a statement about how much of the grid a call reads, so the
+    # assertion counts reads. `_to_axis` keeps a `CountingAxis` as given, so a grid can be built on
+    # one and then asked what each entry point touches. Each of these is flat in `n`, and a
+    # rescanned minimum spacing or an `extrema` under a search radius shows up here as `n` reads.
     for n in (256, 4096)
         cx = CountingAxis(cumsum(1.0 .+ 0.5 .* sin.(range(0, 3π; length = n))))
         g = GD.StructuredGrid(cart, cx, collect(0.0:3.0))
@@ -1585,8 +1577,7 @@ Test.@testset "Per-query cost does not grow with the grid" begin
         Test.@test reads(() -> (GD.extent(g, 1), GD.bounds(g, 1), GD.origin(g, 1)), cx) == 0
         Test.@test reads(() -> GD.minimum_spacing(g, 1), cx) == 0
         Test.@test reads(() -> GD.maximum_spacing(g, 1), cx) == 0
-        # A ball query reads only its own window, not the axis: bounded, and the same bound at
-        # both sizes rather than growing with the axis.
+        # A ball query reads its own window alone, under the same bound at both sizes.
         mt = C.MetricTopology(g)
         Test.@test reads(() -> C.nneighbors_within(g, n ÷ 2, 2; ball = 3.0, topology = mt), cx) ≤ 64
     end
@@ -1625,11 +1616,11 @@ Test.@testset "An index records its mask policy, and a sweep passes its own" beg
     mk = trues(n, n); mk[3:9, 3:9] .= false          # mostly-masked interior
     cgm = GD.CurvilinearGrid(cart, X, Y, mk)
 
-    # Narrowing is worth asking for: the index is the size of the active region, not the bounding box.
+    # Narrowing sizes the index by the active region.
     full = GD.cell_list(cgm; ball = 1.5)
     act = GD.cell_list(cgm; ball = 1.5, active_only = true)
     Test.@test Base.summarysize(act) < Base.summarysize(full)
-    # …and it answers only at that policy, rather than returning a short answer.
+    # …and it answers at that policy alone, raising for any other.
     Test.@test C.nneighbors_within(cgm, 1, 1; ball = 1.5,
                                    topology = C.MetricTopology(cgm; index = act)) ==
                C.nneighbors_within(cgm, 1, 1; ball = 1.5)
@@ -1710,9 +1701,9 @@ Test.@testset "A stencil's count and reach are properties of its shape" begin
     Test.@test S.reach(S.Moore(3), Val(4)) == (3, 3, 3, 3)
     Test.@test (Test.@inferred S.reach(S.Moore(3), Val(4))) isa NTuple{4,Int}
 
-    # Symmetry is a property of the shape too — whether the offset set is closed under negation, which
-    # is what lets an adjacency built from it be READ as its own transpose. Each built-in is defined by
-    # a condition on |δ|, so it contains −δ with δ; checked here against the offsets themselves.
+    # Symmetry is a property of the shape too: whether the offset set is closed under negation, under
+    # which an adjacency built from it serves as its own transpose. Each built-in is defined by a
+    # condition on |δ|, so it contains −δ with δ; checked here against the offsets themselves.
     for N in (1, 2, 3), st in (S.Axial(1), S.Axial(3), S.VonNeumann(2), S.Moore(1), S.Moore(2),
                                S.Diagonal(1), S.Anisotropic((3, 1, 2)[1:N]))
         offs = Set(S.offsets(st, Val(N)))
@@ -1722,11 +1713,11 @@ Test.@testset "A stencil's count and reach are properties of its shape" begin
     # A `Custom` set is whatever it was given, decided at compile time from the type.
     Test.@test S.is_symmetric(S.Custom(((1, 0), (-1, 0), (0, 1), (0, -1))), Val(2))
     Test.@test !S.is_symmetric(S.Custom(((1, 0), (0, 1))), Val(2))
-    # A caller's own shape answers `false` unless it says otherwise: a wrong `true` would be read as a
-    # transpose, where a wrong `false` only costs one.
+    # A caller's own shape answers `false` until it declares otherwise, so the default costs one
+    # transpose and never a wrong graph.
     Test.@test !S.is_symmetric(Upwind(1), Val(2))
     Test.@test !S.is_symmetric(Upwind(2), Val(3))
-    # Read from the type, so the widest built-in costs nothing rather than walking 2400 offsets.
+    # Read from the type, so the widest built-in answers without touching its 2400 offsets.
     Test.@test (Test.@inferred S.is_symmetric(S.Moore(3), Val(4))) === true
     let f() = S.is_symmetric(S.Moore(3), Val(4))
         f()
@@ -1746,7 +1737,7 @@ Test.@testset "A prefix scan and an index reduction are execution primitives" be
         end
         Test.@test E.exclusive_scan!(Vector{Int}(undef, n + 1), counts) == want
         Test.@test E.exclusive_scan!(Vector{Int}(undef, n + 1), counts)[end] - 1 == sum(counts)
-        # `init` moves the whole array, which is what a caller indexing from zero needs.
+        # `init` shifts the whole array, for a caller indexing from zero.
         Test.@test E.exclusive_scan!(Vector{Int}(undef, n + 1), counts; init = 0) == want .- 1
     end
     Test.@test_throws DimensionMismatch E.exclusive_scan!(Vector{Int}(undef, 3), [1, 2, 3])
@@ -1786,8 +1777,8 @@ Test.@testset "A Connected query reuses its buffers, and works on every adjacenc
         Test.@test all(ds[t] ≈ 7.0 * idxs[t] + 0.5 for t in 1:m)
     end
 
-    # A wall spanning the grid: cells below it are inside the ball and unreachable, so Connected is a
-    # strict subset. A partial wall the ball can walk around would prove nothing.
+    # A wall spanning the grid: cells below it are inside the ball and unreachable, so `Connected`
+    # returns a strict subset. The wall spans the full width, leaving no path around it.
     cart = GE.CartesianGeometry()
     sph = GE.SphericalGeometry()
     msk = trues(24, 20)
@@ -1864,8 +1855,8 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
     O = FG.Operators
     cart = GE.CartesianGeometry{Float64}()
 
-    # Node→node adjacency says which nodes are linked; only the CELLS say which nodes bound a face,
-    # and the tessellation that computed the Voronoi areas has already built them.
+    # Node→node adjacency says which nodes are linked; the cells say which nodes bound a face, and
+    # the tessellation that computed the Voronoi areas has already built them.
     xs = Float64[]; ys = Float64[]
     for j in 0:6, i in 0:6
         push!(xs, i + 0.17 * sin(3.0 * (i + 2j)))
@@ -1880,15 +1871,15 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
     Test.@test all(c in GD.node_cells(m, Int(v))
                    for c in 1:GD.ncells(m) for v in GD.cell_nodes(m, c))
     Test.@test sum(length(GD.node_cells(m, i)) for i in 1:np) == length(m.cell_nodes)
-    # The cells TILE the region: their areas sum to what the Voronoi cells sum to.
+    # The cells tile the region: their areas sum to what the Voronoi cells sum to.
     tri_area = sum(1:GD.ncells(m)) do c
         a, b, d = GD.cell_nodes(m, c)
         abs((xs[b] - xs[a]) * (ys[d] - ys[a]) - (xs[d] - xs[a]) * (ys[b] - ys[a])) / 2
     end
     Test.@test tri_area ≈ sum(GD.measure(g)) rtol = 1e-10
 
-    # Interpolation is then the containing cell's barycentric combination — EXACT for a linear field,
-    # where a least-squares fit over a neighbourhood is only close.
+    # Interpolation is then the containing cell's barycentric combination, exact for a linear field,
+    # where a least-squares fit over a neighbourhood lands close.
     α, β, γ = 2.5, -1.75, 4.0
     f = α .* xs .+ β .* ys .+ γ
     probes = [(qx, qy) for qx in 1.0:0.37:5.0 for qy in 1.0:0.41:5.0]
@@ -1920,8 +1911,8 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         end
     end
 
-    # …and the count test alone would misread a TIE for a hole: on a regular all-active lattice more
-    # cells sit at exactly the k-th distance than `k_nearest` kept, with nothing skipped.
+    # …and a tie is distinguished from a hole: on a regular all-active lattice more cells sit at
+    # exactly the k-th distance than `k_nearest` kept, with nothing skipped.
     let rx = [Float64(i) for _ in 0:8 for i in 0:8],
         ry = [Float64(j) for j in 0:8 for _ in 0:8]
         nr = length(rx)
@@ -1944,8 +1935,8 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         Test.@test GD.ncells(ms) == 2nn - 4
         Test.@test all(length(GD.node_cells(ms, i)) ≥ 3 for i in 1:nn)
         Test.@test sum(GD.measure(gs)) ≈ 4π * R^2 rtol = 1e-9
-        # The mesh's IDS are the narrow width — node numbers, facet numbers — and its OFFSETS run to
-        # the entry count `3·ncells`, which is six times the node count.
+        # The mesh's ids take the narrow width — node numbers, facet numbers — and its offsets run
+        # to the entry count `3·ncells`, six times the node count.
         Test.@test eltype(ms.cell_nodes) === Int32 && eltype(ms.node_cells) === Int32
         Test.@test eltype(ms.cell_ptr) === Int && eltype(ms.node_ptr) === Int
         Test.@test ms.cell_ptr[end] - 1 == length(ms.cell_nodes)
@@ -1982,11 +1973,11 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         end
     end
 
-    # Where a cell answers, the neighbourhood mask test is not consulted — and must not be. It asks
-    # whether the NEIGHBOURHOOD is wholly active, which is the right question for a fit over one and
-    # the wrong one for a value taken from a single triangle. Here the containing triangle is wholly
-    # active while a node two cells away is not: the mesh answers exactly, and the fit, which is what
-    # the same grid without cells falls back to, refuses a value that is in fact determined.
+    # Where a cell answers, the neighbourhood mask test is not consulted. That test asks whether the
+    # whole neighbourhood is active, the right question for a fit over one and the wrong one for a
+    # value taken from a single triangle. Here the containing triangle is wholly active while a node
+    # two cells away is not: the mesh answers exactly, and the fit the same grid falls back to
+    # without cells refuses a value the data determines.
     let mm = 14
         lx = [Float64(i) for j in 0:(mm - 1) for i in 0:(mm - 1)]
         ly = [Float64(j) for j in 0:(mm - 1) for i in 0:(mm - 1)]
@@ -2003,12 +1994,12 @@ Test.@testset "A node set keeps the cells its tessellation built, and interpolat
         q = (6.35, 6.4)
         Test.@test abs(O.interpolate(fl, withmesh, q) - (2.5q[1] - 1.75q[2] + 4.0)) < 1e-11
         Test.@test isnan(O.interpolate(fl, without, q))
-        # A cell whose OWN vertex is inactive is still refused, which is what the mesh path depends on.
+        # A cell one of whose own vertices is inactive is refused, the rule the mesh path rests on.
         Test.@test isnan(O.interpolate(fl, withmesh, (5.4, 6.35)))
     end
 
-    # A grid handed its own areas has no tessellation to take cells from, and one handed its adjacency
-    # directly has none either. Both say so rather than inventing a triangulation.
+    # A grid handed its own areas has no tessellation to take cells from, and one handed its
+    # adjacency directly has none either. Both report `nothing`.
     Test.@test GD.cell_mesh(GD.UnstructuredGrid(cart, (xs, ys), trues(np); k = 3,
                                                 areas = ones(np))) === nothing
     Test.@test GD.cell_mesh(GD.UnstructuredGrid(cart, (xs, ys), ones(np), trues(np))) === nothing
@@ -2026,7 +2017,7 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
     O = FG.Operators
     cart = GE.CartesianGeometry{Float64}()
 
-    # How far an edge reaches IN MEMORY, which is what the ordering is for. Counted, not timed.
+    # The mean index distance an edge spans, which the ordering shortens. Counted exactly.
     stride(g) = begin
         ptr, nbrs = GD.neighbor_ptr(g), GD.neighbor_nbrs(g)
         s = 0; m = 0
@@ -2036,9 +2027,9 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
         s / m
     end
 
-    # A lattice whose nodes ARRIVE scrambled, which is what a real dataset usually looks like. The
-    # points are generated distinctly and then permuted — scrambling the index arithmetic instead
-    # would repeat points, since two residues of the same modulus share a period.
+    # A lattice whose nodes arrive scrambled, as a dataset read off disk does. The points are
+    # generated distinctly and then permuted, which keeps them distinct; scrambling the index
+    # arithmetic repeats points, two residues of the same modulus sharing a period.
     mm = 20
     x0 = [i + 0.13 * sin(3.0 * (i + j)) for j in 0:(mm - 1) for i in 0:(mm - 1)]
     y0 = [j + 0.11 * cos(2.0 * (i - j)) for j in 0:(mm - 1) for i in 0:(mm - 1)]
@@ -2053,8 +2044,8 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
     g2 = GD.reorder(g, perm)
     Test.@test stride(g2) < stride(g) / 2
 
-    # The reordered grid is the SAME grid relabelled: node `k` of it is node `perm[k]` of the original,
-    # and the adjacency is renumbered to match rather than merely permuted alongside.
+    # The reordered grid is the same grid relabelled: node `k` of it is node `perm[k]` of the
+    # original, and the adjacency is renumbered into the new labels.
     inv = zeros(Int, n)
     for k in 1:n
         inv[perm[k]] = k
@@ -2065,8 +2056,8 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
                    sort([inv[j] for j in GD.neighbors(g, perm[k])]) for k in 1:n)
     Test.@test sum(GD.measure(g2)) ≈ sum(GD.measure(g)) rtol = 1e-14
 
-    # So every derived answer is unchanged once the field is permuted the same way — which is why the
-    # permutation is RETURNED rather than applied behind the caller: it is their handle on their data.
+    # So every derived answer is unchanged once the field is permuted the same way. The permutation
+    # is returned to the caller, as the handle they need to move their own data.
     f = 2.5 .* xs .- 1.75 .* ys .+ 4.0
     let a1 = zeros(n), b1 = zeros(n), a2 = zeros(n), b2 = zeros(n)
         O.gradient!(a1, b1, f, O.gradient_plan(g))
@@ -2089,7 +2080,7 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
         Test.@test eltype(m2.cell_nodes) === eltype(m1.cell_nodes)
     end
 
-    # A mask travels with its node rather than staying at its index.
+    # A mask travels with its node to the node's new label.
     let mk = trues(n)
         mk[5] = false; mk[123] = false
         gm = GD.UnstructuredGrid(cart, GD.coordinates(g), collect(GD.measure(g)), mk,
@@ -2099,12 +2090,12 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
         Test.@test count(GD.mask(gm2)) == count(GD.mask(gm))
     end
 
-    # A permutation that is not one is refused rather than silently dropping a node.
+    # An index vector that is not a permutation is refused at entry.
     Test.@test_throws ArgumentError GD.reorder(g, [1; 1; collect(3:n)])
     Test.@test_throws ArgumentError GD.reorder(g, [0; collect(2:n)])
     Test.@test_throws DimensionMismatch GD.reorder(g, collect(1:(n - 1)))
 
-    # On a sphere the key is the EMBEDDED position, so the longitude seam does not cut the curve:
+    # On a sphere the key is the embedded position, so the longitude seam does not cut the curve:
     # the same points, differently shuffled, sort to the same order.
     let sph = GE.SphericalGeometry(6.371e6), nn = 200
         λ = [mod(k * 2.399963229728653, 2π) for k in 1:nn]
@@ -2112,7 +2103,7 @@ Test.@testset "A node set can be ordered along a space-filling curve" begin
         sh = [mod(97k, nn) + 1 for k in 0:(nn - 1)]
         ga = GD.UnstructuredGrid(sph, (λ, φ), trues(nn); k = 6)
         gb = GD.UnstructuredGrid(sph, (λ[sh], φ[sh]), trues(nn); k = 6)
-        # Sorted by the curve, both land on the same sequence of POINTS.
+        # Sorted by the curve, both land on the same sequence of points.
         pa = GD.spatial_order(ga)
         pb = GD.spatial_order(gb)
         Test.@test [λ[i] for i in pa] ≈ [λ[sh][i] for i in pb]

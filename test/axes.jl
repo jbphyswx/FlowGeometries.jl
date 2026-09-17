@@ -1,12 +1,11 @@
 Test.@testset "Axis eltype conversion preserves the container type" begin
     geom = FG.Geometry.CartesianGeometry()
-    # A Float32 Vector into a Float64 geometry must copy — but into the same kind of container,
-    # not unconditionally into a plain `Vector`.
+    # A Float32 Vector into a Float64 geometry copies into the same kind of container.
     x32 = Float32[0, 1, 2, 3]
     grid = FG.Grids.StructuredGrid(geom, x32, x32, trues(4, 4))
     Test.@test FG.Grids.coordinates(grid, 1) isa Vector{Float64}
-    # A uniform axis keeps its uniformity across an eltype conversion — that property, not the
-    # container, is what later fast paths dispatch on.
+    # A uniform axis keeps its uniformity across an eltype conversion, and the later fast paths
+    # dispatch on that property.
     r32 = Float32(0):Float32(1):Float32(3)
     gridr = FG.Grids.StructuredGrid(geom, r32, r32, trues(4, 4))
     Test.@test FG.Grids.isuniform(gridr, 1)
@@ -14,19 +13,19 @@ Test.@testset "Axis eltype conversion preserves the container type" begin
     Test.@test FG.Grids.spacing(gridr, 1) === 1.0
     Test.@test collect(FG.Grids.coordinates(gridr, 1)) == Float64[0, 1, 2, 3]
 
-    # An axis already of the geometry's element type is kept EXACTLY as given, whatever type it is.
+    # An axis already of the geometry's element type is kept as given, whatever type it is.
     # `range(0f0; step=0.25f0, …)` is a `StepRangeLen{Float32, Float64, Float64, Int}` — Float32
-    # elements over a Float64 offset and step — and that is the caller's choice to make, not this
-    # package's to override. `Axes.uniform_axis` is the opt-in for Float32-throughout arithmetic.
+    # elements over a Float64 offset and step — and that remains the caller's choice.
+    # `Axes.uniform_axis` is the opt-in for Float32-throughout arithmetic.
     geo32 = FG.Geometry.CartesianGeometry(Float32)
     r32f = range(0.0f0; step = 0.25f0, length = 5)
     g32 = FG.Grids.StructuredGrid(geo32, r32f, r32f, trues(5, 5))
     ax32 = FG.Grids.coordinates(g32, 1)
-    Test.@test ax32 === r32f                       # preserved, not replaced
+    Test.@test ax32 === r32f                       # the very object passed in
     Test.@test eltype(ax32) === Float32
     Test.@test FG.Grids.spacing(g32, 1) === 0.25f0
     Test.@test FG.Grids.coords(g32, 2, 3) === (x = 0.25f0, y = 0.5f0)
-    # …and converting deliberately gives Float32 throughout.
+    # …and an explicit conversion gives Float32 throughout.
     u32 = FG.Axes.uniform_axis(Float32, r32f)
     Test.@test all(p -> !(p isa Type) || p === Float32, typeof(u32).parameters)
     Test.@test collect(u32) == collect(r32f)
@@ -34,9 +33,8 @@ end
 
 Test.@testset "AbstractUniformAxis is a working extension point" begin
     A = FG.Axes
-    # The contract is three methods, not a layout, so a subtype may name its fields anything.
-    # These are named unlike `UniformAxis`'s so that a generic method reaching for a field is a
-    # test failure instead of a coincidence.
+    # The contract is three methods, so a subtype may name its fields anything. These are named
+    # unlike `UniformAxis`'s, so a generic method reaching for a field fails here.
     struct MinimalAxis{T} <: A.AbstractUniformAxis{T}
         lo::T
         h::T
@@ -75,7 +73,7 @@ Test.@testset "AbstractUniformAxis is a working extension point" begin
     Test.@test MinimalAxis(0.0, 1.0, 0) == A.UniformAxis(9.0, 3.0, 0)
     Test.@test MinimalAxis(2.0, 1.0, 1) == A.UniformAxis(2.0, 7.0, 1)
     Test.@test A.uniform_axis(Float32, m) === A.UniformAxis(0.0f0, 0.25f0, 5)
-    # Messages name the actual type, not the supertype.
+    # Messages name the concrete type.
     Test.@test occursin("MinimalAxis", sprint(show, m))
     Test.@test_throws ArgumentError minimum(MinimalAxis(0.0, 1.0, 0))
     # Without the hook, a derived axis is correct but plain.
@@ -140,7 +138,7 @@ Test.@testset "A caller's own axis type is preserved, and still gets every fast 
     mine = TaggedAxis(0.0, 0.5, 9, :mine)
     g = FG.Grids.StructuredGrid(geo, mine, mine)
     ax = FG.Grids.coordinates(g, 1)
-    Test.@test ax === mine                          # the same object, not a copy
+    Test.@test ax === mine                          # the very object passed in
     Test.@test ax isa TaggedAxis && ax.tag === :mine # and the extra field survives
 
     # Every uniform fast path applies to it.
@@ -149,7 +147,7 @@ Test.@testset "A caller's own axis type is preserved, and still gets every fast 
     Test.@test Base.summarysize(g) < 512
     Test.@test FG.Grids.minimum_spacing(g, 1) == FG.Grids.maximum_spacing(g, 1) == 0.5
     Test.@test FG.Grids.measure(g, 3, 4) === 0.25
-    # `local_spacing` returns `step` rather than differencing, so the gap is exactly constant.
+    # `local_spacing` returns `step` itself, so the gap is exactly constant.
     Test.@test length(Set(FG.Discretization.local_spacing(ax, i)[2] for i in 1:8)) == 1
     Test.@test FG.Discretization.locate(ax, 2.0) == FG.Discretization.locate(collect(ax), 2.0)
     Test.@test FG.Discretization.nearest_index(ax, 2.0) == 5
@@ -203,20 +201,18 @@ Test.@testset "A uniform axis is an AbstractRange, and behaves like one" begin
     Test.@test promote_type(A.UniformAxis{Float32}, A.UniformAxis{Float64}) ===
                A.UniformAxis{Float64}
 
-    # An affine map of an affine sequence is affine, so the spacing guarantee survives arithmetic
-    # instead of collapsing to a Vector.
+    # An affine map of an affine sequence is affine, so the spacing guarantee survives arithmetic.
     Test.@test A.isuniform(a .+ 1.0) && A.spacing(a .+ 1.0) === 0.25
     Test.@test A.isuniform(2.0 .* a) && A.spacing(2.0 .* a) === 0.5
     Test.@test A.isuniform(a .+ a) && A.spacing(a .+ a) === 0.5
     Test.@test A.isuniform(-a) && A.spacing(-a) === -0.25
-    # Anything not affine must become a plain array rather than claim to be uniform.
+    # A non-affine map reports itself non-uniform and becomes a plain array.
     Test.@test !A.isuniform(cos.(a))
     Test.@test cos.(a) ≈ cos.(v)
     Test.@test_throws DimensionMismatch A.UniformAxis(0.0, 1.0, 3) .+ A.UniformAxis(0.0, 1.0, 4)
 
-    # The reason for the subtyping: being an `AbstractRange` is what gets Base's closed-form
-    # `searchsorted` instead of a bisection. Asserted as the dispatch itself — the property that
-    # causes the speed — rather than as a duration; the duration is in `benchmark/`.
+    # An `AbstractRange` reaches Base's closed-form `searchsorted`. The assertion is on the dispatch
+    # itself, the property carrying the speed; durations are in `benchmark/`.
     Test.@test A.UniformAxis(0.0, 1e-1, 10) isa AbstractRange
     Test.@test which(searchsortedfirst, Tuple{A.UniformAxis{Float64},Float64}) ===
                which(searchsortedfirst, Tuple{StepRangeLen{Float64},Float64})
@@ -237,24 +233,24 @@ Test.@testset "Uniform axes and constant factors are O(1), and exact" begin
     Test.@test A.isuniform(a) && A.spacing(a) === 0.25
     Test.@test isbits(a)                          # nothing to move to another storage backend
     Test.@test (first(a), last(a)) == (0.0, 1.0)
-    # Closed forms, not scans.
+    # Closed forms.
     Test.@test sum(a) == sum(collect(a))
     Test.@test extrema(a) == extrema(collect(a))
-    # A descending axis is a first-class axis: spacing is SIGNED, extrema are still ordered.
+    # A descending axis is a first-class axis: spacing keeps its sign, extrema are still ordered.
     d = A.UniformAxis(1.0, -0.25, 5)
     Test.@test A.spacing(d) === -0.25
     Test.@test extrema(d) == (0.0, 1.0)
     Test.@test collect(d) == reverse([0.0, 0.25, 0.5, 0.75, 1.0])
-    # A slice and a reversal of a uniform axis are uniform, not collapsed to a Vector.
+    # A slice and a reversal of a uniform axis are themselves uniform.
     Test.@test A.isuniform(a[2:4]) && collect(a[2:4]) == [0.25, 0.5, 0.75]
     Test.@test A.isuniform(reverse(a)) && collect(reverse(a)) == reverse(collect(a))
     Test.@test_throws BoundsError a[6]
     Test.@test_throws BoundsError a[0]
 
-    # `isuniform` is the TYPE question, and nothing here answers it from the values: a Vector
-    # holding an arithmetic sequence is still not `isuniform`, and no constructor inspects data to
-    # decide otherwise. Where the data question genuinely matters, the existing spacing accessors
-    # answer it exactly — identical gaps iff the smallest equals the largest — with no tolerance.
+    # `isuniform` is a question about the type, and nothing here answers it from the values: a
+    # Vector holding an arithmetic sequence is still not `isuniform`, and no constructor inspects
+    # data. The spacing accessors answer the data question exactly — identical gaps iff the smallest
+    # equals the largest — with no tolerance.
     v = collect(a)
     Test.@test !A.isuniform(v)
     geo0 = FG.Geometry.CartesianGeometry()
@@ -270,20 +266,20 @@ Test.@testset "Uniform axes and constant factors are O(1), and exact" begin
     Test.@test sum(c) == 10.0 && prod(c) == 2.5^4 && extrema(c) == (2.5, 2.5)
     Test.@test sum(abs2, c) == 4 * abs2(2.5)
     Test.@test count(>(2), c) == 4
-    Test.@test A.isuniform(A.ConstantVector(1.0, 3)) == false   # a factor list, not an axis
+    Test.@test A.isuniform(A.ConstantVector(1.0, 3)) == false   # a factor list
     Test.@test_throws BoundsError c[5]
 
-    # The whole point: a large uniform grid carries no per-cell and no per-axis storage.
+    # A large uniform grid carries no per-cell and no per-axis storage.
     geo = FG.Geometry.CartesianGeometry()
     N = 2000
     g = FG.Grids.StructuredGrid(geo, range(0.0; step = 0.5, length = N),
                           range(0.0; step = 0.25, length = N), FG.Grids.AllActive((N, N)))
     Test.@test all(f -> f isa A.ConstantVector, FG.Grids.measure_factors(g))
-    Test.@test Base.summarysize(g) < 512          # three numbers per axis, not N per axis
+    Test.@test Base.summarysize(g) < 512          # three numbers per axis
     Test.@test FG.Grids.measure(g, 3, 4) === 0.5 * 0.25
-    # Constant factors and dense factors must agree, and the uniform answer is the exact one:
-    # `Δ` is stored, so every cell width IS `Δ`, where recovering it by differencing reconstructed
-    # coordinates leaves an ulp of noise.
+    # Constant factors and dense factors agree, and the uniform answer is the exact one: `Δ` is
+    # stored, so every cell width is `Δ` to the bit, where differencing reconstructed coordinates
+    # leaves an ulp of noise.
     dense = FG.Discretization._cell_widths_dense(collect(FG.Grids.coordinates(g, 1)))
     Test.@test collect(FG.Grids.measure_factors(g)[1]) ≈ dense rtol = 1e-15
     Test.@test all(==(0.5), FG.Grids.measure_factors(g)[1])
@@ -325,7 +321,7 @@ Test.@testset "Axis widths use bulk operations, not per-element scalar reads" be
     c2 = CountingVector(collect(range(0.0; step = 1.0, length = 2n)))
     FG.Discretization.cell_widths(c1)
     FG.Discretization.cell_widths(c2)
-    Test.@test c2.scalar_reads - c1.scalar_reads <= 4n + 16   # grows linearly, not quadratically
+    Test.@test c2.scalar_reads - c1.scalar_reads <= 4n + 16   # linear in n
 end
 
 Test.@testset "An analytic axis is a formula, and inverts instead of searching" begin
@@ -345,11 +341,11 @@ Test.@testset "An analytic axis is a formula, and inverts instead of searching" 
 
     for (_, a) in axes_under_test
         n = length(a)
-        # `coordinate` IS the indexing, at every integer — one definition, not two that agree.
+        # `coordinate` is the indexing itself at every integer — one definition serves both.
         Test.@test all(A.coordinate(a, Float64(i)) === a[i] for i in 1:n)
-        # …and `index_at` is its inverse, which is what removes the search.
+        # …and `index_at` inverts it, so no search is needed.
         Test.@test all(abs(A.index_at(a, a[i]) - i) < 1e-9 for i in 1:n)
-        # Strictly monotone, which is what makes that inverse single-valued.
+        # Strictly monotone, so that inverse is single-valued.
         Test.@test all(sign(a[i + 1] - a[i]) == sign(a[2] - a[1]) for i in 1:(n - 1))
         # Not uniform, and it does not pretend to be.
         Test.@test A.spacing_trait(a) === A.NonuniformSpacing()
@@ -362,16 +358,16 @@ Test.@testset "An analytic axis is a formula, and inverts instead of searching" 
         Test.@test isbits(a)
     end
 
-    # A geometric axis's gaps ARE a geometric progression — the property it is named for.
+    # A geometric axis's gaps form a geometric progression, the property it is named for.
     let a = A.GeometricAxis(0.0, 10.0, 1.15, 40)
         g = [a[i + 1] - a[i] for i in 1:(length(a) - 1)]
         Test.@test g[1] ≈ a.Δ
         Test.@test all(isapprox(g[i + 1], g[i] * a.ratio; rtol = 1e-12) for i in 1:(length(g) - 1))
     end
 
-    # Every query answers exactly what the search over the same samples answers — at the samples, inside
-    # every cell, ON every face, and outside both ends. The closed form is an optimization, not a
-    # different convention: faces are still the coordinate midpoints, not the index midpoints.
+    # Every query answers exactly what the search over the same samples answers — at the samples,
+    # inside every cell, on every face, and outside both ends. The closed form keeps the same
+    # convention: faces are the coordinate midpoints.
     for (_, a) in axes_under_test
         n = length(a)
         dense = collect(a)
@@ -403,7 +399,7 @@ Test.@testset "An analytic axis is a formula, and inverts instead of searching" 
         z = A.PowerAxis(6.371e6, 8.0e4, 1.6, 20)
         g = GD.StructuredGrid(sph, λ, φ, z)
         gd = GD.StructuredGrid(sph, λ, φ, collect(z))
-        Test.@test GD.coordinates(g, 3) === z          # kept, not collected into a Vector
+        Test.@test GD.coordinates(g, 3) === z          # the very axis passed in
         Test.@test !GD.isuniform(g, 3)
         Test.@test GD.coords(g, 2, 3, 4) == (λ = λ[2], φ = φ[3], r = z[4])
         Test.@test all(GD.measure(g, i, j, k) == GD.measure(gd, i, j, k)
@@ -411,8 +407,7 @@ Test.@testset "An analytic axis is a formula, and inverts instead of searching" 
         Test.@test GD.locate(g, (0.3, 0.1, z[7] + 1.0)) == GD.locate(gd, (0.3, 0.1, z[7] + 1.0))
     end
 
-    # What cannot be inverted single-valuedly is refused at construction, once, rather than producing
-    # a wrong index later.
+    # What cannot be inverted single-valuedly is refused at construction, once.
     Test.@test_throws ArgumentError A.GeometricAxis(0.0, 1.0, 1.0, 10)    # constant gaps: a UniformAxis
     Test.@test_throws ArgumentError A.GeometricAxis(0.0, 1.0, -2.0, 10)   # not monotone
     Test.@test_throws ArgumentError A.GeometricAxis(0.0, 0.0, 1.2, 10)    # no first gap

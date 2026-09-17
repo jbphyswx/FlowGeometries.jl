@@ -19,8 +19,8 @@ Test.@testset "Separable reductions factor, and only where the algebra allows" b
     Test.@test findmin(m)[2] == findmin(dense)[2]
     Test.@test argmax(m) == argmax(dense)
 
-    # A NON-multiplicative `f` does not factor, so it must fall through to the dense path and stay
-    # correct rather than take a shortcut that does not hold.
+    # A non-multiplicative `f` does not factor, so it falls through to the dense path and stays
+    # correct there.
     for f in (exp, log, sin)
         Test.@test sum(f, m) ≈ sum(f, dense) rtol = 1e-9
     end
@@ -33,8 +33,8 @@ Test.@testset "Separable reductions factor, and only where the algebra allows" b
         Test.@test collect(r) ≈ sum(dense; dims = dims) rtol = 1e-12
     end
 
-    # max/min of a product are taken from the per-axis endpoints, which is exact for factors of any
-    # sign — `∏ maximum` alone would be wrong as soon as a factor could go negative.
+    # max/min of a product are taken from the per-axis endpoints, exact for factors of either sign.
+    # A factor list holding a negative entry is the case that separates this from `∏ maximum`.
     ms = FG.Grids.SeparableMeasure(([-2.0, 1.0, 3.0], [-1.0, 4.0]))
     d2 = [ms[i, j] for i in 1:3, j in 1:2]
     Test.@test extrema(ms) == extrema(d2)
@@ -177,7 +177,7 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
     φ = collect(range(-π / 2, π / 2; length = nφ))         # both poles are grid rows
     g = GD.StructuredGrid(sph, λ, φ)
 
-    # ∂/∂north of sin φ is cos φ / R — the physical derivative, not the coordinate one.
+    # ∂/∂north of sin φ is cos φ / R: the physical derivative, carrying the metric.
     f = [sin(fj) for _ in λ, fj in φ]
     o = zeros(nλ, nφ)
     O.derivative!(o, f, g, 2; order = 1, nodes = 5, masked = NaN)
@@ -199,9 +199,8 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
     Test.@test all(isnan, o2[:, 1]) && all(isnan, o2[:, nφ])
     Test.@test !any(isnan, o2[:, 2:(nφ - 1)])
 
-    # The guard is relative to the element type, which is the whole point: at a Float32 pole
-    # `|h_λ|` is about 0.28, so an absolute `1e-12` never fires and a large finite number would be
-    # written on the pole rows instead of `masked`.
+    # The guard scales with the element type. At a Float32 pole `|h_λ|` is about 0.28, well above an
+    # absolute `1e-12`, so only a type-relative floor marks those rows `masked`.
     let R32 = Float32(R), n1 = 16, n2 = 9
         s32 = GE.SphericalGeometry(R32)
         λ32 = collect(range(0.0f0, Float32(2π) * (1 - 1.0f0 / n1); length = n1))
@@ -227,8 +226,8 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
         Test.@test D.metric_floor(cart) == 0.0
     end
 
-    # On a spheroid `h_φ = M(φ)` varies with φ, so the factor is NOT constant along the direction
-    # being differenced and must not be hoisted that way.
+    # On a spheroid `h_φ = M(φ)` varies with φ, so the factor varies along the direction being
+    # differenced and stays inside the loop.
     let spd = GE.SpheroidGeometry(), n1 = 12, n2 = 21
         λs = collect(range(0.0, 2π * (1 - 1 / n1); length = n1))
         φs = collect(range(-1.2, 1.2; length = n2))
@@ -272,7 +271,7 @@ Test.@testset "A held stencil table serves every mask policy" begin
     end
 
 
-    # The bare form still refuses rather than silently ignoring the policy.
+    # The bare form has no axis to rebuild a stencil from, and refuses the policy.
     let idx = D.axis_stencils(g, 1; order = 1, nodes = 3)
         Test.@test_throws ArgumentError O.apply_stencil!(zeros(n, n), f, idx[1], idx[2], 1;
                                                          mask = mk, policy = O.ReduceInRun())
@@ -298,10 +297,10 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
     GD = FG.Grids
     cart = FG.Geometry.CartesianGeometry{Float64}()
 
-    # The host reshapes the loop — Cartesian rather than linear, split at `dim`, node count in the
-    # type, address arithmetic where the layout allows it — while the index-parallel form stays for
-    # a device launch. Different shape, identical arithmetic in identical order, so the two must
-    # agree BIT for bit, not merely to a tolerance. Masks, node counts and both dimensions.
+    # The host walks a Cartesian loop split at `dim`, with the node count in the type and address
+    # arithmetic where the layout allows it, while the index-parallel form serves a device launch.
+    # Two loop shapes over identical arithmetic in identical order, so the two agree bit for bit
+    # across masks, node counts and both dimensions.
     bad = 0
     for n in (7, 16, 23), dim in 1:2, k in (2, 3, 4, 5, 6, 8), msk in (false, true)
         xs = cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n)))
@@ -389,8 +388,8 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     O = FG.Operators
     geo = FG.Geometry.CartesianGeometry()
 
-    # Exact for any polynomial the node count spans, at EVERY sample — the ends included, because
-    # the stencil shifts inward rather than clipping to a lower order.
+    # Exact for any polynomial the node count spans, at every sample including the ends, where the
+    # stencil shifts inward and keeps its order.
     x = collect(range(0.0, 2.0; length = 11))
     f = @. 3x^2 - 2x + 5
     out = similar(f)
@@ -399,7 +398,7 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     O.apply_stencil!(out, f, x, 1; order = 2, nodes = 3)
     Test.@test maximum(abs, out .- 6.0) < 1e-11
 
-    # A stretched axis is equally exact: the weights are per-sample, not one set reused.
+    # A stretched axis is equally exact, its weights derived per sample.
     xs = [0.0, 0.11, 0.37, 0.9, 1.05, 1.6, 1.62, 2.0]
     outs = similar(xs)
     O.apply_stencil!(outs, (@. 3xs^2 - 2xs + 5), xs, 1; order = 1, nodes = 3)
@@ -410,8 +409,8 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     O.apply_stencil!(outs, xs .^ 3, xs, 1; order = 1, nodes = 4)
     Test.@test maximum(abs, outs .- 3 .* xs .^ 2) < 1e-11
 
-    # Periodic: the stencil stays centred and wraps, so the seam is no worse than the interior,
-    # and a 5-node stencil converges at 4th order rather than to machine precision.
+    # Periodic: the stencil stays centred and wraps, so the seam matches the interior, and a 5-node
+    # stencil converges at 4th order.
     perr(m) = begin
         lm = collect(range(0, 2π; length = m + 1)[1:m])
         o = similar(lm)
@@ -456,7 +455,7 @@ Test.@testset "apply_stencil! differentiates a field along one direction" begin
     O.apply_stencil!(Op, [sin(l) for l in λ, _ in 1:2], gp, 1; order = 1, nodes = 5)
     Test.@test maximum(abs, Op[:, 1] .- cos.(λ)) < 1e-5
 
-    # A derivative that would read an inactive cell is not invented.
+    # A derivative whose stencil reaches an inactive cell reports `masked`.
     mk = trues(9, 7)
     mk[5, 3] = false
     gm = FG.Grids.StructuredGrid(geo, X, Y, mk)
@@ -503,8 +502,7 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
     # And a cell's own value at its centre, which multilinear interpolation must reproduce.
     Test.@test all(O.interpolate(f, g, (x[i], y[j])) ≈ f[i, j] for i in 1:nx, j in 1:ny)
 
-    # A periodic direction interpolates ACROSS its seam rather than clamping at the last sample,
-    # which is the case a caller composing per-axis weights by hand gets wrong.
+    # A periodic direction interpolates across its seam, pairing the last sample with the first.
     let nλ = 24, λ = collect(range(0.0, 2π * (1 - 1 / 24); length = 24)), z = [0.0, 1.0]
         gp = GD.StructuredGrid(cart, λ, z; periodic = (true, false), period = (2π, 0.0))
         fp = [sin(l) for l in λ, _ in z]
@@ -513,8 +511,7 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
         Test.@test O.interpolate(fp, gp, (2π + 0.3, 0.0)) ≈ O.interpolate(fp, gp, (0.3, 0.0))
     end
 
-    # Scattered and curvilinear: a least-squares plane, so a linear field is exact — a plain
-    # inverse-distance average would not be.
+    # Scattered and curvilinear: a least-squares plane, so a linear field is exact.
     let npt = 400, xs = 10.0 .* rand(npt), ys = 6.0 .* rand(npt)
         gu = GD.UnstructuredGrid(cart, (xs, ys), trues(npt); k = 8, areas = ones(npt))
         fu = 2.0 .* xs .- 3.0 .* ys .+ 5.0
@@ -563,8 +560,8 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     GE = FG.Geometry
     cart = FG.Geometry.CartesianGeometry{Float64}()
 
-    # Deliberately SHEARED. Exactness for a linear field on a skewed stencil is the property that
-    # distinguishes this from inverting an index-space Jacobian, which does not have it.
+    # A sheared mesh. Exactness for a linear field on a skewed stencil is the property under test;
+    # an index-space Jacobian inverse does not have it.
     n = 14
     x = [t + 0.35u for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
     y = [u - 0.2t for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
@@ -599,7 +596,7 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
         Test.@test maximum(abs.(q2[int, int] .- s2[int, int])) < 1e-12
     end
 
-    # A node set, where neighbours come from connectivity rather than an index offset.
+    # A node set, whose neighbours come from its stored connectivity.
     let gu = C.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(8)),
         R = FG.Geometry.radius(GD.grid_geometry(C.unstructured_grid(
             FG.SphericalSampling.IcosahedralSampling(8))))
@@ -613,13 +610,13 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     end
 
     # Rank deficiency: every neighbour on one line leaves the across-line component undetermined
-    # by the data, so it is zeroed rather than produced by inverting a nudged matrix.
+    # by the data, and the pseudo-inverse zeroes it.
     let xl = collect(range(0.0, 5.0; length = 6)), yl = zeros(6)
         lg = GD.UnstructuredGrid(cart, (xl, yl), trues(6); k = 2, areas = ones(6))
         l1 = zeros(6); l2 = zeros(6)
         O.gradient!(l1, l2, 3.0 .* xl, O.gradient_plan(lg))
         Test.@test all(isapprox.(l1, 3.0; atol = 1e-10))     # the resolved direction is exact
-        Test.@test all(iszero, l2)                           # the other is zero, not enormous
+        Test.@test all(iszero, l2)                           # the undetermined one is zero
     end
 
     # A mask: the hole has no coefficients and reads zero, and its neighbours are still exact,
@@ -635,9 +632,9 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
                        for i in 1:n, j in 1:n if mk[i, j])
     end
 
-    # A spheroid. The projection is written against `embed` and the local frame rather than against the
-    # sphere's formulas, so the least-squares gradient and the scattered fit hold there too: the frame
-    # is the sphere's at the same (λ, φ), the positions each (λ, φ) sits at are not.
+    # A spheroid. The projection is written against `embed` and the local frame, so the
+    # least-squares gradient and the scattered fit hold here too. The frame matches the sphere's at
+    # the same (λ, φ), and the two differ in where each (λ, φ) sits.
     let spd = GE.SpheroidGeometry(), nx = 7, ny = 6, np = 7 * 6
         λs = [0.4 + 0.01 * (i - 1) for j in 1:ny for i in 1:nx]
         φs = [0.6 + 0.011 * (j - 1) for j in 1:ny for i in 1:nx]
@@ -667,7 +664,7 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     Test.@test O.ncomponents(plan) == 2
     Test.@test_throws DimensionMismatch O.gradient!(zeros(3), zeros(3), zeros(3), plan)
 
-    # Three coordinates resolve three directions, on the local frame rather than a tangent plane.
+    # Three coordinates resolve three directions, on the full local frame.
     let m = 4, np = 4^3
         xs = [1.0 * (i - 1) for k in 1:m for j in 1:m for i in 1:m]
         ys = [1.0 * (j - 1) for k in 1:m for j in 1:m for i in 1:m]
@@ -691,7 +688,7 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
         Test.@test v1 == u1 && v2 == u2 && v3 == u3
 
         # Rank deficiency in 3-D: every neighbour in one plane leaves the normal component
-        # undetermined by the data, so it is zeroed rather than produced by a nudged inverse.
+        # undetermined by the data, and the pseudo-inverse zeroes it.
         xp = [1.0 * i for j in 1:4 for i in 1:4]
         yp = [1.0 * j for j in 1:4 for i in 1:4]
         gp = GD.UnstructuredGrid(cart, (xp, yp, zeros(16)), trues(16); k = 4, areas = ones(16))
@@ -703,7 +700,7 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
         Test.@test all(iszero, w3)
     end
 
-    # A fourth coordinate has no fixed-size solve behind it, so it is refused rather than guessed.
+    # A fourth coordinate has no fixed-size solve behind it, and is refused at construction.
     let g4 = GD.UnstructuredGrid(cart, (rand(8), rand(8), rand(8), rand(8)), trues(8); k = 4,
                                  areas = ones(8))
         Test.@test_throws ArgumentError O.gradient_plan(g4)
@@ -767,7 +764,7 @@ Test.@testset "The symmetric pseudo-inverse satisfies the Moore-Penrose conditio
         Test.@test maxdiff(mul3(PA, P), P) < 1e-9 * max(maxabs(P), 1.0)          # A⁺ A A⁺ = A⁺
         Test.@test maxdiff(AP, transp(AP)) < 1e-12                               # A A⁺ symmetric
         Test.@test maxdiff(PA, transp(PA)) < 1e-12                               # A⁺ A symmetric
-        # A⁺ must annihilate the null space rather than invent a direction the data never spanned.
+        # A⁺ annihilates the null space, leaving the unspanned directions at zero.
         for v in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
             Av = ntuple(i -> sum(A[i][j] * v[j] for j in 1:3), Val(3))
             if sqrt(sum(abs2, Av)) < 1e-12
@@ -776,7 +773,7 @@ Test.@testset "The symmetric pseudo-inverse satisfies the Moore-Penrose conditio
             end
         end
     end
-    # `D = 2` goes through the 2×2 closed form unchanged, which is what keeps its results identical.
+    # `D = 2` goes through the 2×2 closed form, and its results are unchanged by the generic path.
     let A = ((4.0, 1.0), (1.0, 9.0))
         P = O._sympinv(A, 1e-12)
         Test.@test P[1][2] == P[2][1]
@@ -848,10 +845,9 @@ Test.@testset "Staggering, point location and interpolation weights" begin
         Test.@test all(D.nearest_index(wv, t) == argmin(abs.(wv .- t)) for t in mids)
     end
 
-    # Both are searches, not sweeps: a stretched axis must not be walked, nor materialize its
-    # faces, on a query. Asserted by COUNTING the elements read — the claim itself — rather than
-    # by a clock, which a collection can decide. `locate` reads two faces per bisection step plus
-    # the two end faces, so the bound is generous but still far below `n`.
+    # Both are searches: a query on a stretched axis walks neither the axis nor its materialized
+    # faces. The assertion counts the elements read, which is the claim itself. `locate` reads two
+    # faces per bisection step plus the two end faces, so the bound is loose and still far below `n`.
     for pow in (6, 18)
         n = 1 << pow
         c = CountingAxis(collect(range(0.0, 1.0; length = n)))
@@ -859,7 +855,7 @@ Test.@testset "Staggering, point location and interpolation weights" begin
         Test.@test reads(() -> D.locate(c, 0.37), c) ≤ 8 * pow + 16
         Test.@test reads(() -> D.nearest_index(c, 0.37), c) ≤ 8 * pow + 16
     end
-    # …and the bound really does discriminate: a scan of the larger axis would read `n` of them.
+    # …and the bound discriminates: a scan of the same axis reads all `n`, as the second case shows.
     let c = CountingAxis(collect(range(0.0, 1.0; length = 1 << 18)))
         Test.@test reads(() -> D.locate(c, 0.37), c) < 1000     # against n = 262144
         Test.@test reads(() -> sum(c), c) == 1 << 18            # the wrapper does count reads
@@ -871,7 +867,7 @@ Test.@testset "Staggering, point location and interpolation weights" begin
         Test.@test sum(w) ≈ 1.0
         Test.@test w[1] * v[i] + w[2] * v[i+1] ≈ t atol = 1e-12
     end
-    # Outside the axis it clamps rather than extrapolating.
+    # Outside the axis it clamps to the end sample.
     i, w = D.interpolation_weights(v, -10.0)
     Test.@test w[1] * v[i] + w[2] * v[i+1] ≈ first(v)
     # Lagrange weights are exact for polynomials up to degree nodes-1, on a stretched axis.
@@ -896,8 +892,8 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
     vec1 = cumsum([0.0, 1.0, 0.3, 2.5, 0.7, 4.0])
     rng1 = range(0.0, 1.0; length = 8)
 
-    # `cell_width` IS the gap between faces — that is what it means, and the reason it exists
-    # separately is that `faces` materializes the whole axis to answer for one cell.
+    # `cell_width` is the gap between a cell's two faces, answered without materializing the axis
+    # the way `faces` does.
     for x in (vec1, reverse(vec1), collect(rng1), [3.0])
         f = D.faces(x)
         for i in eachindex(x)
@@ -905,7 +901,7 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
         end
     end
 
-    # Gaps are SIGNED, and that is what lets a stencil keep the index-vs-coordinate direction.
+    # Gaps keep their sign, so a stencil carries the index-versus-coordinate direction.
     Test.@test all(D.local_spacing(vec1, i) == (vec1[i] - vec1[i-1], vec1[i+1] - vec1[i])
                    for i in 2:(length(vec1) - 1))
     # Reversing the axis moves cell `i` to `n+1-i`, where the gaps come back negated and swapped
@@ -967,8 +963,8 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
                        dfq(x[i]) atol = 1e-12
         end
     end
-    # And across a periodic seam, where the wrapped gap is the whole point: the seam cell's error
-    # is the interior truncation error, not the O(1) one a zero boundary gap would give.
+    # And across a periodic seam, where the gap wraps: the seam cell's error matches the interior
+    # truncation error.
     np = 32
     λ2 = collect(range(0.0, 2π * (1 - 1 / np); length = np))
     gper = GD.StructuredGrid(cart, λ2, [0.0]; periodic = (true, false), period = (2π, 0.0))
@@ -995,7 +991,7 @@ Test.@testset "Fornberg finite-difference weights are exact to their stated orde
                [-1/12, 4/3, -5/2, 4/3, -1/12]
     Test.@test D.fd_weights([-1.0, 0.0, 1.0], 0.0, 0) ≈ [0.0, 1.0, 0.0]     # order 0 interpolates
 
-    # The defining property, on ARBITRARILY spaced nodes: with m nodes the weights differentiate
+    # The defining property, on nodes at arbitrary spacing: with m nodes the weights differentiate
     # every polynomial of degree ≤ m-1 exactly.
     nodes = [-1.7, -0.4, 0.0, 0.9, 2.3, 4.1]
     for m in 1:length(nodes), order in 0:min(3, m - 1)
@@ -1010,8 +1006,8 @@ Test.@testset "Fornberg finite-difference weights are exact to their stated orde
     Test.@test_throws ArgumentError D.fd_weights([0.0, 0.0], 0.0, 1)   # repeated node
     Test.@test_throws ArgumentError D.fd_weights([0.0, 1.0], 0.0, -1)
 
-    # The axis form keeps the node count at a boundary rather than clipping the stencil, so the
-    # accuracy order is the same everywhere.
+    # The axis form keeps the node count at a boundary by shifting inward, holding the accuracy
+    # order everywhere.
     xs = collect(range(0.0, 1.0; length = 11))
     for i in 1:11
         idx, w = D.fd_weights(xs, i, 1, 5)
@@ -1050,7 +1046,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     active = [i for i in 1:7 if msk[i, 1]]
 
     # Blanking loses every active cell within `nodes - 1` of the mask; at five nodes it loses the
-    # whole axis. That is what the other policies exist to avoid.
+    # whole axis. The other two policies fill those cells instead.
     for nodes in (2, 3, 5)
         o = zeros(7, 1)
         O.apply_stencil!(o, f, grid, 1; order = 1, nodes = nodes)
@@ -1101,7 +1097,7 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     end
     Test.@test any(a[i, 1] != b[i, 1] for i in 26:34 if i != 30)
 
-    # And the accuracy order survives, which is the reason to shift rather than clip.
+    # And the accuracy order survives the shift, converging at the interior rate.
     errs = Float64[]
     for m in (80, 160, 320)
         xx = collect(range(0.0, 1.0; length = m))
@@ -1187,14 +1183,14 @@ Test.@testset "A stencil at a mask edge can degrade instead of blanking" begin
     Test.@test all(isapprox.(orr[[1, 2, 3, 5, 6, 7], 1], 1.0))
     Test.@test iszero(orr[9, 1])                 # a run of one holds no first derivative
 
-    # The matrix form has no axis to rebuild from, and says so rather than ignoring the policy.
+    # The matrix form has no axis to rebuild a stencil from, and refuses the policy.
     idx, w = D.axis_stencils(x, 1, 3)
     Test.@test_throws ArgumentError O.apply_stencil!(zeros(7, 1), f, idx, w, 1;
                                                      mask = msk, policy = O.ShiftWithinRun())
 
-    # The END OF THE AXIS bounds a window exactly as the end of a run does, so under `ReduceInRun`
-    # `nodes` is a ceiling there too. These are ordinary degenerate grids — a single-latitude
-    # strip, a two-level column, a one-cell channel — not caller mistakes.
+    # The end of the axis bounds a window as the end of a run does, so under `ReduceInRun` `nodes`
+    # is a ceiling there too. These are ordinary degenerate grids: a single-latitude strip, a
+    # two-level column, a one-cell channel.
     let xa = collect(0.0:5.0)
         # An axis with fewer samples than `nodes`: use what there is, and stay exact for the
         # degree the reduced window still supports.
@@ -1341,14 +1337,14 @@ Test.@testset "A batch is evaluated at a coordinate, and gradients take one too"
             Test.@test all(isequal(O.interpolate(f, g, p; masked = NaN, policy = pol)[b], ref[b])
                            for b in 1:nb)          # the allocating form is the same values
         end
-        # An unbatched field still answers with a scalar: the rank decides, not a length.
+        # An unbatched field still answers with a scalar, decided by the field's rank.
         Test.@test O.interpolate(view(f, :, :, 1), g, (8.4, 6.1)) isa Float64
     end
     Test.@test_throws DimensionMismatch O.interpolate!(
         Vector{Float64}(undef, 2), zeros(nx, ny, nb), GD.StructuredGrid(cart, x, y), (1.0, 1.0))
 
-    # Off a rectilinear grid the neighbour set and the tangent-plane fit are the point's, not the
-    # data's, so they are solved once; the values must still match a call per slice.
+    # Off a rectilinear grid the neighbour set and the tangent-plane fit depend on the point alone,
+    # so they are solved once, and the values still match a call per slice.
     n = 12
     X = [0.7i + 0.05j for i in 1:n, j in 1:n]; Y = [0.9j - 0.03i for i in 1:n, j in 1:n]
     cg = GD.CurvilinearGrid(cart, X, Y, trues(n, n); measure = fill(1.0, n, n))
@@ -1395,8 +1391,8 @@ Test.@testset "The metric hoist is the geometry's claim, not an assumption" begi
     Test.@test GE.metric_invariant_directions(GE.CartesianGeometry()) == ()
     Test.@test GE.metric_invariant_directions(OneSphere{Float64}()) == ()
 
-    # A geometry whose h_λ varies with λ: the hoist would divide every cell of a row by the factor at
-    # λ = λ[1]. `derivative!` must instead divide each cell by its own.
+    # A geometry whose h_λ varies with λ, so the factor cannot be hoisted out of a row:
+    # `derivative!` divides each cell by its own.
     nx, ny = 16, 12
     λ = collect(range(0, 2π * (1 - 1 / nx); length = nx))
     φ = collect(range(-1.0, 1.0; length = ny))
@@ -1453,8 +1449,8 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
     O = FG.Operators
     A = FG.Axes
 
-    # Which form a plan takes follows the axis's TYPE, never its values: a vector of equally spaced
-    # numbers is still a stretched axis, because nothing in its type says otherwise.
+    # Which form a plan takes follows the axis's type, never its values: a vector of equally spaced
+    # numbers is a stretched axis, its type carrying no spacing guarantee.
     for (x, per, uniform) in ((0.0:0.5:10.0, nothing, true),
                               (range(0, 2π * (1 - 1 / 32); length = 32), 2π, true),
                               (A.UniformAxis(0.0, 0.25, 40), nothing, true),
@@ -1535,7 +1531,7 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
         end
     end
 
-    # K nodes span degree K−1: exact there, and not above it.
+    # K nodes span degree K−1, and the assertion sits at that degree.
     xu = collect(range(0.0, 1.0; length = 40))
     for k in (3, 4, 5, 6)
         pl = D.stencil_plan(range(0.0, 1.0; length = 40), 1, k)
@@ -1555,7 +1551,7 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
         end
     end
 
-    # A plan describes one axis length, and a field of another is a mistake rather than a wrong answer.
+    # A plan describes one axis length, and a field of another length raises.
     Test.@test_throws DimensionMismatch O.apply_stencil!(
         zeros(8, 4), zeros(8, 4), D.stencil_plan(range(0.0, 1.0; length = 9), 1, 3), 1)
 end
@@ -1652,7 +1648,7 @@ Test.@testset "The ! forms write into the caller's buffers and allocate nothing"
         let sc = D.stencil_scratch(2, 5),
             gi = Matrix{Int}(undef, length(x), 5), gw = Matrix{Float64}(undef, length(x), 5)
             Test.@test _alloc(q_axst!, gi, gw, x, 2, 5, sc) == 0
-            # a scratch too small for the table says so rather than reading past it
+            # a scratch too small for the table is refused at entry
             Test.@test_throws ArgumentError D.axis_stencils!(gi, gw, x, 2, 5;
                                                              scratch = D.stencil_scratch(1, 2))
         end
@@ -1683,19 +1679,19 @@ Test.@testset "The ! forms write into the caller's buffers and allocate nothing"
         end
     end
 
-    # An empty axis has no faces, which is what both forms say about it.
+    # An empty axis has no faces, and both forms return an empty result.
     Test.@test D.faces!(Float64[], Float64[]) == D.faces(Float64[])
     Test.@test D.faces!(zeros(2), [3.0]) == D.faces([3.0])
     Test.@test D.centers!(zeros(1), [0.0, 2.0]) == [1.0]
 
-    # A wrongly sized buffer is a mistake, not a silent partial write.
+    # A wrongly sized buffer raises before anything is written.
     Test.@test_throws DimensionMismatch D.faces!(zeros(3), collect(1.0:5.0))
     Test.@test_throws DimensionMismatch D.centers!(zeros(9), collect(1.0:5.0))
     Test.@test_throws DimensionMismatch D.axis_stencils!(
         Matrix{Int}(undef, 3, 3), Matrix{Float64}(undef, 3, 3), collect(1.0:5.0), 1, 3)
     Test.@test_throws ArgumentError D.lagrange_weights!(zeros(2), collect(1.0:5.0), 2.0, 4)
 
-    # `interpolation_weights` has no `!` form because it needs none: the pair comes back as a tuple.
+    # `interpolation_weights` returns its pair as a tuple, so it has no `!` form.
     Test.@test _alloc(q_iw, collect(1.0:5.0), 2.4) == 0
     Test.@test (Test.@inferred D.interpolation_weights(collect(1.0:5.0), 2.4)) isa
                Tuple{Int,Tuple{Float64,Float64}}
@@ -1718,13 +1714,13 @@ Test.@testset "Staggered gradient, divergence and curl" begin
     y = collect(range(0.0, 3.0; length = 16))
     sg = GD.StaggeredGrid(cart, x, y)
 
-    # Each component is ONE difference across ONE cell, so a linear field is differentiated exactly.
+    # Each component is a single difference across a single cell, so a linear field is exact.
     f = smp(sg, (C, C), (a, b) -> 3.0a - 2.0b + 7.0)
     g1, g2 = O.gradient(f, sg)
     Test.@test maximum(abs.(g1[2:(end - 1), :] .- 3.0)) < 1e-12
     Test.@test maximum(abs.(g2[:, 2:(end - 1)] .+ 2.0)) < 1e-12
     # An outer face of a bounded direction has a cell on one side only, so there is no difference
-    # across it. It is where a boundary condition goes, and none is invented.
+    # across it. That face carries the caller's boundary condition.
     Test.@test all(isnan, g1[1, :]) && all(isnan, g1[end, :])
     Test.@test all(isnan, g2[:, 1]) && all(isnan, g2[:, end])
     Test.@test all(iszero, O.gradient(f, sg; masked = 0.0)[1][1, :])
@@ -1734,15 +1730,15 @@ Test.@testset "Staggered gradient, divergence and curl" begin
     Test.@test maximum(abs.(O.divergence((u, v), sg) .- 5.0)) < 1e-11
     Test.@test maximum(abs.(O.curl(u, v, sg)[2:(end - 1), 2:(end - 1)] .+ 0.75)) < 1e-11
 
-    # The curl of a discrete gradient is zero to round-off, not merely small: both are the same
-    # one-cell differences, so they cancel identically rather than to truncation order.
+    # The curl of a discrete gradient vanishes to round-off: both are the same one-cell differences,
+    # so the terms cancel identically.
     let ψ = smp(sg, (C, C), (a, b) -> sin(1.3a) * cos(0.9b))
         p1, p2 = O.gradient(ψ, sg; masked = 0.0)
         z = O.curl(p1, p2, sg; masked = 0.0)
         Test.@test maximum(abs.(z[2:(end - 1), 2:(end - 1)])) < 1e-10
     end
 
-    # A stretched mesh and a DESCENDING one: the signed gaps keep the derivative's sense either way.
+    # A stretched mesh and a descending one: the signed gaps keep the derivative's sense either way.
     let xs = cumsum(vcat(0.0, 0.1 .+ 0.05 .* (1:19))), ys = collect(range(6.0, 0.0; length = 16))
         s = GD.StaggeredGrid(cart, xs, ys)
         ff = smp(s, (C, C), (a, b) -> 3.0a - 2.0b + 7.0)
@@ -1755,8 +1751,8 @@ Test.@testset "Staggered gradient, divergence and curl" begin
     end
 
     # On a sphere the same call is the metric form, built from the geometry's own scale factors:
-    # ∇·u = (1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]. Gated by CONVERGENCE — second order — rather than
-    # by a tolerance on one resolution, which would not distinguish it from a wrong constant factor.
+    # ∇·u = (1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]. The gate is the convergence rate across three
+    # resolutions, second order, which a wrong constant factor fails.
     let R = 6.371e6, sph = GE.SphericalGeometry(R)
         errs = map((24, 48, 96)) do nlon
             λs = collect(range(0, 2π; length = nlon + 1)[1:nlon])
@@ -1783,8 +1779,8 @@ Test.@testset "Staggered gradient, divergence and curl" begin
     end
 
     # Discretely conservative: the divergence is the net flux through a cell's own faces over its own
-    # volume, so neighbouring cells' shared faces cancel EXACTLY and a wrapping domain integrates to
-    # zero — to round-off, not to truncation order.
+    # volume, so neighbouring cells' shared faces cancel to the bit and a wrapping domain integrates
+    # to zero at round-off.
     let sph = GE.SphericalGeometry(6.371e6),
         λs = collect(range(0, 2π; length = 41)[1:40]),
         φs = collect(range(-1.4, 1.4; length = 25))
@@ -1877,8 +1873,9 @@ Test.@testset "In three directions the curl is a vector, at three vorticity poin
         for i in 1:3
             Test.@test maximum(abs, filter(isfinite, vec(ws[i]))) < 1e-9 * scale
         end
-        # A zonal flow `u_λ = cosφ` has `(∇×u)_r = 2 sinφ / r`. Gated by CONVERGENCE — second order —
-        # at each point's OWN radius; a fixed one floors the error at the radial axis's width.
+        # A zonal flow `u_λ = cosφ` has `(∇×u)_r = 2 sinφ / r`. The gate is the convergence rate,
+        # second order, taken at each point's own radius; a fixed radius floors the error at the
+        # radial axis's width.
         errs = map((16, 32, 64)) do nlon
             λ2 = collect(range(0, 2π; length = nlon + 1)[1:nlon])
             φ2 = collect(range(-1.2, 1.2; length = nlon ÷ 2))

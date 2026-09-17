@@ -59,7 +59,7 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
             Test.@test sum(r.w .* r.μ .^ d) ≈ exact atol = 1e-11
         end
     end
-    # Odd n has its central node exactly at zero (and not at -0.0).
+    # Odd n has its central node at positive zero.
     Test.@test FG.SphericalSampling._gauss_legendre_μ(9).μ[5] === 0.0
 
     # Two regimes with a crossover at n = 60: the asymptotic expansion is a fixed-order Float64
@@ -87,7 +87,7 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
     end
     # Each output stays independently optional on the asymptotic path too.
     Test.@test SS._gauss_legendre_asy!(Float64, nothing, nothing, 128, 64) === nothing
-    # A wider element type must NOT take the Float64 coefficient path — it would cap precision.
+    # A wider element type takes the Newton path, where precision follows the type.
     μb, wb = setprecision(BigFloat, 192) do
         μ = Vector{BigFloat}(undef, 128); w = Vector{BigFloat}(undef, 128)
         SS._gauss_legendre_μ!(μ, w); (μ, w)
@@ -122,8 +122,8 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
         Test.@test q.φ == a.φ && q.λ == a.λ
         Test.@test q.w == FG.SphericalSampling.latitude_weights(s, 12)
     end
-    # McEwen–Wiaux has nodes but deliberately no weights, so the combined form must refuse too
-    # rather than inventing a rule that is not exact even at l = 0.
+    # McEwen–Wiaux has nodes and no weights, so the combined form refuses: no rule over those nodes
+    # is exact even at l = 0.
     Test.@test_throws ArgumentError FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.McEwenWiauxSampling(), 12)
     # The in-place form writes into caller buffers and allocates no scratch of its own.
     n = 64
@@ -263,9 +263,8 @@ Test.@testset "bang spherical_axes! / points!" begin
 end
 
 Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
-    # The property that DEFINES a spectral quadrature sampling: Σ_j w_j P_l(sin φ_j) vanishes
-    # for every 1 ≤ l ≤ lmax. A wrong node set or weight set fails this even when the point
-    # count is right.
+    # The defining property of a spectral quadrature sampling: Σ_j w_j P_l(sin φ_j) vanishes for
+    # every 1 ≤ l ≤ lmax. A wrong node set or weight set fails this even at the right point count.
     function legendre(l, x)
         l == 0 && return one(x)
         p0, p1 = one(x), x
@@ -287,8 +286,8 @@ Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
             for l in 1:(nlat - 1)
                 Test.@test abs(sum(w[j] * legendre(l, sin(ax.φ[j])) for j in eachindex(ax.φ))) < 1e-11
             end
-            # Gauss–Legendre goes further: exact to 2N-1, which is what makes it the sampling
-            # whose quadrature is exact at its own stated band limit.
+            # Gauss–Legendre goes further, exact to 2N-1, so its quadrature holds at its own stated
+            # band limit.
             if s isa FG.SphericalSampling.AbstractGaussLegendreSampling
                 for l in nlat:(2nlat - 1)
                     Test.@test abs(sum(w[j] * legendre(l, sin(ax.φ[j])) for j in eachindex(ax.φ))) < 1e-11
@@ -364,13 +363,13 @@ Test.@testset "Yin–Yang cells tile each panel exactly; the overlap is resoluti
         a = FG.Grids.measure(g)
         np = nlon * nlat
         Test.@test length(a) == 2np
-        # Cell centres, not panel edges: the nlon×nlat cells tile the panel box exactly. Sampling
-        # the endpoints instead inflates this by nlon/(nlon-1) × nlat/(nlat-1).
+        # The nlon×nlat cell centres tile the panel box exactly. Endpoint sampling inflates this by
+        # nlon/(nlon-1) × nlat/(nlat-1).
         Test.@test sum(@view a[1:np]) ≈ box rtol = 1e-14
         # Yang is a rigid rotation of yin, so the two blocks are elementwise identical.
         Test.@test @view(a[1:np]) == @view(a[(np + 1):(2np)])
-        # The panels overlap by construction: the excess over the sphere is exactly 3√2π/4π at
-        # every resolution. A resolution-*dependent* excess would mean a discretisation bug.
+        # The panels overlap by construction, and the excess over the sphere is exactly 3√2π/4π at
+        # every resolution — a constant of the geometry, carrying no resolution dependence.
         Test.@test sum(a) / (4π * R2) ≈ 3 * sqrt(2) / 4 rtol = 1e-14
         # Areas vary as cos φ across the panel, and nowhere degenerate.
         Test.@test all(>(0), a)
@@ -453,13 +452,13 @@ Test.@testset "HEALPix RING neighbours are emitted in ascending order" begin
             end
             inversions += k
             k == 0 && (presorted += 1)
-            # Aggregate rather than assert per pixel: the emitted set must be distinct in-range
-            # pixel ids that exclude the node itself, whatever the order.
+            # One aggregate assertion over all pixels: the emitted set is distinct in-range pixel
+            # ids excluding the node itself, whatever the order.
             valid &= m ≥ 6 && all(0 .≤ v .< npix) && length(unique(v)) == m && p ∉ v
         end
         Test.@test valid
         # Only the ring seam is left out of order, and the seam is ~4·nside of 12·nside² pixels,
-        # so the residual disorder falls like 1/nside rather than to a constant.
+        # so the residual disorder falls like 1/nside.
         Test.@test inversions / npix < 6 / nside
         Test.@test presorted / npix > 1 - 8 / nside
     end
@@ -505,7 +504,7 @@ end
 Test.@testset "HEALPix pixel centers are distinct and correctly ringed" begin
     # These tile the sphere, so no two may coincide, and the ring structure is fully determined:
     # 4nside-1 rings holding 4, 8, … 4(nside-1), then 4nside for 2nside+1 rings, then back down.
-    # The ring structure is fully determined, so it is asserted ring by ring, not just by count.
+    # Being determined, it is asserted ring by ring.
     for nside in (1, 2, 4, 8, 16)
         p = FG.SphericalSampling.spherical_points(FG.SphericalSampling.HEALPixSampling(nside))
         npix = FG.SphericalSampling.healpix_npix(nside)
@@ -527,7 +526,7 @@ Test.@testset "HEALPix pixel centers are distinct and correctly ringed" begin
 end
 
 Test.@testset "Quadrature-exactness trait matches measured exactness" begin
-    # The trait is about integrating PRODUCTS of two degree-lmax functions, which is what
+    # The trait asks about integrating the products of two degree-lmax functions, the quantity
     # spectral analysis forms. Clenshaw–Curtis's grid represents to N-1 but its quadrature only
     # integrates a single P_l to N-1, so it cannot claim exactness at its own band limit.
     Test.@test FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.GaussLegendreSampling())
@@ -561,9 +560,9 @@ end
 
 Test.@testset "Every ring-laid-out sampling answers the ring API" begin
     S = FG.SphericalSampling
-    # `nrings`/`nlon_per_ring` are what a caller walking a map ring by ring loops over — a
-    # per-ring longitude transform, a zonal reduction. They existed for two samplings, so that
-    # caller had to branch on sampling type, which is what these accessors exist to prevent.
+    # `nrings`/`nlon_per_ring` are the loop bounds for a caller walking a map ring by ring — a
+    # per-ring longitude transform, a zonal reduction. Every ring-laid-out sampling answers them,
+    # so such a caller needs no branch on sampling type.
     cases = (("HEALPix", S.HEALPixSampling(4), ()),
              ("Octahedral", S.OctahedralGaussianSampling(8), ()),
              ("Reduced", S.ReducedGaussianSampling([8, 12, 16, 12, 8]), ()),
@@ -664,7 +663,7 @@ Test.@testset "Fibonacci lattice" begin
         Test.@test all(λ -> 0 ≤ λ < 2π + 1e-12, p.λ)
         Test.@test length(unique([(round(a; digits = 10), round(b; digits = 10))
                                   for (a, b) in zip(p.λ, p.φ)])) == n
-        # `z` advances in exactly equal steps, which is what makes the bands equal-area.
+        # `z` advances in exactly equal steps, so the bands are equal-area.
         n < 2 || Test.@test maximum(abs.(diff(sin.(p.φ)) .- 2 / n)) < 1e-12
     end
     # Quasi-uniform: nearest-neighbour separation barely varies, unlike a lat–lon grid's.
@@ -775,7 +774,7 @@ Test.@testset "A ring can be reached one at a time, in O(1), without building th
         Test.@test all(allequal(view(pts.φ, SS.ring_range(s, r))) for r in 1:SS.nrings(s))
     end
 
-    # For a tensor product the range also asserts an ORDERING — longitude fastest within a ring —
+    # For a tensor product the range also fixes an ordering — longitude fastest within a ring —
     # which the tiling check above cannot see, since a longitude-major layout tiles just as well.
     for (s, nlat) in ((SS.GaussLegendreSampling(), 8), (SS.ClenshawCurtisSampling(), 5),
                       (SS.DriscollHealySampling(), 6), (SS.DriscollHealyEqualSampling(), 6))
@@ -802,8 +801,8 @@ end
 
 Test.@testset "The NESTED bit interleave is exact over its whole domain" begin
     SS = FG.SphericalSampling
-    # The cascade replaced a per-bit loop; it must agree with the definition bit for bit, not
-    # merely round-trip. Spreading places input bit b at output bit 2b.
+    # The cascade is asserted against the definition itself, value for value across the domain, and
+    # separately for the round trip. Spreading places input bit b at output bit 2b.
     defn(v) = sum(((v >> b) & 1) << (2b) for b in 0:31; init = 0)
     Test.@test all(SS._spread_bits(v) == defn(v) for v in 0:4095)
     Test.@test all(SS._spread_bits(v) == defn(v) for v in (1 << 20, (1 << 21) - 1, 12345678))

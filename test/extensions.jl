@@ -42,16 +42,16 @@ Test.@testset "Threading is opt-in and changes no result" begin
     FG.Execution.run_chunks(17, nothing) do r; push!(seen, r); end
     Test.@test seen == [1:17]
 
-    # The empty-input contract, which the two shapes answer differently on purpose: a write loop has
-    # nothing to write, and a reduction still has to produce a value.
+    # The empty-input contract, which the two shapes answer differently: a write loop has nothing to
+    # write, and a reduction still has to produce a value.
     ran = Ref(0)
     FG.Execution.run_chunks(0, nothing) do r; ran[] += 1; end
     Test.@test ran[] == 0
     Test.@test FG.Execution.map_chunks(r -> length(r), 0, nothing) == [0]
     Test.@test FG.Execution.map_chunks(r -> length(r), 0, CB.ThreadedBackend()) == [0]
 
-    # A threaded reduction collects into a CONCRETE vector: the partials are the reduction's own
-    # values, and boxing each of them is paid on a path whose serial form allocates nothing.
+    # A threaded reduction collects into a concretely typed vector: the partials are the reduction's
+    # own values, on a path whose serial form allocates nothing.
     let out = FG.Execution.map_chunks(r -> sum(r), 1000, CB.ThreadedBackend())
         Test.@test isconcretetype(eltype(out))
         Test.@test sum(out) == sum(1:1000)
@@ -90,8 +90,8 @@ Test.@testset "Threading is opt-in and changes no result" begin
                    FG.Connectivity.build_connectivity(hp; backend = CB.ThreadedBackend()).nbrs
     end
 
-    # A batched sweep is ONE launch over the whole field, batch axes included — so it must agree with
-    # differencing each slice on its own, not merely with the host.
+    # A batched sweep is a single launch over the whole field, batch axes included, so it has to
+    # agree with differencing each slice on its own.
     let cpu = KernelAbstractions.CPU(), nx = 12, ny = 8, nb = 3
         ax = range(0.0, 1.0; length = nx)
         fld = reshape(collect(Float64, 1:(nx * ny * nb)), nx, ny, nb) ./ (nx * ny * nb)
@@ -137,7 +137,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
         end
     end
 
-    # Every threaded kernel must be bit-identical to serial, not merely close.
+    # Every threaded kernel is bit-identical to serial.
     geo = FG.Geometry.SphericalGeometry()
     thr = CB.ThreadedBackend()
     for n in (7, 64)
@@ -160,9 +160,9 @@ Test.@testset "Threading is opt-in and changes no result" begin
         end
     end
 
-    # Connectivity: both cell passes write only slots their own cell owns. Masked and periodic
-    # cases matter most — they make the per-cell degree vary, so a chunk boundary landing
-    # mid-row would show up as a wrong offset rather than a wrong count.
+    # Connectivity: both cell passes write only slots their own cell owns. The masked and periodic
+    # cases carry a varying per-cell degree, so a chunk boundary landing mid-row surfaces as a wrong
+    # offset here.
     for topo in (FG.Connectivity.IndexTopology((37, 21), (true, false), nothing),
                  FG.Connectivity.IndexTopology((37, 21), (true, true), nothing),
                  FG.Connectivity.IndexTopology((5, 4), (false, false), nothing),
@@ -189,8 +189,8 @@ Test.@testset "Threading is opt-in and changes no result" begin
     Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
 
     # The candidate builder emits and dedups concurrently, so each sampling's `emit!` has to be
-    # free of state shared between nodes. nside = 1 and 2 cover the singular pixels, where a node
-    # has 7 neighbours rather than 8.
+    # free of state shared between nodes. nside = 1 and 2 cover the singular pixels, the ones with
+    # seven neighbours.
     for s in (FG.SphericalSampling.HEALPixSampling(1), FG.SphericalSampling.HEALPixSampling(2), FG.SphericalSampling.HEALPixSampling(8))
         a = FG.Connectivity.build_connectivity(s)
         b = FG.Connectivity.build_connectivity(s; backend = thr)
@@ -224,8 +224,8 @@ Test.@testset "Grids can be moved to another storage backend" begin
     g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 9)
     d = adapt(FakeDev(), g)
     Test.@test FG.Grids.coordinates(d, 1) isa DevArr && FG.Grids.coordinates(d, 2) isa DevArr
-    # A separable measure must adapt its FACTORS — materializing the outer product onto a device
-    # is exactly what the factored form exists to avoid.
+    # A separable measure adapts its factors, so the outer product is never materialized onto a
+    # device.
     Test.@test FG.Grids.measure(d) isa FG.Grids.SeparableMeasure
     Test.@test all(f -> f isa DevArr, FG.Grids.measure_factors(d))
     Test.@test all(FG.Grids.measure(d)[i, j] == FG.Grids.measure(g)[i, j]
@@ -290,13 +290,13 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     Test.@test SS._equiangular_algorithm(Float64) === SS.Transform()   # a plannable type defaults to it
     Test.@test SS._equiangular_algorithm(BigFloat) === SS.Recurrence() # nothing plans BigFloat
 
-    # Both algorithms are reachable by asking for one, so that correctness does not depend on which
-    # extensions happen to be loaded is checked here rather than from a second process.
+    # Both algorithms are reachable by asking for one, so this checks in-process that correctness
+    # holds whichever extensions are loaded.
     #
-    # The WEIGHTS are compared, not the sine sums they are built from: the sums are an intermediate
-    # whose magnitude is O(1) while the weights carry a `4/nlat·sinθ` factor, and the recurrence
-    # accumulates round-off across its `nterm` steps, so the two constructions agree on the returned
-    # quantity to a tolerance the intermediate does not meet.
+    # The comparison is on the weights. The sine sums behind them are an intermediate of magnitude
+    # O(1) while the weights carry a `4/nlat·sinθ` factor, and the recurrence accumulates round-off
+    # across its `nterm` steps, so the two constructions agree on the returned quantity to a
+    # tolerance the intermediate does not meet.
     for (s, fam) in ((SS.ClenshawCurtisSampling(), :open), (SS.DriscollHealySampling(), :closed)),
         nlat in (8, 64, 512)
         wt = SS.latitude_weights(s, nlat; algorithm = SS.Transform())
@@ -312,9 +312,9 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     Test.@test_throws ArgumentError SS.latitude_weights(
         SS.GaussLegendreSampling(), 8; algorithm = SS.Recurrence())
 
-    # The plan is held across calls, so a repeat at the same size does not rebuild it. Asserted as
-    # allocation rather than time: planning allocates and a cache hit does not, which is exact and
-    # carries no machine constant.
+    # The plan is held across calls, so a repeat at the same size does not rebuild it. The assertion
+    # is on allocation: planning allocates and a cache hit does not, which is exact and carries no
+    # machine constant.
     steady = map((64, 256)) do nlat
         s = zeros(Float64, nlat)
         fam = SS.ClosedNodes()
@@ -326,11 +326,11 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
         again = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
         third = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
         Test.@test again < first
-        Test.@test third == again                 # steady state, not a decaying warm-up
+        Test.@test third == again                 # steady state
         again
     end
     # Four times the latitudes costs the same, so neither the plan nor an `nlat`-sized buffer is
-    # being rebuilt — which a per-call allocation of either would show as a fourfold difference.
+    # being rebuilt: a per-call allocation of either scales with `nlat` and shows up here.
     Test.@test steady[2] == steady[1]
     # A cached plan and buffer are task-local, so two tasks at the same size do not share a buffer.
     let nlat = 128
@@ -372,12 +372,12 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
     Test.@test FG.Connectivity.sparse_adjacency_coo!(I, J, conn) == ne
     Test.@test SparseArrays.sparse(I, J, trues(ne), n, n) == A
 
-    # A symmetric graph's CSR arrays ARE its CSC arrays, so the matrix reads the neighbour list and
-    # holds no second permanent copy. What decides that is the layout: under an index stencil it is the
-    # STENCIL's symmetry, read from its type, and under a formula it is
-    # `Grids.has_symmetric_adjacency`. An asymmetric graph wrapped that way gives the transpose of the
-    # adjacency, a different matrix. The contract — entry `(i, j)` set exactly when `j` is a neighbour
-    # of `i` — is what gets checked, on every shape.
+    # A symmetric graph's CSR arrays serve as its CSC arrays, so the matrix reads the neighbour list
+    # and holds no second permanent copy. The layout decides symmetry: under an index stencil it is
+    # the stencil's own, read from its type, and under a formula it is
+    # `Grids.has_symmetric_adjacency`. An asymmetric graph wrapped that way gives the transpose of
+    # the adjacency, a different matrix. The check below is the contract on every shape: entry
+    # `(i, j)` set exactly when `j` is a neighbour of `i`.
     let cart = FG.Geometry.CartesianGeometry{Float64}(),
         xs = collect(0.0:1.0:4.0), ys = collect(0.0:1.0:3.0),
         mk = trues(5, 4)
@@ -534,12 +534,11 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     Test.@test sum(sweep_counts(gball, 3.0, cpu)) ==
                C.mapreduce_within((I, J, d) -> 1, +, 0, gball; ball = 3.0)
 
-    # A chunked body accumulates across its range, so a device backend refuses it rather than
-    # quietly running on the host.
+    # A chunked body accumulates across its range, so a device backend refuses it outright.
     Test.@test_throws ArgumentError FG.Execution.run_chunks(r -> nothing, 4, cpu)
     Test.@test_throws ArgumentError FG.Execution.map_chunks(r -> 1, 4, cpu)
 
-    # An unindexed topology is device-safe; one holding a k-d tree is refused, not silently dropped.
+    # An unindexed topology is device-safe; one holding a k-d tree raises.
     gs = GD.StructuredGrid(cart, collect(0.0:7.0), collect(0.0:7.0))
     Test.@test Adapt.adapt(Array, C.MetricTopology(gs)) === C.MetricTopology(gs)
     gu = healpix_node_grid(2)
@@ -573,8 +572,8 @@ Test.@testset "Every layout's cell centres can be indexed, not just the three ar
         ix = C.indexed(g)
         sc = C.ball_scratch()
         cell = GD.cell_at(g, first(GD.cells(g)))
-        # An index may only ever OVER-return; the distance gate decides membership, so the indexed
-        # answer must equal the scan's exactly rather than approximately.
+        # An index may only over-return, and the distance gate decides membership, so the indexed
+        # answer equals the scan's to the cell.
         Test.@test C.nneighbors_within(g, cell...; ball = 2.0e6, topology = ix, scratch = sc) ==
                    C.nneighbors_within(g, cell...; ball = 2.0e6, topology = C.MetricTopology(g))
     end

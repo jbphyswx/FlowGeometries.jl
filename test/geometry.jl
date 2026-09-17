@@ -139,8 +139,8 @@ Test.@testset "Rank-2 tensors rotate between the ambient and local frames" begin
                                 collect(w))) < 1e-12
     end
 
-    # Invariants a rotation cannot change. The determinant is written out rather than pulling in
-    # LinearAlgebra for one 3×3.
+    # Invariants a rotation cannot change. The determinant is written out for one 3×3, so the suite
+    # takes no LinearAlgebra dependency.
     det3(m) = m[1, 1] * (m[2, 2] * m[3, 3] - m[2, 3] * m[3, 2]) -
               m[1, 2] * (m[2, 1] * m[3, 3] - m[2, 3] * m[3, 1]) +
               m[1, 3] * (m[2, 1] * m[3, 2] - m[2, 2] * m[3, 1])
@@ -187,8 +187,8 @@ Test.@testset "Point functions accept every representation and element type" beg
 
     R = 6.371e6
 
-    # … fed points whose element type is NOT the geometry's: they are converted on entry, and
-    # every representation reaches the same kernel rather than recursing through normalization.
+    # … fed points whose element type differs from the geometry's: they are converted on entry, and
+    # every representation reaches the same kernel in one step.
     Test.@test FG.Geometry.distance(cgeo, (0, 0), (3, 4)) ≈ 5.0
     Test.@test FG.Geometry.distance(cgeo, (0.0f0, 0.0f0), (3.0f0, 4.0f0)) ≈ 5.0
     Test.@test FG.Geometry.distance(cgeo, (x = 0.0, y = 0.0), SA.SVector(3.0, 4.0)) ≈ 5.0
@@ -201,7 +201,7 @@ Test.@testset "Point functions accept every representation and element type" beg
     Test.@test FG.Geometry.distance(sgeo, (0.1, 0.2, R), (0.1, 0.2, R)) ≈ 0.0 atol = 1e-9
     Test.@test FG.Geometry.distance(sgeo, (0.0, 0.0, R), (0.0, 0.0, 2R)) ≈ R
 
-    # An unsupported point length is an error, not unbounded recursion.
+    # An unsupported point length raises, and terminates.
     Test.@test_throws MethodError FG.Geometry.distance(sgeo, (0.1, 0.2, 0.3, 0.4), (0.1, 0.2, 0.3, 0.4))
     Test.@test_throws ArgumentError FG.Geometry.distance(cgeo, [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
 
@@ -213,7 +213,7 @@ Test.@testset "Point functions accept every representation and element type" beg
         Test.@test FG.Geometry.spherical_to_cartesian(sgeo, pt) === Pref
     end
 
-    # The spherical tangent-plane projection is built on it, and was unreachable before.
+    # The spherical tangent-plane projection is built on it.
     Δ0 = FG.Geometry.project_to_tangent_plane(sgeo, (λ = 0.1, φ = 0.2), (λ = 0.1, φ = 0.2))
     Test.@test Δ0.λ ≈ 0.0 atol = 1e-9
     Test.@test Δ0.φ ≈ 0.0 atol = 1e-9
@@ -270,7 +270,7 @@ Test.@testset "Requested point representation is honored exactly" begin
     Test.@test_throws ArgumentError FG.Geometry.vector_from_cartesian(sgeo, [1.0, 2.0], 0.1, 0.2)
     Test.@test_throws ArgumentError FG.Geometry.vector_from_cartesian(sgeo, (1.0,), 0.1, 0.2)
     # The width is the whole of what those check. A component outside the numeric domain has the right
-    # width, so the conversion is what judges it, and it names the offending type rather than a count.
+    # width, so the conversion judges it, and the message names the offending type.
     Test.@test_throws MethodError FG.Geometry.vector_from_cartesian(sgeo, ("a", "b", "c"), 0.1, 0.2)
     Test.@test_throws MethodError FG.Geometry.unit_vector(Float64, (λ = 0.1, φ = missing))
 
@@ -306,7 +306,7 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test size(GE.rotate!(Λm, [0.1j for _ in 1:3, j in 1:4], rot)[1]) == (3, 4)
     Test.@test_throws DimensionMismatch GE.rotate!(zeros(3), zeros(4), rot)
 
-    # Rotating a rectilinear spherical grid warps it — but that warping is a FORMULA, so the result
+    # Rotating a rectilinear spherical grid warps it, and that warping is a formula, so the result
     # stores the mesh and the rotation and evaluates a cell's position where it is asked for.
     sph = FG.Geometry.SphericalGeometry(6.371e6)
     λa = range(0, 2π; length = 25)[1:24]
@@ -314,10 +314,9 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     gs = GR.StructuredGrid(sph, λa, φa)
     gr = GR.unrotate(gs, rot)
     Test.@test gr isa GR.RotatedGrid && size(gr) == (24, 13)
-    # Rotating costs one `PoleRotation`. Materializing it cost two centre arrays, two corner arrays
-    # and a dense copy of a measure a rotation does not change.
+    # Rotating costs one `PoleRotation` on top of the base grid.
     Test.@test Base.summarysize(gr) - Base.summarysize(gs) ≤ sizeof(rot) + 64
-    Test.@test GR.measure(gr) === GR.measure(gs)           # shared, not copied
+    Test.@test GR.measure(gr) === GR.measure(gs)           # the base grid's own array
     Test.@test all(GR.measure(gr, i, j) == GR.measure(gs, i, j) for i in 1:24, j in 1:13)
     Test.@test sum(GR.measure(gr)) == sum(GR.measure(gs))  # an isometry, so exactly
     Test.@test GR._raw_coords(gr, 3, 4) == GE.unrotate(rot, λa[3], φa[4])
@@ -329,8 +328,8 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test GR.period(gr, 1) ≈ 2π
     Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(gr)) ==
                FG.Connectivity.nedges(FG.Connectivity.build_connectivity(gs))
-    # A rotated (λ, φ) depends on BOTH mesh coordinates, so there are no per-axis coordinate vectors
-    # and a ball query cannot be bounded by a per-axis window — it takes an index instead.
+    # A rotated (λ, φ) depends on each mesh coordinate, so there are no per-axis coordinate vectors,
+    # and a ball query is bounded by an index.
     Test.@test_throws ArgumentError GR.coordinates(gr)
     Test.@test GR.candidate_source(gr) isa GR.IndexedCandidates
     # A rotation preserves distance, so a ball holds the same cells in either frame.
@@ -339,8 +338,8 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test GR.coordinate_names(gr) == (:λ, :φ)
     Test.@test FG.Connectivity.nneighbors(gr, 1, 5) == 4     # wraps, like the original
 
-    # How the cells are SPACED along an index direction is the lattice's, and the lattice is the base
-    # grid's, so every spacing question is answered there. The span stays the rotated frame's.
+    # Cell spacing along an index direction is the lattice's, and the lattice is the base grid's, so
+    # every spacing question is answered there. The span stays the rotated frame's.
     for b in (gs, GR.StructuredGrid(sph, λa, [-1.2 + 2.4 * (t / 12)^1.3 for t in 0:12]))
         g = GR.rotate(b, rot)
         Test.@test GR.isuniform(g, 1) == GR.isuniform(b, 1)
@@ -368,8 +367,8 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     Test.@test G.scale_factors(FG.Geometry.CartesianGeometry(), (1.0, 2.0, 3.0)) == (1.0, 1.0, 1.0)
     Test.@test G.jacobian(sg, (0.0, 0.5)) ≈ 4 * cos(0.5)
     Test.@test G.jacobian(FG.Geometry.CartesianGeometry(), (1.0, 2.0)) == 1.0
-    # The Jacobian is the area element per unit coordinate area, which is what the grid's own
-    # measure is built from.
+    # The Jacobian is the area element per unit coordinate area, and the grid's own measure is built
+    # from it.
     gg = FG.Grids.StructuredGrid(sg, collect(range(0, 2π; length = 40)),
                            collect(range(-1.2, 1.2; length = 30)))
     λ, φ = FG.Grids.coordinate_names(gg)
@@ -392,8 +391,8 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     end
     Test.@test Test.@inferred(G.scale_factors(sg, [0.0, π / 3, 5.0], Val(3))) ==
                G.scale_factors(sg, (0.0, π / 3, 5.0))
-    # Naming the width gives a CONCRETE result from a vector-spelled point, where the plain form's
-    # type depends on the length. Both are free once specialized.
+    # Naming the width gives a concretely typed result from a vector-spelled point, where the plain
+    # form's type follows the length. Both are free once specialized.
     let pv = [0.0, π / 3]
         Test.@test _alloc(G.scale_factors, sg, pv, Val(2)) == 0
         Test.@test !isconcretetype(
@@ -458,7 +457,7 @@ Test.@testset "Oblate spheroid geometry" begin
     Test.@test_throws ArgumentError G.SpheroidGeometry(-1.0, 0.1)
     Test.@test_throws ArgumentError G.SpheroidGeometry(1.0, 1.5)
 
-    # The geodetic volume element offsets BOTH curvature radii by h, so it does not factor.
+    # The geodetic volume element offsets each curvature radius by h, so it does not factor.
     Test.@test G.volume_element(g, 0.4, 0.0, 1.0, 1.0, 1.0) ≈
                G.area_element(g, 0.4, 1.0, 1.0)
     Test.@test G.volume_element(g, 0.4, 100.0, 1e-3, 1e-3, 2.0) ≈
@@ -481,13 +480,13 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
         end
         Test.@test G._enu_frame(G.SphericalGeometry(), λ, φ) === (êλ, êφ, êr)
 
-        # ê_r is the ELLIPSOID's normal: ∇(x²/a² + y²/a² + z²/b²) at the surface point, normalized.
-        # This is what makes the geodetic latitude the right angle to build the frame from.
+        # ê_r is the ellipsoid's own normal: ∇(x²/a² + y²/a² + z²/b²) at the surface point,
+        # normalized, so the frame stands on the geodetic latitude.
         P = G.embed(spd, (λ, φ))
         ∇ = (2P[1] / a^2, 2P[2] / a^2, 2P[3] / b^2)
         Test.@test maximum(abs.(êr .- ∇ ./ sqrt(sum(abs2, ∇)))) < 1e-14
 
-        # And the tangents are the coordinate derivatives of the SURFACE, with the curvature radii as
+        # And the tangents are the surface's own coordinate derivatives, with the curvature radii as
         # their lengths — the property that ties the frame to `scale_factors`.
         h = 1e-7
         dφ = (G.embed(spd, (λ, φ + h)) .- G.embed(spd, (λ, φ - h))) ./ (2h)
@@ -530,8 +529,8 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
     Test.@test G.embed(G.SpheroidGeometry(3.0, 0.2), (0.0,)) === (3.0, 0.0, 0.0)
     Test.@test G.distance(G.SpheroidGeometry(3.0, 0.2), (0.0,), (π / 2,)) ≈ 3.0 * π / 2
 
-    # `local_displacement` at two coordinates IS the tangent-plane projection, not a second route to
-    # the same number — so the least-squares gradient it feeds is unchanged where it already worked.
+    # `local_displacement` at two coordinates resolves to the tangent-plane projection itself, one
+    # definition serving both, so the least-squares gradient it feeds sees the same number.
     for geo in (sph, spd), λ in (-2.0, 0.3, 2.8), φ in (-1.2, 0.0, 0.75)
         Test.@test G.local_displacement(geo, (λ, φ), (λ + 1e-4, φ - 2e-4)) ===
                    G.project_to_tangent_plane(geo, (λ, φ), (λ + 1e-4, φ - 2e-4))
@@ -566,8 +565,8 @@ Test.@testset "cartesian_to_geodetic inverts geodetic_to_cartesian" begin
             P = G.geodetic_to_cartesian(spd, (λ, φ, hh))
             r = G.cartesian_to_geodetic(spd, (P.x, P.y, P.z))
             Q = G.geodetic_to_cartesian(spd, (r.λ, r.φ, r.h))
-            # The POSITION is what the inverse is for; a longitude is ill-conditioned at the pole and a
-            # latitude there is not what the round trip is claiming.
+            # The round trip is asserted on the position: at the pole a longitude is
+            # ill-conditioned, and the latitude there carries no claim.
             Test.@test sqrt((Q.x - P.x)^2 + (Q.y - P.y)^2 + (Q.z - P.z)^2) / a < 1e-14
             Test.@test abs(r.h - hh) / a < 1e-13
         end
@@ -657,10 +656,10 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     Test.@test FG.Connectivity.nneighbors(g2, 1, 3) == 4       # wraps in λ
     Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(g2)) > 0
 
-    # The spatial index embeds geodetic coordinates as an ECEF chord, which UNDER-estimates the
-    # geodesic, so a ball query over-returns and the caller's own `distance` trims it. It must
-    # therefore agree with a brute-force geodesic scan exactly, not to a tolerance — and a ball too
-    # small to reach anything must come back empty rather than leak an untrimmed chord candidate.
+    # The spatial index embeds geodetic coordinates as an ECEF chord, a lower bound on the geodesic,
+    # so a ball query over-returns and the caller's own `distance` trims it. The result therefore
+    # agrees with a brute-force geodesic scan cell for cell, and a ball too small to reach anything
+    # comes back empty.
     let gb = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 25)[1:24]),
                                      collect(range(-1.2, 1.2; length = 13)))
         for (ci, r) in (((5, 6), 1.0e6), ((5, 6), 3.0e6), ((1, 1), 2.0e6), ((24, 13), 2.0e6))
@@ -671,8 +670,8 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
         end
     end
 
-    # A node set on a spheroid builds its own k-d-tree adjacency, which the throwing fallback used to
-    # refuse: the construction path goes through the same `embed` the index does.
+    # A node set on a spheroid builds its own k-d-tree adjacency through the same `embed` the index
+    # uses.
     let λn = [0.3 * i for i in 0:19], φn = [0.2 * sin(3.0i) for i in 0:19]
         gu = FG.Grids.UnstructuredGrid(geo, (λn, φn), trues(20); k = 4, areas = ones(20))
         for i in 1:20
@@ -683,8 +682,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
         end
     end
 
-    # A degenerate angular direction drops the differential that no longer exists, so a transect
-    # measures arc length rather than an area with a placeholder in it.
+    # A degenerate angular direction contributes no differential, so a transect measures arc length.
     # Zonal at the equator: the parallel radius is N(0)·cos0 = a, so the circle closes at 2πa.
     gzon = FG.Grids.StructuredGrid(geo, λ8, [0.0])
     Test.@test sum(FG.Grids.measure(gzon)) ≈ 2π * a rtol = 1e-14
@@ -698,9 +696,9 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     wm = FG.Discretization.cell_widths(φm, nothing)
     Test.@test all(FG.Grids.measure(gmer, 1, j) ≈ GE.meridional_radius(geo, φm[j]) * wm[j]
                    for j in eachindex(φm))
-    # The total approaches ∫M dφ — twice the published quarter meridian — at FIRST order, because
-    # `n` cell-centres own `n` widths and so span π(1 + 1/n). Unlike the area case there is no cosφ
-    # factor to annihilate that end-cell excess, and the error is exactly the 1/n it predicts.
+    # The total approaches ∫M dφ — twice the published quarter meridian — at first order, since `n`
+    # cell-centres own `n` widths and so span π(1 + 1/n). No cosφ factor annihilates that end-cell
+    # excess here, and the error is the 1/n that span predicts.
     mer = map((48, 192, 768)) do n
         gm = FG.Grids.StructuredGrid(geo, [0.0], collect(range(-π / 2, π / 2; length = n + 1)))
         abs(sum(FG.Grids.measure(gm)) - 2 * 10001965.729) / (2 * 10001965.729)
@@ -709,9 +707,9 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     # A single point has no extent in either direction.
     Test.@test sum(FG.Grids.measure(FG.Grids.StructuredGrid(geo, [0.3], [0.4]))) == 1.0
 
-    # The geodetic volume element couples φ and h — the height offsets both curvature radii — but
-    # longitude enters none of it, so only that PAIR is stored together and the measure is a
-    # `SlabMeasure`, not the `∏ Nᵈ` dense array. It is not per-axis separable and says so.
+    # The geodetic volume element couples φ and h — the height offsets each curvature radius — and
+    # longitude enters none of it, so φ and h alone are stored together as a `SlabMeasure`, whose
+    # storage is `Nφ·Nh + Nλ`. It reports itself as non-separable per axis.
     Test.@test FG.Grids.measure(g3) isa FG.Grids.SlabMeasure
     Test.@test FG.Grids.measure_factors(g3) === nothing
     let dense = FG.Grids.measure_array(g3)
@@ -722,13 +720,13 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
         wh8 = FG.Discretization.cell_widths(h4, nothing)
         Test.@test all(dense[i, j, k] ≈ GE.volume_element(geo, φ7[j], h4[k], wλ8[i], wφ8[j], wh8[k])
                        for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8))
-        # `sum` and `extrema` are the factored forms — `O(Nλ + Nφ·Nh)` rather than a pass over the
-        # product — so they agree with the dense reduction to round-off, not bit for bit.
+        # `sum` and `extrema` are the factored forms, `O(Nλ + Nφ·Nh)`, so they agree with the dense
+        # reduction to round-off.
         Test.@test sum(FG.Grids.measure(g3)) ≈ sum(dense) rtol = 1e-12
         Test.@test all(isapprox.(extrema(FG.Grids.measure(g3)), extrema(dense); rtol = 1e-12))
     end
-    # Storage grows like Nφ·Nh + Nλ. Eight times the longitudes leaves the coupled slab alone, where
-    # the dense array would be eight times the size.
+    # Eight times the longitudes leaves the coupled slab untouched, so the storage grows by `Nλ`
+    # alone.
     let base = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 37)[1:36]),
                                        collect(range(-1.2, 1.2; length = 19)),
                                        collect(range(0.0, 3000.0; length = 5))),
@@ -781,7 +779,7 @@ Test.@testset "Pole rotation" begin
     Test.@test rot.sinθ ≈ sin(0.3 - π / 2) && rot.cosθ ≈ cos(0.3 - π / 2)
     Test.@test isbits(rot)
 
-    # `similar_rotation` re-resolves the tilt at the new width rather than rounding the old one.
+    # `similar_rotation` re-resolves the tilt from the pole at the new width.
     r32 = G.similar_rotation(Float32, rot)
     Test.@test r32 isa G.PoleRotation{Float32}
     Test.@test r32.sinθ === sin(Float32(0.3) - Float32(π) / 2)
