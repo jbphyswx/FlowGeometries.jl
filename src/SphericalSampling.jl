@@ -2,7 +2,7 @@ module SphericalSampling
 
 using ..Execution: Execution
 
-# Public API via `FlowGeometries.SphericalSampling.*` or parent rebinds. No exports.
+# Public API via `FlowGeometries.SphericalSampling.*`. No exports and no top-level rebind.
 
 include("Sampling/Types.jl")
 include("Sampling/GaussLegendre.jl")

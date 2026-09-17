@@ -2,12 +2,12 @@
 """
     GradientPlan
 
-The two index buffers are typed independently and hold any `Integer`, so a plan built off a CSR keeps
-that CSR's own width — see `Connectivity._index_type`.
-
 The geometry of a least-squares gradient, separated from any field: for each cell, the coefficient on
 each neighbour's *difference* from it, once per coordinate direction. Built by
-`Connectivity.gradient_plan`, applied by [`gradient!`](@ref).
+[`gradient_plan`](@ref), applied by [`gradient!`](@ref).
+
+The two index buffers are typed independently and hold any `Integer`, so a plan built off a CSR keeps
+that CSR's own width — see `Connectivity._index_type`.
 
 `D` is the number of directions the fit resolves, which is the grid's coordinate count: two on a
 surface — a `(λ, φ)` or `(x, y)` mesh — and three in a volume, where the neighbourhood spans a solid

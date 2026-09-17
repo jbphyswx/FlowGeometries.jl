@@ -6,7 +6,7 @@ using ..Geometry: Geometry
 using ..Discretization: Discretization
 using ..SphericalSampling: SphericalSampling
 
-# Public API via `FlowGeometries.Grids.*` or `FlowGeometries.coords` (parent rebind). No exports.
+# Public API via `FlowGeometries.Grids.*`. No exports and no top-level rebind.
 
 include("Grids/Interface.jl")
 include("Grids/Measure.jl")

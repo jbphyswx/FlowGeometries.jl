@@ -283,6 +283,35 @@ Test.@testset "Curvilinear areas hold two corner rows, not the whole field" begi
     end
 end
 
+Test.@testset "A curvilinear spherical area holds below a cell of R·sqrt(eps(T))" begin
+    # A cell whose solid angle is under `eps(T)` is where the excess is most exposed to cancellation:
+    # the triple product behind it is of order the area while the vertex components are of order one.
+    # 391x264 over 4°x4° gives a solid angle of 3.9e-8 against `eps(Float32) = 1.2e-7`.
+    nlon, nlat = 391, 264
+    for T in (Float32, Float64)
+        geo = FG.Geometry.SphericalGeometry{T}(T(6.371e6))
+        lon = range(T(deg2rad(-125)), T(deg2rad(-121)); length = nlon)
+        lat = range(T(deg2rad(34)), T(deg2rad(38)); length = nlat)
+        g = FG.Grids.CurvilinearGrid(geo, T[lon[i] for i in 1:nlon, j in 1:nlat],
+                                     T[lat[j] for i in 1:nlon, j in 1:nlat], trues(nlon, nlat))
+        a = FG.Grids.measure(g)
+        # Ground truth per cell: `R²·Δλ·(sin φ₂ − sin φ₁)`, with no excess in it.
+        dλ = Float64(lon[2]) - Float64(lon[1])
+        dφ = Float64(lat[2]) - Float64(lat[1])
+        worst = 0.0
+        for j in 2:(nlat - 1), i in 2:(nlon - 1)
+            φ = Float64(lat[j])
+            truth = Float64(6.371e6)^2 * dλ * (sin(φ + dφ / 2) - sin(φ - dφ / 2))
+            worst = max(worst, abs(Float64(a[i, j]) - truth) / truth)
+        end
+        Test.@test worst < (T === Float32 ? 5e-3 : 1e-6)
+        # The spread across 4° of latitude is `cos φ`, and nothing wider. Rounding noise shows up
+        # here as a spread many times the real one while the total area still agrees.
+        spread = maximum(a) / minimum(a)
+        Test.@test spread ≈ cos(Float64(lat[1])) / cos(Float64(lat[end])) rtol = 0.02
+    end
+end
+
 Test.@testset "Cell measure is stored factored, not materialized" begin
     geo = FG.Geometry.SphericalGeometry()
     for (nx, ny) in ((16, 9), (64, 40))

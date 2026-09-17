@@ -184,15 +184,21 @@ Spherical excess of the triangle spanned by three unit vectors, via Van Oosterom
 
     tan(E/2) = |a · (b × c)| / (1 + a·b + b·c + c·a)
 
-One `atan` and no other transcendental, against L'Huilier's three great-circle distances (each its own
-trig) plus four tangents. Taking directions lets a mesh convert each vertex once — see
+One `atan` and no other transcendental. Taking directions lets a mesh convert each vertex once — see
 [`unit_vector`](@ref) — and share it across every triangle. Multiply by `R²` for an area, as
 [`triangle_area`](@ref) does.
+
+The numerator is evaluated as `a · (u × v)` for `u = b - a` and `v = c - a`, an identity because
+`a · (a × x)` vanishes for every `x`. `u` and `v` carry the triangle's own scale, so the result is never
+assembled by cancelling terms of order one. Cancellation there costs the excess all of its correct
+digits below a side of about `R·√eps(T)` — 2 km on Earth at `Float32`, which is an ordinary cell.
 """
 @inline function spherical_excess(a::NTuple{3,T}, b::NTuple{3,T}, c::NTuple{3,T}) where {T}
-    num = a[1] * (b[2] * c[3] - b[3] * c[2]) +
-          a[2] * (b[3] * c[1] - b[1] * c[3]) +
-          a[3] * (b[1] * c[2] - b[2] * c[1])
+    u = (b[1] - a[1], b[2] - a[2], b[3] - a[3])
+    v = (c[1] - a[1], c[2] - a[2], c[3] - a[3])
+    num = a[1] * (u[2] * v[3] - u[3] * v[2]) +
+          a[2] * (u[3] * v[1] - u[1] * v[3]) +
+          a[3] * (u[1] * v[2] - u[2] * v[1])
     ab = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
     bc = b[1] * c[1] + b[2] * c[2] + b[3] * c[3]
     ca = c[1] * a[1] + c[2] * a[2] + c[3] * a[3]
