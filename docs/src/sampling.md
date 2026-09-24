@@ -37,7 +37,8 @@ stored.
 
 Gauss–Legendre and Clenshaw–Curtis put their points on iso-latitude rings that crowd toward the
 poles; HEALPix, the cubed sphere and the icosahedral geodesic are quasi-uniform. Yin–Yang is two
-overlapping panels, neither of which reaches a pole.
+overlapping panels, each a low-latitude patch in its own frame; the poles lie inside yang, so neither
+panel has a polar singularity.
 
 ## Traits
 

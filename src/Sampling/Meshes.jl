@@ -164,19 +164,19 @@ end
 """
     _yin_yang_rotate(λ, φ) -> (λ_global, φ_global)
 
-The Kageyama–Sato rotation carrying a panel-frame `(λ, φ)` onto yang's position on the sphere. Yang is
-yin rigidly rotated, so this is the whole difference between the two panels.
+The Kageyama–Sato map carrying a panel-frame `(λ, φ)` onto yang: `(x, y, z) ↦ (−x, z, y)` on the unit
+vector. The map is an involution, so it also carries yang back to the panel frame. Yang is yin rigidly
+rotated, so this is the whole difference between the two panels.
 """
 @inline function _yin_yang_rotate(λ::T, φ::T) where {T<:AbstractFloat}
     sinφ, cosφ = sincos(φ)
     sinλ, cosλ = sincos(λ)
-    X = -sinφ
-    Y = cosφ * cosλ
-    Z = -cosφ * sinλ
-    θ = acos(clamp(Z, -one(T), one(T)))
+    X = -cosφ * cosλ
+    Y = sinφ
+    Z = cosφ * sinλ
     ϕ = atan(Y, X)
     ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, geographic_latitude(θ))
+    return (ϕ, atan(Z, hypot(X, Y)))
 end
 
 """

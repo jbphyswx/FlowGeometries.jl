@@ -384,6 +384,28 @@ Test.@testset "Yin–Yang cells tile each panel exactly; the overlap is resoluti
     let a = FG.Grids.measure(FG.Grids.YinYangGrid(192, 128))
         Test.@test minimum(a) / maximum(a) ≈ cos(π / 4) rtol = 1e-2
     end
+
+    dir(λ, φ) = (cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ))
+    # Kageyama & Sato (2004): yang is `(x, y, z) ↦ (−x, z, y)` of yin, an involution.
+    rot = FG.SphericalSampling._yin_yang_rotate
+    lattice = [(λ, φ) for λ in range(-3π / 4, 3π / 4; length = 7), φ in range(-π / 4, π / 4; length = 5)]
+    Test.@test all(lattice) do (λ, φ)
+        a = dir(λ, φ)
+        all(isapprox.(dir(rot(λ, φ)...), (-a[1], a[3], a[2]); atol = 1e-15)) &&
+            all(isapprox.(dir(rot(rot(λ, φ)...)...), a; atol = 1e-15))
+    end
+    # The two panels cover the sphere: every probe lies in some cell, so within that cell's
+    # half-diagonal of its centre.
+    for (nlon, nlat) in ((24, 16), (36, 24))
+        p = FG.SphericalSampling.spherical_points(FG.SphericalSampling.YinYangSampling(), nlon, nlat)
+        centres = dir.(p.λ, p.φ)
+        nearest = 1.0
+        for λd in 0:2:358, φd in -90:2:90
+            q = dir(deg2rad(λd), deg2rad(φd))
+            nearest = min(nearest, maximum(c -> q[1] * c[1] + q[2] * c[2] + q[3] * c[3], centres))
+        end
+        Test.@test acos(nearest) ≤ 0.51 * hypot(3π / 2 / nlon, π / 2 / nlat)
+    end
 end
 
 Test.@testset "Coarsest cubed sphere (one node per face) is constructible" begin
