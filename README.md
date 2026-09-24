@@ -161,9 +161,11 @@ FG.Connectivity.count_holes(grid)     # enclosed inactive regions; wrapping chan
 
 ![Cell area relative to the mean](docs/src/assets/cell_areas.png)
 
-Every built-in layout gets true cell areas with **no optional dependency** — the exact solid angle of
-its gnomonic rectangle for the cubed sphere, dual-cell areas from the mesh's own triangulation for
-icosahedral, lat–lon patches for Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
+Every built-in layout gets true cell areas with **no optional dependency** — the latitude band
+`R²Δλ(sin φ₊ − sin φ₋)` between a rectilinear cell's faces (the quadrature weight on a Gauss–Legendre,
+Driscoll–Healy or Clenshaw–Curtis grid), the exact solid angle of its gnomonic rectangle for the cubed
+sphere, dual-cell areas from the mesh's own triangulation for icosahedral, lat–lon patches for
+Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
 `4πR²/N` is exact only for HEALPix (flat colour above); on an icosahedral geodesic the largest cell is
 nearly twice the smallest, and every area-weighted integral feels the difference. The dark spots are
 the twelve pentagons.

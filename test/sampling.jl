@@ -745,6 +745,31 @@ Test.@testset "HEALPix pixel indexing round-trips in both schemes" begin
     end
 end
 
+Test.@testset "Float32 angles are accurate at the poles" begin
+    SS = FG.SphericalSampling
+    ulp = eps(Float32(π) / 2)
+    # HEALPix rings 1–4 at each pole (4 + 8 + 12 + 16 = 40 pixels), where at nside = 1024 the first ring
+    # sits 2.7 arcmin from the pole. A colatitude near 0 keeps its relative accuracy; a latitude is
+    # accurate to its own last bit; and each pixel's centre, read back at Float32, is that pixel.
+    ns = 1024
+    npix = SS.healpix_npix(ns)
+    Test.@test all(vcat(0:39, (npix - 40):(npix - 1))) do p
+        θ32, ϕ32 = SS.pix2ang(Float32, ns, p)
+        θ64 = SS.pix2ang(Float64, ns, p)[1]
+        φ32 = SS._pix2lonlat(Float32, ns, p, SS.Ring())[2]
+        φ64 = SS._pix2lonlat(Float64, ns, p, SS.Ring())[2]
+        (p ≥ 40 || abs(θ32 - θ64) ≤ 4 * eps(Float32) * θ64) && abs(φ32 - φ64) ≤ ulp &&
+            SS.ang2pix(ns, θ32, ϕ32) == p && SS.vec2pix(ns, SS.pix2vec(Float32, ns, p)) == p
+    end
+    Test.@test SS.ring_info(Float32, ns, 1).latitude == SS._pix2lonlat(Float32, ns, 0, SS.Ring())[2]
+    # A cubed-sphere face centre sits on each pole at odd `n`, and yang covers both poles.
+    for (p32, p64) in ((SS.cubed_sphere_points(Float32, 63), SS.cubed_sphere_points(63)),
+                       (SS.spherical_points(Float32, SS.YinYangSampling(), 96, 64),
+                        SS.spherical_points(SS.YinYangSampling(), 96, 64)))
+        Test.@test maximum(abs.(Float64.(p32.φ) .- p64.φ)) ≤ 4 * ulp
+    end
+end
+
 Test.@testset "A ring can be reached one at a time, in O(1), without building the table" begin
     SS = FG.SphericalSampling
     samplings = (

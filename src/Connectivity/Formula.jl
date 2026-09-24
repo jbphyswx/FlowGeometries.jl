@@ -265,12 +265,13 @@ end
     Grids.formula_neighbors(grid::RingGrid, i)
 
 A ring grid's adjacency: the two points either side along the ring, wrapping in longitude, and on each
-adjacent ring the two points whose longitudes straddle this one's.
+adjacent ring the two points whose longitudes straddle this one's, or the one point at the same
+longitude where the rings line up.
 
-The straddling pair comes from proportional position, `⌊(j−1)·nlon[r′]/nlon[r]⌋` and its successor. Where
-adjacent rings differ in width this relation is directed — a wide ring's point can straddle a narrow
-ring's point that does not straddle it back — so the graph is not symmetric in general. It is symmetric
-whenever the two rings have equal counts, which is most of a Gaussian grid's interior.
+The straddling pair comes from proportional position, `(j−1)·nlon[r′]/nlon[r]`: its floor and, unless
+it is an integer, its successor. Where adjacent rings differ in width this relation is directed — a wide
+ring's point can straddle a narrow ring's point that does not straddle it back — so the graph is not
+symmetric in general. It is symmetric wherever two adjacent rings have equal counts.
 
 Duplicates are dropped, so a ring holding one or two points reports fewer than the six a wide ring does.
 """
@@ -292,9 +293,9 @@ Duplicates are dropped, so a ring holding one or two points reports fewer than t
         (1 ≤ rr ≤ nring) || continue
         mm = Grids.nlon_in_ring(grid, rr)
         bb = first(Grids.ring_range(grid, rr)) - 1
-        p = fld((j - 1) * mm, m)                     # 0-based position on the adjacent ring
+        p, s = fldmod((j - 1) * mm, m)               # 0-based position on the adjacent ring
         ids, n = _push_unique(ids, n, ic, bb + mod1(p + 1, mm))
-        ids, n = _push_unique(ids, n, ic, bb + mod1(p + 2, mm))
+        iszero(s) || ((ids, n) = _push_unique(ids, n, ic, bb + mod1(p + 2, mm)))
     end
     return (ids, n)
 end

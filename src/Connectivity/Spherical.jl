@@ -156,6 +156,10 @@ Build a spherical `StructuredGrid` from a tensor-product sampling (Clenshaw–Cu
 Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). Longitude periodicity is
 auto-detected unless `periodic` is set.
 
+A sampling with latitude quadrature weights (Gauss–Legendre, Driscoll–Healy, Clenshaw–Curtis) gives
+cells of measure `R²·Δλ·wⱼ`, so `sum(f .* measure(grid))` is that quadrature; the nodes and the
+weights come from one solve. Any other sampling gives the exact cell areas.
+
 `T` is the element type to build in, and defaults to the `geometry`'s own, a geometry fixing the width
 of every coordinate and metric factor computed against it. Naming `T` converts the geometry to that
 width, so the grid is `T` throughout.
@@ -174,15 +178,16 @@ function structured_grid(
     mask = nothing,
     periodic = nothing,
 ) where {T<:AbstractFloat}
-    ax = SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)
-    λ = ax.λ
-    φ = ax.φ
-    m = mask === nothing ? Grids.AllActive((length(λ), length(φ))) : mask
-    # The geometry fixes the width of every coordinate and metric factor, so a grid built at `T`
-    # around a geometry of another width comes back promoted to that other width.
-    return Grids.StructuredGrid(Geometry.similar_geometry(T, geometry), λ, φ, m;
-                                periodic = periodic, sampling = s)
+    q = _axes_and_weights(T, s, nlat, nlon)
+    m = mask === nothing ? Grids.AllActive((length(q.λ), length(q.φ))) : mask
+    return Grids._structured_grid(Geometry.similar_geometry(T, geometry), (q.λ, q.φ), m, periodic,
+                                  nothing, s, q.w)
 end
+
+_axes_and_weights(::Type{T}, s::Grids._WeightedSampling, nlat, nlon) where {T} =
+    SphericalSampling.spherical_quadrature(T, s, nlat; nlon = nlon)
+_axes_and_weights(::Type{T}, s, nlat, nlon) where {T} =
+    (; SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)..., w = nothing)
 
 """
     build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only)

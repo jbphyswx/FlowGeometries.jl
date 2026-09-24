@@ -80,7 +80,7 @@ spacing becomes a length, area or volume contribution, and where the `abs` is ap
 
 A length-1 axis contributes the multiplicative **identity** to a measure that is a product of per-axis
 widths (Cartesian `Δx·Δy`), so a degenerate direction reduces an area to a length. The spherical
-`R²cosφ·Δλ·Δφ` measure is not a plain product and handles its own singleton case, in the
+measure's latitude factor is not a width and handles its own singleton case, in the
 `Grids.StructuredGrid` constructor.
 
 `Grids.cell_width` is this on a grid direction, and `Grids.cell_widths` the whole axis at once.

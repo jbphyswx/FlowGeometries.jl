@@ -83,12 +83,19 @@ the sphere.
 ) where {T<:AbstractFloat}
     ξ, η = _cubed_cell_angles(T, n, i, j)
     p = _cubed_face_to_xyz(f, tan(ξ), tan(η), T)
-    r = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
-    x = p.x / r; y = p.y / r; z = p.z / r
-    θ = acos(clamp(z, -one(T), one(T)))
+    return _unit_lonlat(p.x, p.y, p.z)
+end
+
+"""
+    _unit_lonlat(x, y, z) -> (λ, φ)
+
+Longitude in `[0, 2π)` and geographic latitude of the direction `(x, y, z)`, which need not be
+normalized. `atan(z, hypot(x, y))` is accurate relative to the latitude's distance from a pole.
+"""
+@inline function _unit_lonlat(x::T, y::T, z::T) where {T<:AbstractFloat}
     ϕ = atan(y, x)
     ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, geographic_latitude(θ))
+    return (ϕ, atan(z, hypot(x, y)))
 end
 
 """
@@ -270,11 +277,7 @@ function _xyz_to_lonlat!(λ::AbstractVector{T}, φ::AbstractVector{T}, verts) wh
     length(λ) == n && length(φ) == n || throw(DimensionMismatch("buffers must match vertex count"))
     @inbounds for i in 1:n
         x, y, z = verts[i]
-        θ = acos(clamp(T(z), -one(T), one(T)))
-        ϕ = atan(T(y), T(x))
-        ϕ < 0 && (ϕ += T(2π))
-        λ[i] = ϕ
-        φ[i] = geographic_latitude(θ)
+        λ[i], φ[i] = _unit_lonlat(T(x), T(y), T(z))
     end
     return (; λ, φ)
 end
@@ -598,12 +601,7 @@ Normalize `p` and write vertex `v`'s longitude and latitude. Top-level, so it ca
     λ::AbstractVector{T}, φ::AbstractVector{T}, v::Int, p::NTuple{3,T}, ::Type{T},
 ) where {T<:AbstractFloat}
     r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
-    x = p[1] / r; y = p[2] / r; z = p[3] / r
-    θ = acos(clamp(z, -one(T), one(T)))
-    ϕ = atan(y, x)
-    ϕ < 0 && (ϕ += T(2π))
-    @inbounds λ[v] = ϕ
-    @inbounds φ[v] = geographic_latitude(θ)
+    @inbounds λ[v], φ[v] = _unit_lonlat(p[1] / r, p[2] / r, p[3] / r)
     return nothing
 end
 

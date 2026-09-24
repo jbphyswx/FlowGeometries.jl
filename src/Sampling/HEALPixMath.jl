@@ -7,10 +7,9 @@ healpix_nring(s::HEALPixSampling) = healpix_nring(s.nside)
 healpix_pixel_area(nside::Integer) = 4π / healpix_npix(nside)
 healpix_pixel_area(s::HEALPixSampling) = healpix_pixel_area(s.nside)
 
-# A ring walk: colatitude is constant along a ring, so the `acos` and the latitude conversion run
-# `4·nside − 1` times over the `12·nside²` pixels, and a pixel's longitude is `(j − shift)·Δϕ` with `Δϕ`
-# the ring's. `ringpix` is `4·nr` in every regime, so one expression for `Δϕ` reproduces all three
-# exactly.
+# A ring walk: latitude is constant along a ring, so the ring's trigonometry runs `4·nside − 1` times
+# over the `12·nside²` pixels, and a pixel's longitude is `(j − shift)·Δϕ` with `Δϕ` the ring's.
+# `ringpix` is `4·nr` in every regime, so one expression for `Δϕ` reproduces all three exactly.
 function spherical_points!(λ::AbstractVector{T}, φ::AbstractVector{T}, s::HEALPixSampling) where {T<:AbstractFloat}
     npix = healpix_npix(s)
     length(λ) == npix && length(φ) == npix || throw(DimensionMismatch("buffers must have length healpix_npix"))
@@ -41,8 +40,8 @@ end
 
 The whole HEALPix cloud in NESTED pixel order.
 
-The ring quantities are tabulated once, `4·nside − 1` of them, so the `acos` and the latitude conversion
-run per ring here too. A nested pixel's ring and position along it come from its face coordinates
+The ring quantities are tabulated once, `4·nside − 1` of them, so the ring's trigonometry runs per ring
+here too. A nested pixel's ring and position along it come from its face coordinates
 (`_hp_xyf2ringj`), and the coordinates are then the ring walk's own expressions, so the two
 orderings hold the same numbers to the bit. Both writes are sequential.
 """
@@ -73,32 +72,53 @@ function _healpix_nested_cloud!(
     return (; λ, φ)
 end
 
-function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractFloat}
+"""
+    _hp_ring_angles(T, nside, ring) -> (θ, φ)
+
+Colatitude and latitude of HEALPix ring `ring`, counted from the north pole, each formed directly. In a
+polar cap `cos θ = ±(1 − δ)` with `δ = r²/(3·nside²)`, `r` the ring's count from its own pole, and the
+angle from that pole is `2asin(r/(√6·nside))`, accurate to the last bit however small `r/nside` is. In
+the belt `|cos θ| ≤ 2/3`, where `acos` and `asin` are well conditioned.
+"""
+@inline function _hp_ring_angles(::Type{T}, nside::Int, ring::Int) where {T<:AbstractFloat}
     fn = T(nside)
-    nl2 = 2 * nside
+    if nside ≤ ring ≤ 3 * nside
+        z = (T(2 * nside) - T(ring)) / (T(1.5) * fn)
+        return acos(z), asin(z)
+    end
+    north = ring < nside
+    r = north ? ring : 4 * nside - ring
+    a = 2 * asin(T(r) / (sqrt(T(6)) * fn))
+    return north ? (a, T(π) / 2 - a) : (T(π) - a, a - T(π) / 2)
+end
+
+"""
+    _healpix_ring_phi(nside, ipix, T) -> (ring, ϕ)
+
+The ring (counted from the north pole) and longitude of 0-based RING pixel `ipix`.
+"""
+function _healpix_ring_phi(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractFloat}
+    fn = T(nside)
     nl4 = 4 * nside
     npix = 12 * nside * nside
     # Pixels in the north polar cap, i.e. rings 1 … nside-1, which hold 4, 8, … 4(nside-1) pixels:
     # 2·nside·(nside-1). Getting this wrong routes equatorial pixels through the cap branch.
     ncap = 2 * nside * (nside - 1)
-    fact1 = T(1.5) * fn
-    fact2 = T(3) * fn * fn
     if ipix < ncap
         hip = (ipix + 1) / T(2)
         fihip = floor(hip)
         iring = Int(floor(sqrt(hip - sqrt(fihip))) + 1)
         iphi = ipix + 1 - 2 * iring * (iring - 1)
-        z = one(T) - T(iring * iring) / fact2
+        ring = iring
         ϕ = (T(iphi) - T(0.5)) * T(π) / (T(2) * T(iring))
     elseif ipix < (npix - ncap)
         # Every equatorial ring holds 4·nside pixels, so the ring index advances per nl4. `fodd`
         # staggers alternate rings by half a pixel: 1 when (iring+nside) is odd, 1/2 when even.
         ip = ipix - ncap
         tmp = ip ÷ nl4
-        iring = tmp + nside
+        ring = tmp + nside
         iphi = ip - tmp * nl4 + 1
-        fodd = isodd(iring + nside) ? one(T) : T(0.5)
-        z = (T(nl2) - T(iring)) / fact1
+        fodd = isodd(ring + nside) ? one(T) : T(0.5)
         ϕ = (T(iphi) - fodd) * T(π) / (T(2) * fn)
     else
         ip = npix - ipix
@@ -106,11 +126,15 @@ function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:Abstr
         fihip = floor(hip)
         iring = Int(floor(sqrt(hip - sqrt(fihip))) + 1)
         iphi = 4 * iring + 1 - (ip - 2 * iring * (iring - 1))
-        z = -one(T) + T(iring * iring) / fact2
+        ring = nl4 - iring
         ϕ = (T(iphi) - T(0.5)) * T(π) / (T(2) * T(iring))
     end
-    θ = acos(clamp(z, -one(T), one(T)))
-    return θ, mod(ϕ, T(2π))
+    return ring, mod(ϕ, T(2π))
+end
+
+function _healpix_pix2ang_ring(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractFloat}
+    ring, ϕ = _healpix_ring_phi(nside, ipix, T)
+    return _hp_ring_angles(T, nside, ring)[1], ϕ
 end
 
 
@@ -295,10 +319,11 @@ function _hp_ang2xyf(nside::Int, θ::T, ϕ::T) where {T<:AbstractFloat}
         face = ifp == ifm ? (ifp | 4) : (ifp < ifm ? ifp : ifm + 8)
         return (mod(jm, nside), nside - mod(jp, nside) - 1, face)
     else
-        # Polar caps: within one of the four base faces of that hemisphere.
+        # Polar caps: within one of the four base faces of that hemisphere. `3(1 − |z|)` is
+        # `6sin²(θ/2)` in the north and `6cos²(θ/2)` in the south, both accurate at the pole.
         ntt = min(3, Int(floor(tt)))
         tp = tt - T(ntt)
-        tmp = T(nside) * sqrt(T(3) * (one(T) - za))
+        tmp = T(nside) * sqrt(T(6)) * (z ≥ 0 ? sin(θ / 2) : cos(θ / 2))
         jp = min(Int(floor(tp * tmp)), nside - 1)
         jm = min(Int(floor((one(T) - tp) * tmp)), nside - 1)
         return z ≥ 0 ? (nside - jm - 1, nside - jp - 1, ntt) : (jp, jm, ntt + 8)
@@ -325,19 +350,9 @@ function ring_info(::Type{T}, nside::Integer, ring::Integer) where {T<:AbstractF
         "ring must lie in 1:$(4 * ns - 1) for nside = $ns, got $r",
     ))
     info = _hp_get_ring_info_small(ns, r)
-    # `z = cosθ` on the ring, by the same two-regime formula the pixel centres use.
-    fn = T(ns)
-    z = if r < ns
-        one(T) - T(r * r) / (T(3) * fn * fn)
-    elseif r ≤ 3 * ns
-        (T(2 * ns) - T(r)) / (T(1.5) * fn)
-    else
-        nr = 4 * ns - r
-        T(nr * nr) / (T(3) * fn * fn) - one(T)
-    end
-    θ = acos(clamp(z, -one(T), one(T)))
+    θ, φ = _hp_ring_angles(T, ns, r)
     return (; startpix = info.startpix, ringpix = info.ringpix,
-              colatitude = θ, latitude = geographic_latitude(θ), shifted = info.shifted)
+              colatitude = θ, latitude = φ, shifted = info.shifted)
 end
 
 """
@@ -377,6 +392,20 @@ pix2ang(::Type{T}, nside::Integer, pix::Integer; scheme::RingScheme = Ring()) wh
     0 ≤ p < npix || throw(ArgumentError("HEALPix pixel $p out of range 0:$(npix - 1)"))
     ring = _pix2ring_index(ns, p, scheme)
     return _healpix_pix2ang_ring(ns, ring, T)
+end
+
+"""
+    _pix2lonlat(T, nside, pix, scheme) -> (λ, φ)
+
+Pixel `pix`'s centre as longitude and geographic latitude, the latitude taken straight from the ring
+([`_hp_ring_angles`](@ref)) so it matches [`ring_info`](@ref)'s to the bit and carries no `π/2 − θ`
+rounding near a pole.
+"""
+@inline function _pix2lonlat(::Type{T}, ns::Int, p::Int, scheme::RingScheme) where {T<:AbstractFloat}
+    npix = healpix_npix(ns)
+    0 ≤ p < npix || throw(ArgumentError("HEALPix pixel $p out of range 0:$(npix - 1)"))
+    ring, ϕ = _healpix_ring_phi(ns, _pix2ring_index(ns, p, scheme), T)
+    return ϕ, _hp_ring_angles(T, ns, ring)[2]
 end
 
 @inline _pix2ring_index(::Int, p::Int, ::Ring) = p
@@ -430,9 +459,9 @@ The 0-based index of the pixel containing direction `v`, which need not be norma
 function vec2pix(nside::Integer, v; scheme::RingScheme = Ring())
     x, y, z = v[1], v[2], v[3]
     T = float(promote_type(typeof(x), typeof(y), typeof(z)))
-    r = sqrt(T(x)^2 + T(y)^2 + T(z)^2)
-    iszero(r) && throw(ArgumentError("the zero vector has no direction"))
-    θ = acos(clamp(T(z) / r, -one(T), one(T)))
+    ρ = hypot(T(x), T(y))
+    iszero(ρ) && iszero(z) && throw(ArgumentError("the zero vector has no direction"))
+    θ = atan(ρ, T(z))              # accurate relative to θ at the poles
     ϕ = mod(atan(T(y), T(x)), T(2π))
     return ang2pix(nside, θ, ϕ; scheme = scheme)
 end

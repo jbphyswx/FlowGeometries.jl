@@ -105,8 +105,11 @@ Coordinates are also reachable by their geometry-correct names — `grid.λ`, `g
 ## Cell measure is stored factored
 
 On a rectilinear grid every measure this package supports is a product of one factor per axis:
-Cartesian `Δx·Δy·Δz`, spherical `R²cosφ·Δλ·Δφ = (Δλ)·(R²cosφ·Δφ)`. A `StructuredGrid` stores those
-`∑ Nᵈ` factors, and the `∏ Nᵈ` products come out of them.
+Cartesian `Δx·Δy·Δz`, spherical `(Δλ)·(R²(sin φ₊ − sin φ₋))`, the exact area between a cell's faces
+with the outer latitude faces clamped to the poles, so the cells of a global grid sum to `4πR²`. A grid
+built on a sampling with quadrature weights (Gauss–Legendre, Driscoll–Healy, Clenshaw–Curtis) takes
+`R²·wⱼ` as its latitude factor, and `sum(f .* measure(grid))` is that quadrature. A `StructuredGrid`
+stores those `∑ Nᵈ` factors, and the `∏ Nᵈ` products come out of them.
 
 ```@example grids
 m = FG.Grids.measure(grid)           # a SeparableMeasure — a real AbstractArray

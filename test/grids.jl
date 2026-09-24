@@ -122,25 +122,37 @@ Test.@testset "Grids implement the Base collection surface" begin
     Test.@test sprint(show, grid) == "StructuredGrid{Float64}(5×4)"
 end
 
-Test.@testset "Cell measure is a separable outer product matching the metric formulas" begin
+Test.@testset "Cell measure is the exact integral of the metric over each cell" begin
     cw = FG.Discretization.cell_width
     sgeo = FG.Geometry.SphericalGeometry(6.371e6)
     cgeo = FG.Geometry.CartesianGeometry()
     cgeo3 = FG.Geometry.CartesianGeometry()
+    R = sgeo.R
 
-    # Spherical area must equal R²cosφ·Δλ·Δφ cell by cell, on a nonuniform grid.
+    # The reference in BigFloat: faces midway between centres and one gap out at each end, latitude
+    # faces clamped to the poles, and the band area `|sin φ₊ − sin φ₋|` between them.
+    function bfaces(x)
+        b = big.(x)
+        n = length(b)
+        return vcat(b[1] - (b[2] - b[1]) / 2, (b[1:(n - 1)] .+ b[2:n]) ./ 2, b[n] + (b[n] - b[n - 1]) / 2)
+    end
+    pole(x) = clamp(x, -big(π) / 2, big(π) / 2)
+    band(f, j) = abs(sin(pole(f[j + 1])) - sin(pole(f[j])))
+
+    # A spherical cell is `R²·Δλ·(sin φ₊ − sin φ₋)` between its faces, on a nonuniform grid.
     λ = collect(range(0.0; step = 2π / 12, length = 12))
     φ = cumsum([-1.0, 0.2, 0.5, 0.15, 0.4, 0.3])
     g = FG.Grids.StructuredGrid(sgeo, λ, φ, trues(length(λ), length(φ)))
     λper = FG.Grids.isperiodic(g, 1) ? 2π : nothing
-    ref = [FG.Geometry.area_element(sgeo, φ[j], cw(λ, i, λper), cw(φ, j))
-           for i in eachindex(λ), j in eachindex(φ)]
+    fφ = bfaces(φ)
+    ref = [Float64(big(R)^2 * cw(λ, i, λper) * band(fφ, j)) for i in eachindex(λ), j in eachindex(φ)]
     Test.@test FG.Grids.measure(g) ≈ ref rtol = 1e-14
 
-    # Spherical volume must equal r²cosφ·Δλ·Δφ·Δr.
+    # A shell cell is `Δλ·(sin φ₊ − sin φ₋)·(r₊³ − r₋³)/3`.
     r = collect(6.30e6:1.0e4:6.34e6)
     g3 = FG.Grids.StructuredGrid(sgeo, λ, φ, r, trues(length(λ), length(φ), length(r)))
-    ref3 = [FG.Geometry.volume_element(sgeo, r[k], φ[j], cw(λ, i, λper), cw(φ, j), cw(r, k))
+    fr = bfaces(r)
+    ref3 = [Float64(cw(λ, i, λper) * band(fφ, j) * (fr[k + 1]^3 - fr[k]^3) / 3)
             for i in eachindex(λ), j in eachindex(φ), k in eachindex(r)]
     Test.@test FG.Grids.measure(g3) ≈ ref3 rtol = 1e-14
 
@@ -150,12 +162,31 @@ Test.@testset "Cell measure is a separable outer product matching the metric for
     merid = FG.Grids.StructuredGrid(sgeo, [0.3], φ, trues(1, length(φ)))
     Test.@test FG.Grids.measure(merid) ≈ [sgeo.R * cw(φ, j) for _ in 1:1, j in eachindex(φ)]
 
-    # A whole sphere's cells sum to 4πR².
-    n = 200
-    λf = collect(range(0.0; step = 2π / n, length = n))
-    φf = collect(range(-π / 2 + π / (2n), π / 2 - π / (2n); length = n))
-    gf = FG.Grids.StructuredGrid(sgeo, λf, φf, trues(n, n))
-    Test.@test sum(FG.Grids.measure(gf)) ≈ 4π * sgeo.R^2 rtol = 1e-4
+    # A whole sphere's cells sum to 4πR², whether the outer faces fall on the poles or beyond them:
+    # a node on a pole owns its polar cap.
+    λ16 = collect(range(0.0; step = 2π / 16, length = 16))
+    for φs in (collect(range(-π / 2 + π / 64, π / 2 - π / 64; length = 32)),
+               collect(range(-π / 2, π / 2; length = 33)),
+               collect(range(π / 2, -π / 2; length = 33)))
+        Test.@test sum(FG.Grids.measure(FG.Grids.StructuredGrid(sgeo, λ16, φs))) ≈ 4π * R^2 rtol = 1e-13
+    end
+    let φs = collect(range(-π / 2, π / 2; length = 33)),
+        m = FG.Grids.measure(FG.Grids.StructuredGrid(sgeo, λ16, φs))
+        Test.@test sum(m[:, end]) ≈ 2π * R^2 * (1 - cos(π / 64)) rtol = 1e-13
+    end
+
+    # Float32 cells are exact to a few ulps against the same centres read in BigFloat, including the
+    # narrow polar bands.
+    let φ32 = Float32.(collect(range(-π / 2 + π / 4096, π / 2 - π / 4096; length = 2048))),
+        R32 = Float32(R),
+        w32 = FG.Grids.measure_factors(
+            FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(R32), Float32.(λ16), φ32))[2]
+        f = bfaces(φ32)
+        Test.@test maximum(abs(big(w32[j]) / (big(R32)^2 * band(f, j)) - 1) for j in eachindex(φ32)) <
+                   4 * eps(Float32)
+    end
+    Test.@test FG.Grids._half_pi_lo(Float64) == Float64(big(π) / 2 - big(Float64(π)) / 2)
+    Test.@test FG.Grids._half_pi_lo(Float32) == Float32(big(π) / 2 - big(Float32(π)) / 2)
 
     # A periodic axis wraps its boundary cell in 3-D exactly as it already did in 2-D.
     xnu = cumsum([0.0, 10.0, 40.0, 15.0, 60.0, 25.0])
@@ -176,6 +207,37 @@ Test.@testset "Cell measure is a separable outer product matching the metric for
     g2p = FG.Grids.StructuredGrid(cgeo, xnu, yy, trues(length(xnu), length(yy));
                             periodic = true, period = xper)
     Test.@test FG.Grids.measure(g2p)[end, 1] / cw(yy, 1) ≈ FG.Grids.measure(gp)[end, 1, 1] / (cw(yy, 1) * cw(zz, 1))
+end
+
+Test.@testset "A grid on a quadrature sampling is measured by its weights" begin
+    SS = FG.SphericalSampling
+    R = 6.371e6
+    geo = FG.Geometry.SphericalGeometry(R)
+    for (s, n, degree) in ((SS.GaussLegendreSampling(), 24, 47), (SS.ClenshawCurtisSampling(), 24, 23),
+                           (SS.DriscollHealySampling(), 24, 23), (SS.DriscollHealyEqualSampling(), 24, 23))
+        g = FG.Connectivity.structured_grid(s, n; geometry = geo)
+        q = SS.spherical_quadrature(s, n)
+        m = FG.Grids.measure(g)
+        Test.@test FG.Grids.sampling(g) === s
+        Test.@test all(isapprox(m[i, j], R^2 * (2π / length(q.λ)) * q.w[j]; rtol = 1e-13)
+                       for i in axes(m, 1), j in axes(m, 2))
+        # `Σ measure·f` is the quadrature, so it integrates `sin^d φ` over the sphere exactly up to the
+        # rule's degree: `4πR²/(d+1)` for even `d`, zero for odd.
+        μ = sin.(FG.Grids.coordinates(g, 2))
+        Test.@test all(0:degree) do d
+            got = sum(m[i, j] * μ[j]^d for i in axes(m, 1), j in axes(m, 2))
+            abs(got - (iseven(d) ? 4π * R^2 / (d + 1) : 0.0)) < 1e-12 * 4π * R^2
+        end
+    end
+    # A sampling with no weights is measured geometrically, and still covers the sphere.
+    gm = FG.Connectivity.structured_grid(SS.McEwenWiauxSampling(), 24; geometry = geo)
+    Test.@test sum(FG.Grids.measure(gm)) ≈ 4π * R^2 rtol = 1e-13
+    # A staggered location of such a grid is a mesh of faces, with no quadrature of its own.
+    let gl = FG.Connectivity.structured_grid(SS.GaussLegendreSampling(), 12; geometry = geo),
+        gf = FG.Grids.grid_at(FG.Grids.StaggeredGrid(gl), (FG.Discretization.Center(), FG.Discretization.Face()))
+        Test.@test FG.Grids.sampling(gf) === nothing
+        Test.@test size(gf) == (23, 13)
+    end
 end
 
 Test.@testset "measure is the dimension-agnostic name for area/volume" begin
@@ -749,7 +811,7 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             Test.@test φ == pts.φ
 
             # The nested ids are the ring order permuted, so the same ring walk serves that scheme:
-            # `4·nside − 1` `acos` calls for the whole cloud. Both are powers of two here, which the
+            # `4·nside − 1` ring evaluations for the whole cloud. Both are powers of two here, which the
             # nested quadtree needs.
             gn = G.HEALPixGrid(geo, ns; scheme = SS.Nested())
             nλ, nφ = G.materialize(gn)
@@ -838,6 +900,32 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         conn = C.build_connectivity(g)
         for i in 1:length(g)
             Test.@test sort(collect(G.neighbors(conn, i))) == sort(collect(G.neighbors(g, i)))
+        end
+
+        # The cross-ring neighbours are the brute-force straddle, in exact integer arithmetic: point `j`
+        # of an `m`-point ring sits `(j−1)·mm` units round an `mm`-point ring whose point `k` sits at
+        # `(k−1)·m`, and its neighbours there are the last point at or before it and the first at or
+        # after it.
+        function straddle(j, m, mm)
+            at = (j - 1) * mm
+            lo = maximum(k for k in 1:mm if (k - 1) * m ≤ at)
+            return sort(unique([lo, (lo - 1) * m == at ? lo : mod1(lo + 1, mm)]))
+        end
+        for gs in (g, G.RingGrid(geo, SS.ReducedGaussianSampling([12, 12, 16, 16, 12, 12])))
+            ok = true
+            for r in 1:G.nrings(gs), (j, i) in enumerate(G.ring_range(gs, r)), rr in (r - 1, r + 1)
+                1 ≤ rr ≤ G.nrings(gs) || continue
+                base = first(G.ring_range(gs, rr)) - 1
+                got = sort([k - base for k in G.neighbors(gs, i) if G.ring_of(gs, k) == rr])
+                ok &= got == straddle(j, G.nlon_in_ring(gs, r), G.nlon_in_ring(gs, rr))
+            end
+            Test.@test ok
+        end
+        # Where adjacent rings hold equal counts the points line up one to one, so the graph is
+        # symmetric and an interior point has four neighbours.
+        let ge = G.RingGrid(geo, SS.ReducedGaussianSampling(fill(12, 5)))
+            Test.@test C.is_symmetric_adjacency(C.build_connectivity(ge))
+            Test.@test all(C.nneighbors(ge, i) == (G.ring_of(ge, i) in (1, 5) ? 3 : 4) for i in 1:length(ge))
         end
     end
 

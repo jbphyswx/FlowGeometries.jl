@@ -88,12 +88,8 @@ of them inactive.
 
 @inline ncoordinates(::HEALPixGrid) = 2
 
-# `pix2ang` gives colatitude; the package's spherical coordinates are `(λ, φ)` with `φ` the geographic
-# latitude, which is the same angle measured from the equator.
-@inline function _raw_coords(grid::HEALPixGrid{T}, i::Integer) where {T}
-    θ, ϕ = SphericalSampling.pix2ang(T, nside(grid), Int(i) - 1; scheme = scheme(grid))
-    return (ϕ, SphericalSampling.geographic_latitude(θ))
-end
+@inline _raw_coords(grid::HEALPixGrid{T}, i::Integer) where {T} =
+    SphericalSampling._pix2lonlat(T, nside(grid), Int(i) - 1, scheme(grid))
 
 coordinates(grid::HEALPixGrid) = throw(ArgumentError(
     "a HEALPixGrid stores no coordinate arrays — a pixel's position is arithmetic in (nside, pixel). " *
@@ -121,7 +117,7 @@ coordinates(grid::HEALPixGrid) = throw(ArgumentError(
 
 # ---- materialization --------------------------------------------------------
 
-# The whole cloud as a ring walk, costing `4·nside − 1` `acos` calls: colatitude is constant along a
+# The whole cloud as a ring walk, costing `4·nside − 1` ring evaluations: latitude is constant along a
 # ring, and the RING ordering makes a ring's pixels contiguous.
 function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Ring}) where {T,G}
     n = npixels(grid)
@@ -131,7 +127,7 @@ function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Ring}) where {T,G
     return (p.λ, p.φ)
 end
 
-# The nested ids in their own order, off the same per-ring table: `4·nside − 1` `acos` calls for the
+# The nested ids in their own order, off the same per-ring table: `4·nside − 1` ring evaluations for the
 # whole cloud, where the per-cell path costs one per pixel.
 function materialize(grid::HEALPixGrid{T,G,<:SphericalSampling.Nested}) where {T,G}
     n = npixels(grid)

@@ -78,8 +78,8 @@ FG.Geometry.volume_element(sph, r, φ, Δλ, Δφ, Δr)     # r²·cosφ·Δλ·
 FG.Geometry.area_element(cart, 2.0, 3.0)              # dx·dy, from the cell's own extents
 ```
 
-These are the pointwise elements. A grid's per-cell measure is built from them once at construction —
-see [Grids](@ref grids-page).
+These are the pointwise elements. A grid's per-cell measure is their exact integral over each cell,
+formed once at construction — see [Grids](@ref grids-page).
 
 ## Cartesian ↔ spherical
 
@@ -139,12 +139,12 @@ gs = FG.Grids.StructuredGrid(wgs, λ, φ)
 FG.Grids.coordinate_names(gs), FG.Grids.isperiodic(gs, 1), size(gs)
 ```
 
-The surface element `M(φ)·N(φ)cosφ·Δλ·Δφ` factors, so the measure stays separable and an interior cell
-matches the geometry's own element exactly:
+The surface element `M(φ)·N(φ)cosφ·Δλ·Δφ` factors, so the measure stays separable, and each cell is
+that element integrated between its faces. The cells add up to the ellipsoid's closed-form area:
 
 ```@example geometry
-Δλ, Δφ = FG.Grids.spacing(gs, 1), FG.Grids.spacing(gs, 2)
-FG.Grids.measure(gs, 3, 4) ≈ FG.Geometry.area_element(wgs, φ[4], Δλ, Δφ)
+a, e² = FG.Geometry.semimajor_axis(wgs), FG.Geometry.eccentricity²(wgs)
+sum(FG.Grids.measure(gs)) ≈ 2π * a^2 * (1 + (1 - e²) / sqrt(e²) * atanh(sqrt(e²)))
 ```
 
 Adding a height direction changes that. The geodetic volume element offsets *both* curvature radii by
@@ -154,11 +154,6 @@ dense — which `measure_factors` reports by returning `nothing`:
 ```@example geometry
 g3 = FG.Grids.StructuredGrid(wgs, λ, φ, range(0.0, 2000.0; length = 3))
 FG.Grids.measure_factors(gs) !== nothing, FG.Grids.measure_factors(g3) === nothing
-```
-
-```@example geometry
-Δh = FG.Grids.spacing(g3, 3)
-FG.Grids.measure(g3, 3, 4, 2) ≈ FG.Geometry.volume_element(wgs, φ[4], 1000.0, Δλ, Δφ, Δh)
 ```
 
 ## Adding a geometry
@@ -178,8 +173,8 @@ gu = FG.Grids.StructuredGrid(u, λ, φ)
 sum(FG.Grids.measure(gu)), FG.Geometry.distance(u, (0.0, 0.0), (0.0, π/2))
 ```
 
-That total is the unit sphere's area to the discretization's accuracy, and the distance is a quarter
-great circle — both from the one method above.
+That total is the unit sphere's area, `4π`, and the distance is a quarter great circle — both from the
+one method above.
 
 ## Rotated frames
 

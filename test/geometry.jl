@@ -367,16 +367,17 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     Test.@test G.scale_factors(FG.Geometry.CartesianGeometry(), (1.0, 2.0, 3.0)) == (1.0, 1.0, 1.0)
     Test.@test G.jacobian(sg, (0.0, 0.5)) ≈ 4 * cos(0.5)
     Test.@test G.jacobian(FG.Geometry.CartesianGeometry(), (1.0, 2.0)) == 1.0
-    # The Jacobian is the area element per unit coordinate area, and the grid's own measure is built
-    # from it.
+    # The Jacobian is the area element per unit coordinate area, and the grid's own measure is its
+    # integral over the cell.
     gg = FG.Grids.StructuredGrid(sg, collect(range(0, 2π; length = 40)),
                            collect(range(-1.2, 1.2; length = 30)))
-    λ, φ = FG.Grids.coordinate_names(gg)
     i, j = 7, 11
-    p = FG.Grids.coords(gg, i, j)
     Δλ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 1), i, FG.Grids.period(gg, 1))
-    Δφ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 2), j)
-    Test.@test FG.Grids.measure(gg, i, j) ≈ G.jacobian(sg, (p.λ, p.φ)) * Δλ * Δφ rtol = 1e-12
+    f = FG.Discretization.faces(FG.Grids.coordinates(gg, 2))
+    gl = FG.SphericalSampling._gauss_legendre_μ(16)
+    mid, half = (f[j] + f[j + 1]) / 2, (f[j + 1] - f[j]) / 2
+    ∫J = half * sum(gl.w[k] * G.jacobian(sg, (0.0, mid + half * gl.μ[k])) for k in eachindex(gl.μ))
+    Test.@test FG.Grids.measure(gg, i, j) ≈ Δλ * ∫J rtol = 1e-13
     # Any point representation is accepted.
     Test.@test G.scale_factors(sg, (λ = 0.0, φ = π / 3)) == G.scale_factors(sg, (0.0, π / 3))
     Test.@test G.scale_factors(sg, [0.0, π / 3]) == G.scale_factors(sg, (0.0, π / 3))
@@ -620,33 +621,38 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     Test.@test FG.Grids.measure_factors(g2) !== nothing
     Test.@test FG.Grids.measure_factors(g3) === nothing
 
-    # Every cell equals the geometry's own element, exactly — not to a tolerance.
+    # Every cell is the geometry's own element integrated over the cell, latitude faces clamped to the
+    # poles; the reference integrates by 64-point Gauss–Legendre.
+    gl = FG.SphericalSampling._gauss_legendre_μ(64)
+    ∫seg(f, lo, hi) = (hi - lo) / 2 * sum(gl.w[k] * f((lo + hi) / 2 + (hi - lo) / 2 * gl.μ[k])
+                                          for k in eachindex(gl.μ))
+    ∫lat(f, lo, hi) = ∫seg(f, clamp(lo, -π / 2, π / 2), clamp(hi, -π / 2, π / 2))
     wλ = FG.Discretization.cell_widths(FG.Grids.coordinates(g2, 1), 2π)
-    wφ = FG.Discretization.cell_widths(FG.Grids.coordinates(g2, 2), nothing)
-    wh = FG.Discretization.cell_widths(FG.Grids.coordinates(g3, 3), nothing)
+    fφ = FG.Discretization.faces(φ7)
+    fh = FG.Discretization.faces(h4)
     Test.@test all(
-        FG.Grids.measure(g2, i, j) ≈ GE.area_element(geo, φ7[j], wλ[i], wφ[j])
+        isapprox(FG.Grids.measure(g2, i, j),
+                 ∫lat(t -> GE.area_element(geo, t, wλ[i], 1.0), fφ[j], fφ[j + 1]); rtol = 1e-13)
         for j in eachindex(φ7), i in eachindex(λ8)
     )
     Test.@test all(
-        FG.Grids.measure(g3, i, j, k) ≈
-        GE.volume_element(geo, φ7[j], h4[k], wλ[i], wφ[j], wh[k])
+        isapprox(FG.Grids.measure(g3, i, j, k),
+                 ∫seg(s -> ∫lat(t -> GE.volume_element(geo, t, s, wλ[i], 1.0, 1.0), fφ[j], fφ[j + 1]),
+                      fh[k], fh[k + 1]); rtol = 1e-13)
         for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8)
     )
     # A further direction enters as a plain width.
     Test.@test sum(FG.Grids.measure(g4)) ≈
                sum(FG.Discretization.cell_widths([0.0, 2.0], nothing)) * sum(FG.Grids.measure(g3)) rtol = 1e-13
 
-    # Independent check: the closed-form ellipsoid area, approached at second order.
+    # Independent check: the closed-form ellipsoid area, at every resolution.
     e = sqrt(e²)
     A_exact = 2π * a^2 * (1 + (1 - e²) / e * atanh(e))
-    errs = map((24, 96, 384)) do n
+    for n in (4, 24, 96)
         gn = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = n + 1)[1:n]),
                                      collect(range(-π / 2, π / 2; length = n ÷ 2 + 1)))
-        abs(sum(FG.Grids.measure(gn)) - A_exact) / A_exact
+        Test.@test sum(FG.Grids.measure(gn)) ≈ A_exact rtol = 1e-13
     end
-    Test.@test errs[3] < 3e-5
-    Test.@test errs[1] / errs[2] > 8 && errs[2] / errs[3] > 8   # 4× refinement ⇒ ~16×
     # A sphere is the f = 0 spheroid, and must agree with SphericalGeometry cell for cell.
     gsph = FG.Grids.StructuredGrid(GE.SphericalGeometry(a), λ8, φ7)
     gflat = FG.Grids.StructuredGrid(GE.SpheroidGeometry(a, 0.0), λ8, φ7)
@@ -690,20 +696,18 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     gzon2 = FG.Grids.StructuredGrid(geo, λ8, [0.7])
     Test.@test sum(FG.Grids.measure(gzon2)) ≈
                2π * GE.prime_vertical_radius(geo, 0.7) * cos(0.7) rtol = 1e-14
-    # Meridional: each cell is exactly M(φ)·Δφ, the meridian arc element.
+    # Meridional: each cell is the meridian arc between its faces, `∫M dφ`.
     φm = collect(range(-π / 2, π / 2; length = 33))
     gmer = FG.Grids.StructuredGrid(geo, [0.0], φm)
-    wm = FG.Discretization.cell_widths(φm, nothing)
-    Test.@test all(FG.Grids.measure(gmer, 1, j) ≈ GE.meridional_radius(geo, φm[j]) * wm[j]
+    fm = FG.Discretization.faces(φm)
+    Test.@test all(isapprox(FG.Grids.measure(gmer, 1, j),
+                            ∫lat(t -> GE.meridional_radius(geo, t), fm[j], fm[j + 1]); rtol = 1e-13)
                    for j in eachindex(φm))
-    # The total approaches ∫M dφ — twice the published quarter meridian — at first order, since `n`
-    # cell-centres own `n` widths and so span π(1 + 1/n). No cosφ factor annihilates that end-cell
-    # excess here, and the error is the 1/n that span predicts.
-    mer = map((48, 192, 768)) do n
+    # Pole to pole, the arcs add up to twice the published quarter meridian, 10 001 965.729 m.
+    for n in (48, 192)
         gm = FG.Grids.StructuredGrid(geo, [0.0], collect(range(-π / 2, π / 2; length = n + 1)))
-        abs(sum(FG.Grids.measure(gm)) - 2 * 10001965.729) / (2 * 10001965.729)
+        Test.@test sum(FG.Grids.measure(gm)) ≈ 2 * 10001965.729 atol = 2e-3
     end
-    Test.@test all(isapprox(mer[i], 1 / (48 * 4^(i - 1)); rtol = 0.02) for i in 1:3)
     # A single point has no extent in either direction.
     Test.@test sum(FG.Grids.measure(FG.Grids.StructuredGrid(geo, [0.3], [0.4]))) == 1.0
 
@@ -714,12 +718,6 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     Test.@test FG.Grids.measure_factors(g3) === nothing
     let dense = FG.Grids.measure_array(g3)
         Test.@test size(dense) == size(g3)
-        # Every cell equals the geometry's own element, which is the claim the storage form must keep.
-        wλ8 = FG.Discretization.cell_widths(λ8, 2π)
-        wφ8 = FG.Discretization.cell_widths(φ7, nothing)
-        wh8 = FG.Discretization.cell_widths(h4, nothing)
-        Test.@test all(dense[i, j, k] ≈ GE.volume_element(geo, φ7[j], h4[k], wλ8[i], wφ8[j], wh8[k])
-                       for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8))
         # `sum` and `extrema` are the factored forms, `O(Nλ + Nφ·Nh)`, so they agree with the dense
         # reduction to round-off.
         Test.@test sum(FG.Grids.measure(g3)) ≈ sum(dense) rtol = 1e-12

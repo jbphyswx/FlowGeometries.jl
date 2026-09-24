@@ -77,10 +77,7 @@ The subdivision frequency `ν`: the grid has `10ν² + 2` vertices and `20ν²` 
 
 @inline function _raw_coords(grid::IcosahedralGrid{T}, id::Integer) where {T}
     v = SphericalSampling._ico_vertex_dir(T, Int(id), frequency(grid))
-    θ = acos(clamp(v[3], -one(T), one(T)))
-    ϕ = atan(v[2], v[1])
-    ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, SphericalSampling.geographic_latitude(θ))
+    return SphericalSampling._unit_lonlat(v[1], v[2], v[3])
 end
 
 coordinates(grid::IcosahedralGrid) = throw(ArgumentError(
