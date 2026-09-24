@@ -93,12 +93,18 @@ own.
 
 `fields` need only name what changes; everything else is carried over.
 """
-@inline function rebuild(grid::G, fields::NamedTuple) where {G<:AbstractGrid}
-    unknown = Base.setdiff(keys(fields), fieldnames(G))
-    isempty(unknown) || throw(ArgumentError(
-        "$(nameof(G)) has no field $(join(unknown, ", ")); it has $(join(fieldnames(G), ", "))",
-    ))
-    return _from_fields(G, map(n -> get(fields, n, getfield(grid, n)), fieldnames(G))...)
+@inline rebuild(grid::G, fields::NamedTuple) where {G<:AbstractGrid} =
+    _from_fields(G, _rebuilt_fields(grid, fields)...)
+
+# One value per field of `G`: the replacement where `fields` names it, the grid's own otherwise. The
+# names are type parameters, so the choice is made per field at compile time.
+@generated function _rebuilt_fields(grid::G, fields::NamedTuple{K}) where {G<:AbstractGrid, K}
+    names = fieldnames(G)
+    unknown = Tuple(k for k in K if !(k in names))
+    isempty(unknown) || return :(throw(ArgumentError($(
+        "$(nameof(G)) has no field $(join(unknown, ", ")); it has $(join(names, ", "))"))))
+    return Expr(:tuple, (n in K ? :(getfield(fields, $(QuoteNode(n)))) :
+                                  :(getfield(grid, $(QuoteNode(n)))) for n in names)...)
 end
 
 # Every type parameter is determined by the field types, so these re-derive the whole list from the
