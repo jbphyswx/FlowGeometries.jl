@@ -165,6 +165,9 @@ function k_nearest!(
     kk = Int(k)
     kk ≥ 0 || throw(ArgumentError("k must be non-negative, got $k"))
     (kk == 0 || isempty(idx)) && return 0
+    (length(idx) ≥ kk && length(dist) ≥ kk) || throw(ArgumentError(
+        "idx and dist must hold at least k = $kk entries; got $(length(idx)) and $(length(dist))",
+    ))
     sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
     r = _knn_seed_radius_at(grid, p, kk, topology)
     rmax = _knn_radius_ceiling(grid, topology)

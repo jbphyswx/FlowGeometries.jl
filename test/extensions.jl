@@ -403,13 +403,11 @@ Test.@testset "Sparse adjacency assembles straight into CSC" begin
                            for i in 1:FG.Connectivity.nnodes(cn)
                            for k in cn.ptr[i]:(cn.ptr[i + 1] - 1))
         end
-        # And the symmetric case is the cheaper one, the transpose route allocating a second CSR.
+        # The wrap is the cheaper route for one and the same graph: the transpose allocates a second
+        # CSR.
         big = FG.Grids.StructuredGrid(cart, collect(range(0.0, 1.0; length = 120)),
                                       collect(range(0.0, 1.0; length = 120)))
-        sym() = FG.Connectivity.sparse_adjacency_matrix(big)
-        asym() = FG.Connectivity.sparse_adjacency_matrix(big; stencil = Upwind(1))
-        sym(); asym()
-        Test.@test @allocated(sym()) < @allocated(asym())
+        Test.@test _alloc(q_sparse, big) < _alloc(q_sparse_csr, big)
     end
 end
 
@@ -457,11 +455,7 @@ Test.@testset "A formula layout's symmetric adjacency wraps into CSC" begin
 
     # And the wrap is the cheaper route on a formula layout too.
     hp = FG.Grids.HEALPixGrid(16)
-    wrap() = FG.Connectivity.sparse_adjacency_matrix(hp)
-    transpose_route() =
-        FG.Connectivity.sparse_adjacency_matrix(FG.Connectivity.build_connectivity(hp))
-    wrap(); transpose_route()
-    Test.@test @allocated(wrap()) < @allocated(transpose_route())
+    Test.@test _alloc(q_sparse, hp) < _alloc(q_sparse_csr, hp)
 end
 
 Test.@testset "Index-parallel loops run as kernels and give the same answer" begin

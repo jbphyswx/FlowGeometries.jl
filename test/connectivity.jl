@@ -190,6 +190,37 @@ Test.@testset "Spherical sampling connectivity" begin
     end
 end
 
+Test.@testset "A cubed-sphere stencil reaches across a seam as far as it reaches inside a panel" begin
+    C = FG.Connectivity
+    SS = FG.SphericalSampling
+    S = FG.Stencils
+    dir(λ, φ) = (cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ))
+    ang(a, b) = atan(sqrt(sum(abs2, (a[2] * b[3] - a[3] * b[2], a[3] * b[1] - a[1] * b[3],
+                                     a[1] * b[2] - a[2] * b[1]))), sum(a .* b))
+    for n in (3, 4, 8)
+        p = SS.cubed_sphere_points(n)
+        v = dir.(p.λ, p.φ)
+        N = 6n^2
+        h = π / 2 / n
+        # Moore(1): eight neighbours, except at the three cells round each cube corner, whose diagonal
+        # exit leaves through the corner itself, where three panels meet and no cell is diagonal.
+        m1 = C.build_connectivity(SS.CubedSphereSampling(), n; stencil = S.Moore(1))
+        deg = [C.nneighbors(m1, i) for i in 1:N]
+        Test.@test count(==(7), deg) == 24 && count(==(8), deg) == N - 24
+        Test.@test C.is_symmetric_adjacency(m1)
+        # Each neighbour is one of the cell's nearest, seam or no seam.
+        Test.@test all(1:N) do i
+            near = sort([ang(v[i], v[j]) for j in 1:N if j != i])
+            maximum(ang(v[i], v[j]) for j in FG.Grids.neighbors(m1, i)) ≤ near[deg[i] + 4]
+        end
+        # Axial(2): a two-cell step across a seam lands two cells into the next panel.
+        a2 = C.build_connectivity(SS.CubedSphereSampling(), n; stencil = S.Axial(2))
+        Test.@test C.is_symmetric_adjacency(a2)
+        Test.@test all(i -> C.nneighbors(a2, i) == 8, 1:N)
+        Test.@test all(ang(v[i], v[j]) < 2.1h for i in 1:N for j in FG.Grids.neighbors(a2, i))
+    end
+end
+
 Test.@testset "Connectivity is built into contiguous CSR, not per-node vectors" begin
     # Degrees and reciprocity are unaffected by the storage change.
     conn = FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(4))
@@ -1455,6 +1486,9 @@ Test.@testset "Queries can be seeded by a point, not just a cell" begin
         Test.@test dst ≈ [d for (d, _) in ranked[1:6]]
         Test.@test issorted(dst)
     end
+    # Buffers shorter than `k` are refused before anything is written, as the cell-seeded form does.
+    Test.@test_throws ArgumentError C.k_nearest!(zeros(Int, 2), zeros(6), gs, (7.3, 4.2); k = 6)
+    Test.@test_throws ArgumentError C.k_nearest!(zeros(Int, 6), zeros(2), gs, (7.3, 4.2); k = 6)
 
     # Off a rectilinear grid there is no axis to bracket along, so `locate` is the nearest centre.
     # Every route to it — scan, tree, cell list — must name the same cell as an exhaustive search.

@@ -24,8 +24,8 @@ function apply_stencil!(
 end
 
 # The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
-# past the last sample the pair is `(n, 1)` across the seam. `interpolation_weights` alone clamps to
-# the endpoint value there.
+# above the axis's largest sample the pair is `(n, 1)` across the seam, whichever way the axis runs.
+# `interpolation_weights` alone clamps to the endpoint value there.
 @inline function _interp_pair(grid::Grids.StructuredGrid{T, G,N}, d::Int, v::T) where {G,T,N}
     x = Grids.coordinates(grid, d)
     n = length(x)
@@ -37,10 +37,11 @@ end
             v = lo + mod(v - lo, L)
             @inbounds x1, xn = T(x[1]), T(x[n])
             asc = xn ≥ x1
-            beyond = asc ? v > xn : v < xn
-            if beyond
-                h = asc ? (x1 + L) - xn : (x1 - L) - xn
-                t = iszero(h) ? zero(T) : (v - xn) / h
+            # The seam gap runs from the largest sample to the smallest plus one period: from `xn` to
+            # `x1 + L` ascending, from `x1` to `xn + L` descending. `t` is the weight of sample 1.
+            if v > (asc ? xn : x1)
+                h = asc ? (x1 + L) - xn : (xn + L) - x1
+                t = iszero(h) ? zero(T) : (asc ? v - xn : (xn + L) - v) / h
                 return (n, 1, one(T) - t, t)
             end
         end

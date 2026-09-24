@@ -220,51 +220,58 @@ end
 # ---------------------------------------------------------------------------
 
 """
-Exact face-neighbor under offset `(di,dj)` for the gnomonic cubed sphere matching
-`SphericalSampling._cubed_face_to_xyz` / `cubed_sphere_points!`.
+    _cubed_neighbor(f, i, j, di, dj, n) -> (f′, i′, j′)
 
-Panel interiors stay on-face. Crossing an edge uses cube face adjacency with index
-maps derived by matching cube XYZ along shared edges. Diagonal (corner) exits
-return `(0,0,0)` — no unique adjacent face.
+The cell the index offset `(di, dj)` reaches from cell `(i, j)` of face `f`, on the gnomonic cubed
+sphere of `SphericalSampling._cubed_face_to_xyz` and [`SphericalSampling.cubed_sphere_points!`](@ref).
+
+An offset that leaves the face through an edge lands on the adjacent face at the same depth past that
+edge, with the along-edge index carried by the edge's map; the maps come from matching cube XYZ along
+each shared edge. `(0, 0, 0)` when the offset leaves through a cube corner, where three faces meet and no
+single continuation exists, or reaches past the adjacent face.
 """
 function _cubed_neighbor(f::Int, i::Int, j::Int, di::Int, dj::Int, n::Int)
     ii, jj = i + di, j + dj
-    if 1 ≤ ii ≤ n && 1 ≤ jj ≤ n
-        return f, ii, jj
-    end
-    (di != 0 && dj != 0) && return 0, 0, 0
+    inI, inJ = 1 ≤ ii ≤ n, 1 ≤ jj ≤ n
+    inI && inJ && return f, ii, jj
+    (inI || inJ) || return 0, 0, 0
+    # Depth past the edge, 1 on the adjacent face's first row; `d` counts it from that face's low
+    # edge and `t` from its high one.
+    e = inI ? (jj < 1 ? 1 - jj : jj - n) : (ii < 1 ? 1 - ii : ii - n)
+    e > n && return 0, 0, 0
+    d, t = e, n + 1 - e
     r(k) = n + 1 - k
     # Face local (i,j) → gnomonic (X,Y); cube XYZ as in `_cubed_face_to_xyz`.
     if f == 1  # +z (X,Y,1)
-        jj < 1 && return 4, r(i), 1          # Y=-1 → -y, Y₄=-1
-        jj > n && return 2, i, 1             # Y=+1 → +y, Y₂=-1
-        ii < 1 && return 5, j, 1             # X=-1 → -x, Y₅=-1
-        ii > n && return 3, r(j), 1          # X=+1 → +x, Y₃=-1
+        jj < 1 && return 4, r(ii), d         # Y=-1 → -y, Y₄=-1
+        jj > n && return 2, ii, d            # Y=+1 → +y, Y₂=-1
+        ii < 1 && return 5, jj, d            # X=-1 → -x, Y₅=-1
+        ii > n && return 3, r(jj), d         # X=+1 → +x, Y₃=-1
     elseif f == 2  # +y (X, 1, -Y)
-        jj < 1 && return 1, i, n
-        jj > n && return 6, n, r(i)          # (X,1,-1) → face6 X₆=1, Y₆=-X
-        ii < 1 && return 5, n, j
-        ii > n && return 3, 1, j
+        jj < 1 && return 1, ii, t
+        jj > n && return 6, t, r(ii)         # (X,1,-1) → face6 X₆=1, Y₆=-X
+        ii < 1 && return 5, t, jj
+        ii > n && return 3, d, jj
     elseif f == 3  # +x (1, -X, -Y)
-        jj < 1 && return 1, n, r(i)
-        jj > n && return 6, r(i), 1          # (1,-X,-1) → face6 Y₆=-1, X₆=-X
-        ii < 1 && return 2, n, j
-        ii > n && return 4, 1, j
+        jj < 1 && return 1, t, r(ii)
+        jj > n && return 6, r(ii), d         # (1,-X,-1) → face6 Y₆=-1, X₆=-X
+        ii < 1 && return 2, t, jj
+        ii > n && return 4, d, jj
     elseif f == 4  # -y (-X, -1, -Y)
-        jj < 1 && return 1, r(i), 1
-        jj > n && return 6, 1, i             # (-X,-1,-1) → face6 X₆=-1, Y₆=X
-        ii < 1 && return 3, n, j
-        ii > n && return 5, 1, j
+        jj < 1 && return 1, r(ii), d
+        jj > n && return 6, d, ii            # (-X,-1,-1) → face6 X₆=-1, Y₆=X
+        ii < 1 && return 3, t, jj
+        ii > n && return 5, d, jj
     elseif f == 5  # -x (-1, X, -Y)
-        jj < 1 && return 1, 1, i
-        jj > n && return 6, i, n             # (-1,X,-1) → face6 Y₆=+1, X₆=X
-        ii < 1 && return 4, n, j
-        ii > n && return 2, 1, j
+        jj < 1 && return 1, d, ii
+        jj > n && return 6, ii, t            # (-1,X,-1) → face6 Y₆=+1, X₆=X
+        ii < 1 && return 4, t, jj
+        ii > n && return 2, d, jj
     else  # f == 6, -z (-Y, X, -1); i→X (cube y), j→Y (cube x = -Y)
-        jj < 1 && return 3, r(i), n          # Y=-1 → cube x=+1 → +x top
-        jj > n && return 5, i, n             # Y=+1 → cube x=-1 → -x top
-        ii < 1 && return 4, j, n             # X=-1 → cube y=-1 → -y top
-        ii > n && return 2, r(j), n          # X=+1 → cube y=+1 → +y top
+        jj < 1 && return 3, r(ii), t         # Y=-1 → cube x=+1 → +x top
+        jj > n && return 5, ii, t            # Y=+1 → cube x=-1 → -x top
+        ii < 1 && return 4, jj, t            # X=-1 → cube y=-1 → -y top
+        ii > n && return 2, r(jj), t         # X=+1 → cube y=+1 → +y top
     end
     return 0, 0, 0
 end
@@ -274,6 +281,9 @@ end
 
 Six-panel gnomonic cubed sphere with cross-face seams. Indexing matches
 [`SphericalSampling.cubed_sphere_points!`](@ref).
+
+A stencil reaches across a seam as it does inside a panel, so under `Moore(1)` with `n ≥ 2` every cell
+has eight neighbours except the 24 cells at a cube corner, which have seven.
 """
 function build_connectivity(
     ::SphericalSampling.CubedSphereSampling, n::Integer;

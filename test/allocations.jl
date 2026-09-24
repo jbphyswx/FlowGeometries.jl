@@ -148,25 +148,15 @@ Test.@testset "Curvilinear construction memory is its own stored content, nothin
     geo = FG.Geometry.SphericalGeometry()
     # Construction memory scales with the grid's own stored content, corners and areas, and carries
     # no full-size unit-vector field on top.
-    function mib(n)
-        λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
-        φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
-        m = trues(n, n)
-        f = () -> FG.Grids.CurvilinearGrid(geo, λ, φ, m)
-        f()
-        return (@allocated f()) / 2^20
-    end
     n = 200
-    stored = 3 * 8 * (n + 1)^2 / 2^20      # xc, yc, areas
-    Test.@test mib(n) < 1.6 * stored
+    λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
+    φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
+    stored = 3 * 8 * (n + 1)^2                 # xc, yc, areas
+    Test.@test _alloc(q_cgrid, geo, λ, φ, trues(n, n)) < 1.6 * stored
 
-    # …and corner reconstruction costs only its own output. Minimum of several samples: a single
-    # `@allocated` can land on a collection or on the tail of compilation, and the true cost is a
-    # floor, so the minimum converges to it.
-    cc(A) = (FG.Grids._centers_to_corners(A);
-             minimum(@allocated(FG.Grids._centers_to_corners(A)) for _ in 1:3))
+    # …and corner reconstruction costs only its own output.
     big = [1.0i + 2.0j for i in 1:120, j in 1:120]
-    Test.@test cc(big) < 1.2 * 8 * 121^2
+    Test.@test _alloc(q_corners, big) < 1.2 * 8 * 121^2
 end
 
 Test.@testset "The grid-free connectivity path does not scale its allocations with nlat" begin
@@ -1045,6 +1035,19 @@ Test.@testset "Applying a gradient plan allocates nothing" begin
         O.gradient!(u1, u2, u3, f3, p3)
         Test.@test _alloc(q_gradient_t!, (u1, u2, u3), f3, p3) == 0
     end
+end
+
+Test.@testset "Building a gradient plan allocates the same buffers at every grid size" begin
+    GD = FG.Grids
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    sheared(n) = GD.CurvilinearGrid(cart, [0.7i + 0.05j for i in 1:n, j in 1:n],
+                                    [0.9j - 0.03i for i in 1:n, j in 1:n], trues(n, n);
+                                    measure = fill(1.0, n, n))
+    # At both sizes every O(n) buffer is past the size above which an array's storage is allocated
+    # apart from its header, so the two counts agree exactly when nothing is allocated per cell.
+    small, large = _nalloc(q_gplan, sheared(32)), _nalloc(q_gplan, sheared(64))
+    small == large || println("    gradient_plan -> ", small, " allocations at 32², ", large, " at 64²")
+    Test.@test large == small
 end
 
 Test.@testset "A batch axis costs no allocation, and none that grows with it" begin

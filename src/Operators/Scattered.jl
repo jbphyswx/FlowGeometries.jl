@@ -8,7 +8,8 @@ Build the least-squares gradient of `grid` — the geometry of it, with no field
 This is the counterpart of `apply_stencil!` for the two architectures that have no separable axis to
 difference along: a `CurvilinearGrid`, whose neighbours come from its index topology, and an
 `UnstructuredGrid`, whose come from its stored adjacency. `conn` overrides the neighbour set; otherwise
-one is built, from `stencil` where the architecture takes one.
+one is built, from `stencil` where the architecture takes one. A neighbour set with no edges at all
+raises an `ArgumentError`, the fit having nothing to read.
 
 One direction per coordinate: a `(λ, φ)` or `(x, y)` surface resolves two, in its tangent plane, and a
 three-coordinate volume resolves three, on the local frame — see
@@ -33,6 +34,11 @@ function gradient_plan(
     # curvilinear grid, the stored adjacency on a node set, which ignores the stencil.
     c = conn === nothing ?
         Connectivity.build_connectivity(grid; stencil = stencil, active_only = active_only) : conn
+    msk = Grids.mask(grid)
+    (length(c.nbrs) == 0 && length(msk) > 1 && (!active_only || any(msk))) && throw(ArgumentError(
+        "gradient_plan fits each gradient from a cell's neighbours, and no cell of this grid has " *
+        "one; give the grid an adjacency (`k` or `radius` on a node set) or pass `conn`",
+    ))
     # `Val(D)` from a runtime count: the body below is written once for any `D`, and the tuple
     # arithmetic in it only stays in registers when the width is a compile-time fact.
     return D == 2 ? _gradient_plan(grid, c, active_only, Val(2)) :
@@ -42,6 +48,27 @@ end
 # The `Δrₖ` contraction, one method per width, so each is a flat sum with no accumulator.
 @inline _contract(p::NTuple{2,T}, δ::NTuple{2,T}) where {T} = p[1] * δ[1] + p[2] * δ[2]
 @inline _contract(p::NTuple{3,T}, δ::NTuple{3,T}) where {T} = p[1] * δ[1] + p[2] * δ[2] + p[3] * δ[3]
+
+# The largest row of a CSR offset array over its first `n` rows.
+@inline function _max_degree(ptr::AbstractVector{<:Integer}, n::Int)
+    d = 0
+    @inbounds for i in 1:n
+        d = max(d, Int(ptr[i + 1] - ptr[i]))
+    end
+    return d
+end
+
+# The weighted Gram matrix `Σₜ wₜ δₜ δₜᵀ` over the first `m` displacements.
+@inline function _gram(dcol::NTuple{D,AbstractVector{T}}, wk::AbstractVector{T}, m::Int,
+                       ::Val{D}) where {T,D}
+    return ntuple(r -> ntuple(s -> begin
+            acc = zero(T)
+            @inbounds for t in 1:m
+                acc += wk[t] * dcol[r][t] * dcol[s][t]
+            end
+            acc
+        end, Val(D)), Val(D))
+end
 
 function _gradient_plan(
     grid::Grids.AbstractGrid{G,T}, c, active_only::Bool, ::Val{D},
@@ -62,11 +89,9 @@ function _gradient_plan(
     coef = ntuple(_ -> Vector{T}(undef, cap), Val(D))
     # Scratch for one cell's neighbours: the displacements are read twice, once to accumulate `A` and
     # once to weight it by `A⁺`, and re-projecting them doubles the trigonometry. Sized to the largest
-    # degree once, so it is allocated once.
-    maxdeg = 0
-    @inbounds for i in 1:n
-        maxdeg = max(maxdeg, c.ptr[i + 1] - c.ptr[i])
-    end
+    # degree once, so it is allocated once. `maxdeg` is assigned exactly once: the closure below
+    # captures it, and a captured variable that is reassigned is boxed.
+    maxdeg = _max_degree(c.ptr, n)
     dcol = ntuple(_ -> Vector{T}(undef, maxdeg), Val(D))
     wk = Vector{T}(undef, maxdeg)
     w = 0                                              # write cursor into `nbr`/`coef`
@@ -89,13 +114,7 @@ function _gradient_plan(
                 wk[m] = inv(q)
                 nbr[w + m] = j
             end
-            A = ntuple(r -> ntuple(s -> begin
-                    acc = zero(T)
-                    for t in 1:m
-                        acc += wk[t] * dcol[r][t] * dcol[s][t]
-                    end
-                    acc
-                end, Val(D)), Val(D))
+            A = _gram(dcol, wk, m, Val(D))
             # Relative tolerance: `A` scales with the weights, and `wₖ = 1/|Δrₖ|²` makes it O(number
             # of neighbours), so the cut is against its own trace.
             trA = zero(T)

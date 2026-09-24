@@ -510,6 +510,17 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
         Test.@test O.interpolate(fp, gp, (mid, 0.0)) ≈ (sin(λ[end]) + sin(λ[1])) / 2
         Test.@test O.interpolate(fp, gp, (2π + 0.3, 0.0)) ≈ O.interpolate(fp, gp, (0.3, 0.0))
     end
+    # A descending axis has its seam above its first sample, between that sample and the last one's
+    # image one period up, and the pair is linear across it.
+    let λd = reverse(collect(range(0.0, 2π * (1 - 1 / 24); length = 24))), z = [0.0, 1.0]
+        gd = GD.StructuredGrid(cart, λd, z; periodic = (true, false), period = (2π, 0.0))
+        fd = [sin(l) for l in λd, _ in z]
+        gap = 2π - λd[1]
+        Test.@test O.interpolate(fd, gd, (λd[1] + gap / 2, 0.0)) ≈ (sin(λd[1]) + sin(λd[end])) / 2
+        Test.@test O.interpolate(fd, gd, (λd[1] + gap / 4, 0.0)) ≈
+                   0.75 * sin(λd[1]) + 0.25 * sin(λd[end])
+        Test.@test O.interpolate(fd, gd, (2π + 0.3, 0.0)) ≈ O.interpolate(fd, gd, (0.3, 0.0))
+    end
 
     # Scattered and curvilinear: a least-squares plane, so a linear field is exact.
     let npt = 400, xs = 10.0 .* rand(npt), ys = 6.0 .* rand(npt)
@@ -704,6 +715,19 @@ Test.@testset "A least-squares gradient where there is no separable axis" begin
     let g4 = GD.UnstructuredGrid(cart, (rand(8), rand(8), rand(8), rand(8)), trues(8); k = 4,
                                  areas = ones(8))
         Test.@test_throws ArgumentError O.gradient_plan(g4)
+    end
+
+    # A node set given positions and areas alone has no adjacency, so no cell has a neighbour to fit
+    # from and the plan is refused. Passing the adjacency as `conn` gives the grid's own gradient.
+    let xs = [0.0, 1.0, 0.0, 1.0, 0.5, 2.0], ys = [0.0, 0.0, 1.0, 1.0, 0.5, 1.5]
+        bare = GD.UnstructuredGrid(cart, (xs, ys), ones(6))
+        knn = GD.UnstructuredGrid(cart, (xs, ys), trues(6); k = 3, areas = ones(6))
+        Test.@test_throws ArgumentError O.gradient_plan(bare)
+        Test.@test O.gradient_plan(bare; conn = C.build_connectivity(knn)).coeffs ==
+                   O.gradient_plan(knn).coeffs
+        # With every cell masked there is nothing to fit, which is not an error.
+        dark = GD.UnstructuredGrid(cart, (xs, ys), ones(6), falses(6))
+        Test.@test isempty(O.gradient_plan(dark).nbr)
     end
 
     # `gradient_plan` forwards `stencil` to `build_connectivity` for every architecture, so each

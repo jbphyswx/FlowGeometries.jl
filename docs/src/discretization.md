@@ -352,6 +352,10 @@ one dot product per cell, allocating nothing. Where `A` is rank deficient — ev
 line, at a boundary or beside a mask — that component is **zeroed**, under the rule `apply_stencil!`
 states for a mask.
 
+A node set built from positions and areas alone has no adjacency, and `gradient_plan` refuses it with an
+`ArgumentError`. Give the grid one (`k` or `radius` on the `UnstructuredGrid` constructor), or pass the
+neighbour set as `conn`.
+
 ## Evaluating a field at a coordinate
 
 Observational data arrives with a coordinate. [`interpolate`](@ref FlowGeometries.Operators.interpolate) evaluates a field there:

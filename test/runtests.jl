@@ -99,6 +99,16 @@ for n in 1:6
     end
 end
 
+# How many allocations `f(a)` makes, least of four calls. A cost per cell shows here as growth with the
+# grid, which a fixed set of buffers does not have.
+function _nalloc(f::F, a) where {F}
+    c = typemax(Int)
+    for _ in 1:4
+        c = min(c, Base.@allocations f(a))
+    end
+    return c
+end
+
 # Each entry point is a named top-level function. A closure over a testset local boxes what it
 # captures, and a captured `Module` carries a fixed cost, so a closure harness measures itself.
 q_coords(g, I)           = FG.Grids.coords(g, I...)
@@ -130,6 +140,9 @@ q_embed(geo, p)          = FG.Geometry.embed(geo, p)
 q_proj(geo, c, n)        = FG.Geometry.project_to_tangent_plane(geo, c, n)
 q_ltb(geo, p)            = FG.Geometry.local_tangent_basis(geo, p)
 q_c2g(geo, v)            = FG.Geometry.cartesian_to_geodetic(geo, v)
+q_gplan(g)               = FG.Operators.gradient_plan(g)
+q_cgrid(geo, λ, φ, m)    = FG.Grids.CurvilinearGrid(geo, λ, φ, m)
+q_corners(C)             = FG.Grids._centers_to_corners(C)
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
 q_gradient_t!(outs, f, plan) = FG.Operators.gradient!(outs, f, plan)
 q_stag_grad!(outs, f, sg) = FG.Operators.gradient!(outs, f, sg)
@@ -175,6 +188,9 @@ q_faces!(o, x)           = FG.Discretization.faces!(o, x)
 q_centers!(o, f)         = FG.Discretization.centers!(o, f)
 q_lagr!(w, x, v, k)      = FG.Discretization.lagrange_weights!(w, x, v, k)
 q_iw(x, v)               = FG.Discretization.interpolation_weights(x, v)
+q_sparse(g)              = FG.Connectivity.sparse_adjacency_matrix(g)
+q_sparse_csr(g)          = FG.Connectivity.sparse_adjacency_matrix(
+                              FG.Connectivity.build_connectivity(g))
 q_conn(g, r, s)          = FG.Connectivity.nneighbors_within(g, 12, 9; ball = r,
                               reach = FG.Connectivity.Connected(), scratch = s)
 q_connf(g, r, s)         = FG.Connectivity.nneighbors_within(g, 7; ball = r,
