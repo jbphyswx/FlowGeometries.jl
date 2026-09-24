@@ -28,7 +28,15 @@ function apply_stencil!(
     plan::Discretization.AbstractStencilPlan, dim::Integer;
     mask = nothing, masked = zero(S), backend = nothing,
 ) where {S,N}
-    d = Int(dim)
+    return _apply_plan_checked!(out, field, plan, Int(dim), mask, masked, backend, nothing)
+end
+
+# The plan form, with `fac` the metric factor a derivative writes each value with — see
+# [`_RowFactors`](@ref) — or `nothing` for the plain sum.
+function _apply_plan_checked!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, plan::Discretization.AbstractStencilPlan,
+    d::Int, mask, masked, backend, fac,
+) where {S,N}
     1 ≤ d ≤ N || throw(ArgumentError("direction $d is outside 1:$N"))
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
@@ -38,29 +46,28 @@ function apply_stencil!(
         "of the field has $(size(field, d))",
     ))
     _check_mask_extent(mask, size(field), d)
-    return _apply_plan!(out, field, plan, d, mask, masked, backend)
+    return _apply_plan!(out, field, plan, d, mask, masked, backend, fac)
 end
 
 # A tabulated plan holds exactly the two matrices the table form takes, so it goes straight there and
 # shares that path's specializations.
 @inline _apply_plan!(
-    out, field, plan::Discretization.TabulatedStencilPlan, d::Int, mask, masked, backend,
-) = apply_stencil!(out, field, plan.indices, plan.weights, d; mask = mask, masked = masked,
-                   backend = backend)
+    out, field, plan::Discretization.TabulatedStencilPlan, d::Int, mask, masked, backend, fac,
+) = _apply_table!(out, field, plan.indices, plan.weights, d, mask, masked, backend, fac)
 
 function _apply_plan!(
     out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K}, d::Int,
-    mask, masked, backend,
+    mask, masked, backend, fac,
 ) where {S,N,T,K}
     # The device path takes the per-cell body, which reads a row whatever the plan's form — the constant
     # coefficients are a host loop-shape win and a launch has its own.
     if backend !== nothing
         idx, w = _plan_tables(plan)
-        return apply_stencil!(out, field, idx, w, d; mask = mask, masked = masked, backend = backend)
+        return _apply_table!(out, field, idx, w, d, mask, masked, backend, fac)
     end
     vm = _mask_rank(mask, Val(N))
     return _dispatch_dim(d, vm) do vdim
-        _plan_sweep_host!(out, field, plan, mask, masked, vdim, Val(N), vm)
+        _plan_sweep_host!(out, field, plan, mask, masked, vdim, Val(N), vm, fac)
     end
 end
 
@@ -81,124 +88,72 @@ function _plan_tables(plan::Discretization.UniformStencilPlan{T,K}) where {T,K}
 end
 
 """
-    _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M), invh, R) -> out
+    _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M), fac) -> out
 
 The host sweep for a plan. Same nest as [`_stencil_sweep_host!`](@ref) — Cartesian range walked
 directly, nest split at `dim`, node count in the type — with a uniform plan's interior row a tuple in
 registers and the shifted end rows read from its own `O(K²)` table.
 
-`invh` fuses the metric: each span is scaled as it is written, while it is in cache, saving the second
-full pass over `out` a separate `_scale_by_metric!` costs. Pass `nothing` for the plain sweep.
+`fac` is the metric factor each value is written with — see [`_RowFactors`](@ref) — or `nothing` for
+the plain sweep.
 """
 function _plan_sweep_host!(
     out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K},
-    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, invh = nothing, R::Int = 0,
+    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, fac = nothing,
 ) where {S,N,T,K,dim,M}
     sz = size(field)
     n = sz[dim]
-    if _linear_layout(out, field, mask)
+    if _run_addressable(out, field, mask, fac)
         stride = prod(ntuple(d -> sz[d], Val(dim - 1)))
         npost = prod(ntuple(d -> sz[dim + d], Val(N - dim)))
         outer = stride * sz[dim]
         mpost = prod(ntuple(d -> sz[dim + d], Val(M - dim)))
         if dim == 1
             # The slab written is one direction-1 run, and `p` counts the batch axes too — the batch is
-            # the slowest, so slab `p` takes spatial run `p % R`, exactly as it takes mask slab
-            # `p % mpost`.
+            # the slowest, so slab `p` takes mask slab `p % mpost` and its factor from run `p`.
             for p in 0:(npost - 1)
                 _plan_first_linear!(out, field, plan, mask, masked, p * outer,
-                                    (p % mpost) * outer, n, Val(K))
-                invh === nothing || _fuse_scale!(out, invh, R, p * outer + 1, 1, n, p, masked)
+                                    (p % mpost) * outer, n, Val(K), _slab_factor(fac, p))
             end
             return out
         end
         # The span written covers `stride ÷ sz[1]` direction-1 runs, one factor each. Its first run,
-        # counted over directions `2:N` in column-major order, is `nruns · ((j−1) + n·p)`: the batch
-        # part of `p` advances by a whole multiple of `R` and drops out of the modulus.
+        # counted over directions `2:N` in column-major order, is `nruns · ((j−1) + n·p)`.
         nruns = stride ÷ sz[1]
+        runlen = fac === nothing ? stride : sz[1]
         for p in 0:(npost - 1), j in 1:n
             nodes, wts = Discretization.plan_row(plan, j)
             _plan_row_linear!(out, field, nodes, wts, mask, masked, j, p * outer,
-                              (p % mpost) * outer, stride, Val(K))
-            invh === nothing ||
-                _fuse_scale!(out, invh, R, p * outer + (j - 1) * stride + 1, nruns, sz[1],
-                             nruns * ((j - 1) + n * p), masked)
+                              (p % mpost) * outer, stride, Val(K), fac, nruns * ((j - 1) + n * p),
+                              runlen)
         end
         return out
     end
-    # Anything that does not index linearly asks the array for its own indexing, and takes the metric
-    # as a separate pass: the address arithmetic a fused span needs is what it does not have.
-    invh === nothing || throw(ArgumentError(
-        "a fused metric factor needs the linear layout; scale as a separate pass for this array type",
-    ))
+    # Anything that does not index linearly asks the array for its own indexing.
     pre = CartesianIndices(ntuple(d -> sz[d], Val(dim - 1)))
     post = CartesianIndices(ntuple(d -> sz[dim + d], Val(N - dim)))
     @inbounds for Ipost in post, j in 1:n
         nodes, wts = Discretization.plan_row(plan, j)
         _plan_row!(out, field, nodes, wts, mask, masked, j, Tuple(Ipost), pre, Val(K),
-                   Val(dim), Val(N), Val(M))
+                   Val(dim), Val(N), Val(M), fac)
     end
     return out
 end
 
 # A tabulated plan holds the two matrices the table sweep takes, and that sweep has the same nest and
-# the same span boundaries, so the metric fuses there on the same terms. `K` is in the plan's type, so
-# the node count needs no runtime switch.
+# the same span boundaries. `K` is in the plan's type, so the node count needs no runtime switch.
 @inline _plan_sweep_host!(
     out::AbstractArray{S,N}, field, plan::Discretization.TabulatedStencilPlan{T,K},
-    mask, masked, vdim::Val, ::Val{N}, vm::Val, invh = nothing, R::Int = 0,
+    mask, masked, vdim::Val, ::Val{N}, vm::Val, fac = nothing,
 ) where {S,N,T,K} =
     _stencil_sweep_host!(out, field, plan.indices, plan.weights, mask, masked, vdim, Val(K),
-                         Val(N), vm, invh, R)
-
-"""
-    _fuse_scale!(out, invh, R, start, nruns, runlen, rbase, masked) -> nothing
-
-Scale a span the sweep has just written, run by run, while it is still in cache.
-
-The span holds `nruns` contiguous runs of `runlen` cells along direction 1, and the metric factor is
-constant on each of them, direction 1 being metric-invariant. `invh[1:R]` holds one factor per spatial
-run in column-major order over directions `2:N`, and a batch element repeats that cycle, so the run
-number is taken modulo `R`. `rbase` is the span's first run, counted the same way.
-
-`invh` comes from [`_metric_scratch`](@ref) and is held across calls, so it may be longer than `R`:
-the count is the argument, never `length(invh)`.
-"""
-@inline function _fuse_scale!(
-    out::AbstractArray, invh::AbstractVector, R::Int, start::Int, nruns::Int, runlen::Int,
-    rbase::Int, masked,
-)
-    @inbounds for t in 0:(nruns - 1)
-        _scale_span!(out, start + t * runlen, runlen, invh[(rbase + t) % R + 1], masked)
-    end
-    return nothing
-end
-
-"""
-    _scale_span!(out, start, len, inv_h, masked) -> nothing
-
-Multiply the contiguous span `out[start:start+len-1]` by `inv_h`, or write `masked` across it when
-`inv_h` is zero — which is how a degenerate scale factor reaches here, `derivative!` having compared it
-against the geometry's own [`Discretization.metric_floor`](@ref).
-"""
-@inline function _scale_span!(out::AbstractArray{S}, start::Int, len::Int, inv_h, masked) where {S}
-    if iszero(inv_h)
-        @inbounds for t in 0:(len - 1)
-            out[start + t] = masked
-        end
-    else
-        @inbounds for t in 0:(len - 1)
-            out[start + t] *= inv_h
-        end
-    end
-    return nothing
-end
+                         Val(N), vm, fac)
 
 # `dim == 1`: the differenced direction is the contiguous one. The interior span carries the weights in
-# registers and reads `field` at a fixed offset per node.
+# registers and reads `field` at a fixed offset per node. `h` is the run's metric factor.
 @inline function _plan_first_linear!(
     out::AbstractArray{S}, field, plan::Discretization.UniformStencilPlan{T,K},
-    mask, masked, off::Int, moff::Int, n::Int, ::Val{K},
+    mask, masked, off::Int, moff::Int, n::Int, ::Val{K}, h,
 ) where {S,T,K}
     left = plan.left
     right = plan.right
@@ -208,7 +163,7 @@ end
     # interior does not wrap either, so it takes the same constant-coefficient span below.
     @inbounds for j in 1:left
         _plan_cell_linear!(out, field, Discretization.plan_row(plan, j)..., mask, masked,
-                           off, moff, j, Val(K))
+                           off, moff, j, Val(K), h)
     end
     # The interior: constant coefficients, nodes at a fixed offset. This is the span the plan exists for.
     @inbounds for j in (left + 1):(n - right)
@@ -230,11 +185,11 @@ end
         for q in 1:K
             acc += S(w[q]) * S(field[off + j - left + q - 1])
         end
-        out[off + j] = acc
+        out[off + j] = _scaled(acc, h, masked)
     end
     @inbounds for j in (n - right + 1):n
         _plan_cell_linear!(out, field, Discretization.plan_row(plan, j)..., mask, masked,
-                           off, moff, j, Val(K))
+                           off, moff, j, Val(K), h)
     end
     return nothing
 end
@@ -242,7 +197,7 @@ end
 # One cell from an explicit row, linearly addressed. The end rows and the wrapping case use it.
 @inline function _plan_cell_linear!(
     out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
-    mask, masked, off::Int, moff::Int, j::Int, ::Val{K},
+    mask, masked, off::Int, moff::Int, j::Int, ::Val{K}, h,
 ) where {S,K}
     @inbounds begin
         if mask !== nothing && !mask[moff + j]
@@ -258,36 +213,41 @@ end
             end
             acc += S(wts[q]) * S(field[off + ix])
         end
-        out[off + j] = acc
+        out[off + j] = _scaled(acc, h, masked)
     end
     return nothing
 end
 
 # `dim != 1`: the row is hoisted out of the contiguous span, so it is read once per row on both plan
-# shapes, and this one runs level with the table form.
+# shapes, and this one runs level with the table form. The span is walked as `stride ÷ runlen` runs,
+# run `r` written with factor `_run_factor(fac, rbase, r)`.
 @inline function _plan_row_linear!(
     out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
-    mask, masked, j::Int, off::Int, moff::Int, stride::Int, ::Val{K},
+    mask, masked, j::Int, off::Int, moff::Int, stride::Int, ::Val{K}, fac, rbase::Int, runlen::Int,
 ) where {S,K}
     base = off + (j - 1) * stride
     mbase = moff + (j - 1) * stride
-    @inbounds for i in 1:stride
-        if mask !== nothing && !mask[mbase + i]
-            out[base + i] = masked
-            continue
-        end
-        acc = zero(S)
-        blocked = false
-        for q in 1:K
-            src = off + (nodes[q] - 1) * stride + i
-            msrc = moff + (nodes[q] - 1) * stride + i
-            if mask !== nothing && !mask[msrc]
-                blocked = true
-                break
+    @inbounds for r in 0:((stride ÷ runlen) - 1)
+        h = _run_factor(fac, rbase, r)
+        for t in 1:runlen
+            i = r * runlen + t
+            if mask !== nothing && !mask[mbase + i]
+                out[base + i] = masked
+                continue
             end
-            acc += S(wts[q]) * S(field[src])
+            acc = zero(S)
+            blocked = false
+            for q in 1:K
+                src = off + (nodes[q] - 1) * stride + i
+                msrc = moff + (nodes[q] - 1) * stride + i
+                if mask !== nothing && !mask[msrc]
+                    blocked = true
+                    break
+                end
+                acc += S(wts[q]) * S(field[src])
+            end
+            out[base + i] = blocked ? masked : _scaled(acc, h, masked)
         end
-        out[base + i] = blocked ? masked : acc
     end
     return nothing
 end
@@ -296,7 +256,7 @@ end
 # above does not apply.
 @inline function _plan_row!(
     out::AbstractArray{S,N}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
-    mask, masked, j::Int, tpost::Tuple, pre, ::Val{K}, ::Val{dim}, ::Val{N}, ::Val{M},
+    mask, masked, j::Int, tpost::Tuple, pre, ::Val{K}, ::Val{dim}, ::Val{N}, ::Val{M}, fac,
 ) where {S,N,K,dim,M}
     @inbounds for Ipre in pre
         tpre = Tuple(Ipre)
@@ -315,7 +275,7 @@ end
             end
             acc += S(wts[q]) * S(field[J...])
         end
-        out[I...] = blocked ? masked : acc
+        out[I...] = blocked ? masked : _scaled(acc, _cell_factor(fac, I), masked)
     end
     return nothing
 end

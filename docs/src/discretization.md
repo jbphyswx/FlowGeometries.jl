@@ -305,6 +305,10 @@ element type. An absolute constant cannot serve both: `1e-12` is below `eps(Floa
 `cos(Float32(π/2)) ≈ -4.4e-8`, so `h_λ` at the pole is around `0.28` metres and a fixed small threshold
 never fires.
 
+The factor `1/hᵈ` multiplies each value as it is written, so every cell written `masked` — inactive,
+blanked by the mask policy, or at a degenerate metric — holds exactly the `masked` you passed, `-1.0` as
+much as `NaN`.
+
 A divergence or a curl remains the caller's to assemble, needing a result location and a
 boundary-condition policy this does not choose. When you do, note the **flux form** — on a sphere
 

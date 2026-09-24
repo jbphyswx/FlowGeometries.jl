@@ -20,10 +20,11 @@ and with the precision, `|h| ≤ L·√eps(T)`. A fixed threshold serves neither
 `eps(Float32)`, and at `Float32` on Earth's radius `cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole
 around 0.28 m.
 
+Each value is multiplied by `1/hᵈ` as it is written, so a cell written `masked` holds exactly `masked`.
 No scale factor in this package depends on **longitude**, so `hᵈ` is constant along the first axis
-whichever direction is differenced. The scaling is applied once per remaining index and swept along
-that contiguous axis. (It is *not* generally constant along the differenced direction — on a spheroid
-`h_φ = M(φ)` varies with `φ` — so it is not hoisted that way.)
+whichever direction is differenced, and it is solved once per direction-1 run. (It is *not* generally
+constant along the differenced direction — on a spheroid `h_φ = M(φ)` varies with `φ` — so it is not
+hoisted that way.)
 
 A divergence or a curl is still the caller's to assemble, needing a result location and a boundary
 policy this does not choose. Note the flux form when doing so: on a sphere

@@ -1556,78 +1556,73 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
         zeros(8, 4), zeros(8, 4), D.stencil_plan(range(0.0, 1.0; length = 9), 1, 3), 1)
 end
 
-Test.@testset "derivative! fuses the metric into the sweep, identically" begin
+Test.@testset "derivative! writes each value with its metric factor, and a masked cell keeps masked" begin
     GE = FG.Geometry
     GD = FG.Grids
     O = FG.Operators
     D = FG.Discretization
 
-    # The factor has to be constant across each direction-1 run the sweep writes, which for a geometry
-    # declaring direction 1 metric-invariant it is — in every direction, on any axis spacing.
-    let cart = GE.CartesianGeometry(), sph = GE.SphericalGeometry()
-        f2 = zeros(12, 12)
-        f3 = zeros(12, 12, 12)
-        # a Cartesian metric is the identity: nothing to fuse
-        Test.@test !O._fusable(f2, f2, cart, nothing)
-        Test.@test O._fusable(f2, f2, sph, nothing)
-        Test.@test O._fusable(f3, f3, sph, nothing)
-        # a geometry that does not declare direction 1 invariant
-        Test.@test !O._fusable(f2, f2, TiltedSphere{Float64}(), nothing)
-        # and the run addressing needs the linear layout
-        Test.@test !O._fusable(view(f3, 1:2:11, :, :), f3, sph, nothing)
+    # The reference: the coordinate derivative times `inv(h)` at the cell's own point, and the sentinel
+    # wherever the stencil wrote it or the metric degenerates. The sentinel is finite and nonzero, the
+    # value a scaling after the store changes.
+    s = -3.0
+    function reference(raw, gg, geo, dim)
+        floor_ = D.metric_floor(geo)
+        out = similar(raw)
+        for I in CartesianIndices(raw)
+            h = GE.scale_factors(geo, ntuple(d -> GD.coordinates(gg, d)[I[d]], ndims(gg)))[dim]
+            out[I] = raw[I] == s || abs(h) ≤ floor_ ? s : raw[I] * inv(h)
+        end
+        return out
     end
-
-    # Where it fuses, the answer must be what the two passes gave — bit for bit, being the same
-    # multiplication by the same factor. Uniform and stretched axes, every direction, each with a mask
-    # and without one, with a batch axis and without one, through all three entry points.
-    fused_seen = 0
-    for geo in (GE.SphericalGeometry(), GE.SpheroidGeometry())
+    nkept = 0
+    for geo in (GE.SphericalGeometry(), GE.SpheroidGeometry(), TiltedSphere{Float64}())
         for (nx, ny, nz, nb) in ((16, 12, 0, 0), (9, 7, 0, 3), (8, 6, 5, 0), (8, 6, 5, 2))
+            geo isa TiltedSphere && nz > 0 && continue       # its scale factors are 2-D
             λ = range(0, 2π * (1 - 1 / nx); length = nx)
-            for φ in (range(-1.4, 1.4; length = ny),
-                      [-1.4 + 2.8 * (t / (ny - 1))^1.3 for t in 0:(ny - 1)])
+            # A uniform and a stretched latitude axis, and one with a row on each pole, where the
+            # longitude factor degenerates.
+            for φ in (range(-1.4, 1.4; length = ny), [-1.4 + 2.8 * (t / (ny - 1))^1.3 for t in 0:(ny - 1)],
+                      range(-π / 2, π / 2; length = ny))
                 axs = nz == 0 ? (λ, φ) : (λ, φ, range(1.0, 2.0; length = nz))
                 szs = nz == 0 ? (nx, ny) : (nx, ny, nz)
                 fsz = nb == 0 ? szs : (szs..., nb)
-                fld = reshape(collect(Float64, 1:prod(fsz)), fsz) ./ prod(fsz)
+                fld = reshape([sin(0.3k) + 0.1k for k in 1:prod(fsz)], fsz)
                 msk = trues(szs)
                 msk[CartesianIndices(szs)[2]] = false
-                for gg in (GD.StructuredGrid(geo, axs...;
-                                periodic = (true, false, false)[1:length(axs)],
-                                period = (2π, 0.0, 0.0)[1:length(axs)]),
-                           GD.StructuredGrid(geo, axs...; mask = msk,
-                                periodic = (true, false, false)[1:length(axs)],
-                                period = (2π, 0.0, 0.0)[1:length(axs)]))
-                    for dim in 1:length(axs)
-                        pl = D.stencil_plan(gg, dim; order = 1, nodes = 5)
-                        mk = GD.mask(gg) isa GD.AllActive ? nothing : GD.mask(gg)
-                        O._fusable(fld, fld, geo, mk) && (fused_seen += 1)
-                        a = fill(NaN, fsz)
-                        b = fill(NaN, fsz)
-                        c = fill(NaN, fsz)
-                        O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
-                        O.apply_stencil!(b, fld, gg, dim; order = 1, nodes = 5, masked = -3.0)
-                        O._scale_by_metric!(b, gg, dim, -3.0)
-                        O.derivative!(c, fld, gg, pl, dim; masked = -3.0)
-                        Test.@test isequal(a, b)
-                        Test.@test isequal(c, b)
-
-                        # The table entry point fuses too, against a table-built reference: on a
-                        # uniform axis a plan's weights are translation-invariant where a table's are
-                        # rebuilt per row, so the two differ in the last bits by construction.
-                        ix, wt = D.axis_stencils(gg, dim; order = 1, nodes = 5)
-                        e = fill(NaN, fsz)
-                        t = fill(NaN, fsz)
-                        O.derivative!(e, fld, gg, ix, wt, dim; order = 1, masked = -3.0)
-                        O.apply_stencil!(t, fld, gg, ix, wt, dim; order = 1, masked = -3.0)
-                        O._scale_by_metric!(t, gg, dim, -3.0)
-                        Test.@test isequal(e, t)
+                per = (periodic = (true, false, false)[1:length(axs)], period = (2π, 0.0, 0.0)[1:length(axs)])
+                for gg in (GD.StructuredGrid(geo, axs...; per...),
+                           GD.StructuredGrid(geo, axs...; mask = msk, per...)), dim in 1:length(axs)
+                    mk = GD.mask(gg) isa GD.AllActive ? nothing : GD.mask(gg)
+                    for pol in (O.BlankMasked(), O.ReduceInRun())
+                        raw = fill(NaN, fsz); a = fill(NaN, fsz)
+                        O.apply_stencil!(raw, fld, gg, dim; order = 1, nodes = 5, masked = s, policy = pol)
+                        O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = s, policy = pol)
+                        Test.@test isequal(a, reference(raw, gg, geo, dim))
+                        nkept += count(==(s), raw)
                     end
+                    # A held plan and a held table, each against its own coordinate derivative.
+                    pl = D.stencil_plan(gg, dim; order = 1, nodes = 5)
+                    raw = fill(NaN, fsz); c = fill(NaN, fsz)
+                    O.apply_stencil!(raw, fld, pl, dim; mask = mk, masked = s)
+                    O.derivative!(c, fld, gg, pl, dim; masked = s)
+                    Test.@test isequal(c, reference(raw, gg, geo, dim))
+                    ix, wt = D.axis_stencils(gg, dim; order = 1, nodes = 5)
+                    raw = fill(NaN, fsz); e = fill(NaN, fsz)
+                    O.apply_stencil!(raw, fld, gg, ix, wt, dim; order = 1, masked = s)
+                    O.derivative!(e, fld, gg, ix, wt, dim; order = 1, masked = s)
+                    Test.@test isequal(e, reference(raw, gg, geo, dim))
+                    # The launched kernel writes the same values the host sweep does.
+                    a = fill(NaN, fsz); k = fill(NaN, fsz)
+                    O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = s)
+                    O.derivative!(k, fld, gg, dim; order = 1, nodes = 5, masked = s,
+                                  backend = KernelAbstractions.CPU())
+                    Test.@test isequal(k, a)
                 end
             end
         end
     end
-    Test.@test fused_seen == 80           # every case above took the fused path
+    Test.@test nkept > 0                 # the sentinel was written, so its survival was tested
 end
 
 Test.@testset "The ! forms write into the caller's buffers and allocate nothing" begin

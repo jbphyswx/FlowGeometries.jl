@@ -26,12 +26,21 @@ function apply_stencil!(
     period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S), backend = nothing,
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
+    return _apply_axis!(out, field, x, Int(dim), Int(order), Int(nodes), period, mask, masked,
+                        backend, policy, scratch, nothing)
+end
+
+# The axis form, with `fac` the metric factor a derivative multiplies each value by as it is written, or
+# `nothing` for the plain sum — see [`_RowFactors`](@ref).
+function _apply_axis!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
+    dim::Int, ord::Int, k::Int, period, mask, masked, backend, policy::AbstractMaskPolicy, scratch,
+    fac,
+) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(field, dim) == length(x) || throw(DimensionMismatch(
         "axis has $(length(x)) samples but direction $dim of the field has $(size(field, dim))",
     ))
-    ord = Int(order)
-    k = Int(nodes)
     if policy isa ReduceInRun
         # Under this policy `nodes` is a ceiling. The end of the axis bounds a window exactly as the end
         # of an active run does, and the policy already gives a run too short for `nodes` the largest
@@ -46,12 +55,12 @@ function apply_stencil!(
     # The blanking policy takes a plan, which holds uniform weights in registers. The degrading policies
     # rebuild a window from the axis, so they take the table.
     if policy isa BlankMasked || mask === nothing
-        return apply_stencil!(out, field, Discretization.stencil_plan(x, ord, k; period = period),
-                              dim; mask = mask, masked = masked, backend = backend)
+        return _apply_plan_checked!(out, field, Discretization.stencil_plan(x, ord, k; period = period),
+                                    dim, mask, masked, backend, fac)
     end
     idx, wts = Discretization.axis_stencils(x, ord, k; period = period)
-    return apply_stencil!(out, field, x, idx, wts, dim; order = ord, period = period, mask = mask,
-                          masked = masked, backend = backend, policy = policy, scratch = scratch)
+    return _apply_axis_table!(out, field, x, idx, wts, dim, ord, period, mask, masked, backend, policy,
+                              scratch, fac)
 end
 
 """
@@ -76,6 +85,15 @@ function apply_stencil!(
     order::Integer = 1, period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
     backend = nothing, policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
+    return _apply_axis_table!(out, field, x, indices, weights, Int(dim), Int(order), period, mask,
+                              masked, backend, policy, scratch, nothing)
+end
+
+function _apply_axis_table!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
+    indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Int, ord::Int, period, mask,
+    masked, backend, policy::AbstractMaskPolicy, scratch, fac,
+) where {S,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(field, dim) == length(x) || throw(DimensionMismatch(
         "axis has $(length(x)) samples but direction $dim of the field has $(size(field, dim))",
@@ -86,11 +104,10 @@ function apply_stencil!(
     # The precomputed rows are the whole answer under `BlankMasked`, and they stay the answer in the
     # interior of every active run under the others — a degraded row is only built where one is needed.
     if policy isa BlankMasked || mask === nothing
-        return apply_stencil!(out, field, indices, weights, dim; mask = mask, masked = masked,
-                              backend = backend)
+        return _apply_table!(out, field, indices, weights, dim, mask, masked, backend, fac)
     end
-    return _apply_stencil_degrade!(out, field, x, indices, weights, Int(dim), mask, masked,
-                                   Int(order), size(indices, 2), period, policy, backend, scratch)
+    return _apply_stencil_degrade!(out, field, x, indices, weights, dim, mask, masked, ord,
+                                   size(indices, 2), period, policy, backend, scratch, fac)
 end
 
 # Rebuilding a stencil needs the axis and a scratch table, so it is a chunked host loop: a launch has
@@ -101,7 +118,7 @@ end
 
 function _apply_stencil_degrade!(
     out::AbstractArray{S,N}, field, x::AbstractVector{T}, idx, wts, dim::Int, mask, masked,
-    ord::Int, k::Int, period, policy::AbstractMaskPolicy, backend, scratch,
+    ord::Int, k::Int, period, policy::AbstractMaskPolicy, backend, scratch, fac,
 ) where {S,N,T}
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
@@ -123,7 +140,7 @@ function _apply_stencil_degrade!(
         @inbounds for lin in Base.OneTo(length(ci))
             c = ci[lin]
             _stencil_cell_degrade!(out, field, x, idx, wts, dim, mask, masked, k, ord, n, P, wrap,
-                                   Tuple(c), c, vm, policy, scratch.w, scratch.c, scratch.n)
+                                   Tuple(c), c, vm, policy, scratch.w, scratch.c, scratch.n, fac)
         end
         return out
     end
@@ -134,7 +151,7 @@ function _apply_stencil_degrade!(
         @inbounds for lin in rng
             c = ci[lin]
             _stencil_cell_degrade!(out, field, x, idx, wts, dim, mask, masked, k, ord, n, P, wrap,
-                                   Tuple(c), c, vm, policy, wbuf, cbuf, nbuf)
+                                   Tuple(c), c, vm, policy, wbuf, cbuf, nbuf, fac)
         end
     end
     return out
@@ -170,7 +187,7 @@ end
 @inline function _stencil_cell_degrade!(
     out::AbstractArray{S,N}, field, x::AbstractVector{T}, idx, wts, dim::Int, mask, masked,
     k::Int, ord::Int, n::Int, P::T, wrap::Bool, I::NTuple{N,Int}, ci, ::Val{M}, policy,
-    wbuf, cbuf, nbuf,
+    wbuf, cbuf, nbuf, fac,
 ) where {S,N,T,M}
     Is = _spatial(I, Val(M))
     @inbounds begin
@@ -194,7 +211,7 @@ end
             acc += S(wts[i, q]) * S(field[J...])
         end
         if intact
-            out[ci] = acc
+            out[ci] = _scaled(acc, _cell_factor(fac, I), masked)
             return nothing
         end
 
@@ -223,7 +240,7 @@ end
             J = _at_dim(I, dim, mod1(raw, n))
             acc += S(wbuf[q]) * S(field[J...])
         end
-        out[ci] = acc
+        out[ci] = _scaled(acc, _cell_factor(fac, I), masked)
     end
     return nothing
 end
@@ -234,11 +251,18 @@ function apply_stencil!(
     mask = nothing, masked = zero(S), backend = nothing,
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,N}
-    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     # Degrading means rebuilding a stencil, which needs the axis this form was not given.
     policy isa BlankMasked || throw(ArgumentError(
         "$(policy) needs the axis to rebuild a stencil from; call the `(out, field, x, dim)` form",
     ))
+    return _apply_table!(out, field, indices, weights, Int(dim), mask, masked, backend, nothing)
+end
+
+function _apply_table!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, indices::AbstractMatrix{<:Integer},
+    weights::AbstractMatrix, dim::Int, mask, masked, backend, fac,
+) where {S,N}
+    1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
     ))
@@ -248,7 +272,7 @@ function apply_stencil!(
     size(indices, 1) == size(field, dim) || throw(DimensionMismatch(
         "got $(size(indices, 1)) stencil rows for direction $dim of length $(size(field, dim))",
     ))
-    _check_mask_extent(mask, size(field), Int(dim))
+    _check_mask_extent(mask, size(field), dim)
     k = size(indices, 2)
     # The switch walks the spatial rank, since `dim` is one of those, so a trailing batch axis adds no
     # specializations.
@@ -257,18 +281,19 @@ function apply_stencil!(
         # On the host the loop shape is ours to choose, and the index-parallel one is the wrong shape:
         # see `_stencil_sweep_host!`. Both paths are the same arithmetic in the same order, so they
         # agree bit for bit.
-        return _dispatch_dim(Int(dim), vm) do vdim
+        return _dispatch_dim(dim, vm) do vdim
             _dispatch_nodes(k) do vk
-                _stencil_sweep_host!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm)
+                _stencil_sweep_host!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm,
+                                     fac)
             end
         end
     end
     # The differenced direction and the node count are properties of the weight set, so they resolve to
     # types once before the launch, as they do once per sweep on the host.
-    return _dispatch_dim(Int(dim), vm) do vdim
+    return _dispatch_dim(dim, vm) do vdim
         _dispatch_nodes(k) do vk
             _launch_stencil!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm,
-                             backend)
+                             backend, fac)
         end
     end
 end
@@ -277,15 +302,85 @@ end
 # `prod(spatial) * prod(batch)` work items.
 function _launch_stencil!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, ::Val{dim}, nodes, ::Val{N},
-    ::Val{M}, backend,
+    ::Val{M}, backend, fac,
 ) where {S,N,dim,M}
     ci = CartesianIndices(size(field))
     Execution.run_indices(length(ci), backend) do lin
         _stencil_cell!(out, field, indices, weights, Val(dim), mask, masked, nodes,
-                       Tuple(@inbounds ci[lin]), (@inbounds ci[lin]), Val(M))
+                       Tuple(@inbounds ci[lin]), (@inbounds ci[lin]), Val(M), fac)
     end
     return out
 end
+
+# ---------------------------------------------------------------------------
+# The metric factor a derivative writes each value with
+# ---------------------------------------------------------------------------
+#
+# A kernel multiplies a value by its factor as it stores it, so a cell written `masked` keeps exactly
+# `masked`. A factor of zero marks a degenerate metric, at or below `Discretization.metric_floor`, where
+# the derivative does not exist and the cell is written `masked` too. `nothing` is the plain sum.
+
+"""
+    _RowFactors(inv_h, size)
+
+The inverse metric factor of a derivative on a spatial grid of `size`, one per direction-1 run, in
+column-major order over directions `2:M`: the form for a geometry that declares direction 1
+metric-invariant, where one factor serves a whole run. A batch element repeats the `R` runs.
+"""
+struct _RowFactors{V<:AbstractVector,M}
+    inv_h::V
+    size::NTuple{M,Int}
+    R::Int
+end
+
+_RowFactors(inv_h::AbstractVector, size::NTuple{M,Int}) where {M} =
+    _RowFactors(inv_h, size, prod(Base.tail(size)))
+
+"""
+    _CellFactors(geometry, coordinates, dim, floor)
+
+The inverse metric factor of a derivative along `dim`, evaluated at each cell's own point: the form for
+a geometry that declares no direction metric-invariant.
+"""
+struct _CellFactors{G,C,T}
+    geometry::G
+    coordinates::C
+    dim::Int
+    floor::T
+end
+
+@inline _scaled(acc, ::Nothing, _masked) = acc
+@inline _scaled(acc::S, h, masked) where {S} = iszero(h) ? convert(S, masked) : S(acc * h)
+
+# The factor of the cell at index `I`, batch components included: a factor reads the spatial ones.
+@inline _cell_factor(::Nothing, ::Tuple) = nothing
+
+@inline function _cell_factor(f::_RowFactors{V,M}, I::NTuple{N,Int}) where {V,M,N}
+    r = 0
+    @inbounds for d in M:-1:2
+        r = r * f.size[d] + (I[d] - 1)
+    end
+    return @inbounds f.inv_h[r + 1]
+end
+
+@inline function _cell_factor(
+    f::_CellFactors{G,<:NTuple{M,Any},T}, I::NTuple{N,Int},
+) where {G,M,T,N}
+    pt = ntuple(d -> T(@inbounds f.coordinates[d][I[d]]), Val(M))
+    h = @inbounds Geometry.scale_factors(f.geometry, pt)[f.dim]
+    return abs(h) ≤ f.floor ? zero(T) : inv(h)
+end
+
+# The factor of slab `p` of a direction-1 sweep, one run long, and of run `rbase + r` of a span.
+@inline _slab_factor(::Nothing, ::Int) = nothing
+@inline _slab_factor(f::_RowFactors, p::Int) = @inbounds f.inv_h[p % f.R + 1]
+@inline _run_factor(::Nothing, ::Int, ::Int) = nothing
+@inline _run_factor(f::_RowFactors, rbase::Int, r::Int) = @inbounds f.inv_h[(rbase + r) % f.R + 1]
+
+# Address arithmetic along a run needs the run's factor from its position alone, which a per-cell factor
+# does not give; such a sweep takes the Cartesian nest.
+@inline _run_addressable(out, field, mask, fac) = _linear_layout(out, field, mask)
+@inline _run_addressable(out, field, mask, ::_CellFactors) = false
 
 # Two runtime values are lifted into the type: the differenced direction, so the loop nest splits around
 # it, and the node count, so the innermost loop has a known trip count. Both resolve once per sweep,
@@ -324,15 +419,15 @@ per-work-item body cannot express:
 
 The arithmetic and its order are identical to `_stencil_cell!`, so the two paths agree bit for bit.
 
-`invh` fuses the metric factor into the sweep — see [`_fuse_scale!`](@ref). Pass `nothing` for the
-plain sweep.
+`fac` is the metric factor each value is written with — see [`_RowFactors`](@ref) — or `nothing` for
+the plain sweep.
 """
 function _stencil_sweep_host!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, ::Val{dim}, nodes, ::Val{N},
-    ::Val{M}, invh = nothing, R::Int = 0,
+    ::Val{M}, fac = nothing,
 ) where {S,N,dim,M}
     sz = size(field)
-    if _linear_layout(out, field, mask)
+    if _run_addressable(out, field, mask, fac)
         # Column-major and one-based, so the whole nest is address arithmetic: cells that differ only
         # before `dim` are `1` apart, and a node is a fixed offset of `stride` per index step along
         # `dim`. The innermost span is then contiguous and vectorizes.
@@ -345,32 +440,31 @@ function _stencil_sweep_host!(
         mpost = prod(ntuple(d -> sz[dim + d], Val(M - dim)))
         if dim == 1
             # The differenced direction is itself the contiguous one, so every cell has its own row,
-            # read once, and there is no span to hoist it out of. The loop over `j` is contiguous.
+            # read once, and there is no span to hoist it out of. The loop over `j` is contiguous, and
+            # the slab is one direction-1 run, so one factor serves it.
             for p in 0:(npost - 1)
                 _stencil_first_linear!(out, field, indices, weights, mask, masked, p * outer,
-                                       (p % mpost) * outer, sz[1], nodes)
-                invh === nothing || _fuse_scale!(out, invh, R, p * outer + 1, 1, sz[1], p, masked)
+                                       (p % mpost) * outer, sz[1], nodes, _slab_factor(fac, p))
             end
             return out
         end
+        # A span of `stride` cells holds `stride ÷ sz[1]` direction-1 runs. Its first run, counted over
+        # directions `2:N` in column-major order, is `nruns · ((j−1) + n·p)`, and a batch element
+        # repeats the grid's runs, so `_run_factor` takes the count modulo their number.
         nruns = stride ÷ sz[1]
+        runlen = fac === nothing ? stride : sz[1]
         for p in 0:(npost - 1), j in 1:sz[dim]
             _stencil_row_linear!(out, field, indices, weights, mask, masked, j, p * outer,
-                                 (p % mpost) * outer, stride, nodes)
-            invh === nothing ||
-                _fuse_scale!(out, invh, R, p * outer + (j - 1) * stride + 1, nruns, sz[1],
-                             nruns * ((j - 1) + sz[dim] * p), masked)
+                                 (p % mpost) * outer, stride, nodes, fac,
+                                 nruns * ((j - 1) + sz[dim] * p), runlen)
         end
         return out
     end
-    invh === nothing || throw(ArgumentError(
-        "a fused metric factor needs the linear layout; scale as a separate pass for this array type",
-    ))
     pre = CartesianIndices(ntuple(d -> sz[d], Val(dim - 1)))
     post = CartesianIndices(ntuple(d -> sz[dim + d], Val(N - dim)))
     @inbounds for Ipost in post, j in 1:sz[dim]
         _stencil_row!(out, field, indices, weights, mask, masked, j, Tuple(Ipost), pre, nodes,
-                      Val(dim), Val(N), Val(M))
+                      Val(dim), Val(N), Val(M), fac)
     end
     return out
 end
@@ -410,10 +504,10 @@ end
     !Base.has_offset_axes(out, field) && (mask === nothing || !Base.has_offset_axes(mask))
 
 # `dim == 1`: the slab is one contiguous run along the differenced direction, so the stencil row changes
-# every step and is read straight out of the table.
+# every step and is read straight out of the table. `h` is the run's metric factor.
 @inline function _stencil_first_linear!(
     out::AbstractArray{S}, field, indices, weights, mask, masked, off::Int, moff::Int, n::Int,
-    ::Val{k},
+    ::Val{k}, h,
 ) where {S,k}
     @inbounds for j in 1:n
         if mask !== nothing && !mask[moff + j]
@@ -430,7 +524,7 @@ end
             end
             acc += S(weights[j, q]) * S(field[off + ix])
         end
-        out[off + j] = blocked ? masked : acc
+        out[off + j] = blocked ? masked : _scaled(acc, h, masked)
     end
     return nothing
 end
@@ -439,7 +533,7 @@ end
 # literal trip count in the `Val` method and unrolls there, and runs as an ordinary loop here.
 @inline function _stencil_first_linear!(
     out::AbstractArray{S}, field, indices, weights, mask, masked, off::Int, moff::Int, n::Int,
-    k::Int,
+    k::Int, h,
 ) where {S}
     @inbounds for j in 1:n
         if mask !== nothing && !mask[moff + j]
@@ -456,48 +550,59 @@ end
             end
             acc += S(weights[j, q]) * S(field[off + ix])
         end
-        out[off + j] = blocked ? masked : acc
+        out[off + j] = blocked ? masked : _scaled(acc, h, masked)
     end
     return nothing
 end
 
 # One row, as offsets. `off` is the start of this slab, `stride` the distance between consecutive
-# indices along `dim`, so `base + t` walks the contiguous span and `js[q] + t` reads node `q` of it.
+# indices along `dim`, so `base + t` walks the contiguous span and `js[q] + t` reads node `q` of it. The
+# span is walked as `stride ÷ runlen` runs of `runlen` cells, run `r` written with factor
+# `_run_factor(fac, rbase, r)`.
 @inline function _stencil_row_linear!(
     out::AbstractArray{S}, field, indices, weights, mask, masked, j::Int, off::Int, moff::Int,
-    stride::Int, ::Val{k},
+    stride::Int, ::Val{k}, fac, rbase::Int, runlen::Int,
 ) where {S,k}
     @inbounds js = ntuple(q -> off + (Int(indices[j, q]) - 1) * stride, Val(k))
     @inbounds ws = ntuple(q -> S(weights[j, q]), Val(k))
     base = off + (j - 1) * stride
+    nruns = stride ÷ runlen
     if mask === nothing
-        @inbounds for t in 1:stride
-            acc = zero(S)
-            for q in 1:k
-                acc += ws[q] * S(field[js[q] + t])
+        @inbounds for r in 0:(nruns - 1)
+            h = _run_factor(fac, rbase, r)
+            for i in 1:runlen
+                t = r * runlen + i
+                acc = zero(S)
+                for q in 1:k
+                    acc += ws[q] * S(field[js[q] + t])
+                end
+                out[base + t] = _scaled(acc, h, masked)
             end
-            out[base + t] = acc
         end
     else
         # The mask spans only the spatial axes, so it has its own slab base and its own node
         # addresses; `moff == off` whenever the field carries no batch and this is the same arithmetic.
         @inbounds ms = ntuple(q -> moff + (Int(indices[j, q]) - 1) * stride, Val(k))
         mbase = moff + (j - 1) * stride
-        @inbounds for t in 1:stride
-            if !mask[mbase + t]
-                out[base + t] = masked
-                continue
-            end
-            acc = zero(S)
-            blocked = false
-            for q in 1:k
-                if !mask[ms[q] + t]
-                    blocked = true
-                    break
+        @inbounds for r in 0:(nruns - 1)
+            h = _run_factor(fac, rbase, r)
+            for i in 1:runlen
+                t = r * runlen + i
+                if !mask[mbase + t]
+                    out[base + t] = masked
+                    continue
                 end
-                acc += ws[q] * S(field[js[q] + t])
+                acc = zero(S)
+                blocked = false
+                for q in 1:k
+                    if !mask[ms[q] + t]
+                        blocked = true
+                        break
+                    end
+                    acc += ws[q] * S(field[js[q] + t])
+                end
+                out[base + t] = blocked ? masked : _scaled(acc, h, masked)
             end
-            out[base + t] = blocked ? masked : acc
         end
     end
     return nothing
@@ -506,26 +611,30 @@ end
 # Above the specialization cap the row cannot become a tuple, so it is read per cell.
 @inline function _stencil_row_linear!(
     out::AbstractArray{S}, field, indices, weights, mask, masked, j::Int, off::Int, moff::Int,
-    stride::Int, k::Int,
+    stride::Int, k::Int, fac, rbase::Int, runlen::Int,
 ) where {S}
     base = off + (j - 1) * stride
     mbase = moff + (j - 1) * stride
-    @inbounds for t in 1:stride
-        if mask !== nothing && !mask[mbase + t]
-            out[base + t] = masked
-            continue
-        end
-        acc = zero(S)
-        blocked = false
-        for q in 1:k
-            ix = (Int(indices[j, q]) - 1) * stride + t
-            if mask !== nothing && !mask[moff + ix]
-                blocked = true
-                break
+    @inbounds for r in 0:((stride ÷ runlen) - 1)
+        h = _run_factor(fac, rbase, r)
+        for i in 1:runlen
+            t = r * runlen + i
+            if mask !== nothing && !mask[mbase + t]
+                out[base + t] = masked
+                continue
             end
-            acc += S(weights[j, q]) * S(field[off + ix])
+            acc = zero(S)
+            blocked = false
+            for q in 1:k
+                ix = (Int(indices[j, q]) - 1) * stride + t
+                if mask !== nothing && !mask[moff + ix]
+                    blocked = true
+                    break
+                end
+                acc += S(weights[j, q]) * S(field[off + ix])
+            end
+            out[base + t] = blocked ? masked : _scaled(acc, h, masked)
         end
-        out[base + t] = blocked ? masked : acc
     end
     return nothing
 end
@@ -534,7 +643,7 @@ end
 # row is read once here.
 @inline function _stencil_row!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, j::Int, Ipost::Tuple, pre,
-    ::Val{k}, ::Val{dim}, ::Val{N}, ::Val{M},
+    ::Val{k}, ::Val{dim}, ::Val{N}, ::Val{M}, fac,
 ) where {S,N,dim,k,M}
     # The row, read once. With `k` in the type these are stack tuples, so the inner loop unrolls and
     # keeps them in registers across the cells of the row.
@@ -556,7 +665,7 @@ end
             end
             acc += ws[q] * S(field[J...])
         end
-        out[I...] = blocked ? masked : acc
+        out[I...] = blocked ? masked : _scaled(acc, _cell_factor(fac, I), masked)
     end
     return nothing
 end
@@ -565,7 +674,7 @@ end
 # is read per cell.
 @inline function _stencil_row!(
     out::AbstractArray{S,N}, field, indices, weights, mask, masked, j::Int, Ipost::Tuple, pre,
-    k::Int, ::Val{dim}, ::Val{N}, ::Val{M},
+    k::Int, ::Val{dim}, ::Val{N}, ::Val{M}, fac,
 ) where {S,N,dim,M}
     @inbounds for Ipre in pre
         I = (Tuple(Ipre)..., j, Ipost...)
@@ -583,7 +692,7 @@ end
             end
             acc += S(weights[j, q]) * S(field[J...])
         end
-        out[I...] = blocked ? masked : acc
+        out[I...] = blocked ? masked : _scaled(acc, _cell_factor(fac, I), masked)
     end
     return nothing
 end
@@ -606,7 +715,7 @@ loop.
 # comparison per node per cell and the loop has no known trip count.
 @inline function _stencil_cell!(
     out::AbstractArray{S,N}, field, indices, weights, ::Val{dim}, mask, masked, nodes,
-    I::NTuple{N,Int}, ci, ::Val{M},
+    I::NTuple{N,Int}, ci, ::Val{M}, fac = nothing,
 ) where {S,N,M,dim}
     @inbounds begin
         if mask !== nothing && !mask[_spatial(I, Val(M))...]
@@ -624,7 +733,7 @@ loop.
             end
             acc += S(weights[j, q]) * S(field[J...])
         end
-        out[ci] = blocked ? masked : acc
+        out[ci] = blocked ? masked : _scaled(acc, _cell_factor(fac, I), masked)
     end
     return nothing
 end
