@@ -120,6 +120,12 @@ end
     return ntuple(d -> @inbounds(k[d][I...]), Val(N))
 end
 
+function _bounded_domain_length(grid::CurvilinearGrid, d::Integer)
+    k = has_corners(grid) ? corners(grid, d) : _centers_to_corners(coordinates(grid, d))
+    lo, hi = extrema(k)
+    return hi - lo
+end
+
 # ---------------------------------------------------------------------------
 # Curvilinear grid construction: corner-based exact quadrilateral cell areas
 # ---------------------------------------------------------------------------

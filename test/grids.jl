@@ -1554,3 +1554,63 @@ Test.@testset "Span and spacing agree with the axis, and cost one pass to summar
         Test.@test !(:stats in fieldnames(typeof(cg)))
     end
 end
+
+Test.@testset "The domain length is what the cells cover" begin
+    GD = FG.Grids
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+
+    # A bounded axis spans from its first face to its last, and the measure integrates over exactly those
+    # cells: on a Cartesian grid its total is the product of the domain lengths.
+    for a in (0.0:0.5:5.0, [0.0, 1.0, 3.0, 6.0, 10.0, 15.0], collect(range(6.0, 0.0; length = 9)))
+        f = FG.Discretization.faces(collect(Float64, a))
+        g = GD.StructuredGrid(cart, a, 0.0:1.0:4.0; periodic = (false, true), period = (0.0, 7.5))
+        Test.@test GD.domain_length(g, 1) ≈ abs(f[end] - f[1]) rtol = 1e-14
+        Test.@test GD.domain_length(g, 2) == 7.5
+        Test.@test sum(GD.measure(g)) ≈ GD.domain_length(g, 1) * GD.domain_length(g, 2) rtol = 1e-14
+    end
+    Test.@test GD.domain_length(GD.StructuredGrid(cart, 0.0:0.25:2.75), 1) ≈ 12 * 0.25
+    Test.@test GD.domain_length(GD.StructuredGrid(cart, [3.0], [0.0, 1.0]), 1) == 1.0
+
+    # A curvilinear grid's cells span its vertices, held or reconstructed.
+    n = 8
+    X = [0.5 * (i - 0.5) for i in 1:n, j in 1:n]
+    Y = [0.25 * (j - 0.5) for i in 1:n, j in 1:n]
+    cg = GD.CurvilinearGrid(cart, X, Y, trues(n, n))
+    Test.@test GD.domain_length(cg, 1) ≈ 0.5n rtol = 1e-14
+    Test.@test GD.domain_length(cg, 2) ≈ 0.25n rtol = 1e-14
+    Xc = [0.3 * (i - 1) + 0.1 * (j - 1) for i in 1:(n + 1), j in 1:(n + 1)]
+    Yc = [0.2 * (j - 1) for i in 1:(n + 1), j in 1:(n + 1)]
+    ck = GD.CurvilinearGrid(cart, (Xc[1:n, 1:n] .+ Xc[2:end, 2:end]) ./ 2, (Yc[1:n, 1:n] .+ Yc[2:end, 2:end]) ./ 2,
+                            trues(n, n); corners = (Xc, Yc))
+    Test.@test GD.domain_length(ck, 1) ≈ 0.3n + 0.1n rtol = 1e-14
+    Test.@test GD.domain_length(ck, 2) ≈ 0.2n rtol = 1e-14
+
+    # A node set on a lattice counts the lattice, in any order.
+    xs = [0.5 * i for i in 0:5 for j in 0:3]
+    ys = [0.25 * j for i in 0:5 for j in 0:3]
+    p = [7, 1, 24, 13, 2, 19, 5, 11, 3, 22, 8, 16, 4, 20, 9, 14, 6, 23, 10, 17, 12, 21, 15, 18]
+    lat = GD.UnstructuredGrid(cart, (xs[p], ys[p]), ones(24))
+    Test.@test GD.node_counts(lat) == (6, 4)
+    Test.@test GD.domain_length(lat, 1) ≈ 6 * 0.5 rtol = 1e-14
+    Test.@test GD.domain_length(lat, 2) ≈ 4 * 0.25 rtol = 1e-14
+    # Nodes on a line are one row of a lattice.
+    row = GD.UnstructuredGrid(cart, (collect(0.0:0.5:2.5), zeros(6)), ones(6))
+    Test.@test GD.node_counts(row) == (6, 1)
+    Test.@test GD.domain_length(row, 2) == 1.0
+
+    # Off a lattice, the count a uniform density of the nodes gives over each span.
+    xr = [4 * ((i * 0.618034) % 1) for i in 1:200]
+    yr = [(i * 0.4142136) % 1 for i in 1:200]
+    cl = GD.UnstructuredGrid(cart, (xr, yr), ones(200))
+    ex, ey = GD.extent(cl, 1), GD.extent(cl, 2)
+    ρ = sqrt(200 / (ex * ey))
+    Test.@test GD.node_counts(cl) == (round(Int, ex * ρ), round(Int, ey * ρ))
+    Test.@test GD.domain_length(cl, 1) ≈ ex * GD.node_counts(cl)[1] / (GD.node_counts(cl)[1] - 1)
+    # A wrapping direction takes its period, also in the density.
+    cp = GD.UnstructuredGrid(cart, (xr, yr), ones(200); periodic = (true, false), period = (5.0, 0.0))
+    Test.@test GD.domain_length(cp, 1) == 5.0
+    Test.@test GD.node_counts(cp)[2] == round(Int, ey * sqrt(200 / (5.0 * ey)))
+
+    # A layout with no faces along a bounded direction says so.
+    Test.@test_throws ArgumentError GD.domain_length(GD.HEALPixGrid(FG.Geometry.SphericalGeometry(1.0), 2), 2)
+end

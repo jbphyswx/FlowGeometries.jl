@@ -378,6 +378,30 @@ Wrap length of coordinate direction `d`, meaningful only where [`isperiodic`](@r
 @inline period(grid::UnstructuredGrid, d::Integer) =
     @inbounds getfield(grid, :period)[_checked_direction(getfield(grid, :period), d)]
 
+"""
+    node_counts(grid::UnstructuredGrid) -> NTuple{N,Int}
+
+How many nodes lie along each direction. Nodes that are the product of their distinct coordinates form
+a lattice, and each count is that direction's number of distinct values. Otherwise each count is the one
+a uniform density of the nodes gives over the direction's span, its [`period`](@ref) where it wraps and
+its [`extent`](@ref) where not; a direction of zero span holds one.
+"""
+function node_counts(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
+    x = coordinates(grid)
+    n = length(first(x))
+    distinct = map(v -> length(unique(v)), x)
+    prod(distinct) == n && return distinct
+    spans = ntuple(d -> isperiodic(grid, d) ? period(grid, d) : extent(grid, d), Val(N))
+    ρ = (n / prod(s -> s > 0 ? s : one(T), spans))^(1 / count(>(0), spans))
+    return map(s -> s > 0 ? max(2, round(Int, s * ρ)) : 1, spans)
+end
+
+function _bounded_domain_length(grid::UnstructuredGrid, d::Integer)
+    n = @inbounds node_counts(grid)[_checked_direction(coordinates(grid), d)]
+    e = extent(grid, d)
+    return n > 1 ? e * n / (n - 1) : one(e)
+end
+
 
 # ---------------------------------------------------------------------------
 # Unstructured grid construction: k-d-tree adjacency + (optional) Voronoi areas

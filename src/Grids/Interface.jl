@@ -432,6 +432,32 @@ gets an [`Axes.ConstantVector`](@ref), so nothing is materialized.
 end
 
 """
+    domain_length(grid, d) -> T
+
+The length the grid's cells cover along direction `d`, in its coordinate units: [`period`](@ref) where
+`d` wraps, and otherwise the distance from the outer face of the first cell to that of the last.
+
+- rectilinear: the total of [`cell_widths`](@ref), `extent + (w₁ + w_N)/2`, which is `N·|Δ|` on a
+  uniform axis and `1` for a single cell;
+- curvilinear: the span of the cell vertices, [`corners`](@ref) where the grid holds them and
+  otherwise the ones reconstructed half a cell outside the outermost centres;
+- node set: nodes have no faces, so the convention is a lattice's. With `n` nodes along `d` from
+  [`node_counts`](@ref), the length is `extent·n/(n − 1)`, the extent plus one spacing of `n` evenly
+  spaced nodes.
+"""
+@inline domain_length(grid::AbstractGrid, d::Integer) =
+    isperiodic(grid, d) ? period(grid, d) : _bounded_domain_length(grid, d)
+
+# The interior widths total `extent − (w₁ + w_N)/2`.
+@inline function _bounded_domain_length(grid::AbstractStructuredGrid, d::Integer)
+    n = _at_axis(length, coordinates(grid), d)
+    return extent(grid, d) + (cell_width(grid, d, 1) + cell_width(grid, d, n)) / 2
+end
+
+_bounded_domain_length(grid::AbstractGrid, d::Integer) = throw(ArgumentError(
+    "a $(nameof(typeof(grid))) defines no domain length along its bounded direction $d"))
+
+"""
     coordinate_names(grid) -> NTuple{N,Symbol}
 
 The grid's coordinate names, from its geometry: `(:x, :y[, :z])` or `(:λ, :φ[, :r])`.
