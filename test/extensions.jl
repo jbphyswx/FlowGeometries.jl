@@ -501,6 +501,27 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     FG.Execution.run_indices(i -> (acc[i] = i * i), 100, cpu)
     Test.@test acc == [i * i for i in 1:100]
 
+    # A device reduction is exact on integers at every size: one partial group, a group and a round
+    # boundary either side, and more elements than the first stage has work-items.
+    for n in (0, 1, 13, 255, 256, 257, 10_000, 256 * 65_536 + 3, 10_000_000)
+        Test.@test FG.Execution.reduce_indices(identity, +, 0, n, cpu) == n * (n + 1) ÷ 2
+    end
+    # It combines in index order, so an associative `op` that does not commute folds as the serial
+    # loop does. Composing affine maps `x ↦ a·x + b` (mod p) is such an op, `(1, 0)` its identity.
+    let p = 1_000_003, n = 70_001
+        compose(u, v) = ((u[1] * v[1]) % p, (u[2] * v[1] + v[2]) % p)
+        aff(i) = (i % 7 + 2, i % 11)
+        want = foldl(compose, (aff(i) for i in 1:n); init = (1, 0))
+        Test.@test FG.Execution.reduce_indices(aff, compose, (1, 0), n, cpu) == want
+        Test.@test FG.Execution.reduce_indices(aff, compose, (1, 0), n, CB.SerialBackend()) == want
+    end
+    # The device scan equals the serial one entry for entry, for either offset width and any `init`.
+    for n in (0, 1, 13, 255, 256, 257, 10_000, 300_001), I in (Int, Int32), init in (1, 0, 5)
+        counts = rand(0:9, n)
+        want = FG.Execution.exclusive_scan!(Vector{I}(undef, n + 1), counts; init = init)
+        Test.@test FG.Execution.exclusive_scan!(Vector{I}(undef, n + 1), counts, cpu; init = init) == want
+    end
+
     # A ball query is device-shaped once the topology carries no index: it reads coordinates and the
     # mask, and allocates nothing, so it runs inside the launch.
     gball = GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0))
