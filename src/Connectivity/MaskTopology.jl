@@ -24,48 +24,58 @@ The offset walk is unrolled at compile time through [`Stencils.fold_offsets`](@r
 end
 
 """
-    interior(grid; stencil = Stencils.Axial(1), backend = nothing) -> Array{Bool}
+    interior(grid; stencil = Stencils.Axial(1), backend = SerialBackend()) -> AbstractArray{Bool}
 
 Which active cells have their whole stencil active and in range. `false` at a domain edge that does
 not wrap, and beside any masked-out cell.
 
-Each cell's answer depends on its own neighbourhood alone, so `backend` runs the cells concurrently.
+Each cell's answer depends on its own neighbourhood alone, so `backend` runs the cells concurrently, and
+the result is allocated where they run.
 """
-function interior(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1), backend = nothing)
+function interior(
+    grid::Grids.AbstractGrid; stencil = Stencils.Axial(1),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+)
     return _interior(IndexTopology(grid), _stencil_val(stencil); backend = backend)
 end
 
 function _interior(
-    t::IndexTopology{N}, sten::Stencils.AbstractStencil; backend = nothing,
+    t::IndexTopology{N}, sten::Stencils.AbstractStencil;
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {N}
     sz = t.size
-    out = fill(false, sz)
+    # Every cell writes its own answer, so the buffer needs no fill.
+    out = Execution.allocate(backend, Bool, sz...)
     ci = CartesianIndices(sz)
-    Execution.run_indices(prod(sz), backend) do k
+    Execution.run_indices(prod(sz), backend, Execution.Written(out)) do k
         @inbounds out[k] = _stencil_closed(t, sten, Tuple(ci[k]))
     end
     return out
 end
 
 """
-    boundary_cells(grid; stencil = Stencils.Axial(1), backend = nothing) -> Array{Bool}
+    boundary_cells(grid; stencil = Stencils.Axial(1), backend = SerialBackend()) -> AbstractArray{Bool}
 
 The active cells [`interior`](@ref) excludes: those touching an edge or a masked-out neighbour.
 
 One pass and one array: a cell is a boundary cell exactly when it is active and its stencil is not
 closed, the same predicate `interior` reads.
 """
-function boundary_cells(grid::Grids.AbstractGrid; stencil = Stencils.Axial(1), backend = nothing)
+function boundary_cells(
+    grid::Grids.AbstractGrid; stencil = Stencils.Axial(1),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+)
     return _boundary_cells(IndexTopology(grid), _stencil_val(stencil); backend = backend)
 end
 
 function _boundary_cells(
-    t::IndexTopology{N}, sten::Stencils.AbstractStencil; backend = nothing,
+    t::IndexTopology{N}, sten::Stencils.AbstractStencil;
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {N}
     sz = t.size
-    out = fill(false, sz)
+    out = Execution.allocate(backend, Bool, sz...)
     ci = CartesianIndices(sz)
-    Execution.run_indices(prod(sz), backend) do k
+    Execution.run_indices(prod(sz), backend, Execution.Written(out)) do k
         I = Tuple(@inbounds ci[k])
         @inbounds out[k] = _active(t, I...) && !_stencil_closed(t, sten, I)
     end

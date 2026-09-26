@@ -98,14 +98,14 @@ A formula fixes the neighbour set, so `stencil` selects nothing here. The generi
 one absorbs the keywords that shape the others, as [`Grids.StoredMeshNeighbors`](@ref) does.
 """
 function build_connectivity(
-    grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true, backend = nothing,
-    _...,
+    grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true,
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
 )
     n = length(Grids.mask(grid))
     # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill
     # them run, and the build is device-resident end to end under a backend that launches kernels.
     deg = Execution.allocate(backend, Int, n)
-    Execution.run_indices(n, backend) do k
+    Execution.run_indices(n, backend, Execution.Written(deg)) do k
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
     total = _csr_total(deg, n, backend)
@@ -119,7 +119,7 @@ function _formula_fill(
 ) where {I<:Integer}
     ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
     nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend) do k
+    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _formula_ids(grid, k, active_only)
             slot = Int(ptr[k])

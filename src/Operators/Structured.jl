@@ -10,7 +10,8 @@ Only a rectilinear direction has a 1-D axis to difference along, so this is a `S
 function apply_stencil!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    active_only::Bool = true, masked = zero(S), backend = nothing,
+    active_only::Bool = true, masked = zero(S),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), Int(dim))
@@ -150,7 +151,8 @@ end
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    active_only::Bool = true, masked = zero(S), backend = nothing,
+    active_only::Bool = true, masked = zero(S),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     d = Int(dim)
@@ -176,8 +178,8 @@ function derivative!(
     d = Int(dim)
     _check_batched(out, field, grid, Val(N), d)
     msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    return _apply_plan_checked!(out, field, plan, d, msk, masked, nothing,
-                                _derivative_factors(grid, d, nothing))
+    return _apply_plan_checked!(out, field, plan, d, msk, masked, CB.SerialBackend(),
+                                _derivative_factors(grid, d, CB.SerialBackend()))
 end
 
 """
@@ -200,11 +202,16 @@ function _derivative_factors(grid::Grids.StructuredGrid{T,G,N}, d::Int, backend)
         R = _dispatch_dim(d, Val(N)) do vdim
             _metric_row_factors!(buf, grid, vdim, Val(N))
         end
-        v = backend === nothing ? buf : copyto!(Execution.allocate(backend, T, R), 1, buf, 1, R)
-        return _RowFactors(v, Grids.size_tuple(grid))
+        return _RowFactors(_factors_on(Execution.resolve(backend), buf, R), Grids.size_tuple(grid))
     end
     return _CellFactors(geo, Grids.coordinates(grid), d, Discretization.metric_floor(geo))
 end
+
+# The factors where the sweep reads them: the task's own buffer on the host, its first `R` entries in
+# the backend's memory elsewhere.
+_factors_on(::Execution._HostBackend, buf::AbstractVector, ::Int) = buf
+_factors_on(b::CB.AbstractExecutionBackend, buf::AbstractVector, R::Int) =
+    Execution.on_backend(b, view(buf, 1:R))
 
 """
     _metric_row_factors!(buf, grid, Val(dim), Val(N)) -> Int
@@ -318,7 +325,7 @@ end
 
 """
     apply_stencil!(out, field, grid, indices, weights, dim; order=1, active_only=true,
-                   masked=zero, policy=BlankMasked(), backend=nothing) -> out
+                   masked=zero, policy=BlankMasked(), backend=SerialBackend()) -> out
 
 Apply a stencil table built by [`Discretization.axis_stencils`](@ref). The mask, the wrap period and
 the axis all come from `grid`.
@@ -332,7 +339,8 @@ part of the work that depends on the grid alone.
 function apply_stencil!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
+    order::Integer = 1, active_only::Bool = true, masked = zero(S),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), Int(dim))
@@ -363,7 +371,7 @@ end
 
 """
     derivative!(out, field, grid, indices, weights, dim; order=1, active_only=true, masked=zero,
-                policy=BlankMasked(), backend=nothing) -> out
+                policy=BlankMasked(), backend=SerialBackend()) -> out
 
 [`derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
 above, for the entry point a geometry-aware caller actually uses.
@@ -371,7 +379,8 @@ above, for the entry point a geometry-aware caller actually uses.
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
+    order::Integer = 1, active_only::Bool = true, masked = zero(S),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     d = Int(dim)

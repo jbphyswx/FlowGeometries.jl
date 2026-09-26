@@ -4,14 +4,15 @@
 [![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://jbphyswx.github.io/FlowGeometries.jl/dev/)
 [![Coverage](https://codecov.io/gh/jbphyswx/FlowGeometries.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jbphyswx/FlowGeometries.jl)
 
-Coordinate metrics, spherical samplings, and grid types — with a **dependency-free core**.
+Coordinate metrics, spherical samplings, and grid types. The core depends only on
+ComputationalBackends, whose tags name how a bulk loop runs.
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
 
 Fourteen samplings, eight grid layouts, three metrics — chosen independently of each other, in
 any number of dimensions. Spatial search, tessellation, sparse output, static vectors, FFT-based
-quadrature, device transfer and threading all arrive through package extensions, so you pay for
-exactly what you load.
+quadrature, device transfer, device kernels and multi-process execution all arrive through package
+extensions, so you pay for exactly what you load.
 
 **API style:** `using FlowGeometries: FlowGeometries as FG`, then qualified calls
 (`FG.Grids.coords`, `FG.Geometry.distance`, …). Nothing is exported and nothing is rebound at the top
@@ -279,7 +280,12 @@ FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 | `StaticArrays` | `SVector` / `MVector` points end to end |
 | `AbstractFFTs` | `O(n log n)` equiangular quadrature weights |
 | `Adapt` | move a grid to another storage backend |
-| `ComputationalBackends` | opt-in threading, bit-identical to serial |
+| `KernelAbstractions` | index-parallel loops as device kernels, under `GPUBackend(backend)` |
+| `Distributed` | bulk loops as one share per worker, under `DistributedBackend(inner)` |
+| `MPI` | bulk loops as one share per rank, under `MPIBackend(inner, comm)` |
+
+Every bulk entry point takes a ComputationalBackends tag as `backend`, `SerialBackend()` by default;
+`ThreadedBackend()` and `AutoBackend()` need no extension.
 
 ```julia
 using ComputationalBackends: ThreadedBackend

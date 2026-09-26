@@ -195,10 +195,11 @@ end
 # Exact planar quadrilateral area (shoelace) over the (Nx+1)×(Ny+1) corner arrays.
 function _corner_areas(
     ::G, xc::AbstractMatrix{T}, yc::AbstractMatrix{T}, Nx::Integer, Ny::Integer;
-    backend = nothing,
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat, G<:Geometry.AbstractCartesianGeometry{T}}
     areas = similar(xc, T, Nx, Ny)
-    Execution.run_chunks(Int(Ny), backend) do rows
+    columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
+    Execution.run_chunks(Int(Ny), backend, columns) do rows
     @inbounds for j in rows, i in 1:Nx
         # Cell (i,j) has vertices (i,j)→(i+1,j)→(i+1,j+1)→(i,j+1) (counter-clockwise in index space).
         x1 = xc[i, j];         y1 = yc[i, j]
@@ -229,14 +230,15 @@ end
 # row j+1's cells are done — so the buffer holds two rows, `O(Nx)`.
 function _corner_areas(
     geometry::G, λc::AbstractMatrix{T}, φc::AbstractMatrix{T}, Nx::Integer, Ny::Integer;
-    backend = nothing,
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     nk = Nx + 1
     R2 = Geometry.radius(geometry)^2
     areas = similar(λc, T, Nx, Ny)
     # Chunked over rows, each chunk with its own two-row buffer. A chunk re-derives its first row, at
     # one extra row of trig per chunk, which keeps the chunks independent.
-    Execution.run_chunks(Int(Ny), backend) do rows
+    columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
+    Execution.run_chunks(Int(Ny), backend, columns) do rows
         lo = Vector{NTuple{3,T}}(undef, nk)
         hi = Vector{NTuple{3,T}}(undef, nk)
         _fill_dir_row!(lo, λc, φc, first(rows), nk)
@@ -315,7 +317,8 @@ function _curvilinear_grid(
     geometry::G, coords::NTuple{N,AbstractArray}, measure_pos, mask::AbstractArray{Bool,N};
     corners = nothing, measure = nothing, keep_corners::Bool = false,
     x_corner = nothing, y_corner = nothing,
-    topology = nothing, period = nothing, periodic = nothing, backend = nothing,
+    topology = nothing, period = nothing, periodic = nothing,
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     N == ndims(mask) || throw(ArgumentError(
         "got $N coordinate arrays for a $(ndims(mask))-dimensional mask",

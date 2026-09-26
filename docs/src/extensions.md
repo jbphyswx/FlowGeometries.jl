@@ -4,8 +4,8 @@ CurrentModule = FlowGeometries
 
 # Extensions
 
-The package itself has **no dependencies**. Every optional capability is a package extension that
-loads when — and only when — you load its trigger.
+The package depends only on ComputationalBackends, whose tags name how a bulk loop runs. Every optional
+capability is a package extension that loads when — and only when — you load its trigger.
 
 | load this | and you get |
 |---|---|
@@ -16,8 +16,9 @@ loads when — and only when — you load its trigger.
 | `StaticArrays` | `SVector`/`MVector` points and returns, in vector form end to end |
 | `AbstractFFTs` | O(n log n) equiangular quadrature weights |
 | `Adapt` | move a grid to another storage backend (GPU arrays, wrappers) |
-| `KernelAbstractions` | run the index-parallel loops as device kernels |
-| `ComputationalBackends` | opt-in threading through the execution tags |
+| `KernelAbstractions` | run the index-parallel loops as device kernels, under `GPUBackend` |
+| `Distributed` | run the bulk loops as one share per worker, under `DistributedBackend` |
+| `MPI` | run the bulk loops as one share per rank, under `MPIBackend` |
 
 ## NearestNeighbors — spatial search
 
@@ -71,13 +72,14 @@ supports; the second raises on a device backend.
 
 ```julia
 using KernelAbstractions
-backend = KernelAbstractions.CPU()          # or a vendor backend
+using ComputationalBackends: GPUBackend
+backend = GPUBackend(KernelAbstractions.CPU())          # or a vendor backend
 FG.Operators.apply_stencil!(out, field, x, 1; order = 2, backend = backend)
 FG.Connectivity.build_connectivity(grid; stencil = FG.Stencils.Moore(1), backend = backend)
 ```
 
-Both are bit-identical to the serial result, which the suite checks on `KernelAbstractions.CPU()` — no
-GPU needed to verify that the code is device-generic. There is no per-vendor code in the package: a
+Both are bit-identical to the serial result, which the suite checks on
+`GPUBackend(KernelAbstractions.CPU())` — no GPU needed to verify that the code is device-generic. There is no per-vendor code in the package: a
 backend arrives from the caller and the kernel is compiled for it.
 
 A kernel cannot allocate, and the suite gates every per-cell entry point at zero bytes.
@@ -143,7 +145,18 @@ dev = adapt(CuArray, grid)
 Handles all three grid types plus `CSRConnectivity` and `IndexTopology`. A `SeparableMeasure` moves its
 *factors*, so the device receives `O(∑ Nᵈ)` numbers, and `AllActive` carries only its size.
 
-## ComputationalBackends — threading
+## Execution backends
+
+Every bulk entry point takes a ComputationalBackends tag as `backend`, `SerialBackend()` by default:
+
+| tag | runs a loop | needs |
+|---|---|---|
+| `SerialBackend()` | in the calling task | — |
+| `ThreadedBackend()` | as one contiguous chunk per Julia thread | — |
+| `AutoBackend()` | threaded when Julia runs more than one thread, else serially | — |
+| `GPUBackend(b)` | as a launch on the KernelAbstractions backend `b` (index-parallel loops) | `KernelAbstractions` |
+| `DistributedBackend(inner)` | as one share of the indices per worker, each under `inner` | `Distributed` |
+| `MPIBackend(inner, comm)` | as one share per rank of `comm`, each under `inner` | `MPI` |
 
 ```julia
 using ComputationalBackends: ThreadedBackend
@@ -152,5 +165,28 @@ FG.Grids.CurvilinearGrid(geo, λ, φ, mask; backend = ThreadedBackend())
 FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
 ```
 
-Serial by default. Results are bit-identical to serial. See [Performance](@ref performance-page) for
-the measured speedups and for which kernels are threaded.
+Every write a loop makes is fixed by its index, so a result equals the serial one. A reduction combines
+its partials in index order; a floating-point sum can then differ from the serial sum in its last bits.
+See [Performance](@ref performance-page) for the measured speedups and for which kernels are threaded.
+
+A worker or a rank computes on its own copy of what a loop reads, so a loop hands back what it writes
+through the arrays it declares: [`Execution.Written`](@ref)`(array, span)`, where `span` maps a range of
+indices to the positions of `array` they write ([`Execution.ByIndex`](@ref),
+[`Execution.ByBlock`](@ref), [`Execution.ByOffsets`](@ref)). The package's own loops declare theirs. A
+`foreach_within` body declares its writes with `outputs`:
+
+```julia
+using Distributed
+addprocs(4)
+@everywhere using FlowGeometries
+using ComputationalBackends: DistributedBackend
+
+count = zeros(Int, FG.Grids.size_tuple(grid))
+FG.Connectivity.foreach_within(grid; ball = r, backend = DistributedBackend(),
+                               outputs = (FG.Execution.Written(count),)) do I, J, d
+    count[I...] += 1
+end
+```
+
+Under `DistributedBackend` the declared arrays are filled on the calling process. Under `MPIBackend`
+every rank makes the call, after `MPI.Init()`, and every rank ends with the whole of each array.

@@ -296,7 +296,9 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         [:spherical_axes!, :spherical_points!, :spherical_quadrature!, :latitude_weights!,
          :icosahedral_vertices!, :cubed_sphere_points!, :yin_yang_panels!],
         [:run_chunks, :run_indices, :map_chunks, :reduce_indices, :exclusive_scan!],
-        [:allocate, :scalar],
+        [:allocate, :on_backend, :resolve, :local_backend],
+        # a loop's output declarations: types, and spans a distributed backend evaluates
+        [:Written, :ByIndex, :ByBlock, :ByOffsets],
         # builds a NamedTuple from names given at runtime, so the caller chooses the cost
         [:build_point],
     )))

@@ -1,7 +1,9 @@
 using FlowGeometries: FlowGeometries as FG
+using ComputationalBackends: ComputationalBackends as CB
 using Test: Test
 
-# Every weak dependency is loaded up front so the extensions are exercised by the whole suite.
+# Every weak dependency is loaded up front so the extensions are exercised by the whole suite. The
+# Distributed and MPI extensions are loaded by their own topics, which start the processes they need.
 using Adapt: Adapt
 using DelaunayTriangulation: DelaunayTriangulation
 using KernelAbstractions: KernelAbstractions
@@ -281,7 +283,7 @@ function check_shape(label, g, I; axes::Bool = true)
 end
 
 const TOPICS = ["geometry", "axes", "grids", "sampling", "discretization", "connectivity",
-                "extensions", "allocations", "api"]
+                "extensions", "allocations", "api", "distributed", "mpi"]
 
 # No argument runs every topic. Naming some — `Pkg.test(test_args = ["axes"])` — runs only those.
 Test.@testset "FlowGeometries.jl" begin

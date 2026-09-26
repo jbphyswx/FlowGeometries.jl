@@ -4,7 +4,7 @@
 
 """
     derivative!(out, field, grid, dim; order=1, nodes=order+1, policy=BlankMasked(),
-                masked=zero, active_only=true, backend=nothing) -> out
+                masked=zero, active_only=true, backend=SerialBackend(), scratch=nothing) -> out
 
 The derivative with respect to **distance** along direction `dim`: [`apply_stencil!`](@ref) divided by
 the metric factor,

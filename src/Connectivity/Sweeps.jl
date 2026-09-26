@@ -46,7 +46,7 @@ function mapreduce_within(
     f::F, op::O, init, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
     self::Bool = false, topology = default_sweep_topology(grid, ball, active_only),
-    reach::AbstractReach = Unrestricted(), backend = nothing,
+    reach::AbstractReach = Unrestricted(), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {F,O}
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
@@ -75,23 +75,28 @@ function mapreduce_within(
 end
 
 """
-    foreach_within(f, grid; ball, …) -> nothing
+    foreach_within(f, grid; ball, outputs = (), …) -> nothing
 
 Call `f(I, J, d)` for every cell `I` of `grid` and every cell `J` within `ball` of it. The same hoisting
 as [`mapreduce_within`](@ref), for an `f` that writes.
 
-Under a threaded `backend`, `f` runs on disjoint spans of cells concurrently, so what it writes has to be
-determined by `I` — the same contract the connectivity builders keep.
+Under a parallel `backend`, `f` runs on disjoint spans of cells concurrently, so what it writes has to be
+determined by `I` — the same contract the connectivity builders keep. `outputs` declares those writes as
+[`Execution.Written`](@ref) arrays, indexed by the cell's position in the sweep (column-major over a
+structured grid's cells); a `DistributedBackend` or an `MPIBackend` gathers them, and the other backends
+write them in place.
 """
 function foreach_within(
     f::F, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
     self::Bool = false, topology = default_sweep_topology(grid, ball, active_only),
-    reach::AbstractReach = Unrestricted(), backend = nothing,
+    reach::AbstractReach = Unrestricted(), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    outputs::Tuple{Vararg{Execution.Written}} = (),
 ) where {F}
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
-    _sweep_cells_with(f, grid, cells, ball, images, active_only, self, topology, reach, backend)
+    _sweep_cells_with(f, grid, cells, ball, images, active_only, self, topology, reach, backend,
+                      outputs...)
     return nothing
 end
 
@@ -101,8 +106,9 @@ end
 function _sweep_cells_with(
     f::F, grid, cells, ball, images, active_only, self,
     topology::MetricTopology{N,T,<:Union{Nothing,Grids.CellListIndex}}, reach, backend,
+    outs::Execution.Written...,
 ) where {F,N,T}
-    Execution.run_indices(length(cells), backend) do t
+    Execution.run_indices(length(cells), backend, outs...) do t
         I = _sweep_index(grid, @inbounds cells[t])
         _route_fold(nothing, reach, grid, I, ball, images, active_only, self, topology, nothing) do _, J, d
             f(I, J, d)
@@ -114,8 +120,9 @@ end
 
 function _sweep_cells_with(
     f::F, grid, cells, ball, images, active_only, self, topology::MetricTopology, reach, backend,
+    outs::Execution.Written...,
 ) where {F}
-    Execution.run_chunks(length(cells), backend) do rng
+    Execution.run_chunks(length(cells), backend, outs...) do rng
         s = ball_scratch()
         @inbounds for t in rng
             I = _sweep_index(grid, cells[t])

@@ -12,7 +12,7 @@
 # and so carries per-row round-off.
 
 """
-    apply_stencil!(out, field, plan, dim; mask=nothing, masked=zero, backend=nothing) -> out
+    apply_stencil!(out, field, plan, dim; mask=nothing, masked=zero, backend=SerialBackend()) -> out
 
 Apply a held [`Discretization.stencil_plan`](@ref) along direction `dim` of `field`.
 
@@ -26,7 +26,7 @@ is written `masked`.
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
     plan::Discretization.AbstractStencilPlan, dim::Integer;
-    mask = nothing, masked = zero(S), backend = nothing,
+    mask = nothing, masked = zero(S), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,N}
     return _apply_plan_checked!(out, field, plan, Int(dim), mask, masked, backend, nothing)
 end
@@ -59,11 +59,13 @@ function _apply_plan!(
     out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K}, d::Int,
     mask, masked, backend, fac,
 ) where {S,N,T,K}
-    # The device path takes the per-cell body, which reads a row whatever the plan's form — the constant
-    # coefficients are a host loop-shape win and a launch has its own.
-    if backend !== nothing
+    # Every backend but a serial one takes the per-cell body, which reads a row whatever the plan's form
+    # — the constant coefficients are a host loop-shape win and a launch has its own.
+    b = Execution.resolve(backend)
+    if !(b isa CB.AbstractSerialBackend)
         idx, w = _plan_tables(plan)
-        return _apply_table!(out, field, idx, w, d, mask, masked, backend, fac)
+        return _apply_table!(out, field, Execution.on_backend(b, idx), Execution.on_backend(b, w), d,
+                             mask, masked, b, fac)
     end
     vm = _mask_rank(mask, Val(N))
     return _dispatch_dim(d, vm) do vdim

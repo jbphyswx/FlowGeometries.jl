@@ -60,10 +60,12 @@ Host backends only: a work-item-per-node form needs `maxdeg` slots per item, an 
 and a device backend raises here. The grid layouts reach the same graph through
 [`build_connectivity`](@ref) on [`Grids.FormulaNeighbors`](@ref), which is device-resident end to end.
 """
-function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = nothing) where {F}
+function _csr_from_candidates(
+    emit!::F, n::Integer, maxdeg::Integer; backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+) where {F}
     n = Int(n); maxdeg = Int(maxdeg)
     deg = Vector{Int}(undef, n)
-    Execution.run_chunks(n, backend) do rng
+    Execution.run_chunks(n, backend, Execution.Written(deg)) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -81,7 +83,7 @@ function _csr_fill(
 ) where {I<:Integer,F}
     ptr = Execution.exclusive_scan!(Vector{I}(undef, n + 1), deg, backend)
     nbrs = Vector{I}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend) do rng
+    Execution.run_chunks(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             d = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -287,7 +289,7 @@ has eight neighbours except the 24 cells at a cube corner, which have seven.
 """
 function build_connectivity(
     ::SphericalSampling.CubedSphereSampling, n::Integer;
-    stencil = Stencils.Axial(1), backend = nothing,
+    stencil = Stencils.Axial(1), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     n = Int(n)
     n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1"))
@@ -322,7 +324,7 @@ standard Yin–Yang discrete topology, where the panels couple through interpola
 """
 function build_connectivity(
     ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
-    stencil = Stencils.Axial(1), backend = nothing,
+    stencil = Stencils.Axial(1), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     nlon = Int(nlon); nlat = Int(nlat)
     nlon ≥ 1 && nlat ≥ 1 || throw(ArgumentError("Yin–Yang nlon/nlat must be ≥ 1"))
@@ -476,7 +478,9 @@ end
 HEALPix RING topological adjacency (usually 8 neighbors; 7 or 6 at singular pixels).
 Julia node indices are 1-based (`pixel 0` → node `1`).
 """
-function build_connectivity(s::SphericalSampling.HEALPixSampling; backend = nothing, _...)
+function build_connectivity(
+    s::SphericalSampling.HEALPixSampling; backend::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+)
     nside = s.nside
     npix = SphericalSampling.healpix_npix(nside)
     return _csr_from_candidates(npix, 8; backend = backend) do buf, lo, node
@@ -505,11 +509,14 @@ A vertex's neighbours are arithmetic in `(ν, id)` — see [`_ico_neighbor_ids`]
 same count, scan, fill the layout's own builder makes, over `10ν² + 2` vertices. The triangulation's
 `20ν²` triangles and `30ν²` edges are never formed.
 """
-function build_connectivity(s::SphericalSampling.IcosahedralSampling; backend = nothing, _...)
+function build_connectivity(
+    s::SphericalSampling.IcosahedralSampling;
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+)
     ν = Int(s.frequency)
     n = SphericalSampling.icosahedral_nvertices(ν)
     deg = Execution.allocate(backend, Int, n)
-    Execution.run_indices(n, backend) do k
+    Execution.run_indices(n, backend, Execution.Written(deg)) do k
         @inbounds deg[k] = _ico_neighbor_ids(k, ν)[2]
     end
     total = _csr_total(deg, n, backend)
@@ -521,7 +528,7 @@ end
 function _ico_fill(::Type{I}, total::Int, deg, n::Int, ν::Int, backend) where {I<:Integer}
     ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
     nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend) do k
+    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _ico_neighbor_ids(k, ν)
             slot = Int(ptr[k])

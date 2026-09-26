@@ -186,13 +186,13 @@ using ComputationalBackends: ThreadedBackend
 FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
 ```
 
-Chunks are contiguous, so each thread touches one span of every array. Passing `nothing` (the default)
-hands the loop body the whole range in one call, so the serial path adds no partitioning at all.
+Chunks are contiguous, so each thread touches one span of every array. `SerialBackend()`, the
+default, hands the loop body the whole range in one call, so the serial path adds no partitioning at
+all.
 
-Two passes are **not** threaded, for structural reasons. In the CSR compacting move, row `j`'s
-destination can fall inside row `i`'s source block for `i < j`, so concurrent rows overwrite unread
-candidates. And the prefix scan between the count and fill passes is inherently sequential; it is
-`O(n)` against the `O(n·stencil)` passes it separates.
+Every CSR builder counts, scans and fills. Each node pass writes only the slots its own node owns, and
+the scan between them ([`Execution.exclusive_scan!`](@ref)) is two passes over the counts around a
+serial scan of one sum per chunk.
 
 ## Measured non-issues
 

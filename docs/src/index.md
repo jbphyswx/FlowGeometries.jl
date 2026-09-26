@@ -13,9 +13,10 @@ grid = FG.Connectivity.structured_grid(FG.SphericalSampling.GaussLegendreSamplin
 Coordinate metrics, spherical samplings, and grid types for flow-field analysis on the plane and the
 sphere.
 
-The package has no dependencies. Everything optional — spatial search, tessellation, sparse output,
-static vectors, FFT-based quadrature, device transfer, threading — arrives through package
-extensions, so you pay for exactly what you load.
+The package depends only on ComputationalBackends, whose tags name how a bulk loop runs. Everything
+optional — spatial search, tessellation, sparse output, static vectors, FFT-based quadrature, device
+transfer, device kernels, multi-process execution — arrives through package extensions, so you pay
+for exactly what you load.
 
 ## Three orthogonal choices
 

@@ -314,7 +314,8 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
         a = zeros(n, n + 1); b = zeros(n, n + 1)
         mm = msk ? m : nothing
         O.apply_stencil!(a, f, idx, w, dim; mask = mm, masked = NaN)
-        O.apply_stencil!(b, f, idx, w, dim; mask = mm, masked = NaN, backend = KernelAbstractions.CPU())
+        O.apply_stencil!(b, f, idx, w, dim; mask = mm, masked = NaN,
+                         backend = CB.GPUBackend(KernelAbstractions.CPU()))
         all(isequal(a[i], b[i]) for i in eachindex(a)) || (bad += 1)
     end
     Test.@test bad == 0
@@ -329,7 +330,7 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
             idx, w = D.axis_stencils(ax, 1, 3)
             o = zeros(n, n, n); ob = zeros(n, n, n)
             O.apply_stencil!(o, f3, idx, w, dim)
-            O.apply_stencil!(ob, f3, idx, w, dim; backend = KernelAbstractions.CPU())
+            O.apply_stencil!(ob, f3, idx, w, dim; backend = CB.GPUBackend(KernelAbstractions.CPU()))
             Test.@test maximum(abs.(o .- want)) < 1e-10
             Test.@test o == ob
         end
@@ -357,7 +358,7 @@ Test.@testset "The host sweep is a different loop shape, and the same answer" be
             idx, w = D.axis_stencils(xs, 1, k)
             a = zeros(n, n); b = zeros(n, n)
             O.apply_stencil!(a, f, idx, w, 1)
-            O.apply_stencil!(b, f, idx, w, 1; backend = KernelAbstractions.CPU())
+            O.apply_stencil!(b, f, idx, w, 1; backend = CB.GPUBackend(KernelAbstractions.CPU()))
             Test.@test a == b
         end
     end
@@ -1289,7 +1290,8 @@ Test.@testset "A trailing batch axis is differenced in one pass, identically to 
         # The device body walks the whole output, batch included, so it must agree bit for bit too.
         o1 = fill(NaN, dims); o2 = fill(NaN, dims)
         O.apply_stencil!(o1, f, x, idx, w, 1; mask = mk, masked = NaN)
-        O.apply_stencil!(o2, f, x, idx, w, 1; mask = mk, masked = NaN, backend = KernelAbstractions.CPU())
+        O.apply_stencil!(o2, f, x, idx, w, 1; mask = mk, masked = NaN,
+                         backend = CB.GPUBackend(KernelAbstractions.CPU()))
         Test.@test all(isequal(o1[i], o2[i]) for i in eachindex(o1))
     end
 
@@ -1640,7 +1642,7 @@ Test.@testset "derivative! writes each value with its metric factor, and a maske
                     a = fill(NaN, fsz); k = fill(NaN, fsz)
                     O.derivative!(a, fld, gg, dim; order = 1, nodes = 5, masked = s)
                     O.derivative!(k, fld, gg, dim; order = 1, nodes = 5, masked = s,
-                                  backend = KernelAbstractions.CPU())
+                                  backend = CB.GPUBackend(KernelAbstractions.CPU()))
                     Test.@test isequal(k, a)
                 end
             end

@@ -6,12 +6,19 @@ authors = ["Jordan Benjamin <jordantbenjamin@gmail.com>"]
 [workspace]
 projects = ["test", "benchmark", "docs"]
 
+[deps]
+ComputationalBackends = "5c6e2104-4040-447f-8fc0-66ec2223b019"
+
+[sources]
+ComputationalBackends = {url = "https://github.com/jbphyswx/ComputationalBackends.jl.git"}
+
 [weakdeps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
-ComputationalBackends = "5c6e2104-4040-447f-8fc0-66ec2223b019"
 DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 Quickhull = "baca2653-9c88-49d2-a488-12dbf25fc4fb"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
@@ -20,9 +27,10 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 [extensions]
 FlowGeometriesAbstractFFTsExt = "AbstractFFTs"
 FlowGeometriesAdaptExt = "Adapt"
-FlowGeometriesComputationalBackendsExt = "ComputationalBackends"
 FlowGeometriesDelaunayTriangulationExt = "DelaunayTriangulation"
-FlowGeometriesKernelAbstractionsExt = "KernelAbstractions"
+FlowGeometriesDistributedExt = "Distributed"
+FlowGeometriesKernelAbstractionsExt = ["KernelAbstractions", "Adapt"]
+FlowGeometriesMPIExt = "MPI"
 FlowGeometriesNearestNeighborsExt = "NearestNeighbors"
 FlowGeometriesQuickhullExt = "Quickhull"
 FlowGeometriesSparseArraysExt = "SparseArrays"
@@ -33,7 +41,9 @@ AbstractFFTs = "1"
 Adapt = "4"
 ComputationalBackends = "0.1"
 DelaunayTriangulation = "1"
+Distributed = "1.11"
 KernelAbstractions = "0.9"
+MPI = "0.20"
 NearestNeighbors = "0.4"
 Quickhull = "0.2"
 SparseArrays = "1.11"

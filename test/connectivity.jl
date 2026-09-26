@@ -1778,11 +1778,11 @@ Test.@testset "A prefix scan and an index reduction are execution primitives" be
 
     # The reduction is the per-index form, so it is the one a device can run.
     for n in (0, 1, 13, 10_000)
-        Test.@test E.reduce_indices(i -> i * i, +, 0, n, nothing) ==
+        Test.@test E.reduce_indices(i -> i * i, +, 0, n, CB.SerialBackend()) ==
                    sum(i * i for i in 1:n; init = 0)
     end
     # `op` is applied left to right from `init`, so a non-commutative one is still well defined.
-    Test.@test E.reduce_indices(string, *, "", 4, nothing) == "1234"
+    Test.@test E.reduce_indices(string, *, "", 4, CB.SerialBackend()) == "1234"
 end
 
 Test.@testset "A Connected query reuses its buffers, and works on every adjacency" begin

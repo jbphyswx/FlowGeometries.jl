@@ -28,27 +28,31 @@ Test.@testset "StaticArrays extension" begin
 end
 
 Test.@testset "Threading is opt-in and changes no result" begin
-    using ComputationalBackends: ComputationalBackends as CB
-    Test.@test Base.get_extension(FG, :FlowGeometriesComputationalBackendsExt) !== nothing
-
     # Chunking must partition exactly — no gaps, no overlap, contiguous, whatever the remainder.
     for (n, k) in ((10, 3), (10, 1), (3, 10), (1, 1), (100, 7))
         rs = FG.Execution.chunk_ranges(n, k)
         Test.@test reduce(vcat, collect.(rs)) == collect(1:n)
         Test.@test all(!isempty, rs) && length(rs) ≤ max(1, min(k, n))
     end
-    # `nothing` hands the body the whole range in one call: the serial path adds no partitioning.
+    # A serial backend hands the body the whole range in one call: the serial path adds no partitioning.
     seen = UnitRange{Int}[]
-    FG.Execution.run_chunks(17, nothing) do r; push!(seen, r); end
+    FG.Execution.run_chunks(17, CB.SerialBackend()) do r; push!(seen, r); end
     Test.@test seen == [1:17]
 
     # The empty-input contract, which the two shapes answer differently: a write loop has nothing to
     # write, and a reduction still has to produce a value.
     ran = Ref(0)
-    FG.Execution.run_chunks(0, nothing) do r; ran[] += 1; end
+    FG.Execution.run_chunks(0, CB.SerialBackend()) do r; ran[] += 1; end
     Test.@test ran[] == 0
-    Test.@test FG.Execution.map_chunks(r -> length(r), 0, nothing) == [0]
+    Test.@test FG.Execution.map_chunks(r -> length(r), 0, CB.SerialBackend()) == [0]
     Test.@test FG.Execution.map_chunks(r -> length(r), 0, CB.ThreadedBackend()) == [0]
+
+    # AutoBackend is FlowGeometries' own policy: threads where Julia has them, serial otherwise.
+    Test.@test FG.Execution.resolve(CB.AutoBackend()) ===
+               (Threads.nthreads() > 1 ? CB.ThreadedBackend() : CB.SerialBackend())
+    Test.@test FG.Execution.resolve(CB.SerialBackend()) === CB.SerialBackend()
+    # A device tag that wraps no KernelAbstractions backend has nothing to launch on.
+    Test.@test_throws ArgumentError FG.Execution.run_indices(i -> nothing, 4, CB.GPUBackend(:nodevice))
 
     # A threaded reduction collects into a concretely typed vector: the partials are the reduction's
     # own values, on a path whose serial form allocates nothing.
@@ -69,7 +73,8 @@ Test.@testset "Threading is opt-in and changes no result" begin
     # …and so is an integer reduction, on every policy including the device one.
     for n in (0, 1, 13, 10_000)
         want = sum(i * i for i in 1:n; init = 0)
-        for b in (nothing, CB.SerialBackend(), CB.ThreadedBackend(), KernelAbstractions.CPU())
+        for b in (CB.SerialBackend(), CB.ThreadedBackend(), CB.GPUBackend(KernelAbstractions.CPU()),
+                  CB.AutoBackend())
             Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, b) == want
         end
     end
@@ -92,7 +97,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
 
     # A batched sweep is a single launch over the whole field, batch axes included, so it has to
     # agree with differencing each slice on its own.
-    let cpu = KernelAbstractions.CPU(), nx = 12, ny = 8, nb = 3
+    let cpu = CB.GPUBackend(KernelAbstractions.CPU()), nx = 12, ny = 8, nb = 3
         ax = range(0.0, 1.0; length = nx)
         fld = reshape(collect(Float64, 1:(nx * ny * nb)), nx, ny, nb) ./ (nx * ny * nb)
         for k in (3, 5, 8), dim in (1, 2)
@@ -114,7 +119,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
     end
 
     # A node count above the specialized set still runs, on both paths, and still agrees.
-    let cpu = KernelAbstractions.CPU(), n = 20
+    let cpu = CB.GPUBackend(KernelAbstractions.CPU()), n = 20
         ax = range(0.0, 1.0; length = n)
         fld = [sin(3a) * b for a in ax, b in 1:6]
         for k in (8, 10, 11, 13)
@@ -131,7 +136,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
     let gs = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), 0.0:1.0:19.0, 0.0:1.0:19.0)
         base = FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, gs; ball = 2.5)
         Test.@test base > 0
-        for b in (CB.SerialBackend(), CB.ThreadedBackend(), KernelAbstractions.CPU())
+        for b in (CB.SerialBackend(), CB.ThreadedBackend(), CB.GPUBackend(KernelAbstractions.CPU()))
             Test.@test FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, gs;
                                                         ball = 2.5, backend = b) == base
         end
@@ -463,7 +468,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     O = FG.Operators
     C = FG.Connectivity
     GD = FG.Grids
-    cpu = KernelAbstractions.CPU()
+    cpu = CB.GPUBackend(KernelAbstractions.CPU())
 
     n, m = 48, 33
     x = collect(range(0.0, 2π; length = n))
@@ -510,7 +515,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
         end
         return out
     end
-    Test.@test counts(gball, 3.0, cpu) == counts(gball, 3.0, nothing)
+    Test.@test counts(gball, 3.0, cpu) == counts(gball, 3.0, CB.SerialBackend())
     Test.@test counts(gball, 3.0, cpu) ==
                [C.nneighbors_within(gball, Tuple(ci)...; ball = 3.0)
                 for ci in CartesianIndices(size(GD.mask(gball)))]
@@ -524,7 +529,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
         end
         return out
     end
-    Test.@test sweep_counts(gball, 3.0, cpu) == sweep_counts(gball, 3.0, nothing)
+    Test.@test sweep_counts(gball, 3.0, cpu) == sweep_counts(gball, 3.0, CB.SerialBackend())
     Test.@test sum(sweep_counts(gball, 3.0, cpu)) ==
                C.mapreduce_within((I, J, d) -> 1, +, 0, gball; ball = 3.0)
 

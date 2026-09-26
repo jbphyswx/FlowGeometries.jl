@@ -23,7 +23,8 @@ inactive cell** — the derivative there is not determined by the active data, s
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S), backend = nothing,
+    period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
     return _apply_axis!(out, field, x, Int(dim), Int(order), Int(nodes), period, mask, masked,
@@ -65,7 +66,7 @@ end
 
 """
     apply_stencil!(out, field, x, indices, weights, dim; order=1, period=nothing, mask=nothing,
-                   masked=zero, policy=BlankMasked(), backend=nothing) -> out
+                   masked=zero, policy=BlankMasked(), backend=SerialBackend()) -> out
 
 Apply a table built by [`Discretization.axis_stencils`](@ref) **and** keep the axis, so any mask policy works.
 
@@ -83,7 +84,8 @@ function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
-    backend = nothing, policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
     return _apply_axis_table!(out, field, x, indices, weights, Int(dim), Int(order), period, mask,
                               masked, backend, policy, scratch, nothing)
@@ -130,9 +132,10 @@ function _apply_stencil_degrade!(
     n = sz[dim]
     P = period === nothing ? zero(T) : T(period) * Axes.wrap_sign(x)
     wrap = period !== nothing
-    # A caller's buffers are written per cell, so they hold only under a single chunk. The threaded
-    # path allocates its own set per chunk.
-    if backend === nothing && scratch isa Discretization.StencilScratch{T}
+    b = Execution.resolve(backend)
+    # A caller's buffers are written per cell, so they hold only under a single chunk. The parallel
+    # paths allocate their own set per chunk.
+    if b isa CB.AbstractSerialBackend && scratch isa Discretization.StencilScratch{T}
         _fits(scratch, k, ord) || throw(DimensionMismatch(
             "scratch holds $(length(scratch.w)) nodes × $(size(scratch.c, 2)) orders; this call " *
             "needs $k × $(ord + 1) — build it with `stencil_scratch($ord, $k)`",
@@ -144,7 +147,7 @@ function _apply_stencil_degrade!(
         end
         return out
     end
-    Execution.run_chunks(length(ci), backend) do rng
+    Execution.run_chunks(length(ci), b, Execution.Written(out)) do rng
         wbuf = Vector{T}(undef, k)
         cbuf = Matrix{T}(undef, k, ord + 1)
         nbuf = Vector{T}(undef, k)
@@ -248,7 +251,7 @@ end
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    mask = nothing, masked = zero(S), backend = nothing,
+    mask = nothing, masked = zero(S), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,N}
     # Degrading means rebuilding a stencil, which needs the axis this form was not given.
@@ -277,7 +280,8 @@ function _apply_table!(
     # The switch walks the spatial rank, since `dim` is one of those, so a trailing batch axis adds no
     # specializations.
     vm = _mask_rank(mask, Val(N))
-    if backend === nothing
+    b = Execution.resolve(backend)
+    if b isa CB.AbstractSerialBackend
         # On the host the loop shape is ours to choose, and the index-parallel one is the wrong shape:
         # see `_stencil_sweep_host!`. Both paths are the same arithmetic in the same order, so they
         # agree bit for bit.
@@ -292,8 +296,7 @@ function _apply_table!(
     # types once before the launch, as they do once per sweep on the host.
     return _dispatch_dim(dim, vm) do vdim
         _dispatch_nodes(k) do vk
-            _launch_stencil!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm,
-                             backend, fac)
+            _launch_stencil!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm, b, fac)
         end
     end
 end
@@ -305,7 +308,7 @@ function _launch_stencil!(
     ::Val{M}, backend, fac,
 ) where {S,N,dim,M}
     ci = CartesianIndices(size(field))
-    Execution.run_indices(length(ci), backend) do lin
+    Execution.run_indices(length(ci), backend, Execution.Written(out)) do lin
         _stencil_cell!(out, field, indices, weights, Val(dim), mask, masked, nodes,
                        Tuple(@inbounds ci[lin]), (@inbounds ci[lin]), Val(M), fac)
     end

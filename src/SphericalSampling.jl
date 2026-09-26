@@ -1,5 +1,6 @@
 module SphericalSampling
 
+using ComputationalBackends: ComputationalBackends as CB
 using ..Execution: Execution
 
 # Public API via `FlowGeometries.SphericalSampling.*`. No exports and no top-level rebind.
