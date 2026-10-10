@@ -296,6 +296,19 @@ Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
         end
     end
 
+    # Fejér's rule on the open nodes holds at every node count, odd included.
+    let s = FG.SphericalSampling.ClenshawCurtisSampling()
+        for nlat in (1, 3, 5, 9, 15)
+            ax = FG.SphericalSampling.spherical_axes(s, nlat)
+            w = FG.SphericalSampling.latitude_weights(s, nlat)
+            Test.@test sum(w) ≈ 2 rtol = 1e-13
+            Test.@test all(>(0), w)
+            for l in 1:(nlat - 1)
+                Test.@test abs(sum(w[j] * legendre(l, sin(ax.φ[j])) for j in eachindex(ax.φ))) < 1e-12
+            end
+        end
+    end
+
     # Float32 all the way through.
     w32 = FG.SphericalSampling.latitude_weights(Float32, FG.SphericalSampling.ClenshawCurtisSampling(), 12)
     Test.@test eltype(w32) === Float32

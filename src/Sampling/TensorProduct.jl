@@ -355,28 +355,37 @@ end
 """
     _equiangular_weights!(w, family, nlat[, algorithm]) -> w
 
-Latitude quadrature weights for an equiangular node set, from the sine-series expansion of the
-`sinθ` Jacobian:
+Latitude quadrature weights for an equiangular node set, from the sine series
+`S_m(θ) = Σ_{k=0}^{m} sin((2k+1)θ)/(2k+1)`, which satisfies
 
-    wᵢ = (4/N)·sinθᵢ·Σ_{k=0}^{⌊N/2⌋} sin((2k+1)θᵢ)/(2k+1)
+    sinθ·S_m(θ) = ½ − Σ_{j=1}^{m} cos(2jθ)/(4j²−1) − cos((2m+2)θ)/(2(2m+1)).
 
-`family` is [`OpenNodes`](@ref) or `ClosedNodes`, so one construction serves both. Weights sum to
-`∫₀^π sinθ dθ = 2` — see [`latitude_weights`](@ref) for why every sampling here uses that
-normalization.
+- Closed nodes, Driscoll & Healy (1994): `wᵢ = (4/N)·sinθᵢ·S_m(θᵢ)`, `m = N/2 − 1`.
+- Open nodes, Fejér's first rule `wᵢ = (2/N)[1 − 2Σ_{j=1}^{⌊N/2⌋} cos(2jθᵢ)/(4j²−1)]`:
+  `wᵢ = (4/N)[sinθᵢ·S_m(θᵢ) + cos((2m+2)θᵢ)/(2(2m+1))]`, `m = ⌊N/2⌋`.
 
-`algorithm` selects which construction computes the sums; omitted, the element type's default does.
+Weights sum to `∫₀^π sinθ dθ = 2` — see [`latitude_weights`](@ref) for why every sampling here uses
+that normalization. `algorithm` selects which construction computes the sums; omitted, the element
+type's default does.
 """
 function _equiangular_weights!(
     w::AbstractVector{T}, family, nlat::Int,
     algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
 ) where {T<:AbstractFloat}
-    nterm = (nlat + 1) ÷ 2
+    nterm = _equiangular_terms(family, nlat)
     _equiangular_sums!(w, family, nlat, nterm, algorithm)   # w doubles as the sum buffer
     @inbounds for i in 1:nlat
-        w[i] *= (T(4) / T(nlat)) * sin(_node_theta(family, i, nlat, T))
+        θ = _node_theta(family, i, nlat, T)
+        w[i] = (T(4) / T(nlat)) * (sin(θ) * w[i] + _equiangular_tail(family, θ, nterm))
     end
     return w
 end
+
+# `m + 1` terms of `S_m`, and the term that turns `sinθ·S_m` into Fejér's sum on the open nodes.
+@inline _equiangular_terms(::ClosedNodes, nlat::Int) = (nlat + 1) ÷ 2
+@inline _equiangular_terms(::OpenNodes, nlat::Int) = nlat ÷ 2 + 1
+@inline _equiangular_tail(::ClosedNodes, θ, ::Int) = zero(θ)
+@inline _equiangular_tail(::OpenNodes, θ, nterm::Int) = cos(2nterm * θ) / (2(2nterm - 1))
 
 function latitude_weights!(
     w::AbstractVector{T}, ::AbstractDriscollHealySampling, nlat::Integer;
@@ -391,8 +400,7 @@ end
 """
     latitude_weights!(w, ::AbstractClenshawCurtisSampling, nlat)
 
-Weights for the open nodes `θᵢ = π(i−½)/N`, from the same sine-series rule as the closed
-equiangular families.
+Weights for the open nodes `θᵢ = π(i−½)/N`: Fejér's first rule.
 
 These integrate a single `P_l` exactly for `l ≤ N−1`, which is weaker than
 [`bandlimit`](@ref)`(ClenshawCurtisSampling(), N) = N−1` suggests: spectral analysis integrates

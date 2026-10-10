@@ -268,19 +268,27 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     using FFTW: FFTW          # loads AbstractFFTs, which fires the extension
     Test.@test Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt) !== nothing
 
-    # Literal evaluation of the defining sum — no recurrence, no transform.
+    # Literal evaluation of each rule — no recurrence, no transform: Fejér's first rule (a cosine
+    # series) on the open nodes, Driscoll–Healy's sine series on the closed ones.
     function direct(family, nlat)
-        nterm = (nlat + 1) ÷ 2
-        θ(i) = family === :open ? π * (i - 0.5) / nlat : π * (i - 1) / nlat
-        return [(4 / nlat) * sin(θ(i)) * sum(sin((2k + 1) * θ(i)) / (2k + 1) for k in 0:(nterm - 1))
+        if family === :open
+            return [(2 / nlat) * (1 - 2 * sum((cos(2j * π * (i - 0.5) / nlat) / (4j^2 - 1) for j in 1:(nlat ÷ 2));
+                                               init = 0.0))
+                    for i in 1:nlat]
+        end
+        return [(4 / nlat) * sin(π * (i - 1) / nlat) *
+                sum(sin((2k + 1) * π * (i - 1) / nlat) / (2k + 1) for k in 0:(nlat ÷ 2 - 1))
                 for i in 1:nlat]
     end
+    open_counts = (1, 2, 3, 7, 8, 63, 64, 511, 512)
     for nlat in (8, 64, 512)
         dh = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), nlat)
-        cc = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.ClenshawCurtisSampling(), nlat)
         Test.@test maximum(abs.(dh .- direct(:closed, nlat))) < 1e-13
-        Test.@test maximum(abs.(cc .- direct(:open, nlat))) < 1e-13
         Test.@test sum(dh) ≈ 2 atol = 1e-13
+    end
+    for nlat in open_counts
+        cc = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.ClenshawCurtisSampling(), nlat)
+        Test.@test maximum(abs.(cc .- direct(:open, nlat))) < 1e-13
         Test.@test sum(cc) ≈ 2 atol = 1e-13
     end
     SS = FG.SphericalSampling
@@ -302,8 +310,9 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     # O(1) while the weights carry a `4/nlat·sinθ` factor, and the recurrence accumulates round-off
     # across its `nterm` steps, so the two constructions agree on the returned quantity to a
     # tolerance the intermediate does not meet.
-    for (s, fam) in ((SS.ClenshawCurtisSampling(), :open), (SS.DriscollHealySampling(), :closed)),
-        nlat in (8, 64, 512)
+    for (s, fam, counts) in ((SS.ClenshawCurtisSampling(), :open, open_counts),
+                             (SS.DriscollHealySampling(), :closed, (8, 64, 512))),
+        nlat in counts
         wt = SS.latitude_weights(s, nlat; algorithm = SS.Transform())
         wr = SS.latitude_weights(s, nlat; algorithm = SS.Recurrence())
         Test.@test maximum(abs.(wt .- wr)) < 1e-14
