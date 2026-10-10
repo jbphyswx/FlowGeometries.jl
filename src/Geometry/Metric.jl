@@ -355,8 +355,8 @@ Local cell area from the cell's own extents: `dx·dy` on the plane, `R²·cosφ�
 @inline area_element(::AbstractCartesianGeometry{T}, dx::Real, dy::Real) where {T} =
     convert(T, dx) * convert(T, dy)
 
-@inline function area_element(geo::AbstractSphericalGeometry{T}, φ::T, dλ::T, dφ::T) where {T}
-    return radius(geo)^2 * cos(φ) * dλ * dφ
+@inline function area_element(geo::AbstractSphericalGeometry{T}, φ::Real, dλ::Real, dφ::Real) where {T}
+    return radius(geo)^2 * cos(convert(T, φ)) * convert(T, dλ) * convert(T, dφ)
 end
 
 """
@@ -369,8 +369,10 @@ level, giving the shell element `r²·cosφ·dλ·dφ·dr`; the reference [`radi
 @inline volume_element(::AbstractCartesianGeometry{T}, dx::Real, dy::Real, dz::Real) where {T} =
     convert(T, dx) * convert(T, dy) * convert(T, dz)
 
-@inline function volume_element(::AbstractSphericalGeometry{T}, r::T, φ::T, dλ::T, dφ::T, dr::T) where {T}
-    return r^2 * cos(φ) * dλ * dφ * dr
+@inline function volume_element(
+    ::AbstractSphericalGeometry{T}, r::Real, φ::Real, dλ::Real, dφ::Real, dr::Real,
+) where {T}
+    return convert(T, r)^2 * cos(convert(T, φ)) * convert(T, dλ) * convert(T, dφ) * convert(T, dr)
 end
 
 # ---------------------------------------------------------------------------

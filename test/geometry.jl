@@ -37,6 +37,11 @@ Test.@testset "User geometry subtype participates" begin
                FG.Geometry.spherical_to_cartesian(ref, (0.3, 0.4))
     Test.@test FG.Geometry.area_element(s, 0.4, 0.01, 0.02) ==
                FG.Geometry.area_element(ref, 0.4, 0.01, 0.02)
+    # Any real arguments, converted to the geometry's type, as on the plane and the spheroid.
+    Test.@test FG.Geometry.area_element(ref, 0.5f0, 1 // 100, 0.02) ==
+               FG.Geometry.area_element(ref, Float64(0.5f0), 0.01, 0.02)
+    Test.@test FG.Geometry.volume_element(ref, 6_400_000, 0.5f0, 0.01, 0.02, 10) ==
+               FG.Geometry.volume_element(ref, 6.4e6, Float64(0.5f0), 0.01, 0.02, 10.0)
     Test.@test FG.Geometry.scale_factors(s, (0.3, 0.4)) ==
                FG.Geometry.scale_factors(ref, (0.3, 0.4))
     # …and the whole grid stack downstream of it, including the cell measure.
