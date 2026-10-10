@@ -15,6 +15,17 @@ Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
     Test.@test_throws BoundsError FG.Grids.coords(NTuple{2,Float64}, g, 6, 1)
     Test.@test_throws BoundsError FG.Grids.coords!(zeros(2), g, 1, 5)
     Test.@test_throws BoundsError FG.Grids.measure(g, 0, 1)
+    # An index per direction: a third index on a 2-D grid, or one too few, names both counts.
+    for idx in ((1, 1, 2), (1,))
+        err = try
+            FG.Grids.coords(g, idx...)
+            nothing
+        catch e
+            e
+        end
+        Test.@test err isa ArgumentError
+        Test.@test occursin("2 directions; got $(length(idx)) indices", sprint(showerror, err))
+    end
 
     nx, ny = 4, 3
     xm = [Float64(i) for i in 1:nx, j in 1:ny]

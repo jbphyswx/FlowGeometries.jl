@@ -156,9 +156,13 @@ Positional coordinate values at indices `I`. Internal; prefer [`coords`](@ref).
 """
 @inline function _raw_coords(grid::AbstractStructuredGrid{G,T}, I::Vararg{Integer,N}) where {G,T,N}
     c = coordinates(grid)
+    length(c) == N || _index_count_error(grid, length(c), N)
     @boundscheck _checkaxes(c, I)
     return ntuple(d -> @inbounds(c[d][I[d]]), Val(N))
 end
+
+@noinline _index_count_error(grid, ndir::Int, nidx::Int) = throw(ArgumentError(
+    "$(nameof(typeof(grid))) has $ndir directions; got $nidx indices"))
 
 # CurvilinearGrid / UnstructuredGrid _raw_coords are defined after those types exist.
 
