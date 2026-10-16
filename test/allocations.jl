@@ -499,16 +499,16 @@ Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begi
     check_shape("structured 2-D MIXED'",  FG.Grids.StructuredGrid(cart, v, rg), (12, 12))
     check_shape("structured 3-D MIXED",   FG.Grids.StructuredGrid(cart, rg, v, rg), (12, 12, 12))
     check_shape("spherical 2-D MIXED",    FG.Grids.StructuredGrid(sph,
-                    range(0, 2π * (1 - 1 / n); length = n),
+                    FG.Axes.PeriodicAxis(0.0, 2π, n),
                     collect(range(-1.2, 1.2; length = n))), (12, 12))
     check_shape("curvilinear 2-D", FG.Grids.CurvilinearGrid(cart, cx, cy, trues(n, n);
                     measure = fill(1.0, n, n)), (12, 12))
     # A layout whose coordinates, adjacency and measure are arithmetic must reach the same floor: the
     # arithmetic runs in registers, so there is nothing for a per-cell read to allocate.
-    check_shape("HEALPix nside=8", FG.Grids.HEALPixGrid(sph, 8), (100,); axes = false)
+    check_shape("HEALPix nside=8", FG.Grids.HEALPixGrid(sph, 8), (100,))
     check_shape("octahedral N=16",
                 FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(16)),
-                (100,); axes = false)
+                (100,))
 
     # `apply_stencil!` drives the field loop through the same index-parallel entry point the device
     # path uses, so it is gated here too.
@@ -676,6 +676,9 @@ Test.@testset "The per-point kernels outside Grids allocate nothing either" begi
         ("similar_geometry",         _alloc(GE.similar_geometry, Float32, sph)),
         ("similar_rotation",         _alloc(GE.similar_rotation, Float32, rot)),
         ("metric_invariant_directions", _alloc(GE.metric_invariant_directions, sph)),
+        ("scale_invariant_directions", _alloc(GE.scale_invariant_directions, sph)),
+        ("meridian_distance",        _alloc(GE.meridian_distance, GE.SpheroidGeometry(), 0.7)),
+        ("line_distance",            _alloc(GE.line_distance, GE.SpheroidGeometry(), (0.1, 0.3, 50.0), 2, 0.2, 0.9)),
         ("float_type",               _alloc(GE.float_type, sph)),
         ("Axes.spacing_trait",       _alloc(A.spacing_trait, u)),
         ("Axes.wrap_sign",           _alloc(A.wrap_sign, v)),
@@ -813,10 +816,10 @@ Test.@testset "A stencil plan's accessors allocate nothing" begin
     # A plan is read per cell on the paths that do not specialize on its form, so every accessor has to
     # be free — including `plan_row`, whose two tuples are stack values.
     for (x, per) in ((range(0.0, 1.0; length = 64), nothing),
-                     (range(0, 2π * (1 - 1 / 64); length = 64), 2π),
+                     (FG.Axes.PeriodicAxis(0.0, 2π, 64), 2π),
                      (collect(cumsum(fill(0.5, 64))), nothing))
         for k in (3, 4, 5)
-            pl = D.stencil_plan(x, 1, k)
+            pl = D.stencil_plan(x, 1, k; period = per)
             for j in (1, 2, 32, 63, 64)
                 Test.@test _alloc(D.plan_row, pl, j) == 0
             end
@@ -995,7 +998,8 @@ Test.@testset "A per-index gap or width lookup allocates nothing on every axis m
         GD.StructuredGrid(cart, vec1, rng1),
         GD.StructuredGrid(cart, vec1, vec1),
         GD.StructuredGrid(cart, rng1, vec1, collect(0.0:2.0)),
-        GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9))),
+        GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9)); periodic = true),
+        GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 9))),
     )
     # A runtime `d` indexes a tuple whose entries have different types on the mixed grids, so the
     # lookup must not allocate for any of them.
@@ -1062,7 +1066,7 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
     g = GD.StructuredGrid(cart, x, collect(1.0:ny), mk)
     sph = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
                             collect(range(0.0, 2π * (1 - 1 / nx); length = nx)),
-                            collect(range(-1.1, 1.1; length = ny)))
+                            collect(range(-1.1, 1.1; length = ny)); periodic = true)
     idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
     plan = O.gradient_plan(GD.CurvilinearGrid(cart,
         [0.7i + 0.05j for i in 1:nx, j in 1:ny], [0.9j - 0.03i for i in 1:nx, j in 1:ny],
@@ -1092,40 +1096,42 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
     end
 end
 
-Test.@testset "The staggered operators allocate nothing" begin
+Test.@testset "The mimetic operators allocate nothing" begin
     GD = FG.Grids
     O = FG.Operators
-    D = FG.Discretization
     cart = FG.Geometry.CartesianGeometry{Float64}()
-    C, Fa = D.Center(), D.Face()
-    x = collect(range(0.0, 4.0; length = 21))
-    y = collect(range(0.0, 3.0; length = 16))
-    sg = GD.StaggeredGrid(cart, x, y)
-    f = [3.0a - 2.0b for a in x, b in y]
-    fx = GD.axis_at(sg, 1, Fa)
-    fy = GD.axis_at(sg, 2, Fa)
-    u = [2.0a for a in fx, _ in y]
-    v = [3.0b for _ in x, b in fy]
-    g1 = similar(u); g2 = similar(v)
-    dv = similar(f)
-    z = zeros(length(fx), length(fy))
-    # Warm each, then measure: the per-point work is scale factors and one difference, and the
-    # per-direction loop is a tuple over a `Val`, so nothing here belongs on the heap.
-    O.gradient!((g1, g2), f, sg)
-    O.divergence!(dv, (u, v), sg)
-    O.curl!(z, u, v, sg)
-    Test.@test _alloc(q_stag_grad!, (g1, g2), f, sg) == 0
-    Test.@test _alloc(q_stag_div!, dv, (u, v), sg) == 0
-    Test.@test _alloc(q_stag_curl!, z, u, v, sg) == 0
-
-    # …on a sphere too, where the scale factors carry trigonometry.
     sph = FG.Geometry.SphericalGeometry(6.371e6)
-    λ = collect(range(0, 2π; length = 25)[1:24])
-    φ = collect(range(-1.2, 1.2; length = 13))
-    sp = GD.StaggeredGrid(sph, λ, φ)
-    su = zeros(length(GD.axis_at(sp, 1, Fa)), length(φ))
-    sv = zeros(length(λ), length(GD.axis_at(sp, 2, Fa)))
-    sd = zeros(length(λ), length(φ))
-    O.divergence!(sd, (su, sv), sp)
-    Test.@test _alloc(q_stag_div!, sd, (su, sv), sp) == 0
+    hole = trues(21, 16)
+    hole[8:10, 6:9] .= false
+    # Separable metrics on a box and a sphere, dense ones on a masked grid, three directions on a shell.
+    for (grid, bc) in ((GD.StructuredGrid(cart, range(0.0, 4.0; length = 21), range(0.0, 3.0; length = 16)), O.Neumann()),
+                       (GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 24), collect(range(-1.2, 1.2; length = 13))),
+                        O.Dirichlet()),
+                       (GD.StructuredGrid(cart, collect(range(0.0, 4.0; length = 21)), range(0.0, 3.0; length = 16), hole),
+                        O.Neumann()),
+                       (GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), collect(range(-1.0, 1.0; length = 7)),
+                                          collect(range(6.371e6, 6.4e6; length = 5))), O.Neumann()))
+        fm = O.face_metrics(grid, bc)
+        c = O.laplacian_coefficients(fm)
+        χ = rand(GD.size_tuple(grid)...)
+        δ = similar(χ)
+        g = O.allocate_faces(Float64, grid)
+        W = O.allocate_corners(Float64, grid)
+        u = ntuple(_ -> rand(GD.size_tuple(grid)...), GD.ncoordinates(grid))
+        Test.@test _alloc(q_mim_grad!, g, χ, fm) == 0
+        Test.@test _alloc(q_mim_div!, δ, g, fm) == 0
+        Test.@test _alloc(q_mim_curl!, W, g, fm) == 0
+        Test.@test _alloc(q_mim_rot!, g, W, fm) == 0
+        Test.@test _alloc(q_mim_faces!, g, u, fm) == 0
+        Test.@test _alloc(q_mim_centres!, u, g, fm) == 0
+        Test.@test _alloc(q_lap!, δ, χ, c) == 0
+        Test.@test _alloc(q_mim_lap!, δ, χ, fm, g) == 0
+        Test.@test _alloc(q_proj!, χ, c) == 0
+        Test.@test _alloc(q_fidx, grid, CartesianIndex(ntuple(_ -> 2, GD.ncoordinates(grid)))) == 0
+        cg = O.coarsen(grid)
+        cc = O.galerkin_coefficients(c, cg)
+        χc = zeros(GD.size_tuple(cg)...)
+        Test.@test _alloc(q_restrict!, χc, χ, c, cc) == 0
+        Test.@test _alloc(q_prolong!, χ, χc, c, cc) == 0
+    end
 end

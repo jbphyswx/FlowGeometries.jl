@@ -41,6 +41,34 @@ Test.@testset "Connectivity CSR / structured neighbors" begin
     Test.@test Abuf == A
     FG.Connectivity.adjacency_matrix!(Abuf, conn)
     Test.@test Abuf == A
+
+    # Every layout has a dense form, row `k` holding cell `k`'s neighbours.
+    sph = FG.Geometry.SphericalGeometry()
+    sg = FG.Grids.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), range(-1.0, 1.0; length = 6))
+    for g in (FG.Grids.HEALPixGrid(2), FG.Grids.CubedSphereGrid(3), FG.Grids.IcosahedralGrid(2),
+              FG.Grids.YinYangGrid(6, 4), FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(4)),
+              FG.Grids.rotate(sg, FG.Geometry.PoleRotation(0.3, 1.1)))
+        Ag = FG.Connectivity.adjacency_matrix(g)
+        cs = FG.Grids.cells(g)
+        Test.@test size(Ag) == (length(cs), length(cs))
+        Test.@test all(findall(Ag[k, :]) == sort(unique(collect(FG.Grids.neighbors(g, FG.Grids.cell_at(g, cs[k])...))))
+                       for k in 1:length(cs))
+    end
+end
+
+Test.@testset "A ball is gated in the grid's own precision on every layout" begin
+    cart = FG.Geometry.CartesianGeometry{Float32}()
+    xs, ys = Float32.(0:4), Float32.(0:3)
+    sg = FG.Grids.StructuredGrid(cart, xs, ys)
+    ug = FG.Grids.UnstructuredGrid(cart, (vec([x for x in xs, _ in ys]), vec([y for _ in xs, y in ys])), ones(Float32, 20))
+    # Below 1 in Float64 and exactly 1 in Float32: the four axial neighbours sit on the ball's edge.
+    r = prevfloat(1.0)
+    Test.@test Float32(r) == 1.0f0 && r < 1.0
+    for I in ((3, 2), (1, 1), (5, 4))
+        Test.@test FG.Connectivity.nneighbors_within(ug, LinearIndices((5, 4))[I...]; ball = r) ==
+                   FG.Connectivity.nneighbors_within(sg, I...; ball = r)
+    end
+    Test.@test FG.Connectivity.nneighbors_within(sg, 3, 2; ball = r) == 4
 end
 
 Test.@testset "Curvilinear periodicity" begin
@@ -281,9 +309,19 @@ Test.@testset "Icosahedral dual areas are exact and need no tessellation depende
         # The per-triangle Voronoi shares tile each triangle, so the cells tile the sphere.
         Test.@test sum(a) ≈ tot rtol = 1e-14
         Test.@test all(>(0), a)
-        # It is the true spherical Voronoi dual — cross-checked against the convex-hull route.
+        # It is the true spherical Voronoi dual — cross-checked against the convex-hull route. The hull
+        # sees the nodes at their Float64 coordinates, each within δ of the lattice. A cell whose edges
+        # all lie at least s/2 from its node has perimeter/area ≤ 4/s, so moving every node by δ moves
+        # its area by at most 4δ/s relative, s the shortest edge; each route adds its own 16 eps.
         vor = FG.Grids._voronoi_areas(geo, g.λ, g.φ)
-        Test.@test maximum(abs.(a .- vor) ./ vor) < 1e-12
+        δ = maximum(eachindex(mesh.λ)) do k
+            u = (cos(big(mesh.φ[k])) * cos(big(mesh.λ[k])), cos(big(mesh.φ[k])) * sin(big(mesh.λ[k])),
+                 sin(big(mesh.φ[k])))
+            Float64(sqrt(sum(abs2, u .- FG.SphericalSampling._ico_vertex_dir(BigFloat, k, ν))))
+        end
+        s = minimum(FG.Geometry.distance(FG.Geometry.SphericalGeometry(1.0), (mesh.λ[i], mesh.φ[i]),
+                                         (mesh.λ[j], mesh.φ[j])) for (i, j) in mesh.edges)
+        Test.@test maximum(abs.(a .- vor) ./ vor) ≤ 4δ / s + 32 * eps(Float64)
     end
     # A geodesic sphere has exactly 12 pentagons (the icosahedron's corners); they are the
     # smallest cells, and all the rest are hexagons.
@@ -380,7 +418,7 @@ Test.@testset "A symmetric adjacency is read as CSC without transposing a second
                      (FG.Grids.CurvilinearGrid(FG.Geometry.SphericalGeometry(),
                                          [2π * (i - 1) / 12 for i in 1:12, j in 1:9],
                                          [asin(2 * (j - 0.5) / 9 - 1) for i in 1:12, j in 1:9],
-                                         trues(12, 9)), "curvilinear"))
+                                         trues(12, 9); periodic = (true, false)), "curvilinear"))
         conn = FG.Connectivity.build_connectivity(g)
         n = FG.Connectivity.nnodes(conn)
         Test.@test FG.Connectivity.is_symmetric_adjacency(conn)          # what licenses the shortcut
@@ -470,11 +508,16 @@ Test.@testset "Spherical Voronoi areas tile the sphere" begin
     Test.@test sum(ai) ≈ 4π * R^2 rtol = 1e-10
     Test.@test minimum(ai) / maximum(ai) < 0.8
 
-    # Float32 all the way through, and a named error on a degenerate hull.
-    p32 = FG.SphericalSampling.spherical_points(Float32, FG.SphericalSampling.HEALPixSampling(2))
-    a32 = FG.Grids._voronoi_areas(FG.Geometry.SphericalGeometry(Float32(R)), p32.λ, p32.φ)
-    Test.@test eltype(a32) === Float32
-    Test.@test sum(a32) ≈ 4Float32(π) * Float32(R)^2 rtol = 1e-4
+    # Float32 all the way through, each cell to the precision of Float32 against the Float64 areas of
+    # the same points, and a named error on a degenerate hull.
+    for p32 in (FG.SphericalSampling.spherical_points(Float32, FG.SphericalSampling.HEALPixSampling(2)),
+                FG.SphericalSampling.icosahedral_vertices(Float32, 64))
+        a32 = FG.Grids._voronoi_areas(FG.Geometry.SphericalGeometry(Float32(R)), p32.λ, p32.φ)
+        a64 = FG.Grids._voronoi_areas(FG.Geometry.SphericalGeometry(Float64(Float32(R))),
+                                      Float64.(p32.λ), Float64.(p32.φ))
+        Test.@test eltype(a32) === Float32
+        Test.@test maximum(abs.(a32 .- a64) ./ a64) ≤ 16 * eps(Float32)
+    end
     Test.@test_throws ArgumentError FG.Grids._voronoi_areas(geo, [0.0, 1.0], [0.0, 0.5])
 end
 
@@ -594,7 +637,7 @@ Test.@testset "Distance and displacement between cells honour the topology" begi
     sph = FG.Geometry.SphericalGeometry(6.371e6)
     λ = collect(range(0, 2π; length = 25)[1:24])
     φ = collect(range(-1.0, 1.0; length = 9))
-    gs = GR.StructuredGrid(sph, λ, φ)
+    gs = GR.StructuredGrid(sph, λ, φ; periodic = true)
     Test.@test GR.isperiodic(gs, 1)
     Test.@test all(GE.distance(gs, (i, j), (k, l)) ≈ GE.distance(sph, (λ[i], φ[j]), (λ[k], φ[l]))
                    for i in (1, 5, 24), j in (1, 5, 9), k in (1, 12, 24), l in (1, 5, 9))
@@ -682,7 +725,7 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
     # Summing images is a statement about a translation, so an angular periodic direction refuses it.
     gs = GR.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
                            collect(range(0, 2π; length = 25)[1:24]),
-                           collect(range(-1.0, 1.0; length = 9)))
+                           collect(range(-1.0, 1.0; length = 9)); periodic = true)
     Test.@test GR.isperiodic(gs, 1)
     Test.@test_throws ArgumentError C.fold_within((a, J, d) -> a, 0, gs, 3, 4;
                                                   ball = 2.0e6, images = C.AllImages())
@@ -708,7 +751,7 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
     nλ, nφ = 72, 37
     λ = collect(range(0.0, 2π * (1 - 1 / nλ); length = nλ))
     φ = collect(range(-π / 2, π / 2; length = nφ))          # poles are rows
-    g = GD.StructuredGrid(sph, λ, φ)
+    g = GD.StructuredGrid(sph, λ, φ; periodic = true)
 
     # `metric_band` is the exact extent, so it is checked in both directions: it covers every cell
     # of the row genuinely in range, and no cell beyond it is in range. A mere bound satisfies the
@@ -757,7 +800,7 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
     end
     # It reads the cached extremes, so it touches no coordinate of the latitude axis.
     let cx = CountingAxis(collect(range(-1.4, 1.4; length = 200))),
-        gcount = GD.StructuredGrid(sph, λ, cx)
+        gcount = GD.StructuredGrid(sph, λ, cx; periodic = true)
         C.metric_window(gcount, 0.2R)
         Test.@test reads(() -> C.metric_window(gcount, 0.2R), cx) == 0
     end
@@ -820,7 +863,7 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
 
     R = 6.371e6
     sph = FG.Geometry.SphericalGeometry(R)
-    λ = range(0, 2π; length = 25)[1:24]
+    λ = FG.Axes.PeriodicAxis(0.0, 2π, 24)
     φ = range(-π / 2, π / 2; length = 13)
     g2 = FG.Grids.StructuredGrid(sph, λ, φ)
     # Pole cells (full longitude ring in range), the seam, and a radius past the antipode.
@@ -829,9 +872,21 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
         Test.@test agrees(g2, I, r)
     end
     g2s = FG.Grids.StructuredGrid(sph, collect(range(2π; step = -2π / 16, length = 16)),
-                                  asin.(range(-1, 1; length = 9)))
+                                  asin.(range(-1, 1; length = 9)); periodic = true)
     Test.@test agrees(g2s, (4, 8), 2.0e6)
     Test.@test agrees(g2s, (16, 2), 3.0e6)
+    # A box over 320° of longitude: across its 40° gap the columns at its two ends are neighbours, so a
+    # ball wraps longitude whether or not the grid's cells close the ring.
+    λr = range(0.0; step = deg2rad(10.0), length = 33)
+    φr = range(deg2rad(50.0), deg2rad(70.0); length = 5)
+    for geo_r in (sph, FG.Geometry.SpheroidGeometry())
+        gr = FG.Grids.StructuredGrid(geo_r, λr, φr)
+        Test.@test !FG.Grids.isperiodic(gr, 1)
+        Test.@test 33 + 2 * 33 in brute(gr, (1, 3), 2.5e6)
+        for (I, r) in (((1, 3), 2.5e6), ((33, 5), 2.0e6), ((17, 1), 6.0e6), ((2, 2), 9.0e6))
+            Test.@test agrees(gr, I, r)
+        end
+    end
     # 3-D carries the chord metric, shorter than the arc, so a window derived for arcs under-covers
     # it. The near-antipodal radii on the unit shell are where that gap is widest.
     g3 = FG.Grids.StructuredGrid(sph, λ, φ, range(R, R + 3e5; length = 4))
@@ -1000,7 +1055,7 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
     function curv_sph(nλ, nφ)
         λ = [l for l in range(0.0, 2π * (1 - 1 / nλ); length = nλ), _ in 1:nφ]
         φ = [f for _ in 1:nλ, f in range(-1.2, 1.2; length = nφ)]
-        return GD.CurvilinearGrid(sgeo, λ, φ, trues(nλ, nφ))
+        return GD.CurvilinearGrid(sgeo, λ, φ, trues(nλ, nφ); periodic = (true, false))
     end
     Test.@test GD.has_spatial_index(curv(8))                # the extension is loaded
 
@@ -1013,7 +1068,7 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
         [l for l in range(0.0, 2π * (1 - 1 / nλ); length = nλ), _ in 1:nφ, _ in 1:nr],
         [f for _ in 1:nλ, f in range(-1.0, 1.0; length = nφ), _ in 1:nr],
         [q for _ in 1:nλ, _ in 1:nφ, q in range(6.371e6, 1.02 * 6.371e6; length = nr)],
-        fill(1.0, nλ, nφ, nr), trues(nλ, nφ, nr),
+        fill(1.0, nλ, nφ, nr), trues(nλ, nφ, nr); periodic = (true, false, false),
     )
     # A spheroid, where the ECEF chord the index searches is a lower bound on the Vincenty geodesic
     # the gate applies. The index over-returns, as its contract allows, and the answer still matches
@@ -1021,14 +1076,14 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
     spd = FG.Geometry.SpheroidGeometry(6.378137e6, 1 / 298.257223563)
     λ2 = [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11]
     φ2 = [f for _ in 1:20, f in range(-1.2, 1.2; length = 11)]
-    spd2 = GD.CurvilinearGrid(spd, λ2, φ2, fill(1.0, 20, 11), trues(20, 11))
+    spd2 = GD.CurvilinearGrid(spd, λ2, φ2, fill(1.0, 20, 11), trues(20, 11); periodic = (true, false))
     nh = 3
     spd3 = GD.CurvilinearGrid(
         spd,
         [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11, _ in 1:nh],
         [f for _ in 1:20, f in range(-1.2, 1.2; length = 11), _ in 1:nh],
         [h for _ in 1:20, _ in 1:11, h in range(0.0, 2.0e5; length = nh)],
-        fill(1.0, 20, 11, nh), trues(20, 11, nh),
+        fill(1.0, 20, 11, nh), trues(20, 11, nh); periodic = (true, false, false),
     )
     # A box wrapping in two of three directions, so the tree needs ghost images in both.
     nb = 8
@@ -1353,7 +1408,7 @@ Test.@testset "k nearest is exact under the geometry's own metric" begin
         (GD.StructuredGrid(cart, v), (8,)),
         (GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0)), (1, 8)),
         (GD.StructuredGrid(sph, collect(range(0, 2π * (1 - 1 / n); length = n)),
-                           collect(range(-1.2, 1.2; length = n))), (4, 8)),
+                           collect(range(-1.2, 1.2; length = n)); periodic = true), (4, 8)),
         (GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)), (8, 8)),
     )
     for (g, I) in cases, k in (1, 5, 12)
@@ -1437,7 +1492,7 @@ Test.@testset "Queries can be seeded by a point, not just a cell" begin
          ((0.3, 4.2), (15.7, 8.0)), 3.0),
         (GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)),
          ((7.3, 4.2), (1.5, 13.5)), 3.0),
-        (GD.CurvilinearGrid(sph, λ, φ, trues(n, n)), ((0.4, 0.1), (6.0, -1.0)), 0.25R),
+        (GD.CurvilinearGrid(sph, λ, φ, trues(n, n); periodic = (true, false)), ((0.4, 0.1), (6.0, -1.0)), 0.25R),
     )
     for (g, pts, r) in cases, p in pts
         want = brute(g, p, r)
@@ -1485,6 +1540,14 @@ Test.@testset "Queries can be seeded by a point, not just a cell" begin
                         Tuple(CartesianIndices(size(GD.mask(g)))[l])...)), l) for l in all_cells])
         Test.@test dst ≈ [d for (d, _) in ranked[1:6]]
         Test.@test issorted(dst)
+    end
+    # A point search opens at the mean cell's size in the measure's units, metres on a sphere whose
+    # coordinates are radians, so it starts within a doubling or two of the k-th neighbour.
+    for g in (healpix_node_grid(4), GD.CurvilinearGrid(sph, λ, φ, trues(n, n); periodic = (true, false)),
+              GD.HEALPixGrid(sph, 8)),
+        k in (6, 12), p in ((0.4, 0.1), (3.9, -0.7))
+        rk = last(C.k_nearest(g, p; k = k)[2])
+        Test.@test rk / 4 ≤ C._knn_seed_radius_at(g, p, k) ≤ 4rk
     end
     # Buffers shorter than `k` are refused before anything is written, as the cell-seeded form does.
     Test.@test_throws ArgumentError C.k_nearest!(zeros(Int, 2), zeros(6), gs, (7.3, 4.2); k = 6)

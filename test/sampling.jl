@@ -155,6 +155,10 @@ Test.@testset "Driscoll–Healy DH1 / DH2" begin
     w = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), nlat)
     Test.@test w[1] ≈ 0 atol = 1e-14           # north pole weight vanishes
     Test.@test FG.SphericalSampling.bandlimit(FG.SphericalSampling.DriscollHealySampling(), nlat) == lmax
+    # A longitude count other than the default still spaces the samples round the whole circle.
+    let ax = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.DriscollHealySampling(), nlat; nlon = nlat)
+        Test.@test ax.λ ≈ [2π * (i - 1) / nlat for i in 1:nlat]
+    end
 end
 
 Test.@testset "McEwen–Wiaux axes" begin
@@ -228,9 +232,22 @@ Test.@testset "Cubed sphere / Yin–Yang / icosahedral" begin
 end
 
 Test.@testset "Sampling → StructuredGrid" begin
+    SS = FG.SphericalSampling
     geom = FG.Geometry.SphericalGeometry(1.0)
-    (; λ, φ) = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.ClenshawCurtisSampling(), 6)
-    grid = FG.Grids.StructuredGrid(geom, λ, φ, trues(length(λ), length(φ)))
+    # A sampling's grid holds its longitude as a periodic axis: periodic by its type, and the sampling's
+    # own longitudes to the bit.
+    for (s, n, kw) in ((SS.GaussLegendreSampling(), 12, (;)), (SS.ClenshawCurtisSampling(), 12, (;)),
+                       (SS.DriscollHealySampling(), 12, (;)), (SS.DriscollHealyEqualSampling(), 12, (;)),
+                       (SS.McEwenWiauxSampling(), 12, (;)), (SS.LatLonSampling(), 7, (; nlon = 10)),
+                       (SS.DriscollHealySampling(), 12, (; nlon = 12)))
+        sg = FG.Connectivity.structured_grid(s, n; geometry = geom, kw...)
+        Test.@test FG.Grids.axis(sg, 1) isa FG.Axes.PeriodicAxis && FG.Grids.isperiodic(sg, 1)
+        Test.@test FG.Grids.period(sg, 1) == 2π
+        Test.@test collect(FG.Grids.axis(sg, 1)) == SS.spherical_axes(s, n; kw...).λ
+    end
+    # From the plain vectors the direction wraps when asked.
+    (; λ, φ) = SS.spherical_axes(SS.ClenshawCurtisSampling(), 6)
+    grid = FG.Grids.StructuredGrid(geom, λ, φ, trues(length(λ), length(φ)); periodic = true)
     Test.@test FG.Grids.isperiodic(grid, 1)
     Test.@test FG.Grids.size_tuple(grid) == (length(λ), length(φ))
 end

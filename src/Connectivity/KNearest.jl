@@ -148,8 +148,6 @@ end
 @inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}, mt) where {G,T}
     D = Grids.ncoordinates(grid)
     s = zero(T)
-    # The topology's span, reduced once. Off a rectilinear grid the coordinate fields have no order,
-    # so asking the grid is a scan per query.
     for d in 1:D
         e = @inbounds T(mt.span[d])
         s += e * e

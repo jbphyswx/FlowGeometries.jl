@@ -75,7 +75,7 @@ function _gradient_plan(
 ) where {G,T,D}
     geo = Grids.grid_geometry(grid)
     msk = Grids.mask(grid)
-    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
+    sz = Connectivity._linear_shape(grid)
     n = length(msk)
     # The connectivity already gives every degree, so the result is sized up front. Dropping an
     # inactive or coincident neighbour only lowers the count, so `length(c.nbrs)` is an upper bound
@@ -256,7 +256,7 @@ function _scattered_fit(
     m11 = zero(T); m12 = zero(T); m13 = zero(T)
     m22 = zero(T); m23 = zero(T); m33 = zero(T)
     b1 = zero(T); b2 = zero(T); b3 = zero(T)
-    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
+    sz = Connectivity._linear_shape(grid)
     fsum = zero(T); wsum = zero(T)
     @inbounds for t in eachindex(idx)
         j = Int(idx[t])

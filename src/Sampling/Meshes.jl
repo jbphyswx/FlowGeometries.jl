@@ -95,11 +95,8 @@ end
 Longitude in `[0, 2π)` and geographic latitude of the direction `(x, y, z)`, which need not be
 normalized. `atan(z, hypot(x, y))` is accurate relative to the latitude's distance from a pole.
 """
-@inline function _unit_lonlat(x::T, y::T, z::T) where {T<:AbstractFloat}
-    ϕ = atan(y, x)
-    ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, atan(z, hypot(x, y)))
-end
+@inline _unit_lonlat(x::T, y::T, z::T) where {T<:AbstractFloat} =
+    (Geometry.wrap_longitude(atan(y, x)), atan(z, hypot(x, y)))
 
 """
     cubed_sphere_points([T = Float64], n; backend=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
@@ -188,9 +185,7 @@ rotated, so this is the whole difference between the two panels.
     X = -cosφ * cosλ
     Y = sinφ
     Z = cosφ * sinλ
-    ϕ = atan(Y, X)
-    ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, atan(Z, hypot(X, Y)))
+    return (Geometry.wrap_longitude(atan(Y, X)), atan(Z, hypot(X, Y)))
 end
 
 """
@@ -567,36 +562,32 @@ end
     (r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3]); (p[1] / r, p[2] / r, p[3] / r))
 
 """
-    _ico_fold_incident_triangles(f, acc, i, j, face, ν) -> acc
+    _ico_fold_incident_triangles(f, acc, i, j, ν) -> acc
 
-Thread `acc = f(acc, other1, other2)` over the triangles of one face that contain lattice node
-`(i, j)`, `other1` and `other2` being the other two vertices' ids.
+Thread `acc = f(acc, n1, n2)` over the triangles of one face that contain lattice node `(i, j)`, `n1`
+and `n2` being the other two vertices' lattice nodes `(a, b)` on that face.
 
 A triangle belongs to exactly one face, so folding over each of a vertex's occurrences visits each
 incident triangle once. The two lattice orientations give up to three triangles each.
 """
-@inline function _ico_fold_incident_triangles(
-    f::F, acc, fc::Int, i::Int, j::Int, ν::Int,
-) where {F}
-    idof(a, b) = _ico_lattice_id(fc, a, b, ν)
+@inline function _ico_fold_incident_triangles(f::F, acc, i::Int, j::Int, ν::Int) where {F}
+    self = (i, j)
     # Upward triangles {(a,b), (a+1,b), (a,b+1)} whose base is at, below or left of `(i, j)`.
     for (a, b) in ((i, j), (i - 1, j), (i, j - 1))
         (a ≥ 0 && b ≥ 0 && a + b < ν) || continue
-        v0 = idof(a, b); v1 = idof(a + 1, b); v2 = idof(a, b + 1)
-        o1, o2 = _ico_others(v0, v1, v2, idof(i, j))
-        acc = f(acc, o1, o2)
+        n1, n2 = _ico_others((a, b), (a + 1, b), (a, b + 1), self)
+        acc = f(acc, n1, n2)
     end
     # Downward triangles {(a+1,b), (a,b+1), (a+1,b+1)}.
     for (a, b) in ((i - 1, j), (i, j - 1), (i - 1, j - 1))
         (a ≥ 0 && b ≥ 0 && a + b < ν - 1) || continue
-        v0 = idof(a + 1, b); v1 = idof(a, b + 1); v2 = idof(a + 1, b + 1)
-        o1, o2 = _ico_others(v0, v1, v2, idof(i, j))
-        acc = f(acc, o1, o2)
+        n1, n2 = _ico_others((a + 1, b), (a, b + 1), (a + 1, b + 1), self)
+        acc = f(acc, n1, n2)
     end
     return acc
 end
 
-@inline _ico_others(v0::Int, v1::Int, v2::Int, self::Int) =
+@inline _ico_others(v0::NTuple{2,Int}, v1::NTuple{2,Int}, v2::NTuple{2,Int}, self::NTuple{2,Int}) =
     v0 == self ? (v1, v2) : (v1 == self ? (v0, v2) : (v0, v1))
 
 """

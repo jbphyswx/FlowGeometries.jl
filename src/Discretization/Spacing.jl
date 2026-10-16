@@ -61,6 +61,12 @@ end
     return h_m, h_p
 end
 
+# A periodic axis's seam is one step wide, so every gap is the step.
+@inline function local_spacing(x::Axes.PeriodicAxis, ::Integer, period::Real)
+    Axes.own_period(x, period)
+    return step(x), step(x)
+end
+
 """
     cell_width(x, i, period=nothing) -> width
 
@@ -69,9 +75,9 @@ The coordinate width of cell `i` of an axis of cell centres `x`: the centred wid
 one-sided gap to the single neighbour at a genuinely non-periodic boundary, and `1` for a length-1
 axis. On a uniform axis every width is the constant step.
 
-Equivalently `abs(faces(x)[i+1] - faces(x)[i])`: [`faces`](@ref) places a boundary midway between
-neighbouring centres, so the width between them is the average of the two adjacent gaps. Call this
-form per cell; `faces` materializes the whole axis.
+Equivalently `abs(faces(x, period)[i+1] - faces(x, period)[i])`: [`faces`](@ref) places a boundary
+midway between neighbouring centres, across the seam where the axis wraps, so the width between them
+is the average of the two adjacent gaps. Call this form per cell; `faces` materializes the whole axis.
 
 A width is a physical measure, so it is non-negative however the axis is stored — increasing or
 decreasing, as a dataset holding latitude, depth or pressure levels top-down is. This is where a
@@ -104,9 +110,11 @@ end
 [`cell_width`](@ref) at every index of an axis at once: the coordinate widths a separable measure or a
 flux divergence is weighted by.
 
-A uniform axis gets an [`Axes.ConstantVector`](@ref), one number and a length, every one of its cells
-having the same width. Anything else is built densely into the same kind of storage as `x`, by
-broadcasts over views, so a device-resident axis is widened on its device.
+A bounded uniform axis and an [`Axes.PeriodicAxis`](@ref) get an [`Axes.ConstantVector`](@ref), one
+number and a length, every one of their cells having the same width. Anything else is built densely
+into the same kind of storage as `x`, by broadcasts over views, so a device-resident axis is widened on
+its device: that includes a uniform axis of another type given a `period`, whose seam gap its type does
+not fix.
 
 `Grids.cell_widths` is this on a grid direction, taking the period from the grid itself.
 """
@@ -114,21 +122,17 @@ function cell_widths(x::AbstractVector, period::Union{Nothing,Real} = nothing)
     return _cell_widths_dense(x, period)
 end
 
-# Every cell is `|Δ|` wide, boundaries included, whenever the period is the axis's own closure. A
-# regional axis declared periodic against a larger period has a genuinely wider seam, so it falls
-# through to the dense path.
-function cell_widths(
-    x::AbstractRange{T}, period::Union{Nothing,Real} = nothing,
-) where {T<:AbstractFloat}
+function cell_widths(x::AbstractRange{T}, ::Nothing = nothing) where {T<:AbstractFloat}
     n = length(x)
     # A singleton axis contributes a multiplicative identity (see `cell_width`).
     n == 1 && return Axes.ConstantVector(one(T), 1)
     n == 0 && return Axes.ConstantVector(zero(T), 0)
-    w = abs(T(step(x)))
-    period === nothing && return Axes.ConstantVector(w, n)
-    _, h_seam = local_spacing(x, n, period)
-    isapprox(abs(h_seam), w; rtol = 8 * eps(T)) && return Axes.ConstantVector(w, n)
-    return _cell_widths_dense(x, period)
+    return Axes.ConstantVector(abs(T(step(x))), n)
+end
+
+function cell_widths(x::Axes.PeriodicAxis{T}, period::Real) where {T<:AbstractFloat}
+    Axes.own_period(x, period)
+    return cell_widths(x, nothing)
 end
 
 function _cell_widths_dense(x::AbstractVector{T}, period::Union{Nothing,Real} = nothing) where {T<:AbstractFloat}

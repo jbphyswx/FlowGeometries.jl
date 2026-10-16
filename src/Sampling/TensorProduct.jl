@@ -84,7 +84,7 @@ function spherical_axes!(
         θ = T(i) * T(π) / T(nlat)
         φ[i + 1] = geographic_latitude(θ)
     end
-    dλ = T(π) / T(nlat)   # DH2
+    dλ = T(2π) / T(nlon_eff)
     @inbounds for i in 1:nlon_eff
         λ[i] = T(i - 1) * dλ
     end

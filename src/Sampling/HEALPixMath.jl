@@ -462,6 +462,6 @@ function vec2pix(nside::Integer, v; scheme::RingScheme = Ring())
     ρ = hypot(T(x), T(y))
     iszero(ρ) && iszero(z) && throw(ArgumentError("the zero vector has no direction"))
     θ = atan(ρ, T(z))              # accurate relative to θ at the poles
-    ϕ = mod(atan(T(y), T(x)), T(2π))
+    ϕ = Geometry.wrap_longitude(atan(T(y), T(x)))
     return ang2pix(nside, θ, ϕ; scheme = scheme)
 end

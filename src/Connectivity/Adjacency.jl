@@ -55,9 +55,9 @@ function adjacency_matrix!(
     return A
 end
 
-function adjacency_matrix!(A::AbstractMatrix{Bool}, grid::Grids.UnstructuredGrid; _...)
-    return adjacency_matrix!(A, build_connectivity(grid))
-end
+# Every other layout through its own adjacency, as `build_connectivity` resolves it.
+adjacency_matrix!(A::AbstractMatrix{Bool}, grid::Grids.AbstractGrid; kwargs...) =
+    adjacency_matrix!(A, build_connectivity(grid; kwargs...))
 
 """
     adjacency_matrix(grid_or_conn; kwargs...) -> Matrix{Bool}

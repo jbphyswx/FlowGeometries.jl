@@ -284,8 +284,9 @@ sample, an `O(1)` locate — selects it by dispatch, and that needs the directio
 
 `isuniform(grid, d::Integer)` serves a direction chosen at run time.
 """
-@inline spacing_trait(grid::AbstractGrid, ::Val{d}) where {d} =
+@inline spacing_trait(grid::AbstractStructuredGrid, ::Val{d}) where {d} =
     Axes.spacing_trait(@inbounds coordinates(grid)[d])
+@inline spacing_trait(::AbstractGrid, ::Val) = Axes.NonuniformSpacing()
 
 """
     isuniform(grid, d) -> Bool
@@ -295,10 +296,17 @@ Whether coordinate direction `d` has constant spacing known from its type (all d
 no-`d` form). The answer comes from the type alone; no code path inspects coordinate values to decide
 it. See [`spacing_trait`](@ref) for the form a method can dispatch on.
 
-A curvilinear or unstructured grid is never uniform: its coordinates are per-cell fields with no axes.
+Only a rectilinear grid has axes. Every other layout is never uniform: a curvilinear or unstructured
+grid's coordinates are per-cell fields, and a pixelization's are a formula of the cell.
 """
-@inline isuniform(grid::AbstractGrid, d::Integer) = _at_axis(Axes.isuniform, coordinates(grid), d)
-@inline isuniform(grid::AbstractGrid) = all(Axes.isuniform, coordinates(grid))
+@inline isuniform(grid::AbstractStructuredGrid, d::Integer) =
+    _at_axis(Axes.isuniform, coordinates(grid), d)
+@inline isuniform(grid::AbstractStructuredGrid) = all(Axes.isuniform, coordinates(grid))
+@inline function isuniform(grid::AbstractGrid, d::Integer)
+    1 ≤ d ≤ ncoordinates(grid) || throw(ArgumentError("direction $d is outside this grid's directions"))
+    return false
+end
+@inline isuniform(::AbstractGrid) = false
 
 """
     spacing(grid, d) -> T
@@ -324,10 +332,10 @@ The first coordinate along direction `d`.
 Smallest and largest coordinate along direction `d`, ordered `lo ≤ hi` regardless of whether the
 direction is stored ascending or descending. These are the extreme sample positions, i.e. cell centres.
 
-`O(1)` on a rectilinear grid: an axis is monotone, as every search here bisects it, so its extremes are
-its endpoints. `O(N)` where the coordinates are per-cell fields, which carry no such order; a query
-that reads this repeatedly takes it from a
-[`MetricTopology`](@ref FlowGeometries.Connectivity.MetricTopology), built once.
+`O(1)` on every layout here: a rectilinear axis is monotone, so its extremes are its endpoints; a
+per-cell coordinate field carries no order, so a curvilinear grid and a node set take its extremes once,
+at construction; a pixelization covers a known region. The method below, for a layout of your own,
+reads every coordinate.
 """
 @inline bounds(grid::AbstractGrid, d::Integer) = extrema(coordinates(grid, d))
 

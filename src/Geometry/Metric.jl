@@ -189,6 +189,37 @@ where its type is known wide enough.
 """Convert positional point values to the geometry's own float type `T`."""
 @inline _at(::Type{T}, p::Tuple{Vararg{Real,N}}) where {T<:AbstractFloat,N} = convert(NTuple{N,T}, p)
 
+"""
+    wrap_longitude(λ) -> T
+
+`λ` reduced to `[0, 2π)`. Every longitude this package returns lies in that range: a coordinate
+conversion, a pole rotation, a sampling's points and a grid's cell centres.
+
+A value within rounding of a whole turn below zero, whose remainder rounds to `T(2π)` itself, is
+returned as `0`.
+"""
+@inline function wrap_longitude(λ::T) where {T<:AbstractFloat}
+    w = mod(λ, T(2π))
+    return w < T(2π) ? w : zero(T)
+end
+
+@inline wrap_longitude(λ::Real) = wrap_longitude(float(λ))
+
+"""
+    _lon_diff(λ₁, λ₂) -> T
+
+`λ₂ − λ₁` reduced to `[−π, π]`, to the precision of the result. The raw difference is held exactly as
+its rounded value and the rounding error (Knuth's TwoSum), `rem2pi` reduces the rounded value by an
+exact `2π`, and the error is added back, so two longitudes either side of the seam keep the precision of
+the gap between them.
+"""
+@inline function _lon_diff(λ1::T, λ2::T) where {T<:AbstractFloat}
+    s = λ2 - λ1
+    z = s - λ2
+    e = (λ2 - (s - z)) + (-λ1 - z)
+    return rem2pi(s, RoundNearest) + e
+end
+
 # ---------------------------------------------------------------------------
 # Distances
 # ---------------------------------------------------------------------------
@@ -197,8 +228,9 @@ where its type is known wide enough.
     distance(geo::AbstractGeometry, pt1, pt2)
 
 Distance between two points. Spherical 2D uses great-circle (Haversine); spherical 3D uses the
-chord through Cartesian, with `r` the absolute radius from the origin; a lone `(λ,)` is the shorter
-arc of its circle.
+chord, with `r` the absolute radius from the origin; a lone `(λ,)` is the shorter arc of its circle.
+A longitude difference is reduced by an exact `2π`, so a pair either side of the seam keeps the
+precision of the gap between them.
 """
 @inline distance(geo::AbstractGeometry, pt1, pt2) = _distance(geo, as_ntuple(pt1), as_ntuple(pt2))
 
@@ -219,8 +251,7 @@ end
 @inline function _distance(
     geo::AbstractSphericalGeometry{T}, coords1::Tuple{Real}, coords2::Tuple{Real},
 ) where {T}
-    Δλ = convert(T, coords2[1]) - convert(T, coords1[1])
-    return radius(geo) * abs(rem2pi(Δλ, RoundNearest))
+    return radius(geo) * abs(_lon_diff(convert(T, coords1[1]), convert(T, coords2[1])))
 end
 
 @inline function _distance(
@@ -228,21 +259,18 @@ end
 ) where {T}
     λ1, φ1 = _at(T, coords1)
     λ2, φ2 = _at(T, coords2)
-    dλ = λ2 - λ1
+    dλ = _lon_diff(λ1, λ2)
     dφ = φ2 - φ1
     a = sin(dφ / T(2))^2 + cos(φ1) * cos(φ2) * sin(dλ / T(2))^2
     c = T(2) * atan(sqrt(a), sqrt(max(zero(T), one(T) - a)))
     return radius(geo) * c
 end
 
-@inline function _distance(
-    geo::AbstractSphericalGeometry{T}, coords1::Tuple{Real,Real,Real}, coords2::Tuple{Real,Real,Real},
-) where {T}
-    p1 = _spherical_to_cartesian(geo, coords1)
-    p2 = _spherical_to_cartesian(geo, coords2)
-    dx = p1.x - p2.x; dy = p1.y - p2.y; dz = p1.z - p2.z
-    return sqrt(dx * dx + dy * dy + dz * dz)
-end
+# The chord's length, from its components on the local frame (see `normal_coordinates`), which carry no
+# difference of nearly equal positions.
+@inline _distance(
+    geo::AbstractSphericalGeometry, coords1::Tuple{Real,Real,Real}, coords2::Tuple{Real,Real,Real},
+) = hypot(Tuple(_normal_coordinates(geo, coords1, coords2))...)
 
 """
     spherical_to_cartesian(geo, coords) -> NamedTuple{(:x,:y,:z)}
@@ -290,8 +318,9 @@ end
     cartesian_to_spherical(geo, xyz) -> NamedTuple{(:λ,:φ,:r)}
     cartesian_to_spherical(S, geo, xyz) -> S
 
-Inverse of [`spherical_to_cartesian`](@ref): Cartesian `(x, y, z)` to `(λ, φ, r)` with `λ ∈ (-π, π]`,
-`φ ∈ [-π/2, π/2]`, and `r` the absolute radius from the origin. At the origin `λ = φ = 0`.
+Inverse of [`spherical_to_cartesian`](@ref): Cartesian `(x, y, z)` to `(λ, φ, r)` with `λ ∈ [0, 2π)`
+(see [`wrap_longitude`](@ref)), `φ ∈ [-π/2, π/2]`, and `r` the absolute radius from the origin. At the
+origin `λ = φ = 0`.
 """
 @inline cartesian_to_spherical(geo::AbstractSphericalGeometry, xyz) =
     _cartesian_to_spherical(geo, as_ntuple(xyz))
@@ -305,7 +334,7 @@ Inverse of [`spherical_to_cartesian`](@ref): Cartesian `(x, y, z)` to `(λ, φ, 
     x, y, z = _at(T, xyz)
     r = sqrt(x * x + y * y + z * z)
     iszero(r) && return (; λ = zero(T), φ = zero(T), r = r)
-    return (; λ = atan(y, x), φ = asin(clamp(z / r, -one(T), one(T))), r = r)
+    return (; λ = wrap_longitude(atan(y, x)), φ = atan(z, hypot(x, y)), r = r)
 end
 
 # ---------------------------------------------------------------------------

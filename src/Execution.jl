@@ -127,6 +127,33 @@ function chunk_ranges(n::Integer, k::Integer)
     return ranges
 end
 
+# Chunk `c` of `k` near-equal contiguous chunks of `1:n`, the `c`-th range `chunk_ranges(n, k)` holds.
+@inline function _chunk_range(n::Int, k::Int, c::Int)
+    base, rem = divrem(n, k)
+    lo = (c - 1) * base + min(c - 1, rem) + 1
+    return lo:(lo + base - (c > rem))
+end
+
+"""
+    BalancedThreads(chunks_per_thread = 8)
+
+A threaded backend for loops whose indices cost unequal amounts — rows near a pole, a ragged mask, a
+ball query whose neighbour count varies: `1:n` is split into `chunks_per_thread` contiguous chunks per
+Julia thread, and each thread takes the next chunk as it finishes one, so a thread that drew cheap chunks
+takes more of them. The partition depends on `n` and the thread count alone, so a reduction groups the
+same way on every run.
+"""
+struct BalancedThreads <: CB.AbstractThreadedBackend
+    chunks_per_thread::Int
+    function BalancedThreads(k::Integer = 8)
+        k ≥ 1 || throw(ArgumentError("BalancedThreads needs at least one chunk per thread, got $k"))
+        return new(Int(k))
+    end
+end
+
+@inline _nchunks(::CB.AbstractThreadedBackend, n::Int, nt::Int) = min(n, nt)
+@inline _nchunks(b::BalancedThreads, n::Int, nt::Int) = min(n, nt * b.chunks_per_thread)
+
 """
     run_chunks(f, n, backend, outputs::Written...)
 
@@ -141,15 +168,27 @@ run_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend, ::Written...) where {F}
     (n > 0 && f(1:Int(n)); nothing)
 
 # One chunk per thread: the loops this drives are short-bodied, so per-index scheduling costs more than
-# the body it schedules.
-function run_chunks(f::F, n::Integer, ::CB.AbstractThreadedBackend, ::Written...) where {F}
+# the body it schedules. `BalancedThreads` cuts more chunks and hands them out as threads finish.
+function run_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend, ::Written...) where {F}
     n = Int(n)
     n > 0 || return nothing
     nt = Threads.nthreads()
     nt == 1 && return run_chunks(f, n, CB.SerialBackend())
-    ranges = chunk_ranges(n, nt)
-    Threads.@threads for c in eachindex(ranges)
-        @inbounds f(ranges[c])
+    k = _nchunks(b, n, nt)
+    _threads_over(c -> f(_chunk_range(n, k, c)), k, b)
+    return nothing
+end
+
+@inline function _threads_over(g::G, k::Int, ::CB.AbstractThreadedBackend) where {G}
+    Threads.@threads for c in 1:k
+        g(c)
+    end
+    return nothing
+end
+
+@inline function _threads_over(g::G, k::Int, ::BalancedThreads) where {G}
+    Threads.@threads :greedy for c in 1:k
+        g(c)
     end
     return nothing
 end
@@ -180,16 +219,14 @@ map_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend) where {F} = [f(1:Int(n)
 
 # Results stay in chunk order, so the caller's combine sees the sequence the serial path produces. The
 # output vector is typed from `f` on an empty range, which the contract already requires it to accept.
-function map_chunks(f::F, n::Integer, ::CB.AbstractThreadedBackend) where {F}
+function map_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend) where {F}
     n = Int(n)
     n > 0 || return map_chunks(f, 0, CB.SerialBackend())
     nt = Threads.nthreads()
     nt == 1 && return map_chunks(f, n, CB.SerialBackend())
-    ranges = chunk_ranges(n, nt)
-    out = Vector{typeof(f(1:0))}(undef, length(ranges))
-    Threads.@threads for c in eachindex(ranges)
-        @inbounds out[c] = f(ranges[c])
-    end
+    k = _nchunks(b, n, nt)
+    out = Vector{typeof(f(1:0))}(undef, k)
+    _threads_over(c -> (@inbounds out[c] = f(_chunk_range(n, k, c)); nothing), k, b)
     return out
 end
 

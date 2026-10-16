@@ -156,6 +156,7 @@ Test.@testset "Asking for an element type gives back that element type, knowably
             ("pix2ang",             t_p2a,   Tuple{Int,Int}),
             ("pix2vec",             t_p2v,   Tuple{Int,Int}),
             ("stencil_scratch",     t_scr,   Tuple{Int,Int}),
+            ("structured_grid",     t_sgrid, Tuple{typeof(gl),Int}),
         )
             ok, ty = concrete_return(f, Tuple{Type{W},rest.parameters...})
             ok || println("    ", name, " (", W, ") -> ", ty)
@@ -163,10 +164,6 @@ Test.@testset "Asking for an element type gives back that element type, knowably
         end
     end
 
-    # The two grid constructors are absent from that list. A grid's type records whether each
-    # direction is periodic and whether each axis is uniform, and both are detected from the axis
-    # values, so the type cannot be known before the axes exist. The claim that still holds — the
-    # width asked for is the width built — is checked below.
     for W in (Float64, Float32)
         sg = FG.Connectivity.structured_grid(W, gl, 12)
         Test.@test eltype(FG.Grids.axis(sg, 1)) === W
@@ -259,6 +256,13 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
         :stencil_scratch, :interpolate!, :healpix_neighbor_ids,
         :plan_row, :nnodes, :derivative_order, :axis_length,
+        :to_planetary!, :to_local!, :tensor_to_local!,
+        :ring_structure, :ring_latitude, :eachring, :covered_area, :sky_fraction, :integrate,
+        :integrate!, :strain_rate!, :curl!, :divergence!, :strain_components,
+        :rotational_velocity!, :to_faces!, :to_centres!, :laplacian!, :apply_laplacian!,
+        :project_out_constant!, :restrict!, :prolong_add!,
+        :nfaces, :face_dims, :ncorners, :corner_offset, :corner_dims, :corner_to_face, :face_to_corner,
+        :cell_below, :cell_above, :face_below, :face_above,
     ])
 
     # Geometry, Axes and Stencils are per-point kernels almost throughout, so every name below has
@@ -274,11 +278,13 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         :vector_from_cartesian, :tensor_to_local, :tensor_from_local, :spherical_excess,
         :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
         :similar_geometry, :float_type, :similar_rotation, :metric_invariant_directions,
+        :scale_invariant_directions, :line_distance, :meridian_distance,
         :spacing_trait, :similar_axis, :uniform_axis, :wrap_sign, :coordinate, :index_at,
         :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets, :is_symmetric,
         :bandlimit, :nlat_for_bandlimit, :nlon_for_nlat, :npoints, :nrings, :axes_lengths,
         :colatitude, :geographic_latitude, :ang2pix, :pix2ang, :pix2vec, :vec2pix, :ring2nest,
         :ring_info, :admits_exact_bandlimited_quadrature, :nlon_in_ring, :ring_range,
+        :normal_coordinates, :wrap_longitude, :geocentric_latitude, :log_scale_gradients,
     ])
 
     # Names that build something, and names of things.
@@ -287,7 +293,8 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         [:AbstractGeometry, :AbstractCartesianGeometry, :AbstractSphericalGeometry,
          :AbstractEllipsoidalGeometry, :AbstractLonLatGeometry,
          :CartesianGeometry, :SphericalGeometry, :SpheroidGeometry,
-         :AbstractUniformAxis, :UniformAxis, :ConstantVector, :UniformSpacing, :NonuniformSpacing,
+         :AbstractUniformAxis, :UniformAxis, :PeriodicAxis, :ConstantVector, :UniformSpacing,
+         :NonuniformSpacing,
          :AbstractAnalyticAxis, :GeometricAxis, :PowerAxis,
          :AbstractStencil, :Axial, :VonNeumann, :Moore, :Diagonal, :Anisotropic, :Custom,
          :Vertex, :CellRadius, :MetricBall,
@@ -307,7 +314,7 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
         [:spherical_axes!, :spherical_points!, :spherical_quadrature!, :latitude_weights!,
          :icosahedral_vertices!, :cubed_sphere_points!, :yin_yang_panels!],
         [:run_chunks, :run_indices, :map_chunks, :reduce_indices, :exclusive_scan!],
-        [:allocate, :on_backend, :resolve, :local_backend],
+        [:allocate, :on_backend, :resolve, :local_backend, :BalancedThreads],
         # a loop's output declarations: types, and spans a distributed backend evaluates
         [:Written, :ByIndex, :ByBlock, :ByOffsets],
         # builds a NamedTuple from names given at runtime, so the caller chooses the cost
@@ -328,10 +335,14 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
          :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
          :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan, :StencilScratch,
-         :AbstractStencilPlan, :UniformStencilPlan, :TabulatedStencilPlan, :ConnectedScratch,
+         :AbstractStencilPlan, :UniformStencilPlan, :TabulatedStencilPlan, :MaskedStencilPlan, :ConnectedScratch,
          :MeshNeighbors, :AbstractCellAddress, :CartesianCells, :FlatCells,
          :AbstractAdjacency, :IndexStencilNeighbors, :FormulaNeighbors, :StoredMeshNeighbors,
-         :AbstractCandidateSource, :SeparableWindow, :IndexedCandidates],
+         :AbstractCandidateSource, :SeparableWindow, :IndexedCandidates,
+         :AbstractRingStructure, :TensorRings, :IsoLatitudeRings, :NoRings, :StencilPlans,
+         :FaceIndexedGrid, :AbstractBoundaryCondition, :Dirichlet, :Neumann, :SeparableMetrics, :DenseMetrics,
+         :FaceMetrics, :LaplacianCoefficients, :ComponentNullspace, :metric_layout, :n_rotation_components,
+         :rotation_pairs],
         # bulk and one-off operations, away from the per-cell hot paths
         [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
          :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
@@ -341,9 +352,10 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
          :structured_grid,
          :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
          :interpolate,
-         # staggered: a whole-array sweep, or a grid built at a location
+         # a grid built at a location
          :center_grid, :grid_at, :axis_at, :locations, :location_at, :center_location,
-         :divergence, :divergence!, :curl, :curl!, :gradient,
+         # allocating forms of the vector operators
+         :divergence, :curl, :gradient, :strain_rate,
          :corners, :corner_coords, :has_corners, :neighbor_nbrs, :distance, :embedded_points,
          :cell_list,
          :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
@@ -361,7 +373,10 @@ Test.@testset "Every public name is allocation-checked or has a stated reason no
     # grid constructors
     [:structured_grid, :unstructured_grid],
         # builds a weight set, which is the request
-        [:stencil_plan],
+        [:stencil_plan, :masked_stencil_plan, :stencil_plans],
+        # builds a staggered metric, an operator or a level of its hierarchy, or the arrays they act on
+        [:face_metrics, :laplacian_coefficients, :coarsen, :galerkin_coefficients, :allocate_faces,
+         :allocate_corners, :metric_array, :corner_mask, :face_coordinates, :corner_coordinates],
         # extension hooks, which throw until their trigger package is loaded
         [:spatial_index, :index_within!, :has_spatial_index],
         # returns the axis itself, so its type varies by direction: a runtime `d` cannot be stable

@@ -314,7 +314,7 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     # Rotating a rectilinear spherical grid warps it, and that warping is a formula, so the result
     # stores the mesh and the rotation and evaluates a cell's position where it is asked for.
     sph = FG.Geometry.SphericalGeometry(6.371e6)
-    λa = range(0, 2π; length = 25)[1:24]
+    λa = FG.Axes.PeriodicAxis(0.0, 2π, 24)
     φa = range(-1.2, 1.2; length = 13)
     gs = GR.StructuredGrid(sph, λa, φa)
     gr = GR.unrotate(gs, rot)
@@ -377,7 +377,7 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     gg = FG.Grids.StructuredGrid(sg, collect(range(0, 2π; length = 40)),
                            collect(range(-1.2, 1.2; length = 30)))
     i, j = 7, 11
-    Δλ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 1), i, FG.Grids.period(gg, 1))
+    Δλ = FG.Grids.cell_width(gg, 1, i)
     f = FG.Discretization.faces(FG.Grids.coordinates(gg, 2))
     gl = FG.SphericalSampling._gauss_legendre_μ(16)
     mid, half = (f[j] + f[j + 1]) / 2, (f[j + 1] - f[j]) / 2
@@ -435,6 +435,24 @@ Test.@testset "Oblate spheroid geometry" begin
     for (φa, φb) in ((0.0, 0.3), (-0.9, 0.2), (0.5, 1.4), (-1.5, 1.5))
         Test.@test G.distance(g, (0.4, φa), (0.4, φb)) ≈ meridian_arc(g, φa, φb) atol = 1e-3
     end
+    # The meridian distance from the equator is the same arc, odd in φ, and continues past a pole.
+    Test.@test G.meridian_distance(g, π / 2) ≈ 10001965.729 atol = 1e-3
+    for φb in (0.3, -0.9, 1.4, 1.5, π / 2)
+        Test.@test G.meridian_distance(g, φb) ≈ meridian_arc(g, 0.0, φb) rtol = 1e-13
+    end
+    Test.@test G.meridian_distance(g, -0.7) == -G.meridian_distance(g, 0.7)
+    Test.@test G.meridian_distance(g, π) ≈ 2 * G.meridian_distance(g, π / 2) rtol = 1e-15
+    Test.@test G.meridian_distance(G.SpheroidGeometry(6371000.0, 0.0), 0.8) ≈ 6371000.0 * 0.8 rtol = 1e-15
+    # Along latitude the distance is the meridian's plus the height times the step; along longitude and
+    # height, the scale factor times the step.
+    m(φ) = G.meridian_distance(g, φ)
+    Test.@test G.line_distance(g, (0.1, 0.3), 2, 0.2, 0.9) == m(0.9) - m(0.2)
+    Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 2, 0.9, 0.2) == m(0.2) - m(0.9) + 500.0 * (0.2 - 0.9)
+    Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 1, 0.2, 0.9) ==
+               G.scale_factors(g, (0.1, 0.3, 500.0))[1] * (0.9 - 0.2)
+    Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 3, 10.0, 25.0) == 15.0
+    Test.@test G.line_distance(G.SphericalGeometry(2.0), (0.1, 0.3), 1, 0.2, 0.9) == 2.0 * cos(0.3) * (0.9 - 0.2)
+    Test.@test G.line_distance(G.CartesianGeometry(), (1.0, 2.0), 2, 0.5, 3.0) == 2.5
     # Symmetry, the zero case, and a finite answer for a near-antipodal pair.
     p1, p2 = (0.3, -0.4), (1.9, 0.55)
     Test.@test G.distance(g, p1, p2) ≈ G.distance(g, p2, p1)
@@ -562,6 +580,186 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
     end
 end
 
+Test.@testset "Normal coordinates: the geodesic's length along its initial direction" begin
+    G = FG.Geometry
+    R = 6.371e6
+    # The destination of the great circle leaving (λ₁, φ₁) at azimuth α through the central angle σ.
+    function destination(λ1, φ1, α, σ)
+        φ2 = asin(sin(φ1) * cos(σ) + cos(φ1) * sin(σ) * cos(α))
+        return (λ1 + atan(sin(α) * sin(σ) * cos(φ1), cos(σ) - sin(φ1) * sin(φ2)), φ2)
+    end
+    # The unit vector to `p` on the frame at `c`, at 256 bits from the very same inputs, so a difference
+    # from it is the function's own error.
+    function frame_ref(c, p)
+        λ1, φ1, λ2, φ2 = big(c[1]), big(c[2]), big(p[1]), big(p[2])
+        x = (cos(φ2) * cos(λ2), cos(φ2) * sin(λ2), sin(φ2))
+        e = (-sin(λ1), cos(λ1), big(0))
+        n = (-sin(φ1) * cos(λ1), -sin(φ1) * sin(λ1), cos(φ1))
+        u = (cos(φ1) * cos(λ1), cos(φ1) * sin(λ1), sin(φ1))
+        return sum(e .* x), sum(n .* x), sum(u .* x)
+    end
+    centres = ((-2.9, -1.3), (0.4, 0.2), (1.7, 1.45), (3.0, -0.6))
+    azimuths = (0.3, 1.9, 3.5, 5.6)
+    angles = (1 / R, 1e-4, 3e-2, 0.8)          # 1 m to 5000 km
+
+    for T in (Float64, Float32)
+        geo = G.SphericalGeometry(T(R))
+        worst = 0.0
+        for (λ1, φ1) in centres, α in azimuths, σ in angles
+            c = (T(λ1), T(φ1))
+            p = map(T, destination(big(λ1), big(φ1), big(α), big(σ)))
+            p == c && continue                 # one metre can round onto the centre in Float32
+            pe, pn, pz = frame_ref(c, p)
+            s = atan(hypot(pe, pn), pz)
+            want = (big(T(R)) * s * pe / hypot(pe, pn), big(T(R)) * s * pn / hypot(pe, pn))
+            got = G.normal_coordinates(geo, c, p)
+            Test.@test got isa NamedTuple{(:λ, :φ),NTuple{2,T}}
+            worst = max(worst, Float64(hypot(got.λ - want[1], got.φ - want[2]) / hypot(want...)))
+            # Its length is the distance, whatever the separation.
+            Test.@test hypot(got...) ≈ G.distance(geo, c, p) rtol = 8eps(T)
+        end
+        # A few `eps(T)` at every separation, one metre included.
+        Test.@test worst < 16eps(T)
+    end
+
+    # The forward problem, an independent oracle for the direction convention: leaving at azimuth `α`
+    # (east of north) through `σ` comes back as `R·σ·(sin α, cos α)`.
+    geo = G.SphericalGeometry(R)
+    for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8, 3.0)
+        p = map(Float64, destination(big(λ1), big(φ1), big(α), big(σ)))
+        got = G.normal_coordinates(geo, (λ1, φ1), p)
+        Test.@test got.λ ≈ R * σ * sin(α) rtol = 1e-9 atol = 1e-9 * R * σ
+        Test.@test got.φ ≈ R * σ * cos(α) rtol = 1e-9 atol = 1e-9 * R * σ
+    end
+    # Along a meridian there is no eastward part, and along the equator no northward one, exactly.
+    Test.@test G.normal_coordinates(geo, (0.7, 0.2), (0.7, 0.3)).λ == 0.0
+    Test.@test G.normal_coordinates(geo, (0.7, 0.2), (0.7, 0.3)).φ ≈ R * 0.1
+    Test.@test G.normal_coordinates(geo, (0.7, 0.0), (0.9, 0.0)).φ == 0.0
+    Test.@test G.normal_coordinates(geo, (0.7, 0.0), (0.9, 0.0)).λ ≈ R * 0.2
+    # Across the date line the short way round, and the centre itself is the origin.
+    Test.@test G.normal_coordinates(geo, (π - 0.01, 0.0), (-π + 0.01, 0.0)).λ ≈ R * 0.02
+    Test.@test G.normal_coordinates(geo, (0.3, 0.4), (0.3, 0.4)) === (λ = 0.0, φ = 0.0)
+
+    # Either side of the seam, each longitude stored in `[0, 2π)`: the two stored values differ by
+    # nearly a turn, and the gap between them keeps its precision.
+    for T in (Float64, Float32)
+        gt = G.SphericalGeometry(T(R))
+        worst = 0.0
+        n = 0
+        for λ1 in (2π - 1e-5, 1e-5), α in azimuths, σ in (1e-4, 3e-3)
+            c = (T(λ1), T(0.4))
+            d = destination(big(c[1]), big(c[2]), big(α), big(σ))
+            p = (T(mod(d[1], 2big(π))), T(d[2]))
+            abs(p[1] - c[1]) > π || continue          # the pairs that straddle the seam
+            n += 1
+            pe, pn, pz = frame_ref(c, p)
+            s = atan(hypot(pe, pn), pz)
+            want = (big(T(R)) * s * pe / hypot(pe, pn), big(T(R)) * s * pn / hypot(pe, pn))
+            got = G.normal_coordinates(gt, c, p)
+            worst = max(worst, Float64(hypot(got.λ - want[1], got.φ - want[2]) / hypot(want...)))
+            Test.@test abs(G.distance(gt, c, p) - big(T(R)) * s) / (big(T(R)) * s) < 16eps(T)
+        end
+        Test.@test n == 8                             # two azimuths cross from each side, at each σ
+        Test.@test worst < 16eps(T)
+    end
+
+    # One coordinate is the equator's signed arc.
+    Test.@test keys(G.normal_coordinates(geo, (0.3,), (0.1,))) == (:λ,)
+    Test.@test G.normal_coordinates(geo, (0.3,), (0.1,)).λ ≈ R * (big(0.1) - big(0.3)) rtol = 2eps()
+    Test.@test G.normal_coordinates(G.SpheroidGeometry(), (3.0,), (-3.0,)).λ ≈
+               G.semimajor_axis(G.SpheroidGeometry()) * (2π - 6.0)
+
+    # Three coordinates: the chord on the local frame, whose length is the chord distance.
+    for T in (Float64, Float32), (λ1, φ1) in centres, α in azimuths, σ in angles[1:3]
+        g3 = G.SphericalGeometry(T(R))
+        c = (T(λ1), T(φ1), T(R))
+        q = map(T, destination(big(λ1), big(φ1), big(α), big(σ)))
+        p = (q[1], q[2], T(R + 250))
+        pe, pn, pz = frame_ref(c, p)
+        want = (big(p[3]) * pe, big(p[3]) * pn, big(p[3]) * pz - big(c[3]))
+        got = G.normal_coordinates(g3, c, p)
+        Test.@test keys(got) == (:λ, :φ, :r)
+        Test.@test maximum(abs.(big.(Tuple(got)) .- want)) / hypot(want...) < 16eps(T)
+        # The chord distance is its length, to the same precision.
+        Test.@test abs(G.distance(g3, c, p) - hypot(want...)) / hypot(want...) < 16eps(T)
+    end
+    # At a moderate separation, where the embedded chord has digits to spare, the two constructions are
+    # one quantity.
+    let c = (0.4, 0.2, R), p = (0.45, 0.17, R + 3000.0)
+        Test.@test collect(Tuple(G.normal_coordinates(geo, c, p))) ≈
+                   collect(Tuple(G.local_displacement(geo, c, p))) rtol = 1e-9
+    end
+
+    # The spheroid: Vincenty's distance along Vincenty's azimuth.
+    spd = G.SpheroidGeometry()
+    for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8)
+        c = (λ1, φ1)
+        p = map(Float64, destination(big(λ1), big(φ1), big(α), big(σ)))
+        got = G.normal_coordinates(spd, c, p)
+        Test.@test hypot(got...) ≈ G.distance(spd, c, p) rtol = 1e-14
+        # Zero flattening is the sphere.
+        Test.@test collect(Tuple(G.normal_coordinates(G.SpheroidGeometry(R, 0.0), c, p))) ≈
+                   collect(Tuple(G.normal_coordinates(geo, c, p))) rtol = 1e-12
+    end
+    Test.@test G.normal_coordinates(spd, (0.7, 0.2), (0.7, 0.3)).λ == 0.0
+    Test.@test G.normal_coordinates(spd, (0.7, 0.0), (0.9, 0.0)).φ == 0.0
+    Test.@test G.normal_coordinates(spd, (0.7, 0.0), (0.9, 0.0)).λ ≈ spd.a * 0.2
+    # Ten metres keeps its digits in Float32: it agrees with Float64 at the same inputs to a few
+    # `eps(Float32)`.
+    let s32 = G.SpheroidGeometry(Float32(spd.a), Float32(spd.f)), c = (0.4f0, 0.6f0), p = (0.4000013f0, 0.6000009f0)
+        g32 = G.normal_coordinates(s32, c, p)
+        g64 = G.normal_coordinates(spd, Float64.(c), Float64.(p))
+        Test.@test hypot(g32.λ - g64.λ, g32.φ - g64.φ) / hypot(g64...) < 64eps(Float32)
+        Test.@test G.distance(s32, c, p) ≈ G.distance(spd, Float64.(c), Float64.(p)) rtol = 64eps(Float32)
+    end
+
+    # The plane: the coordinate difference.
+    Test.@test G.normal_coordinates(G.CartesianGeometry(), (1.0, 2.0), (1.5, 1.0)) === (x = 0.5, y = -1.0)
+    Test.@test G.normal_coordinates(G.CartesianGeometry(), (1, 2, 3), [2, 2, 2]) === (x = 1.0, y = 0.0, z = -1.0)
+
+    # On a grid, the pair is first brought to its nearest image, so a periodic seam is one spacing.
+    let gc = FG.Grids.StructuredGrid(G.CartesianGeometry(), 0.0:1.0:9.0, 0.0:1.0:4.0;
+                                     topology = (FG.Grids.Periodic(), FG.Grids.Bounded()))
+        Test.@test G.normal_coordinates(gc, (1, 2), (10, 3)) === (x = -1.0, y = 1.0)
+        Test.@test G.normal_coordinates(gc, CartesianIndex(1, 2), CartesianIndex(10, 3)) === (x = -1.0, y = 1.0)
+    end
+    let gs = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 24), range(-1.2, 1.2; length = 13))
+        Test.@test collect(Tuple(G.normal_coordinates(gs, (24, 5), (1, 6)))) ≈
+                   collect(Tuple(G.normal_coordinates(geo, FG.Grids.coords(Tuple, gs, 24, 5),
+                                                      FG.Grids.coords(Tuple, gs, 1, 6)))) rtol = 1e-13
+        Test.@test hypot(G.normal_coordinates(gs, (24, 5), (1, 6))...) ≈ G.distance(gs, (24, 5), (1, 6))
+    end
+
+    # Concrete and allocation-free, as a per-pair quantity in a filter's inner loop must be.
+    Test.@test Test.@inferred(G.normal_coordinates(geo, (0.1, 0.2), (0.3, 0.4))) isa NamedTuple
+    Test.@test Test.@inferred(G.normal_coordinates(spd, (0.1, 0.2), (0.3, 0.4))) isa NamedTuple
+    Test.@test _alloc(G.normal_coordinates, geo, (0.1, 0.2), (0.3, 0.4)) == 0
+    Test.@test _alloc(G.normal_coordinates, spd, (0.1, 0.2), (0.3, 0.4)) == 0
+end
+
+Test.@testset "A longitude is reduced to [0, 2π)" begin
+    G = FG.Geometry
+    for (λ, want) in ((0.5, 0.5), (-0.5, 2π - 0.5), (7.0, 7.0 - 2π), (2π, 0.0), (-4π + 1.0, 1.0))
+        Test.@test G.wrap_longitude(λ) ≈ want atol = 1e-15
+    end
+    # A remainder that rounds up to the whole turn is the turn's start.
+    Test.@test G.wrap_longitude(-eps(2π) / 4) === 0.0
+    Test.@test G.wrap_longitude(-0.5f0) === mod(-0.5f0, Float32(2π))
+    Test.@test G.wrap_longitude(3) === 3.0
+    Test.@test _alloc(G.wrap_longitude, -0.5) == 0
+    # A direction a hair below the x-axis has longitude 0 from every emitter, never a whole turn.
+    SS = FG.SphericalSampling
+    Test.@test SS._unit_lonlat(1.0, -1e-300, 0.0)[1] === 0.0
+    Test.@test SS._yin_yang_rotate(Float64(π), -1e-300)[1] === 0.0
+    Test.@test SS.vec2pix(4, (1.0, -1e-300, 0.0)) == SS.vec2pix(4, (1.0, 0.0, 0.0))
+    # A rotated grid reports its longitudes, and its span, in the same range.
+    sph = G.SphericalGeometry()
+    rg = FG.Grids.rotate(FG.Grids.StructuredGrid(sph, range(0.0, 2π * 23 / 24; length = 24), range(-1.4, 1.4; length = 12)),
+                         G.PoleRotation(2.0, 0.6))
+    Test.@test FG.Grids.bounds(rg, 1) == (0.0, 2π)
+    Test.@test all(0 ≤ FG.Grids.coords(rg, Tuple(I)...)[1] < 2π for I in CartesianIndices(FG.Grids.size_tuple(rg)))
+end
+
 Test.@testset "cartesian_to_geodetic inverts geodetic_to_cartesian" begin
     G = FG.Geometry
     for spd in (G.SpheroidGeometry(), G.SpheroidGeometry(6378137.0, 0.0), G.SpheroidGeometry(1.0, 0.3))
@@ -606,7 +804,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     GE = FG.Geometry
     geo = GE.SpheroidGeometry()
     a, e² = GE.semimajor_axis(geo), GE.eccentricity²(geo)
-    λ8 = collect(range(0, 2π; length = 9)[1:8])
+    λ8 = FG.Axes.PeriodicAxis(0.0, 2π, 8)
     φ7 = collect(range(-π / 2, π / 2; length = 7))
     h4 = collect(range(0.0, 3000.0; length = 4))
     g1 = FG.Grids.StructuredGrid(geo, λ8)
@@ -614,7 +812,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     g3 = FG.Grids.StructuredGrid(geo, λ8, φ7, h4)
     g4 = FG.Grids.StructuredGrid(geo, λ8, φ7, h4, [0.0, 2.0])
     Test.@test size.((g1, g2, g3, g4)) == ((8,), (8, 7), (8, 7, 4), (8, 7, 4, 2))
-    # Longitude closes the circle, so it is periodic without being asked; latitude is not.
+    # A periodic longitude axis wraps; latitude does not.
     Test.@test FG.Grids.isperiodic(g2, 1) && !FG.Grids.isperiodic(g2, 2)
     Test.@test FG.Grids.coordinate_names(g3) == (:λ, :φ, :h)
     Test.@test FG.Grids.coords(g3, 2, 3, 2) == (λ = λ8[2], φ = φ7[3], h = h4[2])
@@ -654,7 +852,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     e = sqrt(e²)
     A_exact = 2π * a^2 * (1 + (1 - e²) / e * atanh(e))
     for n in (4, 24, 96)
-        gn = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = n + 1)[1:n]),
+        gn = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, n),
                                      collect(range(-π / 2, π / 2; length = n ÷ 2 + 1)))
         Test.@test sum(FG.Grids.measure(gn)) ≈ A_exact rtol = 1e-13
     end
@@ -672,7 +870,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     # agrees with a brute-force geodesic scan cell for cell, and a ball too small to reach anything
     # comes back empty.
     let gb = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 25)[1:24]),
-                                     collect(range(-1.2, 1.2; length = 13)))
+                                     collect(range(-1.2, 1.2; length = 13)); periodic = true)
         for (ci, r) in (((5, 6), 1.0e6), ((5, 6), 3.0e6), ((1, 1), 2.0e6), ((24, 13), 2.0e6))
             p0 = FG.Grids.coords(Tuple, gb, ci...)
             want = count(GE.distance(geo, p0, FG.Grids.coords(Tuple, gb, i, j)) ≤ r

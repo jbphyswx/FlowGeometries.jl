@@ -73,7 +73,9 @@ end
 """
     sampling(grid) -> AbstractSphericalSampling | Nothing
 
-The node-set recipe `grid`'s axes were built from, or `nothing` where they were given directly.
+The node-set recipe `grid`'s cells come from, or `nothing` where its coordinates were given directly. A
+pixelization is its recipe: a HEALPix grid answers `HEALPixSampling(nside)`, a cubed-sphere, Yin–Yang or
+icosahedral grid its own sampling, a ring grid the reduced Gaussian rule it was built from.
 
 Coordinates do not determine it: Gauss–Legendre and an arbitrary lat–lon grid are the same numbers to
 within round-off, and only the recipe says which quadrature is exact on them. Keeping it means a grid
@@ -207,23 +209,19 @@ Write positional coordinates into a preallocated `AbstractVector` (`length(out) 
     return out
 end
 
-# Auto-detect axis-1 periodicity: on a spherical grid axis 1 is longitude, and a longitude axis
-# that closes the full 2π circle (to within one cell) is periodic; a regional span is bounded.
-# Cartesian axes are opt-in only, having no analogous auto-detectable physical closure.
-#
-# Compares magnitudes, so the answer is the same in either storage order.
-_auto_periodic_x(::Geometry.AbstractCartesianGeometry, x::AbstractVector) = false
-_auto_periodic_x(
-    ::Union{Geometry.AbstractSphericalGeometry,Geometry.AbstractEllipsoidalGeometry},
-    x::AbstractVector{T},
-) where {T<:AbstractFloat} = _closes_circle(x)
+# A direction's topology from its axis type: an `Axes.PeriodicAxis` wraps, any other axis ends.
+@inline _axis_topology(::Axes.PeriodicAxis) = Periodic()
+@inline _axis_topology(::AbstractVector) = Bounded()
 
-function _closes_circle(x::AbstractVector{T}) where {T<:AbstractFloat}
-    length(x) > 2 || return false
-    dλ = abs(x[2] - x[1])
-    iszero(dλ) && return false
-    return isapprox(abs(x[end] - x[1]) + dλ, T(2π); atol = dλ)
-end
+# A caller's topology for a direction, which a periodic axis requires to be `Periodic`.
+@inline _agree_topology(t::AbstractTopology, ::AbstractVector, ::Int) = t
+@inline _agree_topology(t::Periodic, ::Axes.PeriodicAxis, ::Int) = t
+@noinline _agree_topology(::Bounded, ::Axes.PeriodicAxis, d::Int) = throw(ArgumentError(
+    "direction $d is a PeriodicAxis, which wraps; a bounded direction takes another axis type"))
+
+_grid_topology(::Val{N}, ::Nothing, ax::Tuple) where {N} = map(_axis_topology, ax)
+_grid_topology(::Val{N}, topo, ax::Tuple) where {N} =
+    map(_agree_topology, _as_topology(Val(N), topo), ax, ntuple(identity, Val(N)))
 
 """
     _wrap_sign(x) -> ±1
@@ -251,15 +249,19 @@ generically be rebuilt at a new eltype. That case becomes an [`Axes.UniformAxis`
 also how a `Float32` axis stops carrying `Float64` internals. Call [`Axes.uniform_axis`](@ref) to
 convert at the call site.
 
-Four methods, ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
+Methods ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
 `AbstractVector{T}`, so the parameterized range form is needed to break that tie):
 - `AbstractRange{T}` / `AbstractVector{T}`: passthrough, zero cost, type preserved.
 - `AbstractRange` (wrong eltype): rebuilt as `UniformAxis{T}`, still uniform and now `isbits`.
+- [`Axes.PeriodicAxis`](@ref) (wrong eltype): rebuilt as a `PeriodicAxis{T}` of the same period.
 - `AbstractVector` (wrong eltype): copied with `similar`, so a device-resident array stays in its own
   storage.
 """
 _to_axis(::Type{T}, x::AbstractRange{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractRange) where {T<:AbstractFloat} = Axes.uniform_axis(T, x)
+_to_axis(::Type{T}, x::Axes.PeriodicAxis{T}) where {T<:AbstractFloat} = x
+_to_axis(::Type{T}, x::Axes.PeriodicAxis) where {T<:AbstractFloat} =
+    Axes.PeriodicAxis{T}(first(x), Axes.wrap_sign(x) * Axes.period(x), length(x))
 _to_axis(::Type{T}, x::AbstractVector{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = copyto!(similar(x, T), x)
 
@@ -342,22 +344,6 @@ end
 
 @inline _cartesian_period(x::AbstractRange{T}) where {T<:AbstractFloat} =
     length(x) < 2 ? one(T) : T(length(x)) * abs(T(step(x)))
-
-"""
-    _curvilinear_topology(geometry, x, topo) -> NTuple{2,AbstractTopology}
-
-Per-direction closure. Absent a caller's choice, direction 1 is auto-detected from the first row of
-centres read as a longitude-like axis, as [`StructuredGrid`](@ref) does.
-"""
-function _curvilinear_topology(
-    geometry::Geometry.AbstractGeometry, x::AbstractArray{<:Any,N}, topo,
-) where {N}
-    topo === nothing || return _as_topology(Val(N), topo)
-    # Auto-detection reads direction 1 along its own line through the first cell of every other.
-    line = @view x[:, ntuple(_ -> 1, Val(N - 1))...]
-    wraps = size(x, 1) ≥ 3 && _auto_periodic_x(geometry, line)
-    return ntuple(d -> d == 1 && wraps ? Periodic() : Bounded(), Val(N))
-end
 
 """
     _curvilinear_periods(geometry, centers, topology, period) -> NTuple{N,T}
@@ -673,13 +659,19 @@ entering as plain widths. A `CartesianGeometry` measure is the product of the pe
   axes.
 - `topology`: per-direction closure. Accepts [`Periodic`](@ref)/[`Bounded`](@ref) instances, a tuple
   of them, a `Bool`, or a tuple of `Bool`s; a single value or a short tuple applies to the leading
-  directions and the rest are `Bounded`. When omitted, direction 1 is auto-detected — on a spherical
-  grid a longitude axis spanning the full circle is `Periodic` and a regional span is not, in either
-  storage order — and every other direction is `Bounded`.
-- `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used:
-  `2π` for spherical longitude, and `extent + one spacing` for a Cartesian direction, which is exact
-  for a uniform axis (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer,
-  its seam gap being undetermined by its samples, so `period` is required there.
+  directions and the rest are `Bounded`. When omitted, a direction is `Periodic` where its axis is an
+  [`Axes.PeriodicAxis`](@ref) and `Bounded` otherwise. A `PeriodicAxis` direction declared `Bounded`
+  raises.
+- `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used: a
+  `PeriodicAxis`'s period (which on spherical longitude is `2π`), `2π` for any other spherical
+  longitude, and `extent + one spacing` for a Cartesian direction, which is exact for a uniform axis
+  (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer, its seam gap being
+  undetermined by its samples, so `period` is required there. A period given for a `PeriodicAxis`
+  direction is its own.
+
+A wrapping direction whose axis is a `PeriodicAxis` has a seam one step wide, so its cell widths, faces
+and stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
+whatever seam gap its period leaves.
 - `periodic`: the `topology` keyword under another name, for a `Bool` or a tuple of them.
 - `sampling`: the [`SphericalSampling.AbstractSphericalSampling`](@ref) the axes came from, kept on
   the grid (see [`sampling`](@ref)). On a 2-D spherical grid a sampling with latitude quadrature
@@ -724,10 +716,7 @@ function _structured_grid(
     ax = ntuple(d -> _to_axis(T, axes_in[d]), Val(N))
     dims = ntuple(d -> length(ax[d]), Val(N))
 
-    tp = topo === nothing ?
-        ntuple(d -> (d == 1 && _auto_periodic_x(geometry, ax[1])) ? Periodic() : Bounded(), Val(N)) :
-        _as_topology(Val(N), topo)
-
+    tp = _grid_topology(Val(N), topo, ax)
     per = _wrap_periods(geometry, ax, tp, period)
     # A bounded direction passes `nothing`, selecting the width kernel's non-wrapping branch.
     period_args = ntuple(d -> _is_periodic(tp[d]) ? per[d] : nothing, Val(N))
@@ -763,12 +752,15 @@ function _wrap_periods(
         if !_is_periodic(tp[d])
             zero(T)
         elseif given[d] !== nothing
-            T(given[d])
+            _given_period(ax[d], T(given[d]))
         else
             _inferred_period(geometry, ax[d], d)
         end
     end
 end
+
+_given_period(::AbstractVector, P::T) where {T} = P
+_given_period(x::Axes.PeriodicAxis, P::T) where {T} = T(Axes.own_period(x, P))
 
 _period_tuple(::Val{N}, ::Type{T}, ::Nothing) where {N,T} = ntuple(_ -> nothing, Val(N))
 _period_tuple(::Val{N}, ::Type{T}, p::Real) where {N,T} =
@@ -786,6 +778,20 @@ _inferred_period(
     d == 1 ? T(2π) : throw(ArgumentError(
         "direction $d of a spherical grid has no intrinsic period; pass `period` explicitly",
     ))
+
+# A periodic axis's period is its own; on longitude that has to be the circle.
+function _inferred_period(
+    ::Union{Geometry.AbstractSphericalGeometry{T},Geometry.AbstractEllipsoidalGeometry{T}},
+    x::Axes.PeriodicAxis, d::Int,
+) where {T}
+    P = T(Axes.period(x))
+    (d != 1 || P == T(2π)) || throw(ArgumentError(
+        "a longitude PeriodicAxis covers 2π = $(T(2π)); this one covers $P"))
+    return P
+end
+
+_inferred_period(::Geometry.AbstractCartesianGeometry{T}, x::Axes.PeriodicAxis, ::Int) where {T} =
+    T(Axes.period(x))
 
 # "extent + one spacing" is exact only when there IS one spacing; on a stretched axis the samples do
 # not determine the seam gap, so it must be given.

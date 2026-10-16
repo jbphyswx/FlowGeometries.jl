@@ -28,7 +28,7 @@ Test.@testset "StructuredGrid preserves uniform spacing" begin
     Test.@test out == [2000.0, 4000.0]
     Test.@test FG.Grids.isactive(grid, 1, 1)
     Test.@test FG.Grids.grid_geometry(grid) === geom
-    Test.@test !FG.Grids.isperiodic(grid, 1)  # Cartesian not auto-periodic
+    Test.@test !FG.Grids.isperiodic(grid, 1)  # a plain axis is bounded unless asked
 end
 
 Test.@testset "StructuredGrid with Vector axes is still structured" begin
@@ -42,19 +42,25 @@ Test.@testset "StructuredGrid with Vector axes is still structured" begin
     Test.@test FG.Grids.size_tuple(grid) == (5, 4)
 end
 
-Test.@testset "Spherical StructuredGrid auto-periodic longitude" begin
+Test.@testset "A periodic longitude axis wraps, a plain longitude axis is bounded" begin
     R = 6.371e6
     geom = FG.Geometry.SphericalGeometry(R)
-    # Full-circle longitude (closed to within one cell)
     nλ, nφ = 8, 5
     dλ = 2π / nλ
-    lon = range(0.0; step = dλ, length = nλ)
+    lon = FG.Axes.PeriodicAxis(0.0, 2π, nλ)
     lat = range(-π / 4, π / 4; length = nφ)
     grid = FG.Grids.StructuredGrid(geom, lon, lat, trues(nλ, nφ))
     Test.@test FG.Grids.isperiodic(grid, 1)
     Test.@test !FG.Grids.isperiodic(grid, 2)
+    Test.@test FG.Grids.period(grid, 1) == 2π
+    Test.@test FG.Grids.axis(grid, 1) === lon
     Test.@test FG.Grids.isuniform(grid, 1)
-    Test.@test FG.Grids.spacing(grid, 1) ≈ dλ
+    Test.@test FG.Grids.spacing(grid, 1) == dλ
+    Test.@test FG.Grids.measure_factors(grid)[1] isa FG.Axes.ConstantVector
+    # The same samples in a range say nothing about the seam, so they are bounded unless asked.
+    plain = range(0.0; step = dλ, length = nλ)
+    Test.@test !FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat), 1)
+    Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat; periodic = true), 1)
     Test.@test all(FG.Grids.area(grid, i, j) > 0 for i in 1:nλ, j in 1:nφ)
     p = FG.Grids.coords(grid, 1, 1)
     Test.@test keys(p) == (:λ, :φ)
@@ -142,29 +148,29 @@ Test.@testset "Cell measure is the exact integral of the metric over each cell" 
     # A spherical cell is `R²·Δλ·(sin φ₊ − sin φ₋)` between its faces, on a nonuniform grid.
     λ = collect(range(0.0; step = 2π / 12, length = 12))
     φ = cumsum([-1.0, 0.2, 0.5, 0.15, 0.4, 0.3])
-    g = FG.Grids.StructuredGrid(sgeo, λ, φ, trues(length(λ), length(φ)))
-    λper = FG.Grids.isperiodic(g, 1) ? 2π : nothing
+    g = FG.Grids.StructuredGrid(sgeo, λ, φ, trues(length(λ), length(φ)); periodic = true)
+    λper = 2π
     fφ = bfaces(φ)
     ref = [Float64(big(R)^2 * cw(λ, i, λper) * band(fφ, j)) for i in eachindex(λ), j in eachindex(φ)]
     Test.@test FG.Grids.measure(g) ≈ ref rtol = 1e-14
 
     # A shell cell is `Δλ·(sin φ₊ − sin φ₋)·(r₊³ − r₋³)/3`.
     r = collect(6.30e6:1.0e4:6.34e6)
-    g3 = FG.Grids.StructuredGrid(sgeo, λ, φ, r, trues(length(λ), length(φ), length(r)))
+    g3 = FG.Grids.StructuredGrid(sgeo, λ, φ, r, trues(length(λ), length(φ), length(r)); periodic = true)
     fr = bfaces(r)
     ref3 = [Float64(cw(λ, i, λper) * band(fφ, j) * (fr[k + 1]^3 - fr[k]^3) / 3)
             for i in eachindex(λ), j in eachindex(φ), k in eachindex(r)]
     Test.@test FG.Grids.measure(g3) ≈ ref3 rtol = 1e-14
 
     # A degenerate angular axis contributes no differential, so the measure is the arc element.
-    zonal = FG.Grids.StructuredGrid(sgeo, λ, [0.4], trues(length(λ), 1))
+    zonal = FG.Grids.StructuredGrid(sgeo, λ, [0.4], trues(length(λ), 1); periodic = true)
     Test.@test FG.Grids.measure(zonal) ≈ [sgeo.R * cos(0.4) * cw(λ, i, 2π) for i in eachindex(λ), _ in 1:1]
     merid = FG.Grids.StructuredGrid(sgeo, [0.3], φ, trues(1, length(φ)))
     Test.@test FG.Grids.measure(merid) ≈ [sgeo.R * cw(φ, j) for _ in 1:1, j in eachindex(φ)]
 
     # A whole sphere's cells sum to 4πR², whether the outer faces fall on the poles or beyond them:
     # a node on a pole owns its polar cap.
-    λ16 = collect(range(0.0; step = 2π / 16, length = 16))
+    λ16 = FG.Axes.PeriodicAxis(0.0, 2π, 16)
     for φs in (collect(range(-π / 2 + π / 64, π / 2 - π / 64; length = 32)),
                collect(range(-π / 2, π / 2; length = 33)),
                collect(range(π / 2, -π / 2; length = 33)))
@@ -332,14 +338,14 @@ Test.@testset "Curvilinear areas hold two corner rows, not the whole field" begi
         a = FG.Grids.measure(g)
         Test.@test size(a) == (n, n)
         Test.@test all(>(0), a)
-        # Reference: the same two triangles per cell, from a full materialized corner field.
+        # Reference: the same two triangles per cell in BigFloat, from the corners the kernel reads.
         xc, yc = FG.Grids._centers_to_corners(λ), FG.Grids._centers_to_corners(φ)
-        dirs = [(cos(yc[i, j]) * cos(xc[i, j]), cos(yc[i, j]) * sin(xc[i, j]), sin(yc[i, j]))
-                for i in 1:(n + 1), j in 1:(n + 1)]
-        ref = [geo.R^2 * (FG.Geometry.spherical_excess(dirs[i, j], dirs[i + 1, j], dirs[i + 1, j + 1]) +
-                          FG.Geometry.spherical_excess(dirs[i, j], dirs[i + 1, j + 1], dirs[i, j + 1]))
+        dirs = [(cos(big(yc[i, j])) * cos(big(xc[i, j])), cos(big(yc[i, j])) * sin(big(xc[i, j])),
+                 sin(big(yc[i, j]))) for i in 1:(n + 1), j in 1:(n + 1)]
+        ref = [big(geo.R)^2 * (FG.Geometry.spherical_excess(dirs[i, j], dirs[i + 1, j], dirs[i + 1, j + 1]) +
+                               FG.Geometry.spherical_excess(dirs[i, j], dirs[i + 1, j + 1], dirs[i, j + 1]))
                for i in 1:n, j in 1:n]
-        Test.@test a == ref     # same arithmetic, only the buffering differs
+        Test.@test maximum(abs.(a ./ ref .- 1)) < 16 * eps(Float64)
     end
 end
 
@@ -369,6 +375,20 @@ Test.@testset "A curvilinear spherical area holds below a cell of R·sqrt(eps(T)
         # here as a spread many times the real one while the total area still agrees.
         spread = maximum(a) / minimum(a)
         Test.@test spread ≈ cos(Float64(lat[1])) / cos(Float64(lat[end])) rtol = 0.02
+        # The area of the quadrilateral the stored corners span, to a few ulps of `T` at a cell of
+        # 1e-4 of the radius: the reference is BigFloat from those same corners.
+        let gk = FG.Grids.CurvilinearGrid(geo, T[lon[i] for i in 1:nlon, j in 1:nlat],
+                                          T[lat[j] for i in 1:nlon, j in 1:nlat], trues(nlon, nlat);
+                                          keep_corners = true),
+            xc = FG.Grids.corners(gk, 1), yc = FG.Grids.corners(gk, 2)
+            dir(i, j) = (cos(big(yc[i, j])) * cos(big(xc[i, j])), cos(big(yc[i, j])) * sin(big(xc[i, j])),
+                         sin(big(yc[i, j])))
+            rel = maximum(((i, j),) -> abs(FG.Grids.measure(gk, i, j) /
+                (big(geo.R)^2 * (FG.Geometry.spherical_excess(dir(i, j), dir(i + 1, j), dir(i + 1, j + 1)) +
+                                 FG.Geometry.spherical_excess(dir(i, j), dir(i + 1, j + 1), dir(i, j + 1)))) - 1),
+                ((i, j) for i in (1, 100, 200, nlon), j in (1, 77, 150, nlat)))
+            Test.@test rel < 16 * eps(T)
+        end
     end
 end
 
@@ -473,25 +493,69 @@ Test.@testset "An all-active mask carries no per-cell storage" begin
     Test.@test !FG.Grids.isactive(gm, 2, 3)
 end
 
-Test.@testset "Auto-periodicity does not depend on which way an axis is stored" begin
+Test.@testset "A periodic axis wraps whichever way it is stored, and states its own topology" begin
     # A circle is a circle whichever way it is traversed, and a descending axis is routine.
     sg = FG.Geometry.SphericalGeometry()
     n = 8
-    asc = collect(range(0.0; step = 2π / n, length = n))
-    for x in (asc, reverse(asc))
-        Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(sg, x, [0.0, 0.1], trues(n, 2)), 1)
+    asc = FG.Axes.PeriodicAxis(0.0, 2π, n)
+    desc = FG.Axes.PeriodicAxis(2π - 2π / n, -2π, n)
+    Test.@test collect(desc) ≈ reverse(collect(asc))
+    Test.@test FG.Axes.period(desc) == 2π && step(desc) == -step(asc)
+    for x in (asc, desc)
+        g = FG.Grids.StructuredGrid(sg, x, [0.0, 0.1], trues(n, 2))
+        Test.@test FG.Grids.isperiodic(g, 1) && FG.Grids.period(g, 1) == 2π
     end
-    # A regional span is not periodic in either orientation.
-    reg = collect(range(0.0; step = 0.05, length = n))
-    for x in (reg, reverse(reg))
+    # The same samples in a vector are bounded in either order until the caller says otherwise.
+    for x in (collect(asc), reverse(collect(asc)))
         Test.@test !FG.Grids.isperiodic(FG.Grids.StructuredGrid(sg, x, [0.0, 0.1], trues(n, 2)), 1)
+        Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(sg, x, [0.0, 0.1], trues(n, 2);
+                                                               periodic = true), 1)
     end
-    # The measure follows the periodicity, so a descending full circle tiles as an ascending one
-    # does, seam cell included.
+    # The measure follows the periodicity, so a descending circle tiles as an ascending one does,
+    # seam cell included, and a vector declared periodic tiles it as the periodic axis does.
     φ = collect(range(-1.0, 1.0; length = 5))
     ma = FG.Grids.measure(FG.Grids.StructuredGrid(sg, asc, φ, FG.Grids.AllActive((n, 5))))
-    md = FG.Grids.measure(FG.Grids.StructuredGrid(sg, reverse(asc), φ, FG.Grids.AllActive((n, 5))))
+    md = FG.Grids.measure(FG.Grids.StructuredGrid(sg, desc, φ, FG.Grids.AllActive((n, 5))))
+    mv = FG.Grids.measure(FG.Grids.StructuredGrid(sg, reverse(collect(asc)), φ,
+                                                  FG.Grids.AllActive((n, 5)); periodic = true))
     Test.@test sum(ma) ≈ sum(md) rtol = 1e-14
+    Test.@test sum(ma) ≈ sum(mv) rtol = 1e-14
+    # A periodic axis declared bounded, a longitude axis of another period, or a periodic axis given
+    # another period raises.
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; periodic = false)
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, FG.Axes.PeriodicAxis(0.0, π, n), φ)
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; period = π)
+    # A Cartesian periodic axis wraps at its own period, and a Float32 grid keeps its type.
+    cg = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float32}(), FG.Axes.PeriodicAxis(0.0, 5.0, 10),
+                                 0.0f0:1.0f0:3.0f0)
+    Test.@test FG.Grids.axis(cg, 1) isa FG.Axes.PeriodicAxis{Float32}
+    Test.@test FG.Grids.isperiodic(cg, 1) && FG.Grids.period(cg, 1) == 5.0f0
+end
+
+Test.@testset "A distance across a periodic seam keeps the precision of the gap" begin
+    G = FG.Grids
+    GE = FG.Geometry
+    for T in (Float32, Float64)
+        # A sphere at 1°: the two stored seam longitudes differ by nearly a turn, the cells by one step.
+        R = T(6.371e6)
+        gs = G.StructuredGrid(GE.SphericalGeometry(R), FG.Axes.PeriodicAxis{T}(zero(T), T(2π), 360),
+                              collect(T, range(-1.2, 1.2; length = 9)))
+        for j in (1, 5, 9)
+            a, b = G.coords(Tuple, gs, 360, j), G.coords(Tuple, gs, 1, j)
+            ref = GE.distance(GE.SphericalGeometry(big(R)), big.(a), big.(b))   # the stored values, exactly
+            Test.@test abs(GE.distance(gs, (360, j), (1, j)) - ref) / ref < 16eps(T)
+            gap = big(b[1]) + 2big(π) - big(a[1])
+            Test.@test abs(G.displacement(gs, (360, j), (1, j))[1] - gap) / gap < 4eps(T)
+        end
+        # A Cartesian periodic axis off the origin, whose two seam coordinates are not within a factor
+        # of two.
+        L = T(10)
+        gc = G.StructuredGrid(GE.CartesianGeometry(T), FG.Axes.PeriodicAxis{T}(T(0.003), L, 1000), T[0, 1])
+        a, b = G.coords(Tuple, gc, 1000, 1), G.coords(Tuple, gc, 1, 1)
+        gap = big(b[1]) + big(L) - big(a[1])
+        Test.@test abs(G.displacement(gc, (1000, 1), (1, 1))[1] - gap) / gap < 2eps(T)
+        Test.@test abs(GE.distance(gc, (1000, 1), (1, 1)) - gap) / gap < 2eps(T)
+    end
 end
 
 Test.@testset "A separable measure stays separable under the operations that preserve it" begin
@@ -675,10 +739,10 @@ Test.@testset "Grids and connectivity work in any number of dimensions" begin
 
     # A spherical grid in 1-D measures arc length, and in 4-D keeps its metric directions.
     sgeo = FG.Geometry.SphericalGeometry(2.0)
-    g1 = FG.Grids.StructuredGrid(sgeo, collect(range(0, 2π; length = 9)))
+    g1 = FG.Grids.StructuredGrid(sgeo, FG.Axes.PeriodicAxis(0.0, 2π, 9))
     Test.@test size(g1) == (9,)
     Test.@test FG.Grids.measure_factors(g1) !== nothing
-    Test.@test sum(FG.Grids.measure(g1)) ≈ 2.0 * 2π rtol = 1e-2   # R·Δλ over the full circle
+    Test.@test sum(FG.Grids.measure(g1)) ≈ 2.0 * 2π rtol = 1e-14   # R·Δλ over the full circle
     g4s = FG.Grids.StructuredGrid(sgeo, collect(range(0, 2π; length = 8)),
                             collect(range(-1.0, 1.0; length = 6)),
                             collect(range(1.0, 2.0; length = 4)),
@@ -837,6 +901,15 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             Test.@test length(g) == SS.npoints(oct)
             Test.@test G.nrings(g) == SS.nrings(oct)
         end
+        # Vectors already of the grid's element types are stored as given, and another element type is
+        # converted.
+        let lat = [0.5, -0.5], nl = [4, 4], ar = [1.0, 2.0], g = G.RingGrid(geo, lat, nl, ar)
+            Test.@test getfield(g, :latitudes) === lat && getfield(g, :nlon) === nl
+            Test.@test getfield(g, :ring_area) === ar
+            g32 = G.RingGrid(FG.Geometry.SphericalGeometry(6.371f6), lat, Int32[4, 4], ar)
+            Test.@test eltype(getfield(g32, :latitudes)) === Float32 && eltype(getfield(g32, :nlon)) === Int
+            Test.@test G.measure(g32, 5) == 2.0f0
+        end
     end
 
     Test.@testset "RingGrid coords and ring bookkeeping are the sampling's" begin
@@ -938,6 +1011,10 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             # The layout holds no coordinate arrays and no index space, and both accessors say so.
             Test.@test_throws ArgumentError G.coordinates(g)
             Test.@test_throws ArgumentError C.IndexTopology(g)
+            # It has no axis, so no direction has a spacing its type fixes.
+            Test.@test !G.isuniform(g) && !G.isuniform(g, 1) && !G.isuniform(g, 2)
+            Test.@test G.spacing_trait(g, Val(1)) === FG.Axes.NonuniformSpacing()
+            Test.@test_throws ArgumentError G.isuniform(g, 3)
         end
     end
 
@@ -1024,8 +1101,8 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
         return R^2 * (GE.spherical_excess(c1, c2, c3) + GE.spherical_excess(c1, c3, c4))
     end
 
-    Test.@testset "CubedSphereGrid storage is independent of n" begin
-        sizes = [Base.summarysize(G.CubedSphereGrid(geo, n)) for n in (1, 8, 64, 512)]
+    Test.@testset "CubedSphereGrid stores one quadrant of a panel's areas" begin
+        sizes = [Base.summarysize(G.CubedSphereGrid(geo, n)) - sizeof(Float64) * cld(n, 2)^2 for n in (1, 8, 64, 512)]
         Test.@test allequal(sizes)
         Test.@test length(G.CubedSphereGrid(geo, 512)) == 6 * 512^2
     end
@@ -1059,8 +1136,9 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
             for k in 1:length(g)
                 f, i, j = G.panel_cell(g, k)
                 Test.@test m[k] ≈ cube_area_by_excess(n, f, i, j, R) rtol = 1e-12
-                # The six panels are rigid images of one another, so the area is panel-independent.
-                Test.@test m[k] ≈ m[G.cell_id(g, 1, i, j)] rtol = 1e-14
+                # The six panels are rigid images of one another and a panel is mirror-symmetric, so the
+                # congruent cells hold one number.
+                Test.@test m[k] === m[G.cell_id(g, 1, i, j)] === m[G.cell_id(g, 2, n + 1 - i, n + 1 - j)]
             end
             # `sum` is `4πR²` from the fact that the panels tile the sphere; adding the cells up has to
             # give the same number.
@@ -1288,8 +1366,33 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
     geo = GE.SphericalGeometry()
     R = GE.radius(geo)
 
-    Test.@testset "storage is independent of frequency" begin
-        sizes = [Base.summarysize(G.IcosahedralGrid(geo, ν)) for ν in (1, 8, 64, 512)]
+    # Vertex `k`'s dual area in BigFloat from its neighbours alone: two mutually adjacent neighbours
+    # close a triangle around `k`, and `k`'s share of it is the quadrilateral from `k` through the two
+    # edge midpoints and the circumcentre.
+    function dual_area_ref(g, k)
+        ν = G.frequency(g)
+        dir(id) = SS._ico_vertex_dir(BigFloat, id, ν)
+        nrm(p) = p ./ sqrt(sum(abs2, p))
+        V = dir(k)
+        nb = collect(G.neighbors(g, k))
+        a = big(0.0)
+        for x in nb, y in nb
+            (x < y && y in collect(G.neighbors(g, x))) || continue
+            A, B = dir(x), dir(y)
+            u, w = A .- V, B .- V
+            O = nrm((u[2] * w[3] - u[3] * w[2], u[3] * w[1] - u[1] * w[3], u[1] * w[2] - u[2] * w[1]))
+            sum(O .* V) < 0 && (O = .-O)
+            a += GE.spherical_excess(V, nrm(V .+ A), O) + GE.spherical_excess(V, O, nrm(V .+ B))
+        end
+        return big(GE.radius(G.grid_geometry(g)))^2 * a
+    end
+
+    Test.@testset "storage is one area per class beside the frequency" begin
+        # The classes are the partitions of `ν` into three parts, counted by smallest part `c`; the offsets
+        # hold one more than there are `c`.
+        nclass(ν) = sum((ν - c) ÷ 2 - c + 1 for c in 0:(ν ÷ 3))
+        sizes = [Base.summarysize(G.IcosahedralGrid(geo, ν)) - sizeof(Float64) * nclass(ν) -
+                 sizeof(Int) * (ν ÷ 3 + 2) for ν in (1, 8, 64, 512)]
         Test.@test allequal(sizes)
         Test.@test length(G.IcosahedralGrid(geo, 512)) == 10 * 512^2 + 2
         Test.@test G.frequency(G.IcosahedralGrid(geo, 37)) == 37
@@ -1304,13 +1407,10 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
         n = length(g)
         Test.@test n == length(mesh.λ)
 
+        # Each check runs over every vertex and reports the vertices that fail it.
         Test.@testset "ν = $ν: coords, adjacency and dual areas" begin
             # Bit-identical: the same expressions on the same entity.
-            for k in 1:n
-                c = G.coords(g, k)
-                Test.@test c.λ == mesh.λ[k]
-                Test.@test c.φ == mesh.φ[k]
-            end
+            Test.@test filter(k -> Tuple(G.coords(g, k)) != (mesh.λ[k], mesh.φ[k]), 1:n) == []
             λ, φ = G.materialize(g)
             Test.@test λ == mesh.λ
             Test.@test φ == mesh.φ
@@ -1321,17 +1421,12 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
                 push!(ref[a], b)
                 push!(ref[b], a)
             end
-            for k in 1:n
-                nb = sort(collect(G.neighbors(g, k)))
-                Test.@test nb == sort(unique(ref[k]))
-                Test.@test !(k in nb)
-                Test.@test length(nb) ≤ G.max_neighbors(g)
-            end
+            nbs = [sort(collect(G.neighbors(g, k))) for k in 1:n]
+            Test.@test filter(k -> nbs[k] != sort(unique(ref[k])), 1:n) == []
+            Test.@test filter(k -> k in nbs[k] || length(nbs[k]) > G.max_neighbors(g), 1:n) == []
             conn = C.build_connectivity(g)
             Test.@test C.is_symmetric_adjacency(conn)
-            for k in 1:n
-                Test.@test sort(collect(G.neighbors(conn, k))) == sort(collect(G.neighbors(g, k)))
-            end
+            Test.@test filter(k -> sort(collect(G.neighbors(conn, k))) != nbs[k], 1:n) == []
 
             # Exactly twelve pentagons — the base icosahedron's corners — and hexagons elsewhere.
             deg = [C.nneighbors(g, k) for k in 1:n]
@@ -1339,13 +1434,9 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
             Test.@test count(==(6), deg) == n - 12
             Test.@test all(k -> C.nneighbors(g, k) == 5, 1:12)
 
-            # The per-vertex fan and the accumulating pass over all triangles are the same dual.
-            aref = C._icosahedral_dual_areas(geo, mesh.verts, mesh.triangles, n)
             m = G.measure(g)
             Test.@test m isa G.GridMeasure
-            for k in 1:n
-                Test.@test m[k] ≈ aref[k] rtol = 1e-12
-            end
+            Test.@test filter(k -> !isapprox(m[k], dual_area_ref(g, k); rtol = 16 * eps(Float64)), 1:n) == []
             Test.@test all(>(0), m)
             Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-14
             Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
@@ -1356,15 +1447,13 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
             # class and every member reports that number. The claim under test is that a vertex's
             # own fan gives its class's area, which holds on the congruence of the twenty faces and
             # the threefold symmetry of each.
-            #
-            # A dual cell covers `O(1/ν²)` of the sphere and its excess is accumulated from unit
-            # vectors, so the round-off is `O(eps)` in absolute terms and the relative bound carries
-            # the `ν²`.
-            for k in 1:n
-                Test.@test G._ico_vertex_measure(g, k, ν) ≈ m[k] rtol = 8 * eps(Float64) * ν^2
-            end
-            Test.@test all(m[j] === m[k] for k in 1:n for j in 1:n
-                           if G._ico_class(k, ν) == G._ico_class(j, ν))
+            Test.@test filter(k -> !isapprox(R^2 * G._ico_vertex_share(Float64, k, ν), m[k]; rtol = 16 * eps(Float64)),
+                              1:n) == []
+            cls = [G._ico_class(k, ν) for k in 1:n]
+            first_of = Dict{eltype(cls),Int}()
+            foreach(k -> get!(first_of, cls[k], k), 1:n)
+            Test.@test filter(k -> m[k] !== m[first_of[cls[k]]], 1:n) == []
+            Test.@test length(first_of) == length(getfield(g, :class_area))   # one stored area per class
             Test.@test G.measure_array(g) == collect(m)
             # …and the classes are far fewer than the vertices, which is the saving.
             Test.@test length(unique(G._ico_class(k, ν) for k in 1:n)) ≤ (ν + 2)^2 ÷ 6 + 1
@@ -1394,6 +1483,17 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
             Test.@test eltype(gw) === W
             Test.@test G.coords(gw, 7).λ isa W
             Test.@test G.measure(gw, 7) isa W
+        end
+    end
+
+    Test.@testset "a dual cell keeps the precision of its element type at any frequency" begin
+        for W in (Float64, Float32), ν in (64, 1024)
+            g = G.IcosahedralGrid(GE.SphericalGeometry(W(6.371e6)), ν)
+            n = length(g)
+            # a pentagon, a macro-edge vertex beside it, and two face interiors
+            for k in (1, 13, n ÷ 2, n)
+                Test.@test G.measure(g, k) ≈ dual_area_ref(g, k) rtol = 16 * eps(W)
+            end
         end
     end
 
@@ -1434,12 +1534,18 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
     let sph = GE.SphericalGeometry(6.371e6),
         λ = collect(range(0, 2π; length = 13)[1:12]),
         φ = collect(range(-1.2, 1.2; length = 9))
-        sp = GD.StaggeredGrid(sph, λ, φ)
+        sp = GD.StaggeredGrid(sph, λ, φ; periodic = true)
         Test.@test GD.size_tuple(GD.grid_at(sp, (F, C))) == (12, 9)   # wraps: 12 faces, not 13
         Test.@test GD.size_tuple(GD.grid_at(sp, (C, F))) == (12, 10)
         # The staggered grids keep the mesh's topology, so a query on one wraps as the mesh does.
         Test.@test GD.isperiodic(GD.grid_at(sp, (F, C)), 1)
         Test.@test GD.period(GD.grid_at(sp, (F, C)), 1) ≈ 2π
+        # A periodic axis's faces are another half a step back, so the face grid wraps by its type too.
+        sr = GD.StaggeredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), φ)
+        fr = GD.axis_at(sr, 1, F)
+        Test.@test fr isa FG.Axes.PeriodicAxis && FG.Axes.period(fr) == 2π
+        Test.@test collect(fr) ≈ collect(GD.axis_at(sp, 1, F))
+        Test.@test GD.isperiodic(GD.grid_at(sr, (F, C)), 1)
     end
 
     # The face samples sit on the cell boundaries, on a stretched mesh as much as a uniform one.
@@ -1537,21 +1643,33 @@ Test.@testset "Span and spacing agree with the axis, and cost one pass to summar
         Test.@test r2 ≤ 4.5 * r1                 # linear in the axis, so 4× the axis is ~4× the reads
     end
 
-    # Off a rectilinear grid the coordinates are per-cell fields with no order, so a span is a
-    # genuine scan. A query needing it repeatedly reads it from the topology, which reduced it once.
-    let λ = [0.3i for i in 0:99], φ = [0.2 * sin(3.0i) for i in 0:99],
-        sph = GE.SphericalGeometry(6.371e6)
-        gu = GD.UnstructuredGrid(sph, (λ, φ), ones(100), trues(100))
+    # Off a rectilinear grid the coordinates are per-cell fields with no order; their extremes and the
+    # total measure are taken at construction, so the span and the default topology read none of them.
+    let λ = CountingAxis([0.3i for i in 0:99]), φ = CountingAxis([0.2 * sin(3.0i) for i in 0:99]),
+        sph = GE.SphericalGeometry(6.371e6), w = 1.0 .+ 0.01 .* (1:100)
+        gu = GD.UnstructuredGrid(sph, (λ, φ), w, trues(100))
+        Test.@test GD.bounds(gu, 1) == extrema(λ.data) && GD.bounds(gu, 2) == extrema(φ.data)
+        Test.@test GD._total_measure(gu) == sum(w)
+        Test.@test reads(() -> GD.bounds(gu, 2), φ) == 0
+        Test.@test reads(() -> C.MetricTopology(gu), λ) == 0
         mt = C.MetricTopology(gu)
-        Test.@test all(mt.span[d] ≈ GD.extent(gu, d) for d in 1:2)
-        Test.@test GD.bounds(gu, 1) == extrema(λ)
-        Test.@test !(:stats in fieldnames(typeof(gu)))
+        Test.@test all(mt.span[d] == GD.extent(gu, d) for d in 1:2)
+        # Reordering renumbers the nodes, and the extremes and the total are the set's own.
+        gr = GD.reorder(gu, reverse(1:100))
+        Test.@test GD.bounds(gr, 1) == GD.bounds(gu, 1) && GD._total_measure(gr) ≈ sum(w)
     end
     let n = 6, xm = [i + 0.1j for i in 1:n, j in 1:n], ym = [j - 0.05i for i in 1:n, j in 1:n]
-        cg = GD.CurvilinearGrid(cart, xm, ym, trues(n, n); measure = ones(n, n))
+        cg = GD.CurvilinearGrid(cart, xm, ym, trues(n, n); measure = fill(2.0, n, n))
         Test.@test GD.bounds(cg, 1) == extrema(xm)
         Test.@test GD.bounds(cg, 2) == extrema(ym)
-        Test.@test !(:stats in fieldnames(typeof(cg)))
+        Test.@test GD._total_measure(cg) == 2.0 * n^2
+        qb(gg, d) = FG.Grids.bounds(gg, d)
+        Test.@test Base.return_types(qb, Tuple{typeof(cg),Int})[1] === Tuple{Float64,Float64}
+        qb(cg, 1)
+        Test.@test @allocated(qb(cg, 1)) == 0
+        # A rebuild moves storage and carries both over.
+        cr = GD.rebuild(cg, (; mask = GD.AllActive((n, n))))
+        Test.@test GD.bounds(cr, 2) == GD.bounds(cg, 2) && GD._total_measure(cr) == GD._total_measure(cg)
     end
 end
 
@@ -1613,4 +1731,129 @@ Test.@testset "The domain length is what the cells cover" begin
 
     # A layout with no faces along a bounded direction says so.
     Test.@test_throws ArgumentError GD.domain_length(GD.HEALPixGrid(FG.Geometry.SphericalGeometry(1.0), 2), 2)
+end
+
+Test.@testset "Rings, coverage and integrals read the grid's own structure" begin
+    GD = FG.Grids
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    R = 6.371e6
+    geo = GE.SphericalGeometry(R)
+
+    # A structured sphere: a ring per latitude row, longitude fastest.
+    g = FG.Connectivity.structured_grid(SS.GaussLegendreSampling(), 12; geometry = geo)
+    nlon, nlat = size(g)
+    φ = GD.coordinates(g, 2)
+    Test.@test GD.ring_structure(g) === GD.TensorRings()
+    Test.@test GD.nrings(g) == nlat
+    Test.@test all(GD.ring_range(g, r) == ((r - 1) * nlon + 1):(r * nlon) for r in 1:nlat)
+    Test.@test all(GD.ring_latitude(g, r) == φ[r] for r in 1:nlat)
+    Test.@test all(GD.ring_of(g, i) == (i - 1) ÷ nlon + 1 for i in 1:length(g))
+    Test.@test reduce(vcat, collect.(GD.eachring(g))) == 1:length(g)
+    Test.@test_throws ArgumentError GD.ring_range(g, nlat + 1)
+    # In three directions, a ring per latitude and level.
+    g3 = GD.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 5)),
+                           [R, R + 1e3, R + 2e3])
+    Test.@test GD.nrings(g3) == 15
+    Test.@test GD.ring_latitude(g3, 7) == GD.coordinates(g3, 2)[2]
+    Test.@test GD.ring_range(g3, 15) == 113:120
+
+    # A tabulated ring grid of very uneven rings: its one-comparison lookup is the bisection of the
+    # cumulative counts at every point, and so is its measure's.
+    let counts = [1, 7, 2, 30, 3, 3, 11, 1, 19], lat = collect(range(1.2, -1.2; length = 9))
+        rg = GD.RingGrid(geo, lat, counts, collect(1.0:9.0))
+        off = vcat(0, cumsum(counts))
+        Test.@test all(GD.ring_of(rg, i) == searchsortedlast(off, i - 1) for i in 1:sum(counts))
+        Test.@test collect(GD.measure(rg)) == [Float64(searchsortedlast(off, i - 1)) for i in 1:sum(counts)]
+    end
+
+    # HEALPix in RING order: the sampling's ring table, read off the grid.
+    hp = GD.HEALPixGrid(geo, 4)
+    s = SS.HEALPixSampling(4)
+    Test.@test GD.ring_structure(hp) === GD.IsoLatitudeRings()
+    Test.@test GD.nrings(hp) == 15
+    Test.@test all(GD.ring_range(hp, r) == SS.ring_range(s, r) for r in 1:15)
+    Test.@test all(GD.ring_latitude(hp, r) ≈ GD.coords(hp, first(GD.ring_range(hp, r))).φ for r in 1:15)
+    Test.@test all(GD.ring_of(hp, i) == r for r in 1:15 for i in GD.ring_range(hp, r))
+    Test.@test sum(GD.nlon_in_ring(hp, r) for r in 1:15) == GD.npixels(hp)
+    Test.@test GD.ring_structure(GD.HEALPixGrid(geo, 4; scheme = SS.Nested())) === GD.NoRings()
+
+    # A ring grid: its own tables, and the rule it was built from.
+    s8 = SS.OctahedralGaussianSampling(4)
+    rg = GD.RingGrid(geo, s8)
+    Test.@test GD.sampling(rg) === s8
+    Test.@test all(GD.ring_range(rg, r) == SS.ring_range(s8, r) for r in 1:GD.nrings(rg))
+    Test.@test GD.sampling(GD.RingGrid(geo, [0.5, -0.5], [4, 4], [1.0, 1.0])) === nothing
+
+    # Layouts without rings say so.
+    cs = GD.CubedSphereGrid(geo, 4)
+    Test.@test GD.ring_structure(cs) === GD.NoRings()
+    Test.@test_throws ArgumentError GD.nrings(cs)
+    Test.@test_throws ArgumentError GD.ring_range(cs, 1)
+    Test.@test_throws ArgumentError GD.nrings(GD.StructuredGrid(GE.CartesianGeometry(), 0.0:1.0:3.0,
+                                                                0.0:1.0:2.0))
+
+    # A pixelization is its recipe.
+    Test.@test GD.sampling(hp) === s
+    Test.@test GD.sampling(GD.IcosahedralGrid(geo, 3)) === SS.IcosahedralSampling(3)
+    Test.@test GD.sampling(cs) === SS.CubedSphereSampling()
+    Test.@test GD.sampling(GD.YinYangGrid(geo, 8, 4)) === SS.YinYangSampling()
+
+    # Gauss–Legendre integrates μ² = sin²φ exactly: 4πR²/3 over the sphere. A sum of `n` positive terms
+    # is within `n·eps` of its value.
+    n = length(g)
+    f = [sin(b)^2 for _ in 1:nlon, b in φ]
+    Test.@test GD.integrate(f, g) ≈ 4π * R^2 / 3 rtol = n * eps()
+    Test.@test GD.integrate(ones(nlon, nlat), g) ≈ 4π * R^2 rtol = n * eps()
+    fb = cat(f, 2f, ones(nlon, nlat); dims = 3)
+    Test.@test GD.integrate(fb, g) ≈ [4π * R^2 / 3, 8π * R^2 / 3, 4π * R^2] rtol = n * eps()
+    Test.@test GD.integrate(f, g; backend = CB.ThreadedBackend()) ≈ GD.integrate(f, g) rtol = n * eps()
+    Test.@test GD.sky_fraction(g) == 1
+
+    # Every measure container — separable, per ring, constant, formula, dense — against its own dense
+    # form summed at 256 bits, masked.
+    masked = (
+        FG.Connectivity.structured_grid(SS.GaussLegendreSampling(), 12; geometry = geo,
+                                        mask = [isodd(i + j) || j == 1 for i in 1:nlon, j in 1:nlat]),
+        GD.HEALPixGrid(geo, 4; mask = [isodd(i) for i in 1:192]),
+        GD.RingGrid(geo, s8; mask = [i % 3 != 0 for i in 1:length(rg)]),
+        GD.IcosahedralGrid(geo, 3; mask = [i % 4 != 0 for i in 1:92]),
+        FG.Connectivity.unstructured_grid(SS.IcosahedralSampling(3); geometry = geo,
+                                          mask = [i % 4 != 0 for i in 1:92]),
+    )
+    for gg in masked
+        m = collect(GD.measure(gg))
+        act = collect(GD.mask(gg))
+        fld = reshape([1.5 + sin(0.37i) for i in 1:length(gg)], size(gg))
+        cov = sum(big(m[i]) for i in eachindex(m) if act[i])
+        tol = length(gg) * eps()
+        Test.@test GD.covered_area(gg) ≈ cov rtol = tol
+        Test.@test GD.sky_fraction(gg) ≈ cov / sum(big.(m)) rtol = 2tol
+        Test.@test GD.integrate(fld, gg) ≈ sum(big(fld[i]) * big(m[i]) for i in eachindex(m) if act[i]) rtol = tol
+        Test.@test GD.integrate(fld, gg; active_only = false) ≈ sum(big.(vec(fld)) .* big.(vec(m))) rtol = tol
+    end
+
+    # A spheroid point's direction from the centre, against the embedded point at 256 bits.
+    sp = GE.SpheroidGeometry()
+    spb = GE.SpheroidGeometry(big(sp.a), big(sp.f))
+    for φ0 in (-1.4, -0.3, 0.0, 0.7, π / 2)
+        p = GE.geodetic_to_cartesian(spb, (big(0.3), big(φ0)))
+        Test.@test GE.geocentric_latitude(sp, φ0) ≈ atan(p.z, hypot(p.x, p.y)) rtol = 2eps() atol = 0
+    end
+    Test.@test GE.geocentric_latitude(geo, 0.7) == 0.7
+
+    # Per-call accessors and serial reductions allocate nothing.
+    for gg in (g, hp, rg, masked[1])
+        Test.@test _alloc(GD.ring_structure, gg) == 0
+        Test.@test _alloc(GD.nrings, gg) == 0
+        Test.@test _alloc(GD.ring_range, gg, 2) == 0
+        Test.@test _alloc(GD.ring_latitude, gg, 2) == 0
+        Test.@test _alloc(GD.ring_of, gg, 5) == 0
+        Test.@test _alloc(GD.eachring, gg) == 0
+        Test.@test _alloc(GD.covered_area, gg) == 0
+        Test.@test _alloc(GD.sky_fraction, gg) == 0
+    end
+    Test.@test _alloc(GD.integrate, f, g) == 0
+    Test.@test _alloc(GD.integrate!, zeros(3), fb, g) == 0
+    Test.@test _alloc(GE.geocentric_latitude, sp, 0.7) == 0
 end

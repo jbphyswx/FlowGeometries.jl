@@ -7,10 +7,11 @@
 
 The gnomonic cubed sphere as a grid: six `n × n` panels of equiangular cells, `6n²` in all.
 
-It stores `n`, the geometry and the mask. A cell's coordinates are its panel-local angles through the
-gnomonic map, its neighbours are the panel-interior offsets and the exact seam fold, and its area is the
-closed-form solid angle of its gnomonic rectangle — so all three are arithmetic in `(n, cell)`, and
-`Base.summarysize` is the same at every `n`.
+It stores `n`, the geometry, the mask and one quadrant of a panel's cell areas. A cell's coordinates are
+its panel-local angles through the gnomonic map and its neighbours are the panel-interior offsets and the
+exact seam fold, both arithmetic in `(n, cell)`. Its area is the closed-form solid angle of its gnomonic
+rectangle, the same at the four mirror images of `(i, j)` within a panel and on all six panels, so the
+`⌈n/2⌉²` areas of one quadrant, evaluated at construction, hold every cell's.
 
 Cells are numbered panel by panel with `i` fastest, matching
 [`SphericalSampling.cubed_sphere_points`](@ref). [`panel_cell`](@ref) and [`cell_id`](@ref) convert
@@ -23,10 +24,12 @@ struct CubedSphereGrid{
     T<:AbstractFloat,
     G<:Geometry.AbstractSphericalGeometry{T},
     B<:AbstractVector{Bool},
+    A<:AbstractMatrix{T},
 } <: AbstractGrid{G,T}
     geometry::G
     n::Int
     mask::B
+    area::A      # the areas of cells `(i, j)`, `i, j ≤ ⌈n/2⌉`, of one panel
 end
 
 function CubedSphereGrid(
@@ -39,7 +42,10 @@ function CubedSphereGrid(
     length(m) == ncell || throw(DimensionMismatch(
         "mask holds $(length(m)) entries for a grid of $ncell cells",
     ))
-    return CubedSphereGrid{T,typeof(geometry),typeof(m)}(geometry, nn, m)
+    R² = T(Geometry.radius(geometry))^2
+    q = cld(nn, 2)
+    area = [R² * _gnomonic_solid_angle(SphericalSampling._cubed_cell_edges(T, nn, i, j)...) for i in 1:q, j in 1:q]
+    return CubedSphereGrid{T,typeof(geometry),typeof(m),typeof(area)}(geometry, nn, m, area)
 end
 
 CubedSphereGrid(n::Integer; kwargs...) =
@@ -47,9 +53,9 @@ CubedSphereGrid(n::Integer; kwargs...) =
 
 @inline _from_fields(
     ::Type{<:CubedSphereGrid},
-    geometry::G, n::Int, mask::B,
-) where {T,G<:Geometry.AbstractSphericalGeometry{T},B} =
-    CubedSphereGrid{T,G,B}(geometry, n, mask)
+    geometry::G, n::Int, mask::B, area::A,
+) where {T,G<:Geometry.AbstractSphericalGeometry{T},B,A<:AbstractMatrix{T}} =
+    CubedSphereGrid{T,G,B,A}(geometry, n, mask, area)
 
 """
     panel_size(grid) -> Int
@@ -57,6 +63,8 @@ CubedSphereGrid(n::Integer; kwargs...) =
 Cells across one panel of a panel layout: `n` for the cubed sphere, whose panels are `n × n`.
 """
 @inline panel_size(grid::CubedSphereGrid) = getfield(grid, :n)
+
+@inline sampling(::CubedSphereGrid) = SphericalSampling.CubedSphereSampling()
 
 """
     npanels(grid) -> Int
@@ -135,14 +143,12 @@ that corner, so the four corners combine by inclusion–exclusion. Over a whole 
     _gnomonic_corner(X2, Y2) - _gnomonic_corner(X1, Y2) -
     _gnomonic_corner(X2, Y1) + _gnomonic_corner(X1, Y1)
 
-# A cell's area depends on `(i, j)` alone: the six panels are rigid images of one another, and the
-# solid angle is invariant under the orthogonal map between them.
-@inline function measure(grid::CubedSphereGrid{T}, k::Integer) where {T}
+# The six panels are rigid images of one another, and a panel is symmetric under `i ↦ n+1−i` and
+# `j ↦ n+1−j`, so a cell's area is its mirror image's in the stored quadrant.
+@inline function measure(grid::CubedSphereGrid, k::Integer)
     n = panel_size(grid)
     _, i, j = SphericalSampling._cubed_unlin(Int(k), n)
-    X1, X2, Y1, Y2 = SphericalSampling._cubed_cell_edges(T, n, i, j)
-    R² = T(Geometry.radius(grid_geometry(grid)))^2
-    return R² * _gnomonic_solid_angle(X1, X2, Y1, Y2)
+    return @inbounds getfield(grid, :area)[min(i, n + 1 - i), min(j, n + 1 - j)]
 end
 
 @inline measure(grid::CubedSphereGrid) = GridMeasure(grid)

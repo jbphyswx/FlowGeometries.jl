@@ -156,55 +156,82 @@ function derivative!(
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     d = Int(dim)
+    ord = Int(order)
     _check_batched(out, field, grid, Val(N), d)
     msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    return _apply_axis!(out, field, Grids.coordinates(grid, d), d, Int(order), Int(nodes),
+    _along_arc(grid, d, ord) &&
+        return _arc_derivative!(out, field, grid, d, ord, Int(nodes), msk, masked, backend, policy)
+    return _apply_axis!(out, field, Grids.coordinates(grid, d), d, ord, Int(nodes),
                         Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, msk, masked,
-                        backend, policy, scratch, _derivative_factors(grid, d, backend))
+                        backend, policy, scratch, _derivative_factors(grid, d, backend, ord))
 end
 
 """
-    derivative!(out, field, grid, plan, dim; active_only=true, masked=zero) -> out
+    derivative!(out, field, grid, plan, dim; active_only=true, masked=zero, backend=SerialBackend()) -> out
 
 [`derivative!`](@ref) from a held [`Discretization.stencil_plan`](@ref).
 
 The form to use in a loop: the weights depend on the grid alone, so they are built once, by the caller.
+Where the order is `2` or more along a direction whose own scale factor varies along it, the weights
+depend on the cell and are rebuilt per call; hold a [`masked_stencil_plan`](@ref) there.
 """
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     plan::Discretization.AbstractStencilPlan, dim::Integer;
     active_only::Bool = true, masked = zero(S),
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,G,T,N,NA}
     d = Int(dim)
+    ord = Discretization.derivative_order(plan)
     _check_batched(out, field, grid, Val(N), d)
     msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    return _apply_plan_checked!(out, field, plan, d, msk, masked, CB.SerialBackend(),
-                                _derivative_factors(grid, d, CB.SerialBackend()))
+    _along_arc(grid, d, ord) && return _arc_derivative!(
+        out, field, grid, d, ord, Discretization.nnodes(plan), msk, masked, backend, BlankMasked(),
+    )
+    return _apply_plan_checked!(out, field, plan, d, msk, masked, backend,
+                                _derivative_factors(grid, d, backend, ord))
 end
 
 """
-    _derivative_factors(grid, dim, backend) -> _RowFactors | _CellFactors | Nothing
+    _derivative_factors(grid, dim, backend, order) -> _RowFactors | _CellFactors | Nothing
 
-The inverse metric factor `derivative!` writes each value along `dim` with: `nothing` for a Cartesian
-metric, which is the identity; one factor per direction-1 run for a geometry that declares direction 1
-metric-invariant, placed where `backend` runs; the per-cell evaluation otherwise.
+The inverse metric factor to the power `order` that `derivative!` writes each value along `dim` with:
+`nothing` for a Cartesian metric, which is the identity; one factor per direction-1 run for a geometry
+that declares direction 1 metric-invariant, placed where `backend` runs; the per-cell evaluation
+otherwise. At `order ≥ 2` the power holds only where `dim` is one of the geometry's
+[`Geometry.scale_invariant_directions`](@ref); `_along_arc` routes the rest.
 """
 @inline _derivative_factors(
-    ::Grids.StructuredGrid{T,G}, ::Int, _,
+    ::Grids.StructuredGrid{T,G}, ::Int, _, ::Int,
 ) where {T,G<:Geometry.AbstractCartesianGeometry} = nothing
 
-function _derivative_factors(grid::Grids.StructuredGrid{T,G,N}, d::Int, backend) where {T,G,N}
+function _derivative_factors(grid::Grids.StructuredGrid{T,G,N}, d::Int, backend, ord::Int) where {T,G,N}
     geo = Grids.grid_geometry(grid)
     if 1 in Geometry.metric_invariant_directions(geo)
         buf = _metric_scratch(T, _nfactors(grid))
         # The differenced direction is a type parameter inside the switch, so
         # `scale_factors(geo, pt)[dim]` folds to one component.
         R = _dispatch_dim(d, Val(N)) do vdim
-            _metric_row_factors!(buf, grid, vdim, Val(N))
+            _metric_row_factors!(buf, grid, vdim, Val(N), ord)
         end
         return _RowFactors(_factors_on(Execution.resolve(backend), buf, R), Grids.size_tuple(grid))
     end
-    return _CellFactors(geo, Grids.coordinates(grid), d, Discretization.metric_floor(geo))
+    return _CellFactors(geo, Grids.coordinates(grid), d, Discretization.metric_floor(geo, d), ord)
+end
+
+# Distance along a direction whose own scale factor `h_d` varies along it is not a multiple of the
+# coordinate, so its `order ≥ 2` derivative is no power of `1/h_d`: the weights are solved over the
+# window's distances instead, per cell (`_distance_stencil_plan`).
+@inline _along_arc(grid::Grids.StructuredGrid, d::Int, ord::Int) = _along_arc(Grids.grid_geometry(grid), d, ord)
+@inline _along_arc(::Geometry.AbstractCartesianGeometry, ::Int, ::Int) = false
+@inline _along_arc(geo::Geometry.AbstractGeometry, d::Int, ord::Int) =
+    ord ≥ 2 && !(d in Geometry.scale_invariant_directions(geo))
+
+function _arc_derivative!(out, field, grid::Grids.StructuredGrid, d::Int, ord::Int, k::Int, msk, masked, backend, policy)
+    mask = msk === nothing ? Grids.AllActive(Grids.size_tuple(grid)) : _host_mask(msk)
+    plan = _distance_stencil_plan(grid, mask, d, ord, k, policy)
+    b = Execution.resolve(backend)
+    return _apply_masked_plan!(out, field, Execution.on_backend(b, plan), masked, b, nothing)
 end
 
 # The factors where the sweep reads them: the task's own buffer on the host, its first `R` entries in
@@ -214,10 +241,11 @@ _factors_on(b::CB.AbstractExecutionBackend, buf::AbstractVector, R::Int) =
     Execution.on_backend(b, view(buf, 1:R))
 
 """
-    _metric_row_factors!(buf, grid, Val(dim), Val(N)) -> Int
+    _metric_row_factors!(buf, grid, Val(dim), Val(N), order) -> Int
 
-Write the inverse scale factor of every direction-1 run into `buf`, in column-major order over
-directions `2:N` — the order the sweep writes them in, for any differenced direction. Returns how many.
+Write the inverse scale factor of every direction-1 run, to the power `order`, into `buf`, in
+column-major order over directions `2:N` — the order the sweep writes them in, for any differenced
+direction. Returns how many.
 
 Direction 1 is metric-invariant here, so one factor covers a whole run and any axis-1 coordinate serves
 as the point's first component.
@@ -226,17 +254,17 @@ A degenerate factor — one at or below the geometry's [`Discretization.metric_f
 as zero, and a kernel writes `masked` where its factor is zero.
 """
 function _metric_row_factors!(
-    buf::AbstractVector{T}, grid::Grids.StructuredGrid{T,G,N}, ::Val{dim}, ::Val{N},
+    buf::AbstractVector{T}, grid::Grids.StructuredGrid{T,G,N}, ::Val{dim}, ::Val{N}, ord::Int,
 ) where {G,T,N,dim}
     geo = Grids.grid_geometry(grid)
-    floor_ = Discretization.metric_floor(geo)
+    floor_ = Discretization.metric_floor(geo, dim)
     sz = Grids.size_tuple(grid)
     @inbounds x1 = T(Grids.coordinates(grid, 1)[1])
     rest = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
     @inbounds for (r, Ir) in enumerate(rest)
         pt = (x1, ntuple(d -> T(Grids.coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
         h = Geometry.scale_factors(geo, pt)[dim]
-        buf[r] = abs(h) ≤ floor_ ? zero(T) : inv(h)
+        buf[r] = abs(h) ≤ floor_ ? zero(T) : inv(h)^ord
     end
     return length(rest)
 end
@@ -247,8 +275,8 @@ end
 A task-held buffer of at least `n` factors, as
 [`Connectivity.ball_scratch`](@ref FlowGeometries.Connectivity.ball_scratch) is for a ball query.
 
-The fused sweeps are serial and call no user code, so one buffer per task is enough; it grows to the
-largest grid the task has swept and is refilled per call.
+It is filled before a sweep and only read during one, threaded chunks included, so one buffer per task
+is enough; it grows to the largest grid the task has swept and is refilled per call.
 """
 function _metric_scratch(::Type{T}, n::Int) where {T}
     v = get!(() -> T[], task_local_storage(), (:flowgeometries_metric_factors, T))::Vector{T}
@@ -374,7 +402,9 @@ end
                 policy=BlankMasked(), backend=SerialBackend()) -> out
 
 [`derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
-above, for the entry point a geometry-aware caller actually uses.
+above, for the entry point a geometry-aware caller actually uses. Where the order is `2` or more along
+a direction whose own scale factor varies along it, the weights depend on the cell and are rebuilt per
+call; hold a [`masked_stencil_plan`](@ref) there.
 """
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
@@ -384,9 +414,12 @@ function derivative!(
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     d = Int(dim)
+    ord = Int(order)
     _check_batched(out, field, grid, Val(N), d)
     msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    return _apply_axis_table!(out, field, Grids.coordinates(grid, d), indices, weights, d, Int(order),
+    _along_arc(grid, d, ord) &&
+        return _arc_derivative!(out, field, grid, d, ord, size(indices, 2), msk, masked, backend, policy)
+    return _apply_axis_table!(out, field, Grids.coordinates(grid, d), indices, weights, d, ord,
                               Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, msk,
-                              masked, backend, policy, scratch, _derivative_factors(grid, d, backend))
+                              masked, backend, policy, scratch, _derivative_factors(grid, d, backend, ord))
 end

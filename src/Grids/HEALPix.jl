@@ -75,6 +75,8 @@ of them inactive.
 """
 @inline npixels(grid::HEALPixGrid) = SphericalSampling.healpix_npix(nside(grid))
 
+@inline sampling(grid::HEALPixGrid) = SphericalSampling.HEALPixSampling(nside(grid))
+
 # ---- the three traits -------------------------------------------------------
 
 @inline cell_address(::HEALPixGrid) = FlatCells()
@@ -114,6 +116,7 @@ coordinates(grid::HEALPixGrid) = throw(ArgumentError(
 @inline measure(grid::HEALPixGrid{T}) where {T} =
     Axes.ConstantVector(T(4π) * T(Geometry.radius(grid_geometry(grid)))^2 / T(npixels(grid)),
                         npixels(grid))
+@inline _total_measure(grid::HEALPixGrid) = sum(measure(grid))
 
 # ---- materialization --------------------------------------------------------
 

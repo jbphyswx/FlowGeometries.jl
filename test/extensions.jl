@@ -15,16 +15,56 @@ Test.@testset "SparseArrays sparse_adjacency_matrix (optional)" begin
     Test.@test Matrix(S) == FG.Connectivity.adjacency_matrix(conn)
 end
 
+# The output type is written inside each kernel: `@allocated` of a call taking a type argument
+# dispatches it dynamically.
+_sa_to_cartesian(g, p) = FG.Geometry.spherical_to_cartesian(StaticArrays.SVector, g, p)
+_sa_to_spherical(g, v) = FG.Geometry.cartesian_to_spherical(StaticArrays.SVector, g, v)
+_sa_basis(g, p) = FG.Geometry.local_tangent_basis(StaticArrays.SVector, g, p)
+_sa_project(g, p, q) = FG.Geometry.project_to_tangent_plane(StaticArrays.SVector, g, p, q)
+
 Test.@testset "StaticArrays extension" begin
     using StaticArrays: StaticArrays as SA
-    geom = FG.Geometry.SphericalGeometry(1.0)
-    p1 = SA.SVector{2,Float64}(0.0, 0.0)
-    p2 = SA.SVector{2,Float64}(0.1, 0.2)
-    d = FG.Geometry.distance(geom, p1, p2)
-    Test.@test d ≈ FG.Geometry.distance(geom, Tuple(p1), Tuple(p2))
-    ê = FG.Geometry.local_tangent_basis(geom, p1)
-    Test.@test ê.λ isa NTuple
-    Test.@test Test.@inferred(FG.Geometry.as_ntuple(p2)) === (0.1, 0.2)
+    GE = FG.Geometry
+    sph = GE.SphericalGeometry(6.371e6)
+    cart = GE.CartesianGeometry()
+    p2, q2 = SA.SVector(0.3, -0.4), SA.SVector(0.3 + 1e-7, -0.4 + 2e-7)
+    p3, q3 = SA.SVector(0.3, -0.4, 6.4e6), SA.SVector(2.9, 0.1, 6.5e6)
+    v = SA.SVector(-1.0, -2.0, 0.5)
+    Test.@test Test.@inferred(GE.as_ntuple(p2)) === (0.3, -0.4)
+    # A static vector is read as its tuple, so every result is the tuple path's, bit for bit.
+    Test.@test GE.distance(sph, p2, q2) === GE.distance(sph, Tuple(p2), Tuple(q2))
+    Test.@test GE.distance(sph, p3, q3) === GE.distance(sph, Tuple(p3), Tuple(q3))
+    Test.@test GE.distance(cart, p3, q3) === GE.distance(cart, Tuple(p3), Tuple(q3))
+    ê = GE.local_tangent_basis(sph, p2)
+    Test.@test ê.λ isa NTuple{3,Float64}
+    # …and a leading `SVector` builds the result as one.
+    x = GE.spherical_to_cartesian(SA.SVector, sph, p2)
+    Test.@test x isa SA.SVector{3,Float64}
+    Test.@test Tuple(x) === Tuple(GE.spherical_to_cartesian(sph, Tuple(p2)))
+    s = GE.cartesian_to_spherical(SA.SVector, sph, v)
+    Test.@test s isa SA.SVector{3,Float64}
+    Test.@test Tuple(s) === Tuple(GE.cartesian_to_spherical(sph, Tuple(v)))
+    Test.@test 0 ≤ s[1] < 2π
+    b = GE.local_tangent_basis(SA.SVector, sph, p2)
+    Test.@test b.λ isa SA.SVector{3,Float64}
+    Test.@test Tuple(b.φ) === ê.φ
+    Test.@test GE.local_tangent_basis(SA.SVector, cart, SA.SVector(1.0, 2.0)).x == SA.SVector(1.0, 0.0)
+    d = GE.project_to_tangent_plane(SA.SVector, sph, p2, q2)
+    Test.@test d isa SA.SVector{2,Float64}
+    Test.@test Tuple(d) === Tuple(GE.project_to_tangent_plane(sph, Tuple(p2), Tuple(q2)))
+    Test.@test GE.project_to_tangent_plane(SA.SVector, cart, SA.SVector(1.0, 2.0), SA.SVector(1.5, 1.0)) ==
+               SA.SVector(0.5, -1.0)
+    # Static vectors in, static vectors out, nothing on the heap and every result type inferred.
+    Test.@test _alloc(GE.distance, sph, p2, q2) == 0
+    Test.@test _alloc(GE.distance, sph, p3, q3) == 0
+    Test.@test _alloc(_sa_to_cartesian, sph, p2) == 0
+    Test.@test _alloc(_sa_to_spherical, sph, v) == 0
+    Test.@test _alloc(_sa_basis, sph, p2) == 0
+    Test.@test _alloc(_sa_project, sph, p2, q2) == 0
+    Test.@test Test.@inferred(_sa_to_cartesian(sph, p2)) isa SA.SVector{3,Float64}
+    Test.@test Test.@inferred(_sa_to_spherical(sph, v)) isa SA.SVector{3,Float64}
+    Test.@test Test.@inferred(_sa_basis(sph, p2)).λ isa SA.SVector{3,Float64}
+    Test.@test Test.@inferred(_sa_project(sph, p2, q2)) isa SA.SVector{2,Float64}
 end
 
 Test.@testset "Threading is opt-in and changes no result" begin
@@ -33,6 +73,20 @@ Test.@testset "Threading is opt-in and changes no result" begin
         rs = FG.Execution.chunk_ranges(n, k)
         Test.@test reduce(vcat, collect.(rs)) == collect(1:n)
         Test.@test all(!isempty, rs) && length(rs) ≤ max(1, min(k, n))
+        Test.@test all(FG.Execution._chunk_range(n, length(rs), c) == rs[c] for c in eachindex(rs))
+    end
+    # More chunks than threads, taken as threads free up: still a partition in order, and an exact
+    # reduction is the serial one.
+    let bt = FG.Execution.BalancedThreads(4), nt = Threads.nthreads()
+        for n in (0, 1, 13, 10_000)
+            Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, bt) == sum(i * i for i in 1:n; init = 0)
+        end
+        Test.@test reduce(vcat, FG.Execution.map_chunks(collect, 1000, bt)) == collect(1:1000)
+        Test.@test length(FG.Execution.map_chunks(length, 1000, bt)) == (nt == 1 ? 1 : min(1000, 4nt))
+        hits = zeros(Int, 997)
+        FG.Execution.run_indices(i -> (hits[i] += 1; nothing), 997, bt)
+        Test.@test all(==(1), hits)
+        Test.@test_throws ArgumentError FG.Execution.BalancedThreads(0)
     end
     # A serial backend hands the body the whole range in one call: the serial path adds no partitioning.
     seen = UnitRange{Int}[]
@@ -183,11 +237,19 @@ Test.@testset "Threading is opt-in and changes no result" begin
     g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 33)
     Test.@test FG.Connectivity.build_connectivity(g).nbrs ==
                FG.Connectivity.build_connectivity(g; backend = thr).nbrs
+    # A tensor-product sampling builds the same graph from its axis lengths alone, on any backend.
+    for s in (FG.SphericalSampling.GaussLegendreSampling(), FG.SphericalSampling.DriscollHealySampling()),
+        st in (FG.Stencils.Axial(1), FG.Stencils.Moore(1)),
+        be in (thr, CB.GPUBackend(KernelAbstractions.CPU()))
+        a = FG.Connectivity.build_connectivity(s, 9; stencil = st)
+        b = FG.Connectivity.build_connectivity(s, 9; stencil = st, backend = be)
+        Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
+    end
 
     # The metric-ball builder chunks the same two owned-slot passes, and per-cell degrees vary
     # even more (polar rows reach every longitude), so the same chunk-boundary argument applies.
     gball = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
-                                    range(0, 2π; length = 25)[1:24],
+                                    FG.Axes.PeriodicAxis(0.0, 2π, 24),
                                     range(-π / 2, π / 2; length = 13))
     a = FG.Connectivity.build_connectivity_within(gball; ball = 2.0e6)
     b = FG.Connectivity.build_connectivity_within(gball; ball = 2.0e6, backend = thr)
@@ -228,11 +290,14 @@ Test.@testset "Grids can be moved to another storage backend" begin
     geo = FG.Geometry.SphericalGeometry()
     g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 9)
     d = adapt(FakeDev(), g)
-    Test.@test FG.Grids.coordinates(d, 1) isa DevArr && FG.Grids.coordinates(d, 2) isa DevArr
+    # The longitude is a periodic axis, three numbers, so it travels as itself; the latitude moves.
+    Test.@test FG.Grids.coordinates(d, 1) === FG.Grids.coordinates(g, 1)
+    Test.@test FG.Grids.coordinates(d, 2) isa DevArr
     # A separable measure adapts its factors, so the outer product is never materialized onto a
-    # device.
+    # device; the longitude's widths are one number and the latitude weights move.
     Test.@test FG.Grids.measure(d) isa FG.Grids.SeparableMeasure
-    Test.@test all(f -> f isa DevArr, FG.Grids.measure_factors(d))
+    Test.@test FG.Grids.measure_factors(d)[1] isa FG.Axes.ConstantVector
+    Test.@test FG.Grids.measure_factors(d)[2] isa DevArr
     Test.@test all(FG.Grids.measure(d)[i, j] == FG.Grids.measure(g)[i, j]
                    for i in 1:size(g, 1), j in 1:size(g, 2))
     Test.@test FG.Grids.mask(d) isa FG.Grids.AllActive           # size only; nothing to move
@@ -256,6 +321,36 @@ Test.@testset "Grids can be moved to another storage backend" begin
 
     c = adapt(FakeDev(), FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(2)))
     Test.@test c.nbrs isa DevArr && c.ptr isa DevArr
+
+    # Held plans move by their arrays: a uniform plan's end rows, a tabulated plan's table, a gradient
+    # plan's CSR and coefficients. A staggered grid moves its centre grid and face axes, a rotated grid
+    # its base.
+    D = FG.Discretization
+    up = adapt(FakeDev(), D.stencil_plan(range(0.0, 1.0; length = 12), 1, 5))
+    Test.@test up.edge_idx isa DevArr && up.edge_wts isa DevArr && D.plan_row(up, 1)[2] isa NTuple{5,Float64}
+    tp = adapt(FakeDev(), D.stencil_plan(collect(cumsum(1.0 .+ 0.2 .* sin.(1:12))), 1, 3))
+    Test.@test tp.indices isa DevArr && tp.weights isa DevArr && D.derivative_order(tp) == 1
+    gp = adapt(FakeDev(), FG.Operators.gradient_plan(cg0))
+    Test.@test gp.ptr isa DevArr && gp.nbr isa DevArr && all(c -> c isa DevArr, gp.coeffs)
+    st = adapt(FakeDev(), FG.Grids.StaggeredGrid(FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
+                                                                          collect(0.0:1.0:5.0), collect(0.0:1.0:3.0))))
+    Test.@test FG.Grids.coordinates(st.center, 1) isa DevArr && all(f -> f isa DevArr, st.faces)
+    rg = adapt(FakeDev(), FG.Grids.rotate(FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 9),
+                                          FG.Geometry.PoleRotation(1.0, 0.7)))
+    Test.@test FG.Grids.coordinates(FG.Grids.base_grid(rg), 2) isa DevArr
+
+    # A face metric moves its grid and every array, keeping `area_flux` one array with `area_op` under
+    # `Dirichlet`; the Laplacian's coefficients move with their null space.
+    let mk = trues(6, 5)
+        mk[3, 3] = false
+        gm = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), collect(0.0:1.0:5.0), collect(0.0:0.5:2.0), mk)
+        fm = adapt(FakeDev(), FG.Operators.face_metrics(gm, FG.Operators.Dirichlet()))
+        Test.@test all(a -> a isa DevArr, fm.area_op) && fm.area_flux === fm.area_op
+        Test.@test all(a -> a isa DevArr, fm.gap) && fm.corner[1] isa DevArr
+        Test.@test FG.Grids.coordinates(fm.grid, 1) isa DevArr
+        c = adapt(FakeDev(), FG.Operators.laplacian_coefficients(FG.Operators.face_metrics(gm)))
+        Test.@test c.diag isa DevArr && c.measure isa DevArr && all(a -> a isa DevArr, c.coef) && c.singular
+    end
 
     t = FG.Connectivity.IndexTopology((4, 3), (true, false), nothing)
     Test.@test adapt(FakeDev(), t) === t              # no mask, nothing to move
@@ -574,6 +669,25 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     Test.@test_throws ArgumentError Adapt.adapt(Array, C.indexed(gu))
     Test.@test !isbits(C.indexed(gu))
 
+    # A cell list moves with its topology, and a launched fold over it visits each cell's candidates in
+    # the host's order, so a floating-point sum over them comes back identical.
+    gc = GD.CurvilinearGrid(cart, [i + 0.25j for i in 1:24, j in 1:24], [j + 0.02i for i in 1:24, j in 1:24],
+                            trues(24, 24))
+    mtc = C.default_sweep_topology(gc, 3.0, false)
+    Test.@test mtc.index isa GD.CellListIndex
+    moved = Adapt.adapt(Array, mtc)
+    Test.@test moved.index.items == mtc.index.items && moved.index.bins == mtc.index.bins
+    function dist_sums(g, mt, backend)
+        ci = CartesianIndices(GD.size_tuple(g))
+        out = zeros(length(ci))
+        FG.Execution.run_indices(length(ci), backend) do lin
+            I = Tuple(@inbounds ci[lin])
+            @inbounds out[lin] = C.fold_within((acc, J, d) -> acc + d, 0.0, g, I...; ball = 3.0, topology = mt)
+        end
+        return out
+    end
+    Test.@test dist_sums(gc, moved, cpu) == dist_sums(gc, mtc, CB.SerialBackend())
+
     # An indexed sweep does stay on the host: each task needs its own candidate buffer, which a
     # launch has nowhere to put.
     Test.@test_throws ArgumentError C.foreach_within(
@@ -593,7 +707,7 @@ Test.@testset "Every layout's cell centres can be indexed, not just the three ar
                ("icosahedral", GD.IcosahedralGrid(4)),
                ("rotated", GD.rotate(
                     GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
-                                      range(0, 2π; length = 25)[1:24],
+                                      FG.Axes.PeriodicAxis(0.0, 2π, 24),
                                       range(-1.2, 1.2; length = 13)),
                     FG.Geometry.PoleRotation(0.7, 1.1))))
     for (_, g) in layouts
@@ -605,5 +719,50 @@ Test.@testset "Every layout's cell centres can be indexed, not just the three ar
         # answer equals the scan's to the cell.
         Test.@test C.nneighbors_within(g, cell...; ball = 2.0e6, topology = ix, scratch = sc) ==
                    C.nneighbors_within(g, cell...; ball = 2.0e6, topology = C.MetricTopology(g))
+    end
+end
+
+# Rotation about the polar axis, `u = cos φ` eastward on the unit sphere, is `ẑ × r̂ = (−sin λ cos φ,
+# cos λ cos φ, 0)` in the ambient frame; a field and its local components round-trip; and an outer
+# product rotates to the outer product of the rotated vectors. Over a trailing batch axis, on a lon–lat
+# grid and a pixelization, on every backend.
+Test.@testset "Fields rotate between the local and the ambient frame" begin
+    O = FG.Operators
+    geo = FG.Geometry.SphericalGeometry()
+    msk = trues(12, 7)
+    msk[3:5, 2:3] .= false
+    grids = (FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 12), range(-1.2, 1.2; length = 7), msk),
+             FG.Grids.HEALPixGrid(geo, 2))
+    for g in grids, b in (CB.SerialBackend(), CB.ThreadedBackend(), CB.GPUBackend(KernelAbstractions.CPU()))
+        sz = (size(FG.Grids.mask(g))..., 2)
+        cells = CartesianIndices(size(FG.Grids.mask(g)))
+        λφ = [Tuple(FG.Grids.coords(g, Tuple(cells[mod1(k, length(cells))])...))[1:2] for k in 1:prod(sz)]
+        act = reshape([FG.Grids.isactive(g, Tuple(cells[mod1(k, length(cells))])...) for k in 1:prod(sz)], sz)
+        u = reshape([cos(p[2]) for p in λφ], sz)
+        X, Y, Z = zeros(sz), zeros(sz), zeros(sz)
+        O.to_planetary!(X, Y, Z, u, zeros(sz), nothing, g; backend = b)
+        Test.@test maximum(abs, vec(X) .- vec(act) .* [-sin(p[1]) * cos(p[2]) for p in λφ]) < 1e-15
+        Test.@test maximum(abs, vec(Y) .- vec(act) .* [cos(p[1]) * cos(p[2]) for p in λφ]) < 1e-15
+        Test.@test maximum(abs, Z) < 1e-15
+
+        v = reshape(sin.(1:prod(sz)), sz)
+        w = reshape(cos.(1:prod(sz)), sz)
+        O.to_planetary!(X, Y, Z, u, v, w, g; backend = b)
+        u2, v2, w2 = fill(NaN, sz), fill(NaN, sz), fill(NaN, sz)
+        O.to_local!(u2, v2, w2, X, Y, Z, g; backend = b)
+        Test.@test maximum(abs, u2 .- act .* u) < 1e-15 && maximum(abs, v2 .- act .* v) < 1e-15 &&
+                   maximum(abs, w2 .- act .* w) < 1e-15
+
+        t = ntuple(_ -> fill(NaN, sz), 6)
+        amb = (X .* X, Y .* Y, Z .* Z, X .* Y, X .* Z, Y .* Z)
+        O.tensor_to_local!(t..., amb..., g; backend = b)
+        for (q, ref) in zip(t, (u .* u, v .* v, w .* w, u .* v, u .* w, v .* w))
+            Test.@test maximum(abs, q .- act .* ref) < 1e-14
+        end
+        if b isa CB.SerialBackend
+            Test.@test _alloc(q_toplan!, (X, Y, Z), (u, v, w), g) == 0
+            Test.@test _alloc(q_toloc!, (u2, v2, w2), (X, Y, Z), g) == 0
+            Test.@test _alloc(q_tens!, t, amb, g) == 0
+        end
     end
 end

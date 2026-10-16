@@ -126,6 +126,12 @@ q_win(g, I, r, mt)       = FG.Connectivity.metric_window(g, I, r, mt)
 q_nwithin(g, r, I)       = FG.Connectivity.nneighbors_within(g, I...; ball = r)
 q_within!(b, g, r, I)    = FG.Connectivity.neighbors_within!(b, g, I...; ball = r)
 q_fold(g, r, I)          = FG.Connectivity.fold_within((a, _, d) -> a + d, 0.0, g, I...; ball = r)
+q_mplan!(o, f, p)        = FG.Operators.apply_stencil!(o, f, p)
+q_mderiv!(o, f, g, p)    = FG.Operators.derivative!(o, f, g, p)
+q_plan_be!(o, f, pl, d, b) = FG.Operators.apply_stencil!(o, f, pl, d; backend = b)
+q_toplan!(xyz, uvw, g)   = FG.Operators.to_planetary!(xyz..., uvw..., g)
+q_toloc!(uvw, xyz, g)    = FG.Operators.to_local!(uvw..., xyz..., g)
+q_tens!(loc, amb, g)     = FG.Operators.tensor_to_local!(loc..., amb..., g)
 q_knn!(ix, dt, g, k, I)  = FG.Connectivity.k_nearest!(ix, dt, g, I...; k = k)
 q_within_top(g, r, I, t) = FG.Connectivity.nneighbors_within(g, I...; ball = r, topology = t)
 q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
@@ -147,9 +153,28 @@ q_cgrid(geo, λ, φ, m)    = FG.Grids.CurvilinearGrid(geo, λ, φ, m)
 q_corners(C)             = FG.Grids._centers_to_corners(C)
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
 q_gradient_t!(outs, f, plan) = FG.Operators.gradient!(outs, f, plan)
-q_stag_grad!(outs, f, sg) = FG.Operators.gradient!(outs, f, sg)
-q_stag_div!(out, us, sg)  = FG.Operators.divergence!(out, us, sg)
-q_stag_curl!(o, u1, u2, sg) = FG.Operators.curl!(o, u1, u2, sg)
+q_mim_lap!(o, χ, fm, g)  = FG.Operators.laplacian!(o, χ, fm, g)
+q_fidx(g, F) = (b = FG.Grids.cell_below(g, F, 1); a = FG.Grids.cell_above(g, F, 2);
+                (b === nothing ? 0 : b[1]) + (a === nothing ? 0 : a[2]) + FG.Grids.face_above(g, F, 1)[1] +
+                FG.Grids.face_below(F, 2)[2] + FG.Grids.corner_to_face(g, F, 1, 2)[1] +
+                FG.Grids.face_to_corner(g, F, 1, 2)[2] + sum(FG.Grids.face_dims(g, 1)) +
+                sum(FG.Grids.corner_dims(g, 1, 2)) + FG.Grids.nfaces(g, 2) + FG.Grids.ncorners(g, 1) +
+                FG.Grids.corner_offset(g, 2))
+q_mim_grad!(g, χ, fm)    = FG.Operators.gradient!(g, χ, fm)
+q_mim_div!(δ, v, fm)     = FG.Operators.divergence!(δ, v, fm)
+q_mim_curl!(W, v, fm)    = FG.Operators.curl!(W, v, fm)
+q_mim_rot!(u, R, fm)     = FG.Operators.rotational_velocity!(u, R, fm)
+q_mim_faces!(v, u, fm)   = FG.Operators.to_faces!(v, u, fm)
+q_mim_centres!(u, v, fm) = FG.Operators.to_centres!(u, v, fm)
+q_lap!(o, Φ, c)          = FG.Operators.apply_laplacian!(o, Φ, c)
+q_proj!(Φ, c)            = FG.Operators.project_out_constant!(Φ, c)
+q_restrict!(cs, f, fc, cc) = FG.Operators.restrict!(cs, f, fc, cc)
+q_prolong!(f, cs, fc, cc)  = FG.Operators.prolong_add!(f, cs, fc, cc)
+q_strain!(S, u, g, p, sc) = FG.Operators.strain_rate!(S, u, g, p; scratch = sc)
+q_vcurl!(ω, u, g, p, sc)  = FG.Operators.curl!(ω, u, g, p; scratch = sc)
+q_vdiv!(δ, u, g, p, sc)   = FG.Operators.divergence!(δ, u, g, p; scratch = sc)
+q_strain_names(g)        = FG.Operators.strain_components(g)
+q_lsg(geo, p)            = FG.Geometry.log_scale_gradients(geo, p)
 q_locdisp(geo, c, n)     = FG.Geometry.local_displacement(geo, c, n)
 q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
@@ -198,9 +223,8 @@ q_conn(g, r, s)          = FG.Connectivity.nneighbors_within(g, 12, 9; ball = r,
 q_connf(g, r, s)         = FG.Connectivity.nneighbors_within(g, 7; ball = r,
                               reach = FG.Connectivity.Connected(), scratch = s)
 
-# The per-grid-shape sweep. `axes = false` for a layout whose coordinates are a formula: the spacing
-# accessors are an axis notion, and such a layout holds no axes to answer them from.
-function check_shape(label, g, I; axes::Bool = true)
+# The per-grid-shape sweep.
+function check_shape(label, g, I)
     r = FG.Grids.grid_geometry(g) isa FG.Geometry.AbstractSphericalGeometry ? 6.371e5 : 2.5
     out = Vector{Int}(undef, 64)
     buf = Vector{Int}(undef, 4096)
@@ -245,15 +269,14 @@ function check_shape(label, g, I; axes::Bool = true)
     end
     for d in 1:FG.Grids.ncoordinates(g)
         # `spacing` is the constant-spacing accessor and errors on an irregular axis.
-        if axes && FG.Grids.isuniform(g, d)
+        if FG.Grids.isuniform(g, d)
             a = _alloc(q_spacing, g, d)
             a == 0 || println("    ", label, " / spacing(d=", d, ") -> ", a, " B")
             Test.@test a == 0
         end
-        span = (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
-                ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
-                ("period", _alloc(q_period, g, d)))
-        for (name, a) in (axes ? (span..., ("isuniform", _alloc(q_isuni, g, d))) : span)
+        for (name, a) in (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
+                          ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
+                          ("period", _alloc(q_period, g, d)), ("isuniform", _alloc(q_isuni, g, d)))
             a == 0 || println("    ", label, " / ", name, "(d=", d, ") -> ", a, " B")
             Test.@test a == 0
         end

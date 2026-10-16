@@ -34,10 +34,10 @@ The same three choices on a plane, with a stretched vertical direction:
 ```julia
 geo = FG.Geometry.CartesianGeometry()
 
-# uniform in x and y, stretched in z — each direction keeps its own answer
+# doubly periodic and uniform in x and y, stretched in z — each direction keeps its own answer
+x    = FG.Axes.PeriodicAxis(0.0, 1e5, 200)                 # 200 cells around a 100 km period
 z    = cumsum([0.0; fill(10.0, 4); fill(40.0, 4)])
-grid = FG.Grids.StructuredGrid(geo, range(0, 1e5; length = 201), range(0, 1e5; length = 201), z;
-                               periodic = (true, true), period = (1e5, 1e5))
+grid = FG.Grids.StructuredGrid(geo, x, x, z)
 
 FG.Grids.isuniform(grid, 1), FG.Grids.isuniform(grid, 3)   # (true, false)
 FG.Grids.spacing(grid, 1)                                   # 500.0, read from the type
@@ -67,6 +67,10 @@ FG.Grids.spacing(grid, d)        # the constant Δ, signed
 No code path inspects coordinate values to decide this, and there is no tolerance anywhere. Where the
 data question matters, the spacing accessors answer it exactly — an axis is equally spaced precisely
 when `minimum_spacing == maximum_spacing`.
+
+Periodicity is the same. An `Axes.PeriodicAxis(origin, period, n)` is `n` equal cells around one
+period, and a grid direction built on one wraps; every other direction is bounded unless the
+constructor is given `periodic` or `topology`.
 
 A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
 is a few hundred bytes, and that is all a device receives.
@@ -130,25 +134,41 @@ bounded end and wraps on a periodic one, so no halo either.
 
 ## Staggered operators
 
-A `StaggeredGrid` is one rectilinear mesh read at any Arakawa C location — the tracer at cell centres,
-each velocity component on the faces it crosses, the vorticity at the corner. Every location is an
-ordinary `StructuredGrid`, so everything above applies at each of them unchanged.
+A scalar sits at cell centres, each velocity component on the faces it crosses, each component of a
+rotation potential on the corners of its pair of directions. One gradient defines the family — the
+divergence is its negative adjoint and the Laplacian their composition — so `L` is symmetric,
+`curl(grad χ) = 0` and `div(rot R) = 0` on every grid, and a boundary condition or a mask is a face of
+zero area.
 
 ```julia
-sg = FG.Grids.StaggeredGrid(geo, λ, φ)
-FG.Grids.grid_at(sg, 1)                  # the u-location grid, as a StructuredGrid
-u1, u2 = FG.Operators.gradient(f, sg)    # centres → faces
-FG.Operators.divergence((u1, u2), sg)    # faces  → centres
-FG.Operators.curl(u1, u2, sg)            # faces  → corners
+O = FG.Operators
+fm = O.face_metrics(grid, O.Neumann())                    # areas, gaps, edges, corner areas, once
+g  = O.gradient!(O.allocate_faces(Float64, grid), χ, fm)   # centres → faces
+O.divergence!(δ, g, fm)                                    # faces   → centres
+O.curl!(O.allocate_corners(Float64, grid), g, fm)          # faces   → corners
+c  = O.laplacian_coefficients(fm)                          # L = D G and its null space, for a solver
+O.apply_laplacian!(out, χ, c)
 ```
 
-These are the orthogonal-curvilinear forms built from the geometry's own `scale_factors`, so the same
-call is `∂/∂x` on a plane and `(1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]` on a sphere. Each is a single
-difference across one cell evaluated where the result lives, so the divergence telescopes exactly and
-the curl of a discrete gradient is zero to round-off.
+Rectilinear grids of any dimension and two-dimensional curvilinear ones. On a rectilinear grid a value
+along a direction is taken along increasing coordinate, whichever way the axis is stored, and the three
+operators are exact for a linear field on a Cartesian grid and second order on a sphere. `coarsen` and
+`galerkin_coefficients` build a multigrid hierarchy as `R L P`. A `StaggeredGrid` gives the ordinary
+`StructuredGrid` at any Arakawa C location, for everything else in the package.
 
-The boundary condition is still the caller's: a face with a cell on one side only has no difference
-across it, and is written `masked`.
+## Strain rate, vorticity and divergence
+
+On a collocated grid, along the local frame — east, north and up on a sphere — with the frame's own
+turning added to the derivatives:
+
+```julia
+plans = O.stencil_plans(grid; nodes = 3)          # every direction's derivative weights, held
+S = O.strain_rate((uλ, uφ), grid, plans)          # (λλ = …, φφ = …, λφ = …)
+ω = O.curl((uλ, uφ), grid, plans)                 # d_λu_φ − d_φu_λ + u_λ tan φ / R
+δ = O.divergence((uλ, uφ), grid, plans)
+```
+
+On a curvilinear grid or a node set the derivatives come from a `gradient_plan`.
 
 ## Mask topology
 

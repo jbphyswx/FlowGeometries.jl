@@ -244,6 +244,61 @@ Base.:(==)(a::AbstractUniformAxis, b::AbstractUniformAxis) =
     length(a) == length(b) &&
     (isempty(a) || (first(a) == first(b) && (length(a) == 1 || step(a) == step(b))))
 
+# ---------------------------------------------------------------------------
+# PeriodicAxis
+# ---------------------------------------------------------------------------
+
+"""
+    PeriodicAxis(origin, period, n)
+    PeriodicAxis{T}(origin, period, n)
+
+`n` samples `period/n` apart from `origin`: `n` equal cells around one period, so the cell after the
+last is the first, one period on. A negative `period` stores the samples descending.
+
+A grid direction holding one is periodic with this period, and its seam is one step wide, so cell
+widths, faces and stencil rows there are those of every other cell.
+
+A slice or an affine map of a periodic axis is a plain [`UniformAxis`](@ref).
+"""
+struct PeriodicAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
+    origin::T
+    Δ::T
+    period::T     # the length one turn covers, positive
+    n::Int
+
+    function PeriodicAxis{T}(origin, period, n::Integer) where {T<:AbstractFloat}
+        n ≥ 1 || throw(ArgumentError("a PeriodicAxis needs n ≥ 1, got $n"))
+        P = convert(T, period)
+        (isfinite(P) && !iszero(P)) ||
+            throw(ArgumentError("a PeriodicAxis needs a finite nonzero period, got $P"))
+        return new{T}(convert(T, origin), P / T(n), abs(P), Int(n))
+    end
+end
+
+function PeriodicAxis(origin::Real, period::Real, n::Integer)
+    T = float(promote_type(typeof(origin), typeof(period)))
+    return PeriodicAxis{T}(origin, period, n)
+end
+
+@inline Base.step(a::PeriodicAxis) = a.Δ
+@inline Base.first(a::PeriodicAxis) = a.origin
+@inline Base.length(a::PeriodicAxis) = a.n
+@inline similar_axis(::PeriodicAxis{T}, origin, Δ, n::Integer) where {T} = UniformAxis{T}(origin, Δ, n)
+
+"""
+    period(a::PeriodicAxis) -> T
+
+The length one turn of `a` covers, positive whichever way the samples run.
+"""
+@inline period(a::PeriodicAxis) = a.period
+
+# `P` checked as the period of `a`, which wraps at its own period and no other.
+@inline function own_period(a::PeriodicAxis{T}, P::Real) where {T}
+    T(P) == a.period || throw(ArgumentError(
+        "a PeriodicAxis of period $(a.period) was given period $P; it wraps at its own period"))
+    return a.period
+end
+
 """
     uniform_axis(x) -> UniformAxis
     uniform_axis(T, x) -> UniformAxis{T}

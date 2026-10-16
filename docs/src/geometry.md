@@ -130,10 +130,12 @@ FG.Geometry.prime_vertical_radius(wgs, 0.0), FG.Geometry.meridional_radius(wgs, 
 ```
 
 Grid directions are `(λ, φ, h)`, with `h` the height **above the ellipsoid** — not the absolute radius
-that a spherical grid's third direction carries.
+that a spherical grid's third direction carries. The longitude here is a
+[`PeriodicAxis`](@ref FlowGeometries.Axes.PeriodicAxis), eight equal cells around `2π`, so that direction
+wraps.
 
 ```@example geometry
-λ = range(0, 2π; length = 9)[1:8]
+λ = FG.Axes.PeriodicAxis(0.0, 2π, 8)
 φ = range(-π/2, π/2; length = 7)
 gs = FG.Grids.StructuredGrid(wgs, λ, φ)
 FG.Grids.coordinate_names(gs), FG.Grids.isperiodic(gs, 1), size(gs)
@@ -204,7 +206,7 @@ to the geographic coordinates of each cell.
 
 ```@example geometry
 sph = FG.Geometry.SphericalGeometry()
-λr = range(0, 2π; length = 25)[1:24]
+λr = FG.Axes.PeriodicAxis(0.0, 2π, 24)
 φr = range(-1.2, 1.2; length = 13)
 grot = FG.Grids.unrotate(FG.Grids.StructuredGrid(sph, λr, φr), rot)
 typeof(grot).name.name, size(grot), FG.Grids.coordinate_names(grot)

@@ -26,6 +26,10 @@ include("Operators/Interpolate.jl")
 include("Operators/Gradient.jl")
 include("Operators/Structured.jl")
 include("Operators/Scattered.jl")
-include("Operators/Staggered.jl")
+include("Operators/MaskedPlan.jl")
+include("Operators/Frames.jl")
+include("Operators/Kinematics.jl")
+include("Operators/Mimetic.jl")
+include("Operators/Laplacian.jl")
 
 end # module Operators

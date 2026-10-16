@@ -105,7 +105,7 @@ geometry's own metric:
 
 ```@example conn
 geo = FG.Geometry.SphericalGeometry()            # Earth radius, metres
-λ = range(0, 2π; length = 25)[1:24]
+λ = FG.Axes.PeriodicAxis(0.0, 2π, 24)             # 24 cells round the circle, so λ wraps
 φ = range(-π/2, π/2; length = 13)
 g = FG.Grids.StructuredGrid(geo, λ, φ)
 ball = S.MetricBall(2.0e6)                       # everything within 2000 km

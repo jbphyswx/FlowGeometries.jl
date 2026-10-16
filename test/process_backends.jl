@@ -29,8 +29,11 @@ function check_process_backend(backend)
         a = C.build_connectivity(SS.CubedSphereSampling(), 5; stencil = st)
         b = C.build_connectivity(SS.CubedSphereSampling(), 5; stencil = st, backend = backend)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
+        a = C.build_connectivity(SS.GaussLegendreSampling(), 9; stencil = st)
+        b = C.build_connectivity(SS.GaussLegendreSampling(), 9; stencil = st, backend = backend)
+        Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
     end
-    gball = GD.StructuredGrid(sph, range(0, 2π; length = 25)[1:24], range(-π / 2, π / 2; length = 13))
+    gball = GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 24), range(-π / 2, π / 2; length = 13))
     let a = C.build_connectivity_within(gball; ball = 2.0e6),
         b = C.build_connectivity_within(gball; ball = 2.0e6, backend = backend)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
@@ -51,7 +54,7 @@ function check_process_backend(backend)
     end
     λ = collect(range(0, 2π * (1 - 1 / 16); length = 16))
     φ = collect(range(-π / 2, π / 2; length = 13))
-    gsph = GD.StructuredGrid(sph, λ, φ)
+    gsph = GD.StructuredGrid(sph, λ, φ; periodic = true)
     fs = [sin(l) * cos(p) for l in λ, p in φ]
     for dim in 1:2
         a = fill(NaN, size(fs)); b = fill(NaN, size(fs))

@@ -285,6 +285,26 @@ Test.@testset "Uniform axes and constant factors are O(1), and exact" begin
     Test.@test all(==(0.5), FG.Grids.measure_factors(g)[1])
 end
 
+Test.@testset "A periodic axis is n equal cells around one period" begin
+    A = FG.Axes
+    r = A.PeriodicAxis(0.0, 2π, 12)
+    Test.@test r isa A.AbstractUniformAxis{Float64} && isbits(r)
+    Test.@test A.isuniform(r) && step(r) == 2π / 12 && A.period(r) == 2π
+    Test.@test collect(r) == [(i - 1) * (2π / 12) for i in 1:12]
+    # Descending: a negative period, the same magnitude.
+    d = A.PeriodicAxis(2π, -2π, 12)
+    Test.@test step(d) == -step(r) && A.period(d) == 2π && first(d) == 2π
+    # A slice or a scaled copy is a plain uniform axis.
+    Test.@test r[2:5] isa A.UniformAxis && collect(r[2:5]) == collect(r)[2:5]
+    Test.@test 2.0 .* r isa A.UniformAxis
+    # The element type follows the arguments, or is named.
+    Test.@test A.PeriodicAxis{Float32}(0, 2π, 8) isa A.PeriodicAxis{Float32}
+    Test.@test A.period(A.PeriodicAxis{Float32}(0, 2π, 8)) == Float32(2π)
+    Test.@test_throws ArgumentError A.PeriodicAxis(0.0, 2π, 0)
+    Test.@test_throws ArgumentError A.PeriodicAxis(0.0, 0.0, 4)
+    Test.@test_throws ArgumentError A.PeriodicAxis(0.0, Inf, 4)
+end
+
 Test.@testset "Axis widths use bulk operations, not per-element scalar reads" begin
     # An array type that counts scalar `getindex` calls. Device arrays make scalar indexing an
     # error precisely because it is a per-element round trip; the property that matters is that

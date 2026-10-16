@@ -152,11 +152,12 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    structured_grid([T], sampling, nlat; geometry, nlon, mask, periodic) -> StructuredGrid
+    structured_grid([T], sampling, nlat; geometry, nlon, mask) -> StructuredGrid
 
 Build a spherical `StructuredGrid` from a tensor-product sampling (Clenshaw–Curtis,
-Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). Longitude periodicity is
-auto-detected unless `periodic` is set.
+Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). The samplings space their longitudes
+evenly around the circle, so the longitude axis is an [`Axes.PeriodicAxis`](@ref) over `2π` and the grid
+wraps in longitude.
 
 A sampling with latitude quadrature weights (Gauss–Legendre, Driscoll–Healy, Clenshaw–Curtis) gives
 cells of measure `R²·Δλ·wⱼ`, so `sum(f .* measure(grid))` is that quadrature; the nodes and the
@@ -178,11 +179,11 @@ function structured_grid(
     geometry::Geometry.AbstractSphericalGeometry = Geometry.SphericalGeometry(),
     nlon::Union{Nothing,Integer} = nothing,
     mask = nothing,
-    periodic = nothing,
 ) where {T<:AbstractFloat}
     q = _axes_and_weights(T, s, nlat, nlon)
-    m = mask === nothing ? Grids.AllActive((length(q.λ), length(q.φ))) : mask
-    return Grids._structured_grid(Geometry.similar_geometry(T, geometry), (q.λ, q.φ), m, periodic,
+    λ = Axes.PeriodicAxis{T}(zero(T), T(2π), length(q.λ))
+    m = mask === nothing ? Grids.AllActive((length(λ), length(q.φ))) : mask
+    return Grids._structured_grid(Geometry.similar_geometry(T, geometry), (λ, q.φ), m, nothing,
                                   nothing, s, q.w)
 end
 
@@ -192,7 +193,7 @@ _axes_and_weights(::Type{T}, s, nlat, nlon) where {T} =
     (; SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)..., w = nothing)
 
 """
-    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only)
+    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only, backend)
 
 Sampling topology straight to CSR. A tensor-product sampling's neighbor graph is fixed by its axis
 lengths and longitude wrapping alone, so the axes themselves are never evaluated — for
@@ -206,14 +207,14 @@ function build_connectivity(
     periodic::Union{Nothing,NTuple{2,Bool}} = nothing,
     stencil = Stencils.Axial(1),
     active_only::Bool = true,
+    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     sz = SphericalSampling.axes_lengths(s, nlat; nlon = nlon)
-    # These samplings tile the full circle in longitude and stop at the poles in latitude, the same
-    # closure `StructuredGrid`'s auto-detection reaches from the axes themselves.
+    # These samplings tile the full circle in longitude and stop at the poles in latitude.
     per = periodic === nothing ? (true, false) : periodic
     return build_connectivity(
         IndexTopology((sz.nlon, sz.nlat), per, mask);
-        stencil = stencil, active_only = active_only,
+        stencil = stencil, active_only = active_only, backend = backend,
     )
 end
 
@@ -605,55 +606,17 @@ function unstructured_grid(
     mesh = SphericalSampling.icosahedral_mesh(T, s.frequency)
     conn = _csr_from_undirected_edges(length(mesh.λ), mesh.edges)
     geo = Geometry.similar_geometry(T, geometry)
-    a = areas === nothing ?
-        _icosahedral_dual_areas(geo, mesh.verts, mesh.triangles, length(mesh.λ)) : areas
+    a = areas === nothing ? _icosahedral_dual_areas(geo, s.frequency) : areas
     return _unstructured_from_points_conn(geo, mesh.λ, mesh.φ, conn, a; mask = mask)
 end
 
-"""
-    _icosahedral_dual_areas(geometry, verts, triangles, nvert) -> Vector
+# The geodesic's spherical Voronoi dual areas, in the mesh's vertex numbering: the `IcosahedralGrid`'s,
+# which numbers its vertices the same way.
+_icosahedral_dual_areas(geometry::Geometry.AbstractSphericalGeometry, ν::Integer) =
+    Grids.measure_array(Grids.IcosahedralGrid(geometry, ν))
 
-Exact spherical-Voronoi dual-cell areas from the mesh's own triangulation — no convex hull, no
-optional dependency.
-
-Each triangle is divided among its three vertices by the three arcs from its circumcenter `O` to its
-edge midpoints. Those arcs *are* the perpendicular bisectors of the edges — `O` is equidistant from
-all three vertices and each midpoint is equidistant from its two — so vertex `a`'s share is the
-spherical quadrilateral `(a, M_ab, O, M_ca)`, exactly its Voronoi cell restricted to that triangle.
-The three shares tile the triangle, so accumulating over all `20ν²` triangles tiles the sphere and
-the areas sum to `4πR²` identically. Ordering the cells' corners is never needed, so there is no
-per-vertex `sortperm` and no incident-triangle list.
-"""
-function _icosahedral_dual_areas(
-    geometry::Geometry.AbstractSphericalGeometry{TG},
-    verts::AbstractVector{NTuple{3,TV}},
-    triangles::AbstractVector{NTuple{3,Int}},
-    nvert::Integer,
-) where {TG<:AbstractFloat,TV<:AbstractFloat}
-    T = promote_type(TG, TV)
-    areas = zeros(T, Int(nvert))
-    R2 = T(Geometry.radius(geometry))^2
-    @inline nrm(p) = (r = sqrt(p[1]^2 + p[2]^2 + p[3]^2); (p[1] / r, p[2] / r, p[3] / r))
-    @inbounds for (ia, ib, ic) in triangles
-        A = verts[ia]; B = verts[ib]; C = verts[ic]
-        # Circumcenter: the plane through A, B, C has a unit normal equidistant from all three.
-        ux = B[1] - A[1]; uy = B[2] - A[2]; uz = B[3] - A[3]
-        vx = C[1] - A[1]; vy = C[2] - A[2]; vz = C[3] - A[3]
-        O = nrm((uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx))
-        O[1] * A[1] + O[2] * A[2] + O[3] * A[3] < 0 && (O = (-O[1], -O[2], -O[3]))
-        Mab = nrm((A[1] + B[1], A[2] + B[2], A[3] + B[3]))
-        Mbc = nrm((B[1] + C[1], B[2] + C[2], B[3] + C[3]))
-        Mca = nrm((C[1] + A[1], C[2] + A[2], C[3] + A[3]))
-        areas[ia] += R2 * (Geometry.spherical_excess(A, Mab, O) + Geometry.spherical_excess(A, O, Mca))
-        areas[ib] += R2 * (Geometry.spherical_excess(B, Mbc, O) + Geometry.spherical_excess(B, O, Mab))
-        areas[ic] += R2 * (Geometry.spherical_excess(C, Mca, O) + Geometry.spherical_excess(C, O, Mbc))
-    end
-    return areas
-end
-
-_icosahedral_dual_areas(
-    ::Geometry.AbstractCartesianGeometry{T}, ::AbstractVector, ::AbstractVector, nvert::Integer,
-) where {T<:AbstractFloat} = ones(T, Int(nvert))
+_icosahedral_dual_areas(::Geometry.AbstractCartesianGeometry{T}, ν::Integer) where {T<:AbstractFloat} =
+    ones(T, SphericalSampling.icosahedral_nvertices(ν))
 
 # `areas` is required: a node set's control volumes come from its own tessellation, and each sampling
 # that reaches here computes them in closed form before calling.

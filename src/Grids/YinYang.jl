@@ -59,6 +59,8 @@ YinYangGrid(nlon::Integer, nlat::Integer; kwargs...) =
 
 @inline npanels(::YinYangGrid) = 2
 
+@inline sampling(::YinYangGrid) = SphericalSampling.YinYangSampling()
+
 """
     panel_shape(grid::YinYangGrid) -> (nlon, nlat)
 

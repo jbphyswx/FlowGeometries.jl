@@ -8,7 +8,7 @@ geo    = FG.Geometry.SphericalGeometry()
 ax     = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.ClenshawCurtisSampling(), 32)
 λaxis, φaxis = ax.λ, ax.φ
 mask   = trues(length(λaxis), length(φaxis))
-grid   = FG.Grids.StructuredGrid(geo, λaxis, φaxis, mask)
+grid   = FG.Grids.StructuredGrid(geo, λaxis, φaxis, mask; periodic = true)
 λ2d    = [λaxis[i] for i in eachindex(λaxis), j in eachindex(φaxis)]
 φ2d    = [φaxis[j] for i in eachindex(λaxis), j in eachindex(φaxis)]
 λc, φc = FG.Grids._centers_to_corners(λ2d), FG.Grids._centers_to_corners(φ2d)
@@ -53,15 +53,28 @@ yy   = FG.Grids.YinYangGrid(32, 22)
 ico  = FG.Grids.IcosahedralGrid(16)
 
 # Or directly, in any number of dimensions; the mask is optional
-sg  = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), λaxis, φaxis, mask)
-cg  = FG.Grids.CurvilinearGrid(FG.Geometry.SphericalGeometry(), λ2d, φ2d, mask)
+sg  = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), λaxis, φaxis, mask; periodic = true)
+cg  = FG.Grids.CurvilinearGrid(FG.Geometry.SphericalGeometry(), λ2d, φ2d, mask; periodic = true)
 g4  = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
                               0:1.0:3, 0:1.0:3, 0:1.0:3, 0:1.0:3)  # 4-D, all active
 size(g4)
 ```
 
-A formula layout's storage does not depend on its resolution, and the arithmetic is what answers every
-per-cell question:
+A direction wraps when its axis type says so — a [`PeriodicAxis`](@ref FlowGeometries.Axes.PeriodicAxis),
+`n` equal cells around one period, as a sampling's longitude is — or when `periodic` (or `topology`) is
+passed. Every other direction is bounded; nothing is read off the coordinate values. On a periodic axis
+the seam is one step wide by construction, so its widths, faces and stencil rows keep their uniform
+forms; a plain axis declared periodic takes the per-cell forms, which hold whatever seam its period
+leaves.
+
+```@example grids
+wrapped = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), FG.Axes.PeriodicAxis(0.0, 2π, 64), φaxis)
+FG.Grids.isperiodic(wrapped, 1), FG.Grids.isperiodic(FG.Grids.StructuredGrid(geo, λaxis, φaxis), 1)
+```
+
+A formula layout answers every per-cell question by arithmetic. HEALPix's storage does not depend on its
+resolution; the cubed sphere and the icosahedral geodesic hold their cell areas besides, a quadrant of one
+panel and one area per symmetry class of vertex:
 
 ```@example grids
 g1024 = FG.Grids.HEALPixGrid(1024)                 # 12 582 912 pixels
@@ -160,11 +173,11 @@ When every cell participates the mask is `AllActive`, which stores its size and 
 the two triangles through the four corner directions on a sphere, the shoelace area on a plane.
 
 ```@example grids
-cg2 = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask; x_corner = λc, y_corner = φc)
+cg2 = FG.Grids.CurvilinearGrid(geo, λ2d, φ2d, mask; corners = (λc, φc))
 size(FG.Grids.corners(cg2, 1)), FG.Grids.corner_coords(cg2, i, j)
 ```
 
-Supply `x_corner`/`y_corner` when your source model ships its own cell-vertex grid; otherwise they
+Supply `corners` when your source model ships its own cell-vertex grid; otherwise they
 are reconstructed from the centres, which needs at least a 2×2 grid.
 
 Vertices you supply are kept on the grid. Reconstructed ones are input to the area kernel, and are kept

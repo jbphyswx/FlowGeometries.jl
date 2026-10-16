@@ -58,23 +58,25 @@ function Base.show(io::IO, p::GradientPlan{D,T}) where {D,T}
 end
 
 """
-    gradient!(outs::Tuple, field, plan) -> outs
-    gradient!(g1, g2, field, plan) -> (g1, g2)
-    gradient!(g1, g2, g3, field, plan) -> (g1, g2, g3)
+    gradient!(outs::Tuple, field, plan; backend=SerialBackend()) -> outs
+    gradient!(g1, g2, field, plan; backend=SerialBackend()) -> (g1, g2)
+    gradient!(g1, g2, g3, field, plan; backend=SerialBackend()) -> (g1, g2, g3)
 
 Apply a [`GradientPlan`](@ref): the components of `∇field` at every cell, written one per output array.
-One dot product per cell over its neighbours, allocating nothing.
+One dot product per cell over its neighbours, allocating nothing on the host.
 
 There must be exactly [`ncomponents`](@ref) of them. `field` and the outputs are indexed linearly, so
 an `N`-D array of the grid's shape works as is. The components are named by `plan.names` — `(:λ, :φ)`
 on a sphere, `(:x, :y)` on a plane, `(:x, :y, :z)` in a volume — and are per unit **distance**, the
 displacements being metric already.
+
+Every cell is its own work item under `backend`; the plan's arrays are read where `backend` runs.
 """
 function gradient! end
 
 function gradient!(
     outs::Tuple{AbstractArray{S},Vararg{AbstractArray{S}}}, field::AbstractArray,
-    plan::GradientPlan{D},
+    plan::GradientPlan{D}; backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {D,S}
     n = length(plan)
     length(outs) == D || throw(DimensionMismatch(
@@ -92,22 +94,35 @@ function gradient!(
     nb = length(field) ÷ n
     # Indexed linearly: an `N`-D array of the grid's shape indexes linearly as it stands, and a batched
     # one is that shape repeated, so `vec` adds an array wrapper per output per call for nothing.
-    #
-    # The per-direction accumulator is a tuple rebuilt each step, so one body serves any `D`: `ntuple`
-    # over a `Val` unrolls and stays in registers.
-    @inbounds for b in 0:(nb - 1)
-        off = b * n
-        for i in 1:n
-            f0 = field[off + i]
-            s = ntuple(_ -> zero(S), Val(D))
-            for t in plan.ptr[i]:(plan.ptr[i + 1] - 1)
-                s = _grad_accum(s, _grad_coefs(plan.coeffs, t, S),
-                                S(field[off + plan.nbr[t]] - f0))
-            end
-            _grad_store!(outs, off + i, s)
+    bk = Execution.resolve(backend)
+    if bk isa CB.AbstractSerialBackend
+        @inbounds for b in 0:(nb - 1), i in 1:n
+            _gradient_at!(outs, field, plan, b * n, i, S)
         end
+        return outs
+    end
+    p = Execution.on_backend(bk, plan)
+    Execution.run_indices(n * nb, bk, map(Execution.Written, outs)...) do k
+        off = ((k - 1) ÷ n) * n
+        _gradient_at!(outs, field, p, off, k - off, S)
     end
     return outs
+end
+
+# Cell `i` of the batch element starting at `off`. The per-direction accumulator is a tuple rebuilt each
+# step, so one body serves any `D`: `ntuple` over a `Val` unrolls and stays in registers.
+@inline function _gradient_at!(
+    outs::NTuple{D,AbstractArray}, field, plan::GradientPlan{D}, off::Int, i::Int, ::Type{S},
+) where {D,S}
+    @inbounds begin
+        f0 = field[off + i]
+        s = ntuple(_ -> zero(S), Val(D))
+        for t in plan.ptr[i]:(plan.ptr[i + 1] - 1)
+            s = _grad_accum(s, _grad_coefs(plan.coeffs, t, S), S(field[off + plan.nbr[t]] - f0))
+        end
+        _grad_store!(outs, off + i, s)
+    end
+    return nothing
 end
 
 # The three tuple steps of the loop above, each taking everything it touches as an argument. Written
@@ -124,13 +139,14 @@ end
     return nothing
 end
 
-@inline gradient!(g1::AbstractArray, g2::AbstractArray, field::AbstractArray, plan::GradientPlan{2}) =
-    gradient!((g1, g2), field, plan)
+@inline gradient!(
+    g1::AbstractArray, g2::AbstractArray, field::AbstractArray, plan::GradientPlan{2}; kwargs...,
+) = gradient!((g1, g2), field, plan; kwargs...)
 
 @inline gradient!(
     g1::AbstractArray, g2::AbstractArray, g3::AbstractArray, field::AbstractArray,
-    plan::GradientPlan{3},
-) = gradient!((g1, g2, g3), field, plan)
+    plan::GradientPlan{3}; kwargs...,
+) = gradient!((g1, g2, g3), field, plan; kwargs...)
 
 """
     _sympinv2(a, b, c, tol) -> (p11, p12, p22)

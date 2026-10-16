@@ -1,6 +1,7 @@
 module Connectivity
 
 using ComputationalBackends: ComputationalBackends as CB
+using ..Axes: Axes
 using ..Execution: Execution
 using ..Geometry: Geometry
 using ..Stencils: Stencils
