@@ -99,11 +99,11 @@ function _gradient_plan(
     @inbounds for i in 1:n
         m = 0                                          # this cell's kept neighbours
         if !(active_only && !msk[i])
-            p0 = _grad_coords(grid, sz, i)
+            fr = Geometry._local_frame(geo, _grad_coords(grid, sz, i))
             for t in c.ptr[i]:(c.ptr[i + 1] - 1)
                 j = Int(c.nbrs[t])
                 active_only && !msk[j] && continue
-                Δ = Geometry.local_displacement(geo, p0, _grad_coords(grid, sz, j))
+                Δ = Geometry._displacement_on(geo, fr, _grad_coords(grid, sz, j))
                 δ = ntuple(d -> T(Δ[d]), Val(D))
                 q = _contract(δ, δ)
                 q > 0 || continue                     # a coincident neighbour carries no direction
@@ -145,8 +145,10 @@ end
 The cell of the grid's [`Grids.CellMesh`](@ref) containing `p0`, and the barycentric weights of `p0`
 in it. `a == 0` where there is none — outside the mesh, or against an inactive node.
 
-Trying the cells incident on `nearest` is exhaustive: `p0` lies in the Voronoi cell of its nearest node,
-and in a Delaunay triangulation that region is covered by the triangles incident on that node.
+The cells incident on `nearest` are tried first, and usually hold `p0`. They need not: a point near
+an edge can lie nearer the vertex across it than any of its own. From the best of them the search
+walks across the edge opposite the most negative weight, which ends at the containing cell on a
+Delaunay mesh, or at the mesh's boundary.
 
 The weights are computed in the tangent plane at `p0`, where the three vertices sit at their
 [`Geometry.local_displacement`](@ref)s and `p0` itself is the origin.
@@ -156,31 +158,74 @@ The weights are computed in the tangent plane at `p0`, where the three vertices 
 ) where {T}
     mesh = Grids.cell_mesh(grid)
     msk = Grids.mask(grid)
-    z = (zero(T), zero(T), zero(T))
-    mesh === nothing && return (0, 0, 0, z)
-    (1 ≤ nearest ≤ length(mesh.node_ptr) - 1) || return (0, 0, 0, z)
+    none = (0, 0, 0, (zero(T), zero(T), zero(T)))
+    mesh === nothing && return none
+    (1 ≤ nearest ≤ length(mesh.node_ptr) - 1) || return none
     # A vertex a hair outside is still in: the test decides a boundary shared by two cells, and a
     # query exactly on an edge lands in one of them.
     tol = -sqrt(eps(T))
+    fr = Geometry._local_frame(geo, p0)
+    start, least, held = 0, T(-Inf), false
     @inbounds for cc in Grids.node_cells(mesh, nearest)
-        nds = Grids.cell_nodes(mesh, Int(cc))
-        length(nds) == 3 || continue
-        a, b, c = Int(nds[1]), Int(nds[2]), Int(nds[3])
-        active_only && !(msk[a] && msk[b] && msk[c]) && continue
-        Δa = Geometry.local_displacement(geo, p0, Grids._raw_coords(grid, a))
-        Δb = Geometry.local_displacement(geo, p0, Grids._raw_coords(grid, b))
-        Δc = Geometry.local_displacement(geo, p0, Grids._raw_coords(grid, c))
-        a1, a2 = T(Δa[1]), T(Δa[2])
-        b1, b2 = T(Δb[1]), T(Δb[2])
-        c1, c2 = T(Δc[1]), T(Δc[2])
-        det = (b2 - c2) * (a1 - c1) + (c1 - b1) * (a2 - c2)
-        iszero(det) && continue                       # a degenerate cell spans no area
-        w1 = ((b2 - c2) * (-c1) + (c1 - b1) * (-c2)) / det
-        w2 = ((c2 - a2) * (-c1) + (a1 - c1) * (-c2)) / det
-        w3 = one(T) - w1 - w2
-        (w1 ≥ tol && w2 ≥ tol && w3 ≥ tol) && return (a, b, c, (w1, w2, w3))
+        tri = _cell_weights(grid, geo, fr, mesh, Int(cc), T)
+        a, b, c, w = tri
+        a == 0 && continue
+        m = min(w[1], w[2], w[3])
+        if m ≥ tol
+            (!active_only || (msk[a] && msk[b] && msk[c])) && return tri
+            held = true                                # contained, against an inactive node
+        elseif m > least
+            start, least = Int(cc), m
+        end
     end
-    return (0, 0, 0, z)
+    (held || start == 0) && return none
+    t = start
+    tri = _cell_weights(grid, geo, fr, mesh, t, T)
+    # Each step leaves through the edge `p0` lies beyond, so on a Delaunay mesh no cell repeats; the cap
+    # ends a cycle on a mesh that is not one.
+    @inbounds for _ in 1:Grids.ncells(mesh)
+        a, b, c, w = tri
+        u, v = w[1] ≤ min(w[2], w[3]) ? (b, c) : w[2] ≤ w[3] ? (a, c) : (a, b)
+        t = _cell_across(mesh, t, u, v)
+        t == 0 && return none                          # off the mesh's edge
+        tri = _cell_weights(grid, geo, fr, mesh, t, T)
+        a, b, c, w = tri
+        a == 0 && return none
+        if min(w[1], w[2], w[3]) ≥ tol
+            return !active_only || (msk[a] && msk[b] && msk[c]) ? tri : none
+        end
+    end
+    return none
+end
+
+# Cell `cc`'s vertices and the barycentric weights of the frame's origin in it, or `a == 0` where the
+# cell is no triangle or spans no area.
+@inline function _cell_weights(grid, geo, fr, mesh, cc::Int, ::Type{T}) where {T}
+    nds = Grids.cell_nodes(mesh, cc)
+    length(nds) == 3 || return (0, 0, 0, (zero(T), zero(T), zero(T)))
+    @inbounds a, b, c = Int(nds[1]), Int(nds[2]), Int(nds[3])
+    Δa = Geometry._displacement_on(geo, fr, Grids._raw_coords(grid, a))
+    Δb = Geometry._displacement_on(geo, fr, Grids._raw_coords(grid, b))
+    Δc = Geometry._displacement_on(geo, fr, Grids._raw_coords(grid, c))
+    a1, a2 = T(Δa[1]), T(Δa[2])
+    b1, b2 = T(Δb[1]), T(Δb[2])
+    c1, c2 = T(Δc[1]), T(Δc[2])
+    det = (b2 - c2) * (a1 - c1) + (c1 - b1) * (a2 - c2)
+    iszero(det) && return (0, 0, 0, (zero(T), zero(T), zero(T)))
+    w1 = ((b2 - c2) * (-c1) + (c1 - b1) * (-c2)) / det
+    w2 = ((c2 - a2) * (-c1) + (a1 - c1) * (-c2)) / det
+    return (a, b, c, (w1, w2, one(T) - w1 - w2))
+end
+
+# The cell other than `t` that has both `u` and `v` among its nodes, or 0 where the edge is a boundary.
+@inline function _cell_across(mesh, t::Int, u::Int, v::Int)
+    @inbounds for c1 in Grids.node_cells(mesh, u)
+        Int(c1) == t && continue
+        for c2 in Grids.node_cells(mesh, v)
+            c1 == c2 && return Int(c1)
+        end
+    end
+    return 0
 end
 
 # `f` at the query point from the cell containing it: three reads, exact for a field linear in the
@@ -191,13 +236,44 @@ end
 """
     _mask_may_hide(grid, policy, active_only) -> Bool
 
-Whether the neighbourhood test has anything to find: under [`BlankMasked`](@ref) an active-only
-`k_nearest` may have skipped an inactive cell nearer than the farthest it kept, and the test is a
-second range query over the same index. On an [`Grids.AllActive`](@ref) grid there is no inactive cell
-to skip, so the answer is known without the query.
+Whether the neighbourhood test has anything to find: under [`BlankMasked`](@ref) an active-only search
+may pass over an inactive cell nearer than the farthest active one it keeps. On an
+[`Grids.AllActive`](@ref) grid there is no inactive cell to pass over.
 """
 @inline _mask_may_hide(grid, policy::AbstractMaskPolicy, active_only::Bool) =
     policy isa BlankMasked && active_only && !(Grids.mask(grid) isa Grids.AllActive)
+
+# The `k` nearest cells' ids and distances: the caller's pair where one is given, so that a stream of
+# queries allocates nothing, else a fresh pair.
+@inline _nearest_buffers(::Nothing, k::Int, ::Type{T}) where {T} =
+    (Vector{Int}(undef, k), Vector{T}(undef, k))
+
+@inline function _nearest_buffers(b::Tuple{AbstractVector{<:Integer},AbstractVector}, k::Int, ::Type)
+    (length(b[1]) ≥ k && length(b[2]) ≥ k) || throw(ArgumentError(
+        "nearest must hold at least k = $k ids and distances; got $(length(b[1])) and $(length(b[2]))",
+    ))
+    return b
+end
+
+# The neighbour search both forms share: the `k` nearest active cells to `p0`, nearest first, how many
+# were found, and whether an inactive cell lies at least as near as the farthest of them. `BlankMasked`
+# refuses a fit over such a neighbourhood, on the rule a stencil uses; the search answers it in the same
+# pass, visiting the inactive cells without keeping them.
+#
+# Without a cell mesh that verdict is the whole answer, so the search stops once it is settled. With
+# one, the containing cell is tried first and needs the nearest active node, so the search runs on.
+@inline function _scattered_neighbours(
+    grid::Grids.AbstractGrid{G,T}, p0::Tuple, k::Integer, active_only::Bool, policy, topology, scratch,
+    nearest,
+) where {G,T}
+    kk = Int(k)
+    kk ≥ 0 || throw(ArgumentError("k must be non-negative, got $k"))
+    idx, dist = _nearest_buffers(nearest, kk, T)
+    n, hidden = Connectivity._k_nearest_at!(idx, dist, grid, p0, kk, active_only,
+                                            _mask_may_hide(grid, policy, active_only),
+                                            !Grids.has_cell_mesh(grid), topology, scratch)
+    return idx, dist, n, hidden
+end
 
 # The scalar fit: one value per cell in, one value out. The rank-matched methods below dispatch to it,
 # so `interpolate` returns a scalar for an unbatched field and a vector for a batched one, decided by
@@ -205,7 +281,7 @@ to skip, so the answer is known without the query.
 function _interp_scattered(
     field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}},
     p::NTuple{D,Real}; k::Integer = 8, active_only::Bool = true, masked = T(NaN),
-    topology = Connectivity.MetricTopology(grid), scratch = nothing,
+    topology = Connectivity.MetricTopology(grid), scratch = nothing, nearest = nothing,
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,D}
     policy isa ShiftWithinRun && _interp_mask_error(policy)
@@ -219,37 +295,28 @@ function _interp_scattered(
     ))
     geo = Grids.grid_geometry(grid)
     p0 = ntuple(d -> T(p[d]), Val(D))
-    idx, dist = Connectivity.k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
-                          scratch = scratch)
-    isempty(idx) && return masked
+    idx, _, m, hidden = _scattered_neighbours(grid, p0, k, active_only, policy, topology, scratch,
+                                              nearest)
+    m == 0 && return masked
     # Where the grid carries its cells, the containing one gives the answer exactly, from three
-    # values. `k_nearest` returns nearest first, which is the node whose incident cells to search.
+    # values. The search returns nearest first, which is the node whose incident cells to search.
     #
-    # Tried before the mask test below, and exempt from it: that test asks whether the whole
-    # neighbourhood is active, which is the question for a fit over a neighbourhood. A value taken
-    # from one triangle needs only that triangle, and `_bary_weights` already refuses a cell with an
-    # inactive vertex.
+    # Tried before the mask test, and exempt from it: that test asks whether the whole neighbourhood
+    # is active, which is the question for a fit over a neighbourhood. A value taken from one triangle
+    # needs only that triangle, and `_bary_weights` already refuses a cell with an inactive vertex.
     a, b, c, w = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
     a == 0 || return _bary_value(field, 0, a, b, c, w)
-    # `BlankMasked` refuses where the neighbourhood is not wholly active, on the same rule a stencil
-    # uses; `k_nearest` with `active_only` has already dropped those, so the test is whether doing so
-    # left a hole — a cell nearer than the farthest one kept, that was skipped.
-    if _mask_may_hide(grid, policy, active_only)
-        rmax = dist[end]
-        n_in = Connectivity.nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
-                                 scratch = scratch)
-        n_in > length(idx) && return masked
-    end
-    return _scattered_fit(field, grid, geo, p0, idx, 0, masked)
+    hidden && return masked
+    return _scattered_fit(field, grid, geo, p0, idx, m, 0, masked)
 end
 
-# The fit at one batch element, `off` into the field. The neighbour set and the mask verdict depend on
-# the point and the geometry alone, so a batched call solves them once — that is the k-d tree query,
-# the expensive part — and calls this per element. The per-neighbour projections are eight arithmetic
-# ops, recomputed here, so this allocates nothing.
+# The fit at one batch element, `off` into the field, over the first `m` cells of `idx`. The neighbour
+# set and the mask verdict depend on the point and the geometry alone, so a batched call solves them
+# once and calls this per element. The per-neighbour projections are recomputed here, so this
+# allocates nothing.
 function _scattered_fit(
     field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, geo,
-    p0::NTuple{D,T}, idx, off::Int, masked,
+    p0::NTuple{D,T}, idx, m::Int, off::Int, masked,
 ) where {T,D}
     # Weighted least squares for `f ≈ a + g·Δr` in the tangent plane at `p`. `a` is the value there;
     # fitting the gradient `g` alongside it makes the result exact for a linear field.
@@ -258,9 +325,10 @@ function _scattered_fit(
     b1 = zero(T); b2 = zero(T); b3 = zero(T)
     sz = Connectivity._linear_shape(grid)
     fsum = zero(T); wsum = zero(T)
-    @inbounds for t in eachindex(idx)
+    fr = Geometry._local_frame(geo, p0)
+    @inbounds for t in 1:m
         j = Int(idx[t])
-        Δ = Geometry.project_to_tangent_plane(geo, p0, _grad_coords(grid, sz, j))
+        Δ = Geometry._displacement_on(geo, fr, _grad_coords(grid, sz, j))
         δ1, δ2 = T(Δ[1]), T(Δ[2])
         # Inverse-square distance, floored so a query exactly on a cell centre stays finite.
         q = δ1 * δ1 + δ2 * δ2
@@ -272,13 +340,14 @@ function _scattered_fit(
         fsum += w * fv;      wsum += w
     end
     # A symmetric 3×3 by its adjugate. Where it is singular — collinear neighbours, or a single one —
-    # the plane is not determined and only its constant is, which is the weighted mean.
+    # the plane is not determined and only its constant is, which is the weighted mean. Its entries
+    # carry different powers of length, so the test is against the product of the diagonal, which
+    # carries the same power as `det`: their ratio is the determinant of the unit-diagonal matrix.
     a11 = m22 * m33 - m23 * m23
     a12 = m13 * m23 - m12 * m33
     a13 = m12 * m23 - m13 * m22
     det = m11 * a11 + m12 * a12 + m13 * a13
-    scale = max(m11 * m22 * m33, one(T))
-    abs(det) ≤ scale * sqrt(eps(T)) && return wsum > 0 ? fsum / wsum : masked
+    abs(det) ≤ m11 * m22 * m33 * sqrt(eps(T)) && return wsum > 0 ? fsum / wsum : masked
     return (a11 * b1 + a12 * b2 + a13 * b3) / det        # the constant term: the value at `p`
 end
 
@@ -319,15 +388,14 @@ end
 [`interpolate`](@ref) off a rectilinear grid for a field carrying trailing batch axes,
 writing one value per batch element.
 
-The `k` nearest cells and the mask verdict are a property of the point and the geometry — and the k-d
-tree query is the expensive part — so they are solved once here and the tangent-plane fit is then
-applied to every element.
+The `k` nearest cells and the mask verdict are a property of the point and the geometry, so they are
+solved once here and the tangent-plane fit is then applied to every element.
 """
 function interpolate!(
     out::AbstractVector, field::AbstractArray,
     grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, p::NTuple{D,Real};
     k::Integer = 8, active_only::Bool = true, masked = T(NaN),
-    topology = Connectivity.MetricTopology(grid), scratch = nothing,
+    topology = Connectivity.MetricTopology(grid), scratch = nothing, nearest = nothing,
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,D}
     policy isa ShiftWithinRun && _interp_mask_error(policy)
@@ -345,15 +413,14 @@ function interpolate!(
     ))
     geo = Grids.grid_geometry(grid)
     p0 = ntuple(d -> T(p[d]), Val(D))
-    idx, dist = Connectivity.k_nearest(grid, p0; k = k, active_only = active_only, topology = topology,
-                          scratch = scratch)
-    if isempty(idx)
+    idx, _, m, hidden = _scattered_neighbours(grid, p0, k, active_only, policy, topology, scratch,
+                                              nearest)
+    if m == 0
         fill!(out, masked)
         return out
     end
     # The cell and its weights are a property of the point alone, so they are solved once and applied
-    # to every batch element — the same structure the k-d tree query above already has, and tried
-    # before the neighbourhood mask test as the scalar form does.
+    # to every batch element, tried before the neighbourhood mask test as the scalar form does.
     ba, bb, bc, bw = _bary_weights(grid, geo, p0, Int(idx[1]), active_only)
     if ba != 0
         @inbounds for b in 1:nb
@@ -361,17 +428,12 @@ function interpolate!(
         end
         return out
     end
-    if _mask_may_hide(grid, policy, active_only)
-        rmax = dist[end]
-        n_in = Connectivity.nneighbors_within(grid, p0; ball = rmax, active_only = false, topology = topology,
-                                 scratch = scratch)
-        if n_in > length(idx)
-            fill!(out, masked)
-            return out
-        end
+    if hidden
+        fill!(out, masked)
+        return out
     end
     @inbounds for b in 1:nb
-        out[b] = _scattered_fit(field, grid, geo, p0, idx, (b - 1) * n, masked)
+        out[b] = _scattered_fit(field, grid, geo, p0, idx, m, (b - 1) * n, masked)
     end
     return out
 end

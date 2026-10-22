@@ -66,7 +66,8 @@ function _rotate(rot::PoleRotation{T}, λ::T, φ::T) where {T}
     z = sinφ
     xr = rot.cosθ * x + rot.sinθ * z
     zr = -rot.sinθ * x + rot.cosθ * z
-    return (wrap_longitude(atan(y, xr)), asin(clamp(zr, -one(T), one(T))))
+    # `atan(z, hypot(x, y))`: near the pole `hypot` keeps the small colatitude that `asin(z)` loses.
+    return (wrap_longitude(atan(y, xr)), atan(zr, hypot(xr, y)))
 end
 
 """
@@ -84,7 +85,7 @@ function _unrotate(rot::PoleRotation{T}, λ::T, φ::T) where {T}
     z = sinφ
     xr = rot.cosθ * x - rot.sinθ * z
     zr = rot.sinθ * x + rot.cosθ * z
-    return (wrap_longitude(atan(y, xr) + rot.λp), asin(clamp(zr, -one(T), one(T))))
+    return (wrap_longitude(atan(y, xr) + rot.λp), atan(zr, hypot(xr, y)))
 end
 
 """

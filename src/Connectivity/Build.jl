@@ -49,10 +49,10 @@ end
 function build_connectivity(
     grid::Grids.AbstractGrid, ::Grids.IndexStencilNeighbors;
     stencil = Stencils.Axial(1), active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     return _build_connectivity_topology(
-        IndexTopology(grid), _stencil_val(stencil), active_only; backend = backend,
+        IndexTopology(grid), _stencil_val(stencil), active_only; execution = execution,
     )
 end
 
@@ -88,14 +88,14 @@ function build_connectivity_within end
 function build_connectivity(
     t::IndexTopology;
     stencil = Stencils.Axial(1), active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
-    return _build_connectivity_topology(t, _stencil_val(stencil), active_only; backend = backend)
+    return _build_connectivity_topology(t, _stencil_val(stencil), active_only; execution = execution)
 end
 
 function _build_connectivity_topology(
     t::IndexTopology{N,M}, sten::Stencils.AbstractStencil, active_only::Bool;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {N,M}
     sz = t.size
     per = t.periodic
@@ -109,10 +109,10 @@ function _build_connectivity_topology(
     # own `ptr` range), so they parallelize without coordination, and the scan between them splits at
     # its spans. Every buffer comes from `Execution.allocate`, so all three land wherever the passes
     # filling them run.
-    deg = Execution.allocate(backend, Int, n)
-    # Per index: nothing here carries across cells, so the same body runs as a device kernel when the
-    # backend is one. Every cell writes its own degree, so the buffer needs no zeroing pass.
-    Execution.run_indices(n, backend, Execution.Written(deg)) do k
+    deg = Execution.allocate(execution, Int, n)
+    # Per index: nothing here carries across cells, so the same body runs as a device kernel under a
+    # device backend. Every cell writes its own degree, so the buffer needs no zeroing pass.
+    Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds begin
             I = Tuple(ci[k])
             c = 0
@@ -127,10 +127,10 @@ function _build_connectivity_topology(
             deg[k] = c
         end
     end
-    total = _csr_total(deg, n, backend)
+    total = _csr_total(deg, n, execution)
     return _index_type(max(n + 1, total)) === Int32 ?
-        _topology_fill(Int32, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), backend) :
-        _topology_fill(Int, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), backend)
+        _topology_fill(Int32, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), execution) :
+        _topology_fill(Int, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), execution)
 end
 
 # The filling pass, entered with the CSR's width as a type parameter, so both buffers and every read
@@ -200,19 +200,66 @@ default_sweep_topology(grid, ball, active_only::Bool, ::Grids.IndexedCandidates)
     return nothing
 end
 
-# The same count → prefix-scan → fill shape as the stencil builder: both cell passes write only slots
-# their own cell owns, so they parallelize without coordination.
-#
 # One body for every layout. How a cell is named is `Grids.cell_address`, what bounds the candidates is
 # the topology, and `_within_scan` takes the same arguments on every layout — `scratch` reaches a
 # separable window too, which enumerates without a buffer and leaves it unused.
 function build_connectivity_within(
     grid::Grids.AbstractGrid; ball, active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     topology = default_sweep_topology(grid, ball, active_only),
 )
     cs = Grids.cells(grid)
-    n = length(cs)
+    return _within_build(grid, cs, length(cs), ball, active_only, topology, Execution.resolve(execution))
+end
+
+# On the host each row's ball is queried once: every chunk appends its rows to a buffer of its own, and
+# the chunks, being contiguous and in order, concatenate into the CSR. A serial build is one chunk, whose
+# buffer is the CSR's.
+function _within_build(
+    grid, cs, n::Int, ball, active_only::Bool, topology,
+    backend::Union{CB.AbstractSerialBackend,CB.AbstractThreadedBackend},
+)
+    deg = Vector{Int}(undef, n)
+    W = _index_type(n + 1)                             # every entry is a cell id, at most `n`
+    bufs = Execution.map_chunks(n, backend) do rng
+        buf = W[]
+        s = ball_scratch(topology)
+        @inbounds for k in rng
+            m = length(buf)
+            _within_append!(buf, grid, Grids.cell_at(grid, cs[k]), ball, active_only, topology, s)
+            deg[k] = length(buf) - m
+        end
+        return buf
+    end
+    total = sum(length, bufs; init = 0)
+    return _index_type(max(n + 1, total)) === Int32 ?
+        _within_join(Int32, bufs, deg, n, total) : _within_join(Int, bufs, deg, n, total)
+end
+
+function _within_join(::Type{I}, bufs::Vector{V}, deg, n::Int, total::Int) where {I<:Integer,V}
+    ptr = Execution.exclusive_scan!(Vector{I}(undef, n + 1), deg)
+    length(bufs) == 1 && eltype(V) === I && return csr_connectivity(only(bufs), ptr; validate = false)
+    nbrs = Vector{I}(undef, total)
+    pos = 1
+    @inbounds for c in eachindex(bufs)
+        b = bufs[c]
+        copyto!(nbrs, pos, b, 1, length(b))
+        pos += length(b)
+        bufs[c] = similar(b, 0)                        # the chunk's rows are copied; let them go
+    end
+    return csr_connectivity(nbrs, ptr; validate = false)
+end
+
+@inline _within_append!(buf, grid, I, ball, active_only::Bool, mt, scratch) =
+    _route_fold(buf, Unrestricted(), grid, I, ball, NearestImage(), active_only, false, mt,
+                scratch) do v, J, _
+        push!(v, _sweep_linear(grid, J))
+        return v
+    end
+
+# A device, or a set of processes, counts every row and then fills it: the count → prefix-scan → fill
+# shape of the stencil builder, both passes writing only slots their own cell owns.
+function _within_build(grid, cs, n::Int, ball, active_only::Bool, topology, backend)
     # Every cell writes its own degree, so the buffer needs no zeroing pass before the count.
     deg = Execution.allocate(backend, Int, n)
     _within_pass(n, topology, backend, Execution.Written(deg)) do k, s

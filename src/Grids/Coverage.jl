@@ -24,7 +24,7 @@ on an unmasked grid; on a partial-sky sphere, `f_sky`.
 sky_fraction(grid::AbstractGrid{G,T}) where {G,T} = covered_area(grid) / T(sum(measure(grid)))
 
 """
-    integrate(field, grid; active_only = true, backend = SerialBackend())
+    integrate(field, grid; active_only = true, execution = SerialBackend())
 
 `Σᵢ field[i]·measure(grid)[i]` over the cells: the integral of `field` over the region they cover, by the
 grid's own measure, which on a grid built from a quadrature sampling is that quadrature. Masked cells are
@@ -35,30 +35,30 @@ element, in the order those axes are laid out; [`integrate!`](@ref) writes them 
 """
 function integrate(
     field::AbstractArray, grid::AbstractGrid{G,T}; active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {G,T}
     nb = _check_integrand(field, grid)
     S = promote_type(eltype(field), T)
     ndims(field) == ndims(grid) &&
-        return _integrate_at(field, grid, 0, active_only, S, Execution.resolve(backend))
-    return integrate!(Vector{S}(undef, nb), field, grid; active_only = active_only, backend = backend)
+        return _integrate_at(field, grid, 0, active_only, S, Execution.resolve(execution))
+    return integrate!(Vector{S}(undef, nb), field, grid; active_only = active_only, execution = execution)
 end
 
 """
-    integrate!(out, field, grid; active_only = true, backend = SerialBackend()) -> out
+    integrate!(out, field, grid; active_only = true, execution = SerialBackend()) -> out
 
 [`integrate`](@ref) of a field carrying trailing batch axes, one integral per element written to `out`.
 """
 function integrate!(
     out::AbstractVector, field::AbstractArray, grid::AbstractGrid{G,T}; active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {G,T}
     nb = _check_integrand(field, grid)
     length(out) == nb || throw(DimensionMismatch(
         "out holds $(length(out)) values but the field carries $nb batch elements",
     ))
     S = eltype(out)
-    b = Execution.resolve(backend)
+    b = Execution.resolve(execution)
     n = length(grid)
     @inbounds for k in 1:nb
         out[k] = _integrate_at(field, grid, (k - 1) * n, active_only, S, b)

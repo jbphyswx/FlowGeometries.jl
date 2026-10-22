@@ -729,6 +729,60 @@ function fold_within end
     return acc
 end
 
+# A sphere's ball, row by row. The window gives every row the longitude reach of its widest one, the
+# row nearest a pole. Row `j`'s own reach comes from the haversine the distance gate evaluates,
+# `a = A + B·sin²(Δλ/2)` with `A, B` the row's terms, formed once per row: a cell in the ball has
+# `a ≤ a_r = sin²(r/2R)`, so `sin²(Δλ/2) ≤ q = (a_r − A)/B`, widened by `q`'s rounding, and the row
+# walks that band one step wider. A row whose nearest point, at `Δλ = 0`, lies beyond `r` under that same
+# distance is skipped, every cell in it having `a ≥ A`. The cells visited are the window's that can lie in
+# the ball, in the window's order, each at the distance `Geometry.distance` gives, so the fold is the
+# window's.
+@inline function _fold_within(
+    f::F, init, grid::Grids.StructuredGrid{T,G,2}, I::NTuple{2,Int}, ball, images::NearestImage,
+    active_only::Bool, self::Bool, mt::MetricTopology, _scratch, ::Grids.SeparableWindow,
+) where {F,T,G<:Geometry.AbstractSphericalGeometry}
+    sz = Grids.size_tuple(grid)
+    Grids._cell_checkbounds(grid, I)
+    (active_only && !Grids.isactive(grid, I...)) && return init
+    geo = Grids.grid_geometry(grid)
+    r = T(_ball_radius(ball))
+    R = T(Geometry.radius(geo))
+    ar = r ≥ T(π) * R ? one(T) : sin(r / (2 * R))^2
+    wrap = _query_flags(grid, _periodic_flags(grid), images)
+    prd = _query_lengths(grid, Val(2), images)
+    p0 = Grids._raw_coords(grid, I...)
+    λ0, φ0 = p0
+    λs, φs = Grids.coordinates(grid)
+    msk = Grids.mask(grid)
+    acc = init
+    self && (acc = f(acc, I, zero(T)))
+    wφ = _angle_steps(r, 2 * R, _min_step(mt, 2), sz[2])
+    s1 = _min_step(mt, 1)
+    @inbounds for δ2 in _delta_range(wφ, I[2], sz[2], wrap[2], images)
+        j = wrap[2] ? mod1(I[2] + δ2, sz[2]) : I[2] + δ2
+        φj = last(Grids._image_pair(geo, p0, (λ0, φs[j]), prd))[2]
+        hr = Geometry._hav_row(φ0, φj)
+        Geometry._hav_distance(geo, hr, zero(T)) ≤ r || continue
+        A, B = hr
+        q = (ar - A) / B
+        k = if q < one(T)                              # `B = 0` at a pole gives `±Inf` or `NaN`: whole row
+            δq = 8 * eps(T) * (ar + A + B) / B
+            _steps(2 * asin(sqrt(min(one(T), max(q, zero(T)) + δq))), s1, sz[1]) + 1
+        else
+            sz[1]
+        end
+        for δ1 in _delta_range(k, I[1], sz[1], wrap[1], images)
+            (δ1 == 0 && δ2 == 0) && continue
+            i = wrap[1] ? mod1(I[1] + δ1, sz[1]) : I[1] + δ1
+            active_only && !msk[i, j] && continue
+            dist = Geometry._hav_distance(geo, hr, Geometry._lon_diff(λ0, λs[i]))
+            dist ≤ r || continue
+            acc = f(acc, (i, j), dist)
+        end
+    end
+    return acc
+end
+
 # `f::F` forces a specialization: Julia does not specialize on a function-typed argument that is only
 # passed through, and the inner call then goes dynamic and boxes the grid, the index tuple and the radius.
 # Every entry point takes the same arguments on every layout — a separable window enumerates candidates

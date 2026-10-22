@@ -73,14 +73,22 @@ supports; the second raises on a device backend.
 ```julia
 using KernelAbstractions
 using ComputationalBackends: GPUBackend
-backend = GPUBackend(KernelAbstractions.CPU())          # or a vendor backend
-FG.Operators.apply_stencil!(out, field, x, 1; order = 2, backend = backend)
-FG.Connectivity.build_connectivity(grid; stencil = FG.Stencils.Moore(1), backend = backend)
+execution = GPUBackend(KernelAbstractions.CPU())        # or a vendor backend
+FG.Operators.apply_stencil!(out, field, x, 1; order = 2, execution = execution)
+FG.Connectivity.build_connectivity(grid; stencil = FG.Stencils.Moore(1), execution = execution)
 ```
 
 Both are bit-identical to the serial result, which the suite checks on
-`GPUBackend(KernelAbstractions.CPU())` — no GPU needed to verify that the code is device-generic. There is no per-vendor code in the package: a
-backend arrives from the caller and the kernel is compiled for it.
+`GPUBackend(KernelAbstractions.CPU())`, where the launched kernels run in host memory. There is no
+per-vendor code in the package: a backend arrives from the caller and the kernel is compiled for it.
+
+The field operators — `apply_stencil!`, `derivative!`, `gradient!`, `strain_rate!`, the collocated and
+mimetic `curl!` and `divergence!`, the frame rotations, the other mimetic operators and the Laplacian's —
+read the grid, metrics and plans they are given in the backend's memory. One held on the host is moved
+there for the call; one moved once with `Execution.on_backend(execution, x)` is read where it is, at no
+cost. Build metrics and plans (`face_metrics`, `laplacian_coefficients`, `stencil_plans`,
+`gradient_plan`) from a host grid and move them; `derivative!` builds its own weights and metric factors
+on the host, from host copies of the grid's axes.
 
 A kernel cannot allocate, and the suite gates every per-cell entry point at zero bytes.
 
@@ -91,7 +99,7 @@ body per cell:
 ```julia
 FG.Connectivity.foreach_within(grid; ball = r,
                                topology = FG.Connectivity.MetricTopology(grid),
-                               backend = backend) do I, J, d
+                               execution = execution) do I, J, d
     ...
 end
 ```
@@ -142,12 +150,17 @@ using Adapt, CUDA
 dev = adapt(CuArray, grid)
 ```
 
-Handles all three grid types plus `CSRConnectivity` and `IndexTopology`. A `SeparableMeasure` moves its
-*factors*, so the device receives `O(∑ Nᵈ)` numbers, and `AllActive` carries only its size.
+Handles every grid layout (a rotated grid moves its base grid) and a `StaggeredGrid`, plus
+`CSRConnectivity`, `IndexTopology`, a cell list and the `MetricTopology` carrying one, stencil, masked
+stencil and gradient plans, `FaceMetrics` and `LaplacianCoefficients`. A `MetricTopology` carrying a k-d
+tree raises. A `SeparableMeasure` moves its *factors*, so the device receives `O(∑ Nᵈ)` numbers, and
+`AllActive` carries only its size. A `BitArray` mask moved to a KernelAbstractions backend other than
+`KernelAbstractions.CPU()` is unpacked to one `Bool` per cell and lands in that backend's array type;
+every other target moves it by its own rule.
 
 ## Execution backends
 
-Every bulk entry point takes a ComputationalBackends tag as `backend`, `SerialBackend()` by default:
+Every bulk entry point takes a ComputationalBackends tag as `execution`, `SerialBackend()` by default:
 
 | tag | runs a loop | needs |
 |---|---|---|
@@ -160,9 +173,9 @@ Every bulk entry point takes a ComputationalBackends tag as `backend`, `SerialBa
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.SphericalSampling.cubed_sphere_points(512; backend = ThreadedBackend())
-FG.Grids.CurvilinearGrid(geo, λ, φ, mask; backend = ThreadedBackend())
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
+FG.SphericalSampling.cubed_sphere_points(512; execution = ThreadedBackend())
+FG.Grids.CurvilinearGrid(geo, λ, φ, mask; execution = ThreadedBackend())
+FG.Connectivity.build_connectivity(grid; execution = ThreadedBackend())
 ```
 
 Every write a loop makes is fixed by its index, so a result equals the serial one. A reduction combines
@@ -182,7 +195,7 @@ addprocs(4)
 using ComputationalBackends: DistributedBackend
 
 count = zeros(Int, FG.Grids.size_tuple(grid))
-FG.Connectivity.foreach_within(grid; ball = r, backend = DistributedBackend(),
+FG.Connectivity.foreach_within(grid; ball = r, execution = DistributedBackend(),
                                outputs = (FG.Execution.Written(count),)) do I, J, d
     count[I...] += 1
 end

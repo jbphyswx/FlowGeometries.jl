@@ -288,7 +288,9 @@ Reduce `f(i)` over `i in 1:n` with `op`, under the execution policy `backend` na
 
 The per-index counterpart of [`_reduce_chunks`](@ref), and the reduction a device can run: `f` reads
 index `i` and nothing else, so the work splits without a chunk body. Every integral, norm and count over
-a grid goes through this.
+a grid goes through this. On a host or device backend `f` may also write what `i` determines, as in
+[`run_indices`](@ref), so an update and a reduction of its result take one pass; a process backend runs
+`f` on other processes and keeps those writes there.
 
 `op` must be associative and `init` its identity. `init` seeds each partial as well as the whole, so
 the partials combine in any grouping.
@@ -345,6 +347,11 @@ the array's own package decides what that backend's memory is, and a struct move
 on_backend(::_HostBackend, x) = x
 on_backend(b::Union{CB.AbstractAutoBackend,_ProcessBackend}, x) = on_backend(local_backend(b), x)
 on_backend(b::CB.AbstractExecutionBackend, _) = _unsupported(b)
+
+# Whether a `BitArray` becomes an `Array{Bool}` before it moves to the Adapt target `to`. The Adapt
+# extension defines the default, `false`, and the KernelAbstractions extension the methods for its
+# backends.
+function _unpack_bits end
 
 """
     exclusive_scan!(out, counts, backend = SerialBackend(); init = 1) -> out

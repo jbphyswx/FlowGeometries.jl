@@ -153,7 +153,7 @@ The working buffers a degrading [`apply_stencil!`](@ref FlowGeometries.Operators
 the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
 
 **One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
-so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
+so chunks cannot share them. A threaded `execution` therefore allocates its own set per chunk and ignores
 one passed here.
 """
 struct StencilScratch{T<:AbstractFloat,VT<:AbstractVector{T},MT<:AbstractMatrix{T}}

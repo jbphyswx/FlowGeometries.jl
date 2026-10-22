@@ -23,7 +23,7 @@ A.isuniform(u), A.isuniform(v)
 
 `isuniform` reads the type, and that is the only question this package asks. A `Vector` holding an
 arithmetic sequence answers `false`, and **no code path inspects coordinate values to decide it** — no
-constructor sniffs your data, and there is no tolerance anywhere.
+constructor sniffs your data, so no tolerance enters the decision.
 
 Where the data question genuinely matters, the spacing accessors answer it exactly: an axis is equally
 spaced precisely when its smallest gap equals its largest.
@@ -38,7 +38,7 @@ If that holds and you want the fast path, build the axis yourself. The conversio
 coordinates with the exact arithmetic sequence, so it is yours to ask for:
 
 ```@example axes
-Δ = FG.Grids.minimum_spacing(gv, 1)            # equals maximum_spacing, so it IS the spacing
+Δ = FG.Grids.minimum_spacing(gv, 1)            # equals maximum_spacing, so it is the spacing
 A.spacing(A.UniformAxis(first(v), Δ, length(v)))
 ```
 

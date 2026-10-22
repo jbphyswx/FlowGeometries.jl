@@ -58,22 +58,22 @@ function _direction_plan(grid, ::AbstractArray{Bool}, d::Int, ord::Int, k::Int, 
 end
 
 """
-    derivative!(out, field, grid, plans::StencilPlans, dim; masked = zero, backend = SerialBackend()) -> out
+    derivative!(out, field, grid, plans::StencilPlans, dim; masked = zero, execution = SerialBackend()) -> out
 
 [`derivative!`](@ref) along `dim` with the plan [`stencil_plans`](@ref) holds for that direction.
 """
 function derivative!(
     out::AbstractArray, field::AbstractArray, grid::Grids.StructuredGrid{T,G,N}, plans::StencilPlans{N},
-    dim::Integer; masked = zero(eltype(out)), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    dim::Integer; masked = zero(eltype(out)), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T,G,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
-    return _held_derivative!(out, field, grid, @inbounds(plans.plans[dim]), Int(dim), masked, backend)
+    return _held_derivative!(out, field, grid, @inbounds(plans.plans[dim]), Int(dim), masked, execution)
 end
 
 @inline _held_derivative!(out, field, grid, p::Discretization.AbstractStencilPlan, d::Int, masked, b) =
-    derivative!(out, field, grid, p, d; masked = masked, backend = b)
+    derivative!(out, field, grid, p, d; masked = masked, execution = b)
 @inline _held_derivative!(out, field, grid, p::MaskedStencilPlan, ::Int, masked, b) =
-    derivative!(out, field, grid, p; masked = masked, backend = b)
+    derivative!(out, field, grid, p; masked = masked, execution = b)
 @inline _held_derivative!(out, _field, _grid, ::Nothing, ::Int, masked, _b) = fill!(out, masked)
 
 # `out = d_d f`, with `scratch` the component buffers a least-squares plan writes all of at once.
@@ -81,7 +81,7 @@ end
     _held_derivative!(out, f, grid, @inbounds(plans.plans[d]), d, masked, b)
 
 @inline function _derivative_along!(out, f, _grid, plan::GradientPlan, d::Int, scratch, _masked, b)
-    gradient!(scratch, f, plan; backend = b)
+    gradient!(scratch, f, plan; execution = b)
     copyto!(out, @inbounds scratch[d])
     return out
 end
@@ -98,7 +98,7 @@ end
 end
 
 @inline function _gradient_into!(g::NTuple{N,AbstractArray}, f, _grid, plan::GradientPlan{N}, _masked, b) where {N}
-    gradient!(g, f, plan; backend = b)
+    gradient!(g, f, plan; execution = b)
     return nothing
 end
 
@@ -148,7 +148,7 @@ function _check_frame(u::Tuple, grid::Grids.AbstractGrid)
 end
 
 """
-    strain_rate!(S, u, grid, derivs; masked = NaN, scratch = nothing, backend = SerialBackend()) -> S
+    strain_rate!(S, u, grid, derivs; masked = NaN, scratch = nothing, execution = SerialBackend()) -> S
 
 The rate of strain `½(∇u + ∇uᵀ)` of the vector field `u`, one array per direction of `grid` along its
 local frame, written into the arrays of the `NamedTuple` `S` under the names
@@ -163,14 +163,14 @@ per direction for the derivatives of one component; with it a call allocates not
 """
 function strain_rate!(
     S::NamedTuple, u::Tuple{Vararg{AbstractArray}}, grid::Grids.AbstractGrid, derivs;
-    masked = NaN, scratch = nothing, backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    masked = NaN, scratch = nothing, execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     _check_frame(u, grid)
     N = length(u)
     comps = _components(S, Val(_sym_keys(Val(_frame_names(grid, Val(N))))))
     E = eltype(first(comps))
     g = scratch === nothing ? ntuple(_ -> similar(first(comps)), Val(N)) : scratch
-    b = Execution.resolve(backend)
+    b = Execution.resolve(execution)
     nan = E(NaN)
     _strain_terms!(comps, u, g, grid, derivs, nan, b, Val(N))
     _frame_pass!(_StrainTerms(), comps, u, grid, convert(E, masked), b)
@@ -198,7 +198,7 @@ function _strain_terms!(comps, u, g, grid, derivs, nan, b, ::Val{N}) where {N}
 end
 
 """
-    strain_rate(u, grid, derivs; masked = NaN, backend = SerialBackend()) -> NamedTuple
+    strain_rate(u, grid, derivs; masked = NaN, execution = SerialBackend()) -> NamedTuple
 
 [`strain_rate!`](@ref) into fresh arrays, named as [`strain_components`](@ref) gives.
 """
@@ -210,7 +210,7 @@ function strain_rate(u::Tuple{Vararg{AbstractArray}}, grid::Grids.AbstractGrid, 
 end
 
 """
-    curl!(ω, u, grid, derivs; masked = NaN, scratch = nothing, backend = SerialBackend()) -> ω
+    curl!(ω, u, grid, derivs; masked = NaN, scratch = nothing, execution = SerialBackend()) -> ω
 
 The curl of the vector field `u` on `grid`, its components along the local frame: one array `ω` in two
 directions — the vertical vorticity, `d_λu_φ − d_φu_λ + u_λ tan φ/R` on a sphere — and a tuple of three
@@ -219,12 +219,12 @@ direction.
 """
 function curl!(
     ω::AbstractArray, u::NTuple{2,AbstractArray}, grid::Grids.AbstractGrid, derivs;
-    masked = NaN, scratch = nothing, backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    masked = NaN, scratch = nothing, execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     _check_frame(u, grid)
     E = eltype(ω)
     g = scratch === nothing ? (similar(ω), similar(ω)) : scratch
-    b = Execution.resolve(backend)
+    b = Execution.resolve(execution)
     nan = E(NaN)
     _derivative_along!(ω, u[2], grid, derivs, 1, g, nan, b)
     _derivative_along!(g[1], u[1], grid, derivs, 2, g, nan, b)
@@ -235,12 +235,12 @@ end
 
 function curl!(
     ω::NTuple{3,AbstractArray}, u::NTuple{3,AbstractArray}, grid::Grids.AbstractGrid, derivs;
-    masked = NaN, scratch = nothing, backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    masked = NaN, scratch = nothing, execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     _check_frame(u, grid)
     E = eltype(first(ω))
     g = scratch === nothing ? ntuple(_ -> similar(first(ω)), Val(3)) : scratch
-    b = Execution.resolve(backend)
+    b = Execution.resolve(execution)
     nan = E(NaN)
     foreach(o -> fill!(o, zero(E)), ω)
     # `u_c` enters component `c+1` through `+d_{c+2}` and component `c+2` through `−d_{c+1}`.
@@ -255,7 +255,7 @@ function curl!(
 end
 
 """
-    curl(u, grid, derivs; masked = NaN, backend = SerialBackend())
+    curl(u, grid, derivs; masked = NaN, execution = SerialBackend())
 
 [`curl!`](@ref) into fresh arrays: one in two directions, three in three.
 """
@@ -265,7 +265,7 @@ curl(u::NTuple{3,AbstractArray}, grid::Grids.AbstractGrid, derivs; kwargs...) =
     curl!(ntuple(_ -> similar(first(u), float(eltype(first(u)))), Val(3)), u, grid, derivs; kwargs...)
 
 """
-    divergence!(δ, u, grid, derivs; masked = NaN, scratch = nothing, backend = SerialBackend()) -> δ
+    divergence!(δ, u, grid, derivs; masked = NaN, scratch = nothing, execution = SerialBackend()) -> δ
 
 The divergence of the vector field `u` on `grid`, its components along the local frame: the flux form,
 `d_λu_λ + d_φu_φ − u_φ tan φ/R` on a sphere's surface. `derivs` and the masking are as for
@@ -273,13 +273,13 @@ The divergence of the vector field `u` on `grid`, its components along the local
 """
 function divergence!(
     δ::AbstractArray, u::Tuple{Vararg{AbstractArray}}, grid::Grids.AbstractGrid, derivs;
-    masked = NaN, scratch = nothing, backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    masked = NaN, scratch = nothing, execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     _check_frame(u, grid)
     N = length(u)
     E = eltype(δ)
     g = scratch === nothing ? ntuple(_ -> similar(δ), Val(N)) : scratch
-    b = Execution.resolve(backend)
+    b = Execution.resolve(execution)
     nan = E(NaN)
     _derivative_along!(δ, u[1], grid, derivs, 1, g, nan, b)
     _each_dir(Val(N - 1)) do vc
@@ -293,7 +293,7 @@ function divergence!(
 end
 
 """
-    divergence(u, grid, derivs; masked = NaN, backend = SerialBackend())
+    divergence(u, grid, derivs; masked = NaN, execution = SerialBackend())
 
 [`divergence!`](@ref) into a fresh array.
 """
@@ -308,14 +308,15 @@ struct _DivergenceTerms end
 
 # Adds the `γ` terms of `kind` to `outs` at every cell and writes `masked` where the cell is inactive, the
 # metric degenerates there, or a derivative read is undefined (NaN). One work item per cell, batch
-# elements included.
+# elements included, reading the grid in the backend's memory.
 function _frame_pass!(kind, outs::Tuple, u::NTuple{N,Any}, grid::Grids.AbstractGrid, masked, b) where {N}
     geo = Grids.grid_geometry(grid)
-    msk = Grids.mask(grid)
+    g = Execution.on_backend(b, grid)
+    msk = Grids.mask(g)
     floors = ntuple(d -> Discretization.metric_floor(geo, d), Val(N))
     ci = CartesianIndices(size(first(outs)))
     Execution.run_indices(length(ci), b, map(Execution.Written, outs)...) do lin
-        _frame_cell!(kind, outs, u, grid, geo, msk, floors, masked, @inbounds(ci[lin]), Val(ndims(msk)))
+        _frame_cell!(kind, outs, u, g, geo, msk, floors, masked, @inbounds(ci[lin]), Val(ndims(msk)))
     end
     return nothing
 end

@@ -259,9 +259,16 @@ end
 ) where {T}
     λ1, φ1 = _at(T, coords1)
     λ2, φ2 = _at(T, coords2)
-    dλ = _lon_diff(λ1, λ2)
-    dφ = φ2 - φ1
-    a = sin(dφ / T(2))^2 + cos(φ1) * cos(φ2) * sin(dλ / T(2))^2
+    return _hav_distance(geo, _hav_row(φ1, φ2), _lon_diff(λ1, λ2))
+end
+
+# The haversine `a = sin²(Δφ/2) + cos φ₁ cos φ₂ sin²(Δλ/2)` in two parts, so a sweep that holds both
+# latitudes fixed along a row forms theirs once: `_hav_row` is `(sin²(Δφ/2), cos φ₁ cos φ₂)`, and
+# `_hav_distance` completes the great-circle distance for one longitude difference.
+@inline _hav_row(φ1::T, φ2::T) where {T} = (sin((φ2 - φ1) / T(2))^2, cos(φ1) * cos(φ2))
+
+@inline function _hav_distance(geo::AbstractSphericalGeometry, hr::NTuple{2,T}, dλ::T) where {T}
+    a = hr[1] + hr[2] * sin(dλ / T(2))^2
     c = T(2) * atan(sqrt(a), sqrt(max(zero(T), one(T) - a)))
     return radius(geo) * c
 end

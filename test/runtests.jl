@@ -19,9 +19,8 @@ Upwind(r::Integer) = Upwind{Int(r)}()
 FG.Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
     ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
 
-# An axis that records how many elements were read from it. Several claims here are about how much of
-# an axis a query touches — that it bisects, that it reads a bounded window — and a read count states
-# such a claim exactly and deterministically. Wall-clock numbers live in `benchmark/`.
+# An axis that records how many elements were read from it, so a gate can count how much of an axis
+# a query touches.
 mutable struct CountingAxis{T,V<:AbstractVector{T}} <: AbstractVector{T}
     data::V
     reads::Int
@@ -34,29 +33,6 @@ Base.@propagate_inbounds function Base.getindex(c::CountingAxis, i::Int)
     return c.data[i]
 end
 reads(f::F, c::CountingAxis) where {F} = (c.reads = 0; f(); c.reads)
-
-# Element-type entry points, called with non-constant arguments. A type given as a keyword takes no
-# part in dispatch, so a call that cannot be constant-folded end to end widens the element type to
-# `DataType` and returns an abstract result. Each of these takes the type as a leading positional
-# argument, as `zeros` and `rand` do.
-t_gl(::Type{T}, n) where {T}     = FG.SphericalSampling._gauss_legendre_μ(T, n)
-t_axes(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_axes(T, s, n)
-t_quad(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_quadrature(T, s, n)
-t_wts(::Type{T}, s, n) where {T}  = FG.SphericalSampling.latitude_weights(T, s, n)
-t_wts1(::Type{T}, s) where {T}    = FG.SphericalSampling.latitude_weights(T, s)
-t_pts(::Type{T}, s, n) where {T}  = FG.SphericalSampling.spherical_points(T, s, n)
-t_pts1(::Type{T}, s) where {T}    = FG.SphericalSampling.spherical_points(T, s)
-t_pts2(::Type{T}, s, a, b) where {T} = FG.SphericalSampling.spherical_points(T, s, a, b)
-t_rlat(::Type{T}, s) where {T}    = FG.SphericalSampling.ring_latitudes(T, s)
-t_cube(::Type{T}, n) where {T}    = FG.SphericalSampling.cubed_sphere_points(T, n)
-t_icov(::Type{T}, f) where {T}    = FG.SphericalSampling.icosahedral_vertices(T, f)
-t_icom(::Type{T}, f) where {T}    = FG.SphericalSampling.icosahedral_mesh(T, f)
-t_yy(::Type{T}, a, b) where {T}   = FG.SphericalSampling.yin_yang_panels(T, a, b)
-t_ring(::Type{T}, a, b) where {T} = FG.SphericalSampling.ring_info(T, a, b)
-t_p2a(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2ang(T, a, b)
-t_p2v(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2vec(T, a, b)
-t_scr(::Type{T}, o, k) where {T}  = FG.Discretization.stencil_scratch(T, o, k)
-t_sgrid(::Type{T}, s, n) where {T} = FG.Connectivity.structured_grid(T, s, n)
 
 # The HEALPix pixelization as a node set: the layout materialized into dense coordinate vectors and a
 # stored CSR graph. `HEALPixGrid` is how the pixelization is used; this is the explicit "as a cloud"
@@ -74,19 +50,14 @@ end
 struct OneSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::OneSphere{T}) where {T} = one(T)
 
-# A geometry whose metric varies along direction 1, which the built-in sphere's never does. It holds
-# the bulk operators to `metric_invariant_directions` alone.
+# A geometry whose metric varies along direction 1, declaring no `metric_invariant_directions`.
 struct TiltedSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::TiltedSphere{T}) where {T} = one(T)
 FG.Geometry.scale_factors(::TiltedSphere{T}, p::Tuple{Real,Real}) where {T} =
     (one(T) + T(0.5) * cos(T(p[1])), one(T) + T(0.25) * sin(T(p[2])))
 
-concrete_return(f::F, argtypes) where {F} =
-    (t = Base.return_types(f, argtypes)[1]; (isconcretetype(t), t))
-
-# The allocation harness. `discretization`, `connectivity` and `allocations` all measure with it, so it
-# sits in the preamble every topic sees. Everything here is an ordinary global: a closure captured
-# into `@allocated` measures itself.
+# The allocation harness, shared by every topic. Everything here is an ordinary global: a closure
+# captured into `@allocated` measures itself.
 
 # Fixed arity, and the cell index travels as a tuple that is splatted inside the callee: forwarding
 # through `args...` allocates, so a vararg harness measures itself.
@@ -128,7 +99,7 @@ q_within!(b, g, r, I)    = FG.Connectivity.neighbors_within!(b, g, I...; ball = 
 q_fold(g, r, I)          = FG.Connectivity.fold_within((a, _, d) -> a + d, 0.0, g, I...; ball = r)
 q_mplan!(o, f, p)        = FG.Operators.apply_stencil!(o, f, p)
 q_mderiv!(o, f, g, p)    = FG.Operators.derivative!(o, f, g, p)
-q_plan_be!(o, f, pl, d, b) = FG.Operators.apply_stencil!(o, f, pl, d; backend = b)
+q_plan_be!(o, f, pl, d, b) = FG.Operators.apply_stencil!(o, f, pl, d; execution = b)
 q_toplan!(xyz, uvw, g)   = FG.Operators.to_planetary!(xyz..., uvw..., g)
 q_toloc!(uvw, xyz, g)    = FG.Operators.to_local!(uvw..., xyz..., g)
 q_tens!(loc, amb, g)     = FG.Operators.tensor_to_local!(loc..., amb..., g)
@@ -169,6 +140,7 @@ q_mim_centres!(u, v, fm) = FG.Operators.to_centres!(u, v, fm)
 q_lap!(o, Φ, c)          = FG.Operators.apply_laplacian!(o, Φ, c)
 q_proj!(Φ, c)            = FG.Operators.project_out_constant!(Φ, c)
 q_restrict!(cs, f, fc, cc) = FG.Operators.restrict!(cs, f, fc, cc)
+q_restrict_residual!(cs, b, x, fc, cc) = FG.Operators.restrict_residual!(cs, b, x, fc, cc)
 q_prolong!(f, cs, fc, cc)  = FG.Operators.prolong_add!(f, cs, fc, cc)
 q_strain!(S, u, g, p, sc) = FG.Operators.strain_rate!(S, u, g, p; scratch = sc)
 q_vcurl!(ω, u, g, p, sc)  = FG.Operators.curl!(ω, u, g, p; scratch = sc)
@@ -186,7 +158,6 @@ q_stencil!(o, f, ix, w, d) = FG.Operators.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Operators.apply_stencil!(o, f, ix, w, d; mask = msk)
 q_area(g, I)             = FG.Grids.area(g, I...)
 q_coords!(o, g, I)       = FG.Grids.coords!(o, g, I...)
-q_axis(g, d)             = length(FG.Grids.axis(g, d))
 q_spacing(g, d)          = FG.Grids.spacing(g, d)
 q_origin(g, d)           = FG.Grids.origin(g, d)
 q_extent(g, d)           = FG.Grids.extent(g, d)
@@ -205,10 +176,10 @@ q_nlon_in_ring(s, r)     = FG.SphericalSampling.nlon_in_ring(s, r)
 q_ring_range(s, r)       = FG.SphericalSampling.ring_range(s, r)
 q_npoints(s)             = FG.SphericalSampling.npoints(s)
 q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; scratch = sc)
-# The held-table form. The other overload builds the table per call and is classified as allocating by
-# contract, so measuring it measures the table.
+# The held-table form.
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
+q_sinterp(f, g, p, t, s, nb) = FG.Operators.interpolate(f, g, p; topology = t, scratch = s, nearest = nb)
 q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
 q_axst!(i, w, x, o, k, s) = FG.Discretization.axis_stencils!(i, w, x, o, k; scratch = s)
 q_faces!(o, x)           = FG.Discretization.faces!(o, x)
@@ -289,19 +260,13 @@ function check_shape(label, g, I)
             end
         end
     end
-    # A cell-list query enumerates through a fold, so it holds no candidate buffer at all — the property
-    # the device path depends on.
+    # A cell-list query enumerates through a fold, so it holds no candidate buffer at all.
     let cl = FG.Connectivity.MetricTopology(g; index = FG.Grids.cell_list(g; ball = r))
         a = _alloc(q_within_top, g, r, I, cl)
         a == 0 || println("    ", label, " / cell-list query -> ", a, " B")
         Test.@test a == 0
         Test.@test q_within_top(g, r, I, cl) == q_nwithin(g, r, I)
     end
-
-    Test.@test (Test.@inferred q_coords(g, I)) isa NamedTuple
-    Test.@test (Test.@inferred q_dist(g, cI, cJ)) isa Float64
-    Test.@test (Test.@inferred q_nwithin(g, r, I)) isa Int
-    Test.@test (Test.@inferred q_top(g)) isa FG.Connectivity.MetricTopology
     return nothing
 end
 

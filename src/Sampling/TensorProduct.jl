@@ -18,12 +18,9 @@ function spherical_axes!(
     sz = axes_lengths(GaussLegendreSampling(), nlat; nlon)
     length(λ) == sz.nlon && length(φ) == sz.nlat || throw(DimensionMismatch("λ/φ lengths must match axes_lengths"))
     nlon_eff = sz.nlon
-    # φ receives μ and is converted in place; the weights are not requested, so there is no scratch
-    # at all. Callers that want both should use `spherical_quadrature!`, which solves once.
-    _gauss_legendre!(T, φ, nothing, nlat)
-    @inbounds for i in 1:nlat
-        φ[i] = asin(φ[i])
-    end
+    # The weights are not requested, so there is no scratch at all. Callers that want both should use
+    # `spherical_quadrature!`, which solves once.
+    _gauss_legendre!(T, nothing, nothing, nlat; lat = φ)
     dλ = T(2π) / T(nlon_eff)
     @inbounds for i in 1:nlon_eff
         λ[i] = T(i - 1) * dλ
@@ -192,11 +189,7 @@ function spherical_quadrature!(
     sz = axes_lengths(GaussLegendreSampling(), nlat; nlon)
     length(λ) == sz.nlon && length(φ) == sz.nlat && length(w) == sz.nlat ||
         throw(DimensionMismatch("λ/φ/w lengths must match axes_lengths"))
-    # One solve, no scratch: φ receives μ and is converted to latitude in place.
-    _gauss_legendre!(T, φ, w, nlat)
-    @inbounds for i in 1:nlat
-        φ[i] = asin(φ[i])
-    end
+    _gauss_legendre!(T, nothing, w, nlat; lat = φ)        # one solve, no scratch
     dλ = T(2π) / T(sz.nlon)
     @inbounds for i in 1:sz.nlon
         λ[i] = T(i - 1) * dλ

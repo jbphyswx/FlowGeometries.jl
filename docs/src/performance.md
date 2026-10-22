@@ -183,7 +183,7 @@ Opt-in through `ComputationalBackends` tags, serial by default, bit-identical re
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
+FG.Connectivity.build_connectivity(grid; execution = ThreadedBackend())
 ```
 
 Chunks are contiguous, so each thread touches one span of every array. `SerialBackend()`, the

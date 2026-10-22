@@ -14,6 +14,12 @@ every layout.
   value at its centre. Falls back to the weighted mean where the fit is rank deficient, that being the
   part of it the data still determines.
 
+Off a rectilinear grid the `k` nearest cells come from a ball search, and three keywords hold its
+state across calls. `topology` and `scratch` are as for [`Connectivity.neighbors_within!`](@ref):
+with no index the search visits every cell, and [`Connectivity.indexed`](@ref) brings it to
+`O(log n + k)`. `nearest = (idx, dist)`, two vectors of at least `k` entries, holds the cells found.
+With all three held, a query allocates nothing.
+
 `p` may be written any way a point is accepted elsewhere.
 
 The mask policies say what an inactive contributor means, as they do for a stencil:

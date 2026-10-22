@@ -178,6 +178,9 @@ one per direction shaped by [`Grids.face_dims`](@ref):
 
 Every area, gap, edge length and corner area is positive. Under `Neumann()` the two areas differ at the
 ends of bounded directions only, where data crosses and the operators do not couple.
+
+An operator reads it in `execution`'s memory: one held on the host is moved there for the call, and one
+moved once with `Execution.on_backend` is read as it is.
 """
 struct FaceMetrics{N,T,Gr<:Grids.AbstractGrid,B<:AbstractBoundaryCondition,A<:NTuple{N,AbstractArray{T,N}},
                    F<:NTuple{N,AbstractArray{T,N}},P<:NTuple{N,AbstractArray{T,N}},E<:Tuple,M<:Tuple}
@@ -479,37 +482,38 @@ end
 # ---- the operators --------------------------------------------------------------
 
 """
-    allocate_faces(T, grid; backend = SerialBackend()) -> NTuple{N,AbstractArray{T,N}}
-    allocate_corners(T, grid; backend = SerialBackend()) -> NTuple{P,AbstractArray{T,N}}
+    allocate_faces(T, grid; execution = SerialBackend()) -> NTuple{N,AbstractArray{T,N}}
+    allocate_corners(T, grid; execution = SerialBackend()) -> NTuple{P,AbstractArray{T,N}}
 
 Zeroed face arrays, one per direction shaped by [`Grids.face_dims`](@ref), and corner arrays, one per
-[`rotation_pairs`](@ref) pair shaped by [`Grids.corner_dims`](@ref), in the memory `backend`'s loops
+[`rotation_pairs`](@ref) pair shaped by [`Grids.corner_dims`](@ref), in the memory `execution`'s loops
 write.
 """
 allocate_faces(::Type{T}, grid::Grids.FaceIndexedGrid{TT,G,N};
-               backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {T,TT,G,N} =
-    ntuple(d -> fill!(Execution.allocate(backend, T, Grids.face_dims(grid, d)...), zero(T)), Val(N))
+               execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {T,TT,G,N} =
+    ntuple(d -> fill!(Execution.allocate(execution, T, Grids.face_dims(grid, d)...), zero(T)), Val(N))
 
 allocate_corners(::Type{T}, grid::Grids.FaceIndexedGrid{TT,G,N};
-                 backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {T,TT,G,N} =
-    map(ab -> fill!(Execution.allocate(backend, T, Grids.corner_dims(grid, ab[1], ab[2])...), zero(T)),
+                 execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {T,TT,G,N} =
+    map(ab -> fill!(Execution.allocate(execution, T, Grids.corner_dims(grid, ab[1], ab[2])...), zero(T)),
         rotation_pairs(Val(N)))
 
 """
-    gradient!(g, χ, fm::FaceMetrics; backend = SerialBackend()) -> g
+    gradient!(g, χ, fm::FaceMetrics; execution = SerialBackend()) -> g
 
 `g[d][F] = σ_d (χ_above − χ_below)/gap` on every face of nonzero `area_op` normal to `d`, a zero ghost
 past a `Dirichlet` end, and zero on every other face; `σ_d` is `fm.orientation[d]`.
 """
 function gradient!(g::NTuple{N,AbstractArray}, χ::AbstractArray, fm::FaceMetrics{N,T};
-                   backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = fm.grid
-    _check_cells(χ, grid, "χ")
-    _check_faces(g, grid, "g")
-    b = Execution.resolve(backend)
+                   execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_cells(χ, fm.grid, "χ")
+    _check_faces(g, fm.grid, "g")
+    b = Execution.resolve(execution)
+    m = Execution.on_backend(b, fm)
+    grid = m.grid
     _each_dir(Val(N)) do vd
         d = _val(vd)
-        _gradient_dir!(g[d], χ, grid, fm.area_op[d], fm.gap[d], fm.orientation[d], d, b)
+        _gradient_dir!(g[d], χ, grid, m.area_op[d], m.gap[d], m.orientation[d], d, b)
     end
     return g
 end
@@ -525,23 +529,25 @@ function _gradient_dir!(gd::AbstractArray{S}, χ, grid, ad, gpd, σ, d::Int, b) 
 end
 
 """
-    divergence!(δ, v, fm::FaceMetrics; backend = SerialBackend()) -> δ
+    divergence!(δ, v, fm::FaceMetrics; execution = SerialBackend()) -> δ
 
 `δ[I] = (1/V_I) Σ_d σ_d ((A v)[face above] − (A v)[face below])` over the `area_op` of each face of cell
 `I`, `V_I` its measure, and zero on an inactive cell: the negative adjoint of [`gradient!`](@ref) under
 the cell measure and the face weight `area_op · gap`, so `L = D G` is symmetric.
 """
 function divergence!(δ::AbstractArray, v::NTuple{N,AbstractArray}, fm::FaceMetrics{N,T};
-                     backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = fm.grid
-    _check_cells(δ, grid, "δ")
-    _check_faces(v, grid, "v")
+                     execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_cells(δ, fm.grid, "δ")
+    _check_faces(v, fm.grid, "v")
+    b = Execution.resolve(execution)
+    m = Execution.on_backend(b, fm)
+    grid = m.grid
     msk = Grids.mask(grid)
     meas = Grids.measure(grid)
-    area = fm.area_op
-    σ = fm.orientation
+    area = m.area_op
+    σ = m.orientation
     S = eltype(δ)
-    _each_cell(Grids.size_tuple(grid), Execution.resolve(backend), Execution.Written(δ)) do I
+    _each_cell(Grids.size_tuple(grid), b, Execution.Written(δ)) do I
         @inbounds δ[I] = msk[I] ? S(_flux_out(v, area, σ, grid, I, Val(N), S) / meas[I]) : zero(S)
         return nothing
     end
@@ -559,15 +565,15 @@ end
 end
 
 """
-    laplacian!(out, χ, fm::FaceMetrics, g; backend = SerialBackend()) -> out
+    laplacian!(out, χ, fm::FaceMetrics, g; execution = SerialBackend()) -> out
 
 `L χ = D G χ` from [`gradient!`](@ref) into the face arrays `g`, then [`divergence!`](@ref). For repeated
 application [`laplacian_coefficients`](@ref) holds the same operator in one pass.
 """
 function laplacian!(out::AbstractArray, χ::AbstractArray, fm::FaceMetrics{N}, g::NTuple{N,AbstractArray};
-                    backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N}
-    gradient!(g, χ, fm; backend = backend)
-    return divergence!(out, g, fm; backend = backend)
+                    execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N}
+    gradient!(g, χ, fm; execution = execution)
+    return divergence!(out, g, fm; execution = execution)
 end
 
 """
@@ -597,7 +603,7 @@ end
 end
 
 """
-    curl!(W, v, fm::FaceMetrics; backend = SerialBackend()) -> W
+    curl!(W, v, fm::FaceMetrics; execution = SerialBackend()) -> W
 
 `W_ab = ∂_a v_b − ∂_b v_a` on the `(a, b)` corners from face-normal velocity `v`, one array per
 [`rotation_pairs`](@ref) pair: the circulation `σ_a Δ_a(v_b g_b) − σ_b Δ_b(v_a g_a)` around the corner
@@ -605,17 +611,18 @@ over the area `μ` of the dual cell it bounds, `fm.corner`. A corner is written 
 complex, [`corner_mask`](@ref), and zero elsewhere.
 """
 function curl!(W::Tuple{Vararg{AbstractArray}}, v::NTuple{N,AbstractArray}, fm::FaceMetrics{N,T};
-               backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = fm.grid
-    _check_faces(v, grid, "v")
-    _check_corners(W, grid, "W")
-    b = Execution.resolve(backend)
+               execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_faces(v, fm.grid, "v")
+    _check_corners(W, fm.grid, "W")
+    b = Execution.resolve(execution)
+    m = Execution.on_backend(b, fm)
+    grid = m.grid
     pairs = rotation_pairs(Val(N))
-    σ = fm.orientation
+    σ = m.orientation
     _each_dir(Val(n_rotation_components(N))) do vp
         p = _val(vp)
         a, c = pairs[p]
-        _curl_pair!(W[p], v[a], v[c], fm.area_op[a], fm.area_op[c], fm.gap[a], fm.gap[c], fm.corner[p],
+        _curl_pair!(W[p], v[a], v[c], m.area_op[a], m.area_op[c], m.gap[a], m.gap[c], m.corner[p],
                     σ[a], σ[c], grid, a, c, b)
     end
     return W
@@ -644,7 +651,7 @@ function _curl_pair!(Wp::AbstractArray{S}, va, vb, aa, ab, ga, gb, μ, σa, σb,
 end
 
 """
-    rotational_velocity!(u, R, fm::FaceMetrics; backend = SerialBackend()) -> u
+    rotational_velocity!(u, R, fm::FaceMetrics; execution = SerialBackend()) -> u
 
 `u_a = −Σ_b ∂_b R_ab` on the faces, from the rotation potential `R` on the corners, one array per
 [`rotation_pairs`](@ref) pair: the flux `area_op · u` through a face is `σ_b` times the metric-free
@@ -656,15 +663,16 @@ the corner weight `ℓ μ`, with [`curl!`](@ref).
 """
 function rotational_velocity!(u::NTuple{N,AbstractArray}, R::Tuple{Vararg{AbstractArray}},
                               fm::FaceMetrics{N,T};
-                              backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = fm.grid
-    _check_faces(u, grid, "u")
-    _check_corners(R, grid, "R")
-    b = Execution.resolve(backend)
+                              execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_faces(u, fm.grid, "u")
+    _check_corners(R, fm.grid, "R")
+    b = Execution.resolve(execution)
+    m = Execution.on_backend(b, fm)
+    grid = m.grid
     terms = _rotation_terms(Val(N))
     _each_dir(Val(N)) do vc
         c = _val(vc)
-        _rotational_dir!(u[c], R, fm.edge, fm.area_op[c], fm.orientation, terms[c], grid, c, b)
+        _rotational_dir!(u[c], R, m.edge, m.area_op[c], m.orientation, terms[c], grid, c, b)
     end
     return u
 end
@@ -692,21 +700,22 @@ function _rotational_dir!(uc::AbstractArray{S}, R, edge, ac, σ, terms, grid, c:
 end
 
 """
-    to_faces!(v, u, fm::FaceMetrics; backend = SerialBackend()) -> v
+    to_faces!(v, u, fm::FaceMetrics; execution = SerialBackend()) -> v
 
 The face-normal velocity `v` of a cell-centred field `u`, one array per direction: the mean of the two
 cells a face separates, the one cell's value at the end of a bounded direction, and zero on a face of zero
 `area_flux`. `u` is a tuple of one array of the grid's shape per direction.
 """
 function to_faces!(v::NTuple{N,AbstractArray}, u::NTuple{N,AbstractArray}, fm::FaceMetrics{N,T};
-                   backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = fm.grid
-    _check_faces(v, grid, "v")
-    foreach(ud -> _check_cells(ud, grid, "a component of u"), u)
-    b = Execution.resolve(backend)
+                   execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_faces(v, fm.grid, "v")
+    foreach(ud -> _check_cells(ud, fm.grid, "a component of u"), u)
+    b = Execution.resolve(execution)
+    m = Execution.on_backend(b, fm)
+    grid = m.grid
     _each_dir(Val(N)) do vd
         d = _val(vd)
-        _to_faces_dir!(v[d], u[d], fm.area_flux[d], grid, d, b)
+        _to_faces_dir!(v[d], u[d], m.area_flux[d], grid, d, b)
     end
     return v
 end
@@ -725,22 +734,23 @@ function _to_faces_dir!(vd::AbstractArray{S}, ud, ad, grid, d::Int, b) where {S}
 end
 
 """
-    to_centres!(u, v, fm::FaceMetrics; backend = SerialBackend()) -> u
+    to_centres!(u, v, fm::FaceMetrics; execution = SerialBackend()) -> u
 
 The cell-centred field of the face-normal velocity `v`: along each direction the mean over a cell's two
 faces of nonzero `area_flux`, zero where it has none and on an inactive cell. On a uniform axis
 `to_centres! ∘ to_faces!` has the symbol `cos²(kh/2)`.
 """
 function to_centres!(u::NTuple{N,AbstractArray}, v::NTuple{N,AbstractArray}, fm::FaceMetrics{N,T};
-                     backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = fm.grid
-    _check_faces(v, grid, "v")
-    foreach(ud -> _check_cells(ud, grid, "a component of u"), u)
+                     execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_faces(v, fm.grid, "v")
+    foreach(ud -> _check_cells(ud, fm.grid, "a component of u"), u)
+    b = Execution.resolve(execution)
+    m = Execution.on_backend(b, fm)
+    grid = m.grid
     msk = Grids.mask(grid)
-    b = Execution.resolve(backend)
     _each_dir(Val(N)) do vd
         d = _val(vd)
-        _to_centres_dir!(u[d], v[d], fm.area_flux[d], msk, grid, d, b)
+        _to_centres_dir!(u[d], v[d], m.area_flux[d], msk, grid, d, b)
     end
     return u
 end

@@ -39,7 +39,7 @@ Its fields:
 - `singular`, `nullspace`: whether `L` has a null space, and the [`ComponentNullspace`](@ref) spanning it.
 
 [`laplacian_coefficients`](@ref) builds it from a [`FaceMetrics`](@ref), [`galerkin_coefficients`](@ref)
-from a finer level.
+from a finer level. An operator reads it in `execution`'s memory, as it reads a `FaceMetrics`.
 """
 struct LaplacianCoefficients{N,T,Gr<:Grids.AbstractGrid,C<:NTuple{N,AbstractArray{T,N}},D<:AbstractArray{T,N},
                              M<:AbstractArray{T,N},NS}
@@ -120,7 +120,7 @@ function _nullspace(grid, coef, diag, meas, v::Val{N}, ::Type{T}) where {N,T}
         msk[I] && (ones_[I] = one(T))
     end
     Lone = similar(ones_)
-    _apply_laplacian!(Lone, ones_, grid, msk, coef, meas, v, T, CB.SerialBackend())
+    _apply_laplacian!(_lap_value, Lone, ones_, grid, msk, coef, meas, v, T, CB.SerialBackend())
     scale = zero(T)
     worst = zeros(T, ncomp)
     counts = zeros(Int, ncomp)
@@ -197,20 +197,31 @@ end
 end
 
 """
-    apply_laplacian!(out, Φ, c::LaplacianCoefficients; backend = SerialBackend()) -> out
+    apply_laplacian!(out, Φ, c::LaplacianCoefficients; execution = SerialBackend()) -> out
+    apply_laplacian!(f, out, Φ, c::LaplacianCoefficients; execution = SerialBackend()) -> out
 
 `out = L Φ` from the coefficients, zero on every inactive cell. A face past the end of a bounded direction
 contributes `c·(0 − Φ_I)`, the zero ghost of `Dirichlet`; under `Neumann` its coefficient is zero.
+
+With `f`, `out[I] = f(I, (L Φ)_I)` on each active cell, `I` its `CartesianIndex`: the application and the
+cellwise step that reads it in one pass, as a relaxation sweep or a residual takes them. `out` is a
+different array from `Φ`, and `f` writes nothing a neighbouring cell's `(L Φ)` reads.
 """
-function apply_laplacian!(out::AbstractArray, Φ::AbstractArray, c::LaplacianCoefficients{N,T};
-                          backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
-    grid = c.grid
-    _check_cells(out, grid, "out")
-    _check_cells(Φ, grid, "Φ")
-    _apply_laplacian!(out, Φ, grid, Grids.mask(grid), c.coef, c.measure, Val(N), eltype(out),
-                      Execution.resolve(backend))
+apply_laplacian!(out::AbstractArray, Φ::AbstractArray, c::LaplacianCoefficients; kwargs...) =
+    apply_laplacian!(_lap_value, out, Φ, c; kwargs...)
+
+function apply_laplacian!(f::F, out::AbstractArray, Φ::AbstractArray, c::LaplacianCoefficients{N,T};
+                          execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {F,N,T}
+    _check_cells(out, c.grid, "out")
+    _check_cells(Φ, c.grid, "Φ")
+    b = Execution.resolve(execution)
+    grid = Execution.on_backend(b, c.grid)
+    _apply_laplacian!(f, out, Φ, grid, Grids.mask(grid), Execution.on_backend(b, c.coef),
+                      Execution.on_backend(b, c.measure), Val(N), eltype(out), b)
     return out
 end
+
+@inline _lap_value(_I, L) = L
 
 # `(L Φ)_I`: the flux balance over cell `I`'s faces, over its measure.
 @inline _laplacian_at(Φ, grid, coef, meas, I::CartesianIndex, v::Val, ::Type{S}) where {S} =
@@ -227,12 +238,12 @@ end
     return _flux_sum(Φ, grid, coef, I, ΦI, Val(d - 1), S) + here
 end
 
-_apply_laplacian!(out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {S} =
-    _laplacian_cells!(out, Φ, grid, msk, coef, meas, v, S, b)
+_apply_laplacian!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S} =
+    _laplacian_cells!(f, out, Φ, grid, msk, coef, meas, v, S, b)
 
-function _laplacian_cells!(out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {S}
+function _laplacian_cells!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S}
     _each_cell(Grids.size_tuple(grid), b, Execution.Written(out)) do I
-        @inbounds out[I] = msk[I] ? _laplacian_at(Φ, grid, coef, meas, I, v, S) : zero(S)
+        @inbounds out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, coef, meas, I, v, S))) : zero(S)
         return nothing
     end
     return out
@@ -241,18 +252,19 @@ end
 # On the host the trailing direction splits into slabs. Along a run of direction 1 whose other indices are
 # all interior only the two end cells meet the boundary, and the cells between take `_laplacian_interior`,
 # which reads at fixed offsets with no wrap or ghost test: a zero coefficient carries the mask there.
-function _apply_laplacian!(out::Array, Φ::Array, grid, msk, coef, meas, v::Val{N}, ::Type{S},
-                           b::Execution._HostBackend) where {N,S}
-    N == 1 && return _laplacian_cells!(out, Φ, grid, msk, coef, meas, v, S, b)
+function _apply_laplacian!(f::F, out::Array, Φ::Array, grid, msk, coef, meas, v::Val{N}, ::Type{S},
+                           b::Execution._HostBackend) where {F,N,S}
+    N == 1 && return _laplacian_cells!(f, out, Φ, grid, msk, coef, meas, v, S, b)
     dims = Grids.size_tuple(grid)
     mid = CartesianIndices(ntuple(e -> dims[e + 1], Val(N - 2)))
     Execution.run_chunks(dims[N], b) do slab
-        _laplacian_slab!(out, Φ, grid, msk, coef, meas, v, S, slab, dims, mid)
+        _laplacian_slab!(f, out, Φ, grid, msk, coef, meas, v, S, slab, dims, mid)
     end
     return out
 end
 
-function _laplacian_slab!(out, Φ, grid, msk, coef, meas, v::Val{N}, ::Type{S}, slab, dims, mid) where {N,S}
+function _laplacian_slab!(f::F, out, Φ, grid, msk, coef, meas, v::Val{N}, ::Type{S}, slab, dims,
+                          mid) where {F,N,S}
     n1 = dims[1]
     cf = ntuple(d -> @inbounds(coef[d]), v)
     @inbounds for jN in slab, Im in mid
@@ -260,16 +272,16 @@ function _laplacian_slab!(out, Φ, grid, msk, coef, meas, v::Val{N}, ::Type{S}, 
         if n1 < 3 || _rest_on_edge(rest, dims)
             for i in 1:n1
                 I = CartesianIndex(i, rest...)
-                out[I] = msk[I] ? _laplacian_at(Φ, grid, cf, meas, I, v, S) : zero(S)
+                out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, cf, meas, I, v, S))) : zero(S)
             end
         else
             for i in (1, n1)
                 I = CartesianIndex(i, rest...)
-                out[I] = msk[I] ? _laplacian_at(Φ, grid, cf, meas, I, v, S) : zero(S)
+                out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, cf, meas, I, v, S))) : zero(S)
             end
             for i in 2:(n1 - 1)
                 I = CartesianIndex(i, rest...)
-                out[I] = msk[I] ? _laplacian_interior(Φ, cf, meas, I, v, S) : zero(S)
+                out[I] = msk[I] ? S(f(I, _laplacian_interior(Φ, cf, meas, I, v, S))) : zero(S)
             end
         end
     end
@@ -298,19 +310,20 @@ end
 end
 
 """
-    project_out_constant!(Φ, c::LaplacianCoefficients; backend = SerialBackend()) -> Φ
+    project_out_constant!(Φ, c::LaplacianCoefficients; execution = SerialBackend()) -> Φ
 
 Remove from `Φ`, on each closed component of `L`, its measure-weighted mean there: the component of `Φ`
 in `L`'s null space.
 """
 function project_out_constant!(Φ::AbstractArray, c::LaplacianCoefficients{N,T};
-                               backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+                               execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
     c.singular || return Φ
     # The cells of a component are scattered through `Φ`, so the passes stay in this process.
-    b = Execution.local_backend(backend)
+    b = Execution.local_backend(execution)
     ns = c.nullspace
-    ns.full && return _project_mean!(Φ, c.measure, c.total, b, eltype(Φ))
-    meas, perm = c.measure, ns.perm
+    meas = Execution.on_backend(b, c.measure)
+    ns.full && return _project_mean!(Φ, meas, c.total, b, eltype(Φ))
+    perm = Execution.on_backend(b, ns.perm)
     S = eltype(Φ)
     for k in eachindex(ns.totals)
         o = ns.offsets[k] - 1
@@ -463,8 +476,8 @@ function galerkin_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.Fa
 end
 
 """
-    restrict!(coarse, fine, fc, cc; backend = SerialBackend()) -> coarse
-    prolong_add!(fine, coarse, fc, cc; backend = SerialBackend()) -> fine
+    restrict!(coarse, fine, fc, cc; execution = SerialBackend()) -> coarse
+    prolong_add!(fine, coarse, fc, cc; execution = SerialBackend()) -> fine
 
 The transfers between a level `fc` and the next one down `cc`: `restrict!` writes each coarse cell the
 measure-weighted mean of its children, `Σ V_J f_J / Σ V_J`, and `prolong_add!` adds each coarse value to
@@ -473,13 +486,14 @@ the active fine cells it covers. Under the cell measures each is the other's adj
 """
 function restrict!(coarse::AbstractArray, fine::AbstractArray, fc::LaplacianCoefficients{N,T},
                    cc::LaplacianCoefficients{N,T};
-                   backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+                   execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
     _check_cells(fine, fc.grid, "fine")
     _check_cells(coarse, cc.grid, "coarse")
     fdims = Grids.size_tuple(fc.grid)
-    fmeas, cmeas = fc.measure, cc.measure
+    b = Execution.resolve(execution)
+    fmeas, cmeas = Execution.on_backend(b, fc.measure), Execution.on_backend(b, cc.measure)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), Execution.resolve(backend), Execution.Written(coarse)) do I
+    _each_cell(Grids.size_tuple(cc.grid), b, Execution.Written(coarse)) do I
         @inbounds begin
             w = cmeas[I]
             if iszero(w)
@@ -499,15 +513,54 @@ end
 
 function prolong_add!(fine::AbstractArray, coarse::AbstractArray, fc::LaplacianCoefficients{N,T},
                       cc::LaplacianCoefficients{N,T};
-                      backend::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+                      execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
     _check_cells(fine, fc.grid, "fine")
     _check_cells(coarse, cc.grid, "coarse")
     fdims = Grids.size_tuple(fc.grid)
-    fmeas = fc.measure
-    _each_cell(fdims, Execution.resolve(backend), Execution.Written(fine)) do J
+    b = Execution.resolve(execution)
+    fmeas = Execution.on_backend(b, fc.measure)
+    _each_cell(fdims, b, Execution.Written(fine)) do J
         @inbounds iszero(fmeas[J]) ||
                   (fine[J] += coarse[CartesianIndex(ntuple(d -> _parent(J[d], fdims[d]), Val(N)))])
         return nothing
     end
     return fine
+end
+
+"""
+    restrict_residual!(coarse, b, x, fc, cc; execution = SerialBackend()) -> coarse
+
+[`restrict!`](@ref) of the residual `b + L x` on level `fc`, formed child by child inside the restriction:
+coarse cell `I` gets `Σ (V_J b_J + V_J (L x)_J) / Σ V_J` over its active children, `V_J (L x)_J` the flux
+balance over `J`'s faces.
+"""
+function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::AbstractArray,
+                            fc::LaplacianCoefficients{N,T}, cc::LaplacianCoefficients{N,T};
+                            execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
+    _check_cells(b, fc.grid, "b")
+    _check_cells(x, fc.grid, "x")
+    _check_cells(coarse, cc.grid, "coarse")
+    fdims = Grids.size_tuple(fc.grid)
+    bk = Execution.resolve(execution)
+    fgrid = Execution.on_backend(bk, fc.grid)
+    fmeas, cmeas = Execution.on_backend(bk, fc.measure), Execution.on_backend(bk, cc.measure)
+    coef, msk = Execution.on_backend(bk, fc.coef), Grids.mask(fgrid)
+    S = eltype(coarse)
+    _each_cell(Grids.size_tuple(cc.grid), bk, Execution.Written(coarse)) do I
+        @inbounds begin
+            w = cmeas[I]
+            if iszero(w)
+                coarse[I] = zero(S)
+            else
+                acc = zero(S)
+                for J in CartesianIndices(ntuple(d -> _children(I[d], fdims[d]), Val(N)))
+                    msk[J] || continue
+                    acc += S(fmeas[J] * b[J]) + _flux_sum(x, fgrid, coef, J, S(x[J]), Val(N), S)
+                end
+                coarse[I] = acc / S(w)
+            end
+        end
+        return nothing
+    end
+    return coarse
 end

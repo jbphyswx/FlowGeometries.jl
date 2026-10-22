@@ -24,11 +24,11 @@ function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
     period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
     return _apply_axis!(out, field, x, Int(dim), Int(order), Int(nodes), period, mask, masked,
-                        backend, policy, scratch, nothing)
+                        execution, policy, scratch, nothing)
 end
 
 # The axis form, with `fac` the metric factor a derivative multiplies each value by as it is written, or
@@ -53,20 +53,22 @@ function _apply_axis!(
         end
         k = min(k, length(x))
     end
-    # The blanking policy takes a plan, which holds uniform weights in registers. The degrading policies
-    # rebuild a window from the axis, so they take the table.
+    # The weights are built on the host, from the axis read there. The blanking policy takes a plan,
+    # which holds uniform weights in registers. The degrading policies rebuild a window from the axis,
+    # so they take the table.
+    xh = _host_array(x)
     if policy isa BlankMasked || mask === nothing
-        return _apply_plan_checked!(out, field, Discretization.stencil_plan(x, ord, k; period = period),
+        return _apply_plan_checked!(out, field, Discretization.stencil_plan(xh, ord, k; period = period),
                                     dim, mask, masked, backend, fac)
     end
-    idx, wts = Discretization.axis_stencils(x, ord, k; period = period)
-    return _apply_axis_table!(out, field, x, idx, wts, dim, ord, period, mask, masked, backend, policy,
+    idx, wts = Discretization.axis_stencils(xh, ord, k; period = period)
+    return _apply_axis_table!(out, field, xh, idx, wts, dim, ord, period, mask, masked, backend, policy,
                               scratch, fac)
 end
 
 """
     apply_stencil!(out, field, x, indices, weights, dim; order=1, period=nothing, mask=nothing,
-                   masked=zero, policy=BlankMasked(), backend=SerialBackend()) -> out
+                   masked=zero, policy=BlankMasked(), execution=SerialBackend()) -> out
 
 Apply a table built by [`Discretization.axis_stencils`](@ref) **and** keep the axis, so any mask policy works.
 
@@ -84,11 +86,11 @@ function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, x::AbstractVector{<:AbstractFloat},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
     order::Integer = 1, period::Union{Nothing,Real} = nothing, mask = nothing, masked = zero(S),
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,N}
     return _apply_axis_table!(out, field, x, indices, weights, Int(dim), Int(order), period, mask,
-                              masked, backend, policy, scratch, nothing)
+                              masked, execution, policy, scratch, nothing)
 end
 
 function _apply_axis_table!(
@@ -314,14 +316,14 @@ end
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    mask = nothing, masked = zero(S), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    mask = nothing, masked = zero(S), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {S,N}
     # Degrading means rebuilding a stencil, which needs the axis this form was not given.
     policy isa BlankMasked || throw(ArgumentError(
         "$(policy) needs the axis to rebuild a stencil from; call the `(out, field, x, dim)` form",
     ))
-    return _apply_table!(out, field, indices, weights, Int(dim), mask, masked, backend, nothing)
+    return _apply_table!(out, field, indices, weights, Int(dim), mask, masked, execution, nothing)
 end
 
 function _apply_table!(
@@ -356,10 +358,14 @@ function _apply_table!(
         end
     end
     # The differenced direction and the node count are properties of the weight set, so they resolve to
-    # types once before the launch, as they do once per sweep on the host.
+    # types once before the launch, as they do once per sweep on the host. The table and the mask are
+    # read where the launch runs.
+    di = Execution.on_backend(b, indices)
+    dw = Execution.on_backend(b, weights)
+    dm = Execution.on_backend(b, mask)
     return _dispatch_dim(dim, vm) do vdim
         _dispatch_nodes(k) do vk
-            _launch_stencil!(out, field, indices, weights, mask, masked, vdim, vk, Val(N), vm, b, fac)
+            _launch_stencil!(out, field, di, dw, dm, masked, vdim, vk, Val(N), vm, b, fac)
         end
     end
 end

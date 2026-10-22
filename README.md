@@ -9,7 +9,7 @@ ComputationalBackends, whose tags name how a bulk loop runs.
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
 
-Fourteen samplings, eight grid layouts, three metrics — chosen independently of each other, in
+Fourteen samplings, nine grid layouts, three metrics — chosen independently of each other, in
 any number of dimensions. Spatial search, tessellation, sparse output, static vectors, FFT-based
 quadrature, device transfer, device kernels and multi-process execution all arrive through package
 extensions, so you pay for exactly what you load.
@@ -64,7 +64,7 @@ FG.Grids.isuniform(grid, d)      # compile-time; const-folds
 FG.Grids.spacing(grid, d)        # the constant Δ, signed
 ```
 
-No code path inspects coordinate values to decide this, and there is no tolerance anywhere. Where the
+No code path inspects coordinate values to decide this, so no tolerance enters the decision. Where the
 data question matters, the spacing accessors answer it exactly — an axis is equally spaced precisely
 when `minimum_spacing == maximum_spacing`.
 
@@ -125,7 +125,7 @@ D.faces(axis), D.nodes(axis, D.Face())
 D.interpolation_weights(axis, v)
 D.fd_weights([-1.0, 0.0, 1.0], 0.0, 2)   # [1, -2, 1]
 FG.Geometry.scale_factors(geo, point)    # (R cosφ, R) on a sphere
-D.apply_stencil!(out, field, grid, 1; order = 1, nodes = 5)   # along one direction
+FG.Operators.apply_stencil!(out, field, grid, 1; order = 1, nodes = 5)   # along one direction
 ```
 
 `apply_stencil!` touches a field along a single direction with the result left where the input was — a
@@ -304,12 +304,12 @@ FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 | `Distributed` | bulk loops as one share per worker, under `DistributedBackend(inner)` |
 | `MPI` | bulk loops as one share per rank, under `MPIBackend(inner, comm)` |
 
-Every bulk entry point takes a ComputationalBackends tag as `backend`, `SerialBackend()` by default;
+Every bulk entry point takes a ComputationalBackends tag as `execution`, `SerialBackend()` by default;
 `ThreadedBackend()` and `AutoBackend()` need no extension.
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())   # same CSR, built in parallel
+FG.Connectivity.build_connectivity(grid; execution = ThreadedBackend())   # same CSR, built in parallel
 ```
 
 ## Documentation

@@ -58,9 +58,9 @@ function Base.show(io::IO, p::GradientPlan{D,T}) where {D,T}
 end
 
 """
-    gradient!(outs::Tuple, field, plan; backend=SerialBackend()) -> outs
-    gradient!(g1, g2, field, plan; backend=SerialBackend()) -> (g1, g2)
-    gradient!(g1, g2, g3, field, plan; backend=SerialBackend()) -> (g1, g2, g3)
+    gradient!(outs::Tuple, field, plan; execution=SerialBackend()) -> outs
+    gradient!(g1, g2, field, plan; execution=SerialBackend()) -> (g1, g2)
+    gradient!(g1, g2, g3, field, plan; execution=SerialBackend()) -> (g1, g2, g3)
 
 Apply a [`GradientPlan`](@ref): the components of `∇field` at every cell, written one per output array.
 One dot product per cell over its neighbours, allocating nothing on the host.
@@ -70,13 +70,13 @@ an `N`-D array of the grid's shape works as is. The components are named by `pla
 on a sphere, `(:x, :y)` on a plane, `(:x, :y, :z)` in a volume — and are per unit **distance**, the
 displacements being metric already.
 
-Every cell is its own work item under `backend`; the plan's arrays are read where `backend` runs.
+Every cell is its own work item under `execution`; the plan's arrays are read where `execution` runs.
 """
 function gradient! end
 
 function gradient!(
     outs::Tuple{AbstractArray{S},Vararg{AbstractArray{S}}}, field::AbstractArray,
-    plan::GradientPlan{D}; backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    plan::GradientPlan{D}; execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {D,S}
     n = length(plan)
     length(outs) == D || throw(DimensionMismatch(
@@ -94,7 +94,7 @@ function gradient!(
     nb = length(field) ÷ n
     # Indexed linearly: an `N`-D array of the grid's shape indexes linearly as it stands, and a batched
     # one is that shape repeated, so `vec` adds an array wrapper per output per call for nothing.
-    bk = Execution.resolve(backend)
+    bk = Execution.resolve(execution)
     if bk isa CB.AbstractSerialBackend
         @inbounds for b in 0:(nb - 1), i in 1:n
             _gradient_at!(outs, field, plan, b * n, i, S)

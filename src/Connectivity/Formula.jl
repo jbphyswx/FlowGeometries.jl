@@ -99,19 +99,19 @@ one absorbs the keywords that shape the others, as [`Grids.StoredMeshNeighbors`]
 """
 function build_connectivity(
     grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
 )
     n = length(Grids.mask(grid))
     # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill
     # them run, and the build is device-resident end to end under a backend that launches kernels.
-    deg = Execution.allocate(backend, Int, n)
-    Execution.run_indices(n, backend, Execution.Written(deg)) do k
+    deg = Execution.allocate(execution, Int, n)
+    Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
-    total = _csr_total(deg, n, backend)
+    total = _csr_total(deg, n, execution)
     return _index_type(max(n + 1, total)) === Int32 ?
-        _formula_fill(Int32, total, grid, deg, n, active_only, backend) :
-        _formula_fill(Int, total, grid, deg, n, active_only, backend)
+        _formula_fill(Int32, total, grid, deg, n, active_only, execution) :
+        _formula_fill(Int, total, grid, deg, n, active_only, execution)
 end
 
 function _formula_fill(

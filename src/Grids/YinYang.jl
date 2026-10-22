@@ -9,8 +9,9 @@ The Kageyama–Sato Yin–Yang grid: two `nlon × nlat` lat–lon panels coverin
 `[-3π/4, 3π/4] × [-π/4, π/4]` in their own frames, `2·nlon·nlat` cells in all.
 
 It stores `nlon`, `nlat`, the geometry and the mask. In its own frame each panel is a separable lat–lon
-patch, and yang is yin rigidly rotated, so a cell's coordinates are the panel formula composed with
-[`SphericalSampling._yin_yang_rotate`](@ref). A cell's area depends on its latitude row alone.
+patch, and yang is yin rigidly rotated, so a cell's coordinates are the panel formula on yin and the
+formula composed with [`SphericalSampling._yin_yang_rotate`](@ref) on yang, longitude in `[0, 2π)` on
+both. A cell's area depends on its latitude row alone.
 
 Cells are numbered yin first with `i` fastest, then yang the same way, matching
 [`SphericalSampling.spherical_points`](@ref)`(YinYangSampling(), nlon, nlat)`. [`panel_cell`](@ref) and
@@ -100,7 +101,7 @@ end
     nlon, nlat = panel_shape(grid)
     p, i, j = panel_cell(grid, k)
     λ, φ = SphericalSampling._yin_yang_panel_coords(T, nlon, nlat, i, j)
-    return p == 1 ? (λ, φ) : SphericalSampling._yin_yang_rotate(λ, φ)
+    return p == 1 ? (Geometry.wrap_longitude(λ), φ) : SphericalSampling._yin_yang_rotate(λ, φ)
 end
 
 coordinates(grid::YinYangGrid) = throw(ArgumentError(

@@ -116,6 +116,13 @@ Execution.allocate(b::_KABackend, ::Type{T}, dims::Integer...) where {T} =
     KernelAbstractions.allocate(b.backend, T, Int.(dims)...)
 
 Execution.on_backend(b::_KABackend, x) = Adapt.adapt(b.backend, x)
+Execution.on_backend(b::_KABackend, x::BitArray) =
+    Adapt.adapt(b.backend, Execution._unpack_bits(b.backend) ? Array(x) : x)
+
+# KernelAbstractions asks a device backend's adaptor to move an `Array`, and a `BitArray` is not one, so a
+# mask moves to a device unpacked. The CPU backend reads host memory and keeps the `BitArray`.
+Execution._unpack_bits(::KernelAbstractions.Backend) = true
+Execution._unpack_bits(::KernelAbstractions.CPU) = false
 
 # Group `g` scans the block `_fold_kernel` summed into `sums[g]`. Its base is `init` plus the sums of the
 # groups before it; each round of `W` counts is scanned in local memory (Hillis–Steele) and written from

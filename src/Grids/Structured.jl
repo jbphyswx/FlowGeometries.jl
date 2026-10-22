@@ -667,11 +667,9 @@ entering as plain widths. A `CartesianGeometry` measure is the product of the pe
   longitude, and `extent + one spacing` for a Cartesian direction, which is exact for a uniform axis
   (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer, its seam gap being
   undetermined by its samples, so `period` is required there. A period given for a `PeriodicAxis`
-  direction is its own.
-
-A wrapping direction whose axis is a `PeriodicAxis` has a seam one step wide, so its cell widths, faces
-and stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
-whatever seam gap its period leaves.
+  direction is its own. A `PeriodicAxis` has a seam one step wide, so its cell widths, faces and
+  stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
+  whatever seam gap its period leaves.
 - `periodic`: the `topology` keyword under another name, for a `Bool` or a tuple of them.
 - `sampling`: the [`SphericalSampling.AbstractSphericalSampling`](@ref) the axes came from, kept on
   the grid (see [`sampling`](@ref)). On a 2-D spherical grid a sampling with latitude quadrature
@@ -799,7 +797,7 @@ function _inferred_period(
     ::Geometry.AbstractCartesianGeometry{T}, x::AbstractVector, d::Int,
 ) where {T}
     Axes.isuniform(x) || length(x) < 2 || throw(ArgumentError(
-        "a periodic Cartesian direction with NONUNIFORM spacing has no period to infer (its seam " *
+        "a periodic Cartesian direction with nonuniform spacing has no period to infer (its seam " *
         "gap is not determined by its samples); pass `period` explicitly for direction $d",
     ))
     return _cartesian_period(x)

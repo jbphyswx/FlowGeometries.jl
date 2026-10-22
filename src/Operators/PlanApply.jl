@@ -12,7 +12,7 @@
 # and so carries per-row round-off.
 
 """
-    apply_stencil!(out, field, plan, dim; mask=nothing, masked=zero, backend=SerialBackend()) -> out
+    apply_stencil!(out, field, plan, dim; mask=nothing, masked=zero, execution=SerialBackend()) -> out
 
 Apply a held [`Discretization.stencil_plan`](@ref) along direction `dim` of `field`.
 
@@ -26,9 +26,9 @@ is written `masked`.
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N},
     plan::Discretization.AbstractStencilPlan, dim::Integer;
-    mask = nothing, masked = zero(S), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    mask = nothing, masked = zero(S), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,N}
-    return _apply_plan_checked!(out, field, plan, Int(dim), mask, masked, backend, nothing)
+    return _apply_plan_checked!(out, field, plan, Int(dim), mask, masked, execution, nothing)
 end
 
 # The plan form, with `fac` the metric factor a derivative writes each value with — see
@@ -66,11 +66,12 @@ function _apply_plan!(
     vm = _mask_rank(mask, Val(N))
     b = Execution.resolve(backend)
     # On a device each work item reads its own row from the plan: the centred row and the `O(K²)` end
-    # rows, held where the backend reads them.
+    # rows, held where the backend reads them, as the mask is.
     if !_sweeps_on_host(b, out, field, mask, fac)
         p = Execution.on_backend(b, plan)
+        m = Execution.on_backend(b, mask)
         return _dispatch_dim(d, vm) do vdim
-            _launch_plan!(out, field, p, mask, masked, vdim, Val(N), vm, b, fac)
+            _launch_plan!(out, field, p, m, masked, vdim, Val(N), vm, b, fac)
         end
     end
     return _dispatch_dim(d, vm) do vdim

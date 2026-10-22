@@ -275,7 +275,7 @@ FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, g; ball = 1.0e6)   # tota
 FG.Connectivity.mapreduce_within((I, J, d) -> d, +, 0.0, g; ball = 1.0e6) # and the total distance
 ```
 
-`foreach_within` is the same traversal for an `f` that writes; under a threaded `backend` it runs on
+`foreach_within` is the same traversal for an `f` that writes; under a threaded `execution` it runs on
 disjoint spans of cells, so what `f` writes must be determined by `I`.
 `build_connectivity_within` does the same hoisting internally.
 
@@ -448,11 +448,11 @@ FG.Connectivity.sort_neighbors!(conn)                       # order each node's 
 
 ## Threading
 
-Every builder takes an opt-in `backend`; see [Performance](@ref performance-page).
+Every builder takes an opt-in `execution`; see [Performance](@ref performance-page).
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
+FG.Connectivity.build_connectivity(grid; execution = ThreadedBackend())
 ```
 
 Results are bit-identical to serial; the test suite asserts it with `==`.

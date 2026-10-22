@@ -14,7 +14,7 @@
 
 using FlowGeometries: FlowGeometries as FG
 using NearestNeighbors: NearestNeighbors
-using Printf: @printf
+using Printf: Printf
 
 const C = FG.Connectivity
 const D = FG.Discretization
@@ -42,8 +42,8 @@ function best(f, reps::Int; blocks::Int = 3)
     return t
 end
 
-row(name, t) = @printf("  %-46s %10.2f µs\n", name, t * 1e6)
-ratio_row(name, a, b) = @printf("  %-46s %10.2f×\n", name, b / a)
+row(name, t) = Printf.@printf("  %-46s %10.2f µs\n", name, t * 1e6)
+ratio_row(name, a, b) = Printf.@printf("  %-46s %10.2f×\n", name, b / a)
 group(title) = (println(); println(title); println("  " * "-"^58))
 
 # ---------------------------------------------------------------------------

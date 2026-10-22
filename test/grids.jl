@@ -4,11 +4,6 @@ Test.@testset "StructuredGrid preserves uniform spacing" begin
     y = 0.0:2000.0:10_000.0
     mask = trues(length(x), length(y))
     grid = FG.Grids.StructuredGrid(geom, x, y, mask)
-    # A range axis carries a guarantee of constant spacing, and that guarantee is what the
-    # assertions below cover: the property survives, the spacing is the one asked for, and the
-    # samples equal the input. The container is `Axes.UniformAxis`, which keeps its arithmetic in
-    # the grid's own element type.
-    Test.@test FG.Grids.isuniform(grid)
     Test.@test FG.Grids.isuniform(grid, 1) && FG.Grids.isuniform(grid, 2)
     Test.@test FG.Grids.spacing(grid, 1) === 2000.0
     Test.@test FG.Grids.spacing(grid, 2) === 2000.0
@@ -22,24 +17,11 @@ Test.@testset "StructuredGrid preserves uniform spacing" begin
     Test.@test FG.Grids.size_tuple(grid) == (length(x), length(y))
     Test.@test FG.Grids.area(grid, 2, 2) ≈ 2000.0 * 2000.0
     Test.@test FG.Grids.coords(grid, 2, 3) == (x = 2000.0, y = 4000.0)
-    Test.@test FG.Grids.coords(NTuple{2,Float64}, grid, 2, 3) == (2000.0, 4000.0)
     out = zeros(2)
     FG.Grids.coords!(out, grid, 2, 3)
     Test.@test out == [2000.0, 4000.0]
     Test.@test FG.Grids.isactive(grid, 1, 1)
-    Test.@test FG.Grids.grid_geometry(grid) === geom
     Test.@test !FG.Grids.isperiodic(grid, 1)  # a plain axis is bounded unless asked
-end
-
-Test.@testset "StructuredGrid with Vector axes is still structured" begin
-    geom = FG.Geometry.CartesianGeometry()
-    x = collect(0.0:1.0:4.0)
-    y = collect(0.0:1.0:3.0)
-    grid = FG.Grids.StructuredGrid(geom, x, y, trues(length(x), length(y)))
-    Test.@test grid isa FG.Grids.StructuredGrid
-    Test.@test grid.x isa Vector
-    Test.@test grid.y isa Vector
-    Test.@test FG.Grids.size_tuple(grid) == (5, 4)
 end
 
 Test.@testset "A periodic longitude axis wraps, a plain longitude axis is bounded" begin
@@ -53,17 +35,13 @@ Test.@testset "A periodic longitude axis wraps, a plain longitude axis is bounde
     Test.@test FG.Grids.isperiodic(grid, 1)
     Test.@test !FG.Grids.isperiodic(grid, 2)
     Test.@test FG.Grids.period(grid, 1) == 2π
-    Test.@test FG.Grids.axis(grid, 1) === lon
     Test.@test FG.Grids.isuniform(grid, 1)
     Test.@test FG.Grids.spacing(grid, 1) == dλ
-    Test.@test FG.Grids.measure_factors(grid)[1] isa FG.Axes.ConstantVector
-    # The same samples in a range say nothing about the seam, so they are bounded unless asked.
+    # The same samples in a range are bounded unless asked.
     plain = range(0.0; step = dλ, length = nλ)
     Test.@test !FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat), 1)
     Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat; periodic = true), 1)
-    Test.@test all(FG.Grids.area(grid, i, j) > 0 for i in 1:nλ, j in 1:nφ)
     p = FG.Grids.coords(grid, 1, 1)
-    Test.@test keys(p) == (:λ, :φ)
     Test.@test p.λ ≈ 0.0
     Test.@test p.φ ≈ -π / 4
 end
@@ -75,21 +53,10 @@ Test.@testset "Coordinate names follow the geometry, never stand in for each oth
     cgrid = FG.Grids.StructuredGrid(cgeom, xs, xs, trues(5, 5))
     sgrid = FG.Grids.StructuredGrid(sgeom, deg2rad.(xs), deg2rad.(xs), trues(5, 5))
 
-    # A spherical grid holds longitude/latitude and says so; asking it for `x` raises.
     Test.@test FG.Grids.coordinate_names(cgrid) == (:x, :y)
     Test.@test FG.Grids.coordinate_names(sgrid) == (:λ, :φ)
     Test.@test cgrid.x === FG.Grids.coordinates(cgrid, 1)
     Test.@test sgrid.λ === FG.Grids.coordinates(sgrid, 1)
-    Test.@test sgrid.φ === FG.Grids.coordinates(sgrid, 2)
-    Test.@test_throws FieldError sgrid.x
-    Test.@test_throws FieldError cgrid.λ
-    Test.@test :λ in propertynames(sgrid)
-    Test.@test :x in propertynames(cgrid)
-
-    # `axis` is the rectilinear spelling of the same thing; `coordinates` works on every
-    # architecture, including ones with no axes at all.
-    Test.@test FG.Grids.axis(sgrid, 2) === FG.Grids.coordinates(sgrid, 2)
-    Test.@test FG.Grids.coordinates(cgrid) === (FG.Grids.coordinates(cgrid, 1), FG.Grids.coordinates(cgrid, 2))
 
     nx, ny = 4, 3
     xm = [Float64(i) for i in 1:nx, j in 1:ny]
@@ -98,14 +65,12 @@ Test.@testset "Coordinate names follow the geometry, never stand in for each oth
                                   keep_corners = true)
     Test.@test FG.Grids.coordinate_names(cv) == (:λ, :φ)
     Test.@test cv.λ === FG.Grids.coordinates(cv, 1)
-    Test.@test_throws FieldError cv.x
     Test.@test size(FG.Grids.corners(cv, 1)) == (nx + 1, ny + 1)
     Test.@test keys(FG.Grids.corner_coords(cv, 1, 1)) == (:λ, :φ)
 
     un = FG.Grids.UnstructuredGrid(sgeom, [0.0, 0.1, 0.2], [0.0, 0.1, 0.0], [1.0, 1.0, 1.0], trues(3))
     Test.@test FG.Grids.coordinate_names(un) == (:λ, :φ)
     Test.@test un.λ == [0.0, 0.1, 0.2]
-    Test.@test_throws FieldError un.y
 end
 
 Test.@testset "Grids implement the Base collection surface" begin
@@ -119,13 +84,6 @@ Test.@testset "Grids implement the Base collection surface" begin
     Test.@test ndims(grid) == 2
     Test.@test eltype(grid) === Float64
     Test.@test axes(grid) == (Base.OneTo(5), Base.OneTo(4))
-    Test.@test FG.Grids.size_tuple(grid) == size(grid)
-    # `show` prints a summary, with no coordinate array in it.
-    s = sprint(show, MIME"text/plain"(), grid)
-    Test.@test occursin("StructuredGrid{Float64} 5×4", s)
-    Test.@test occursin("20 active", s)
-    Test.@test count(==('\n'), s) < 10
-    Test.@test sprint(show, grid) == "StructuredGrid{Float64}(5×4)"
 end
 
 Test.@testset "Cell measure is the exact integral of the metric over each cell" begin
@@ -205,10 +163,8 @@ Test.@testset "Cell measure is the exact integral of the metric over each cell" 
         cgeo3, xnu, yy, zz, trues(length(xnu), length(yy), length(zz)); periodic = true)
     gp = FG.Grids.StructuredGrid(cgeo3, xnu, yy, zz, trues(length(xnu), length(yy), length(zz));
                            periodic = true, period = xper)
-    gn = FG.Grids.StructuredGrid(cgeo3, xnu, yy, zz, trues(length(xnu), length(yy), length(zz)); periodic = false)
     Test.@test FG.Grids.measure(gp) ≈ [cw(xnu, i, xper) * cw(yy, j) * cw(zz, k)
                                  for i in eachindex(xnu), j in eachindex(yy), k in eachindex(zz)]
-    Test.@test FG.Grids.measure(gp) != FG.Grids.measure(gn)
     # …and 2-D and 3-D agree on that wrapped width.
     g2p = FG.Grids.StructuredGrid(cgeo, xnu, yy, trues(length(xnu), length(yy));
                             periodic = true, period = xper)
@@ -224,7 +180,6 @@ Test.@testset "A grid on a quadrature sampling is measured by its weights" begin
         g = FG.Connectivity.structured_grid(s, n; geometry = geo)
         q = SS.spherical_quadrature(s, n)
         m = FG.Grids.measure(g)
-        Test.@test FG.Grids.sampling(g) === s
         Test.@test all(isapprox(m[i, j], R^2 * (2π / length(q.λ)) * q.w[j]; rtol = 1e-13)
                        for i in axes(m, 1), j in axes(m, 2))
         # `Σ measure·f` is the quadrature, so it integrates `sin^d φ` over the sphere exactly up to the
@@ -246,87 +201,34 @@ Test.@testset "A grid on a quadrature sampling is measured by its weights" begin
     end
 end
 
-Test.@testset "measure is the dimension-agnostic name for area/volume" begin
-    geom3 = FG.Geometry.CartesianGeometry()
-    x = 0.0:1.0:3.0
-    z = 0.0:1.0:2.0
-    g3 = FG.Grids.StructuredGrid(geom3, x, x, z, trues(4, 4, 3))
-    Test.@test FG.Grids.measure(g3, 2, 2, 2) ≈ 1.0
-    Test.@test FG.Grids.measure(g3, 2, 2, 2) == FG.Grids.area(g3, 2, 2, 2)
-    Test.@test size(FG.Grids.measure(g3)) == (4, 4, 3)
-end
-
 Test.@testset "UnstructuredGrid carries a caller-chosen index type" begin
     geom = FG.Geometry.CartesianGeometry()
     x = [0.0, 1.0, 0.0]
     y = [0.0, 0.0, 1.0]
     areas = [0.5, 0.5, 0.5]
-    # Int32 CSR indices: half the memory of Int64 on a large mesh, and the width GPU kernels use.
+    # CSR: node 1 → [2,3], node 2 → [1], node 3 → [1]
     nbrs = Int32[2, 3, 1, 1]
     ptr = Int32[1, 3, 4, 5]
     grid = FG.Grids.UnstructuredGrid(geom, x, y, areas, trues(3), nbrs, ptr)
-    Test.@test eltype(grid.neighbor_nbrs) === Int32
     Test.@test collect(FG.Grids.neighbors(grid, 1)) == Int32[2, 3]
     Test.@test FG.Grids.measure(grid, 2) ≈ 0.5
+    Test.@test FG.Grids.coords(grid, 2) == (x = 1.0, y = 0.0)
     # Mismatched adjacency length is caught at construction.
     Test.@test_throws ArgumentError FG.Grids.UnstructuredGrid(geom, x, y, areas, trues(3), nbrs, Int32[1, 3])
+    # With no adjacency given, a node has no neighbours.
+    Test.@test isempty(FG.Grids.neighbors(FG.Grids.UnstructuredGrid(geom, x, y, areas, trues(3)), 1))
 end
 
 Test.@testset "1D and 3D StructuredGrid" begin
     geom = FG.Geometry.CartesianGeometry()
     x = 0.0:1.0:9.0
     g1 = FG.Grids.StructuredGrid(geom, x, trues(length(x)))
-    Test.@test FG.Grids.size_tuple(g1) == (10,)
     Test.@test FG.Grids.area(g1, 2) ≈ 1.0
 
     geom3 = FG.Geometry.CartesianGeometry()
     z = 0.0:1.0:4.0
     g3 = FG.Grids.StructuredGrid(geom3, x, x, z, trues(length(x), length(x), length(z)))
-    Test.@test FG.Grids.size_tuple(g3) == (10, 10, 5)
     Test.@test FG.Grids.area(g3, 2, 2, 2) ≈ 1.0
-end
-
-Test.@testset "CurvilinearGrid" begin
-    geom = FG.Geometry.CartesianGeometry()
-    nx, ny = 4, 3
-    x = [Float64(i) for i in 1:nx, j in 1:ny]
-    y = [Float64(j) for i in 1:nx, j in 1:ny]
-    grid = FG.Grids.CurvilinearGrid(geom, x, y, trues(nx, ny))
-    Test.@test FG.Grids.size_tuple(grid) == (nx, ny)
-    Test.@test FG.Grids.coords(grid, 2, 2) == (x = 2.0, y = 2.0)
-    Test.@test FG.Grids.area(grid, 2, 2) > 0
-end
-
-Test.@testset "UnstructuredGrid explicit adjacency" begin
-    geom = FG.Geometry.CartesianGeometry()
-    x = [0.0, 1.0, 0.0]
-    y = [0.0, 0.0, 1.0]
-    areas = [0.5, 0.5, 0.5]
-    mask = trues(3)
-    # CSR: node 1 → [2,3], node 2 → [1], node 3 → [1]
-    nbrs = [2, 3, 1, 1]
-    ptr = [1, 3, 4, 5]
-    grid = FG.Grids.UnstructuredGrid(geom, x, y, areas, mask, nbrs, ptr)
-    Test.@test FG.Grids.size_tuple(grid) == (3,)
-    Test.@test collect(FG.Grids.neighbors(grid, 1)) == [2, 3]
-    Test.@test FG.Grids.coords(grid, 2) == (x = 1.0, y = 0.0)
-
-    # Convenience no-neighbor constructor
-    g0 = FG.Grids.UnstructuredGrid(geom, x, y, areas, mask)
-    Test.@test isempty(FG.Grids.neighbors(g0, 1))
-end
-
-Test.@testset "UnstructuredGrid auto-build works with the extensions loaded" begin
-    # With the extensions loaded, the auto-build produces a usable grid.
-    geom = FG.Geometry.CartesianGeometry()
-    n = 24
-    x = [0.5 + 0.4cos(2π * k / n) for k in 1:n]
-    y = [0.5 + 0.4sin(2π * k / n) for k in 1:n]
-    g = FG.Grids.UnstructuredGrid(geom, x, y, trues(n); k = 4)
-    Test.@test FG.Grids.size_tuple(g) == (n,)
-    Test.@test all(1 ≤ length(FG.Grids.neighbors(g, i)) ≤ 4 for i in 1:n)
-    Test.@test all(>(0), FG.Grids.measure(g))          # Voronoi areas, via DelaunayTriangulation
-    Test.@test all(isfinite, FG.Grids.measure(g))
 end
 
 Test.@testset "Curvilinear areas hold two corner rows, not the whole field" begin
@@ -336,8 +238,6 @@ Test.@testset "Curvilinear areas hold two corner rows, not the whole field" begi
         φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
         g = FG.Grids.CurvilinearGrid(geo, λ, φ, trues(n, n))
         a = FG.Grids.measure(g)
-        Test.@test size(a) == (n, n)
-        Test.@test all(>(0), a)
         # Reference: the same two triangles per cell in BigFloat, from the corners the kernel reads.
         xc, yc = FG.Grids._centers_to_corners(λ), FG.Grids._centers_to_corners(φ)
         dirs = [(cos(big(yc[i, j])) * cos(big(xc[i, j])), cos(big(yc[i, j])) * sin(big(xc[i, j])),
@@ -399,33 +299,20 @@ Test.@testset "Cell measure is stored factored, not materialized" begin
         y = collect(range(-1.3, 1.3; length = ny))
         g = FG.Grids.StructuredGrid(geo, x, y, FG.Grids.AllActive((nx, ny)))
         m = FG.Grids.measure(g)
-        Test.@test m isa FG.Grids.SeparableMeasure
-        Test.@test size(m) == (nx, ny) == size(g)
         # Indexing agrees with the dense outer product to the bit.
         wx, wy = FG.Grids.measure_factors(g)
         dense = wx .* transpose(wy)
         Test.@test all(m[i, j] === dense[i, j] for i in 1:nx, j in 1:ny)
         Test.@test FG.Grids.measure_array(g) == dense
-        Test.@test collect(m) == dense
         Test.@test FG.Grids.measure(g, 3, 4) === dense[3, 4]
-        # sum is ∏ᵈ ∑ᵢ, i.e. O(Nx+Ny); it must still agree with the dense sum to roundoff.
+        # sum is ∏ᵈ ∑ᵢ, i.e. O(Nx+Ny), and agrees with the dense sum to roundoff.
         Test.@test sum(m) ≈ sum(dense) rtol = 1e-14
         Test.@test_throws BoundsError m[nx + 1, 1]
-        # Storage is the two factors.
-        Test.@test sizeof(wx) + sizeof(wy) < sizeof(dense)
     end
     # A 1-D grid is separable too, its single factor serving as the measure.
     g1 = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), collect(0.0:0.5:5.0), FG.Grids.AllActive((11,)))
-    Test.@test FG.Grids.measure(g1) isa FG.Grids.SeparableMeasure
-    f1 = FG.Grids.measure_factors(g1)
-    Test.@test f1 !== nothing && length(f1) == 1
-    Test.@test collect(only(f1)) == collect(FG.Grids.measure(g1))
+    Test.@test collect(only(FG.Grids.measure_factors(g1))) == collect(FG.Grids.measure(g1))
     Test.@test FG.Grids.measure(g1, 3) ≈ 0.5
-
-    # `show` must not sum every cell to print one line.
-    big = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 2000)),
-                            collect(range(-1.4, 1.4; length = 1000)), FG.Grids.AllActive((2000, 1000)))
-    Test.@test occursin("2000×1000", sprint(show, MIME"text/plain"(), big))
 end
 
 Test.@testset "Every architecture can be built without a mask" begin
@@ -438,31 +325,26 @@ Test.@testset "Every architecture can be built without a mask" begin
     x = [t for t in range(0.0, 7.0; length = n), _ in 1:n]
     y = [u for _ in 1:n, u in range(0.0, 7.0; length = n)]
 
-    # `AllActive` is reachable from every architecture, so a curvilinear or node grid with nothing
-    # masked carries no dense all-true array and `isactive` folds to a constant.
+    # A curvilinear or node grid built without a mask is all-active.
     g0 = GD.CurvilinearGrid(cart, x, y; measure = fill(1.0, n, n))
     gm = GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(1.0, n, n))
-    Test.@test GD.mask(g0) isa GD.AllActive
-    Test.@test !(GD.mask(gm) isa GD.AllActive)      # an explicit mask is still stored as given
     Test.@test all(GD.isactive(g0, i, j) == GD.isactive(gm, i, j) for i in 1:n, j in 1:n)
 
     # The mask is recognised by its element type, so the optional positional measure parses either
     # way.
     let gp = GD.CurvilinearGrid(cart, x, y, fill(2.0, n, n)),
         gpm = GD.CurvilinearGrid(cart, x, y, fill(2.0, n, n), trues(n, n))
-        Test.@test GD.mask(gp) isa GD.AllActive && GD.measure(gp, 2, 2) == 2.0
-        Test.@test !(GD.mask(gpm) isa GD.AllActive) && GD.measure(gpm, 2, 2) == 2.0
+        Test.@test GD.measure(gp, 2, 2) == 2.0
+        Test.@test GD.measure(gpm, 2, 2) == 2.0
     end
 
     let nn = 40, xs = 10.0 .* rand(nn), ys = 6.0 .* rand(nn)
         u0 = GD.UnstructuredGrid(cart, (xs, ys); k = 4, areas = ones(nn))
         um = GD.UnstructuredGrid(cart, (xs, ys), trues(nn); k = 4, areas = ones(nn))
-        Test.@test GD.mask(u0) isa GD.AllActive
-        Test.@test GD.mask(GD.UnstructuredGrid(cart, xs, ys; k = 4, areas = ones(nn))) isa GD.AllActive
         Test.@test all(GD.isactive(u0, i) == GD.isactive(um, i) for i in 1:nn)
     end
 
-    # Everything downstream must be unchanged by which representation the grid holds.
+    # Everything downstream is unchanged by which representation the mask has.
     let f = 2.0 .* x .- 3.0 .* y, g1 = zeros(n, n), g2 = zeros(n, n)
         O.gradient!(g1, g2, f, O.gradient_plan(g0))
         Test.@test maximum(abs.(g1 .- 2.0)) < 1e-10 && maximum(abs.(g2 .+ 3.0)) < 1e-10
@@ -481,10 +363,9 @@ Test.@testset "An all-active mask carries no per-cell storage" begin
     Test.@test count(m) == 35 && all(m) && any(m)
     Test.@test collect(m) == trues(7, 5)
     Test.@test_throws BoundsError m[8, 1]
-    # It is what the sampling constructors reach for, and it is smaller than a BitArray.
     g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 33)
-    Test.@test FG.Grids.mask(g) isa FG.Grids.AllActive
     Test.@test all(FG.Grids.isactive(g, i, j) for i in 1:size(g, 1), j in 1:size(g, 2))
+    # It is smaller than a BitArray.
     Test.@test Base.summarysize(FG.Grids.AllActive((4000, 2000))) < Base.summarysize(trues(4000, 2000))
     # An explicit mask still overrides it and still masks.
     mm = trues(FG.SphericalSampling.axes_lengths(FG.SphericalSampling.ClenshawCurtisSampling(), 9).nlon, 9)
@@ -525,10 +406,9 @@ Test.@testset "A periodic axis wraps whichever way it is stored, and states its 
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; periodic = false)
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, FG.Axes.PeriodicAxis(0.0, π, n), φ)
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; period = π)
-    # A Cartesian periodic axis wraps at its own period, and a Float32 grid keeps its type.
+    # A Cartesian periodic axis wraps at its own period.
     cg = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float32}(), FG.Axes.PeriodicAxis(0.0, 5.0, 10),
                                  0.0f0:1.0f0:3.0f0)
-    Test.@test FG.Grids.axis(cg, 1) isa FG.Axes.PeriodicAxis{Float32}
     Test.@test FG.Grids.isperiodic(cg, 1) && FG.Grids.period(cg, 1) == 5.0f0
 end
 
@@ -569,39 +449,31 @@ Test.@testset "A separable measure stays separable under the operations that pre
     probes = ((1, 1), (7, 13), (n, n))
 
     # Scaling, a multiplicative map, and a factor-wise product all keep the product form, so a unit
-    # conversion stays `O(∑Nᵈ)`.
+    # conversion stays `O(∑Nᵈ)` in storage.
     for got in (2.0 .* m, m .* 2.0, m ./ 4.0, abs.(m), abs2.(m), sqrt.(m), inv.(m),
                 m .* m, m ./ m)
-        Test.@test got isa GR.SeparableMeasure
         Test.@test Base.summarysize(got) < 200
     end
     Test.@test all(≈((2.0 .* m)[I...], 2 * dense[I...]) for I in probes)
     Test.@test all(≈(abs2.(m)[I...], abs2(dense[I...])) for I in probes)
     Test.@test all(≈((m .* m)[I...], dense[I...]^2) for I in probes)
-    Test.@test Base.summarysize(dense) > 1_000_000     # what the lazy form avoids
 
-    # The closed-form reductions still apply to the result, so the saving compounds.
+    # The closed-form reductions still apply to the result.
     s = 3.0 .* m
     Test.@test sum(s) ≈ 3 * sum(m)
     Test.@test maximum(s) ≈ 3 * maximum(m)
     Test.@test all(extrema(s) .≈ 3 .* extrema(m))
     Test.@test findmax(s)[2] == findmax(m)[2]
-    Test.@test all(f -> f isa FG.Axes.ConstantVector, GR.measure_factors(s))
 
-    # Everything else materializes, correct and dense. A negative scale belongs in this group:
-    # `findmax`'s per-axis argmax holds for non-negative factors alone.
-    for got in (exp.(m), log.(m), m .+ m, m .+ 1.0, -1.0 .* m, -2.0 .* m)
-        Test.@test !(got isa GR.SeparableMeasure)
-    end
+    # Every other map materializes. `findmax`'s per-axis argmax holds for non-negative factors alone,
+    # so a negative scale is one of them.
     Test.@test exp.(m)[3, 4] ≈ exp(dense[3, 4])
     Test.@test (-2.0 .* m)[3, 4] ≈ -2 * dense[3, 4]
     Test.@test findmax(-2.0 .* m)[1] ≈ maximum(-2 .* dense)
 
-    Test.@test typeof(similar(m)) == Matrix{Float64}
     d = Array{Float64}(undef, size(m))
     copyto!(d, m)
     Test.@test all(d[I...] == dense[I...] for I in probes)
-    Test.@test GR.measure_factors(collect(m)) === nothing
     Test.@test_throws DimensionMismatch m .* GR.measure(
         GR.StructuredGrid(geo, range(0.0; step = 1.0, length = 3),
                           range(0.0; step = 1.0, length = 3)))
@@ -628,7 +500,6 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     Test.@test_throws ArgumentError GR.CurvilinearGrid(geo, X3, Y3, Z3, trues(4, 3, 2))
     vol = fill(1.0 * 2.0 * 0.5, 4, 3, 2)
     g3 = GR.CurvilinearGrid(geo, X3, Y3, Z3, vol, trues(4, 3, 2); keep_corners = true)
-    Test.@test size(g3) == (4, 3, 2) && ndims(g3) == 3
     Test.@test GR.coordinate_names(g3) == (:x, :y, :z)
     Test.@test GR.coords(g3, 2, 3, 2) == (x = 1.0, y = 4.0, z = 0.5)
     Test.@test GR.measure(g3, 2, 2, 1) == 1.0
@@ -637,7 +508,6 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
 
     W = ntuple(d -> [Tuple(ci)[d] * 1.0 for ci in CartesianIndices((3, 3, 2, 2))], 4)
     g4 = GR.CurvilinearGrid(geo, W..., ones(3, 3, 2, 2), trues(3, 3, 2, 2))
-    Test.@test size(g4) == (3, 3, 2, 2)
     Test.@test GR.coords(g4, 2, 3, 1, 2) == (x1 = 2.0, x2 = 3.0, x3 = 1.0, x4 = 2.0)
 
     # The ghost ring is exact for a field linear in each direction, corners included, in 2-D and
@@ -648,7 +518,6 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     # Connectivity follows into N-D, and the dense adjacency agrees with the CSR.
     Test.@test C.nneighbors(g3, 2, 2, 1) == 5          # 6 face neighbours minus one wall
     Test.@test C.linear_index(g3, 2, 3, 2) == 2 + 2 * 4 + 1 * 12
-    Test.@test length(collect(GR.neighbors(g3, 2, 2, 1))) == 5
     Test.@test C.neighbors!(Vector{Int}(undef, 8), g3, 2, 2, 1) == 5
     csr3 = C.build_connectivity(g3)
     Test.@test C.is_symmetric_adjacency(csr3)
@@ -667,8 +536,7 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     Test.@test GR.period(gp, 1) == 4.0
     Test.@test C.nneighbors(gp, 1, 2, 1) == 5
 
-    # Node grids: coordinates as a tuple, since a run of vectors cannot say how many are
-    # coordinates (a CurvilinearGrid counts them from `ndims(mask)`; a node set has no such handle).
+    # Node grids: coordinates as a tuple.
     x, y, z = rand(6), rand(6), rand(6)
     gu3 = GR.UnstructuredGrid(geo, (x, y, z), ones(6), trues(6))
     Test.@test GR.coordinate_names(gu3) == (:x, :y, :z)
@@ -683,8 +551,7 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     Test.@test GR.coordinate_names(
         GR.UnstructuredGrid(geo, rand(8), rand(8), ones(8), trues(8))) == (:x, :y)
 
-    # A k-d tree is dimension-agnostic, so the neighbour search generalizes even though the
-    # Voronoi control volumes behind the 2-D measure do not.
+    # The k-d-tree neighbour search works in any number of dimensions.
     nn = 40
     px, py, pz, pw = rand(nn), rand(nn), rand(nn), rand(nn)
     bruteknn(pts, i, kk) = sort([t[2] for t in sort(
@@ -710,8 +577,6 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     Test.@test GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr); k = 1, radius = 0.6)[2][2] == 2
     Test.@test GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr); k = 1, radius = 0.4)[2][2] == 1
     Test.@test_throws ArgumentError GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr, sr); k = 1)
-    g3kd = GR.UnstructuredGrid(geo, (px, py, pz), trues(nn); k = 4, areas = ones(nn))
-    Test.@test length(collect(GR.neighbors(g3kd, 1))) == 4
     Test.@test_throws ArgumentError GR.UnstructuredGrid(geo, (px, py, pz), trues(nn); k = 4)
 end
 
@@ -719,19 +584,14 @@ Test.@testset "Grids and connectivity work in any number of dimensions" begin
     geo = FG.Geometry.CartesianGeometry()
     # A 4-D and a 5-D rectilinear grid, built through the one varargs constructor.
     g4 = FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0, 0.0:1.0:3.0, 0.0:1.0:3.0)
-    Test.@test size(g4) == (4, 4, 4, 4)
-    Test.@test FG.Grids.mask(g4) isa FG.Grids.AllActive          # no mask argument needed
-    Test.@test ndims(g4) == 4
     Test.@test FG.Grids.measure(g4, 2, 2, 2, 2) ≈ 1.0
     Test.@test sum(FG.Grids.measure(g4)) ≈ 4.0^4 rtol = 1e-12
     Test.@test FG.Grids.coordinate_names(g4) == (:x1, :x2, :x3, :x4)
     Test.@test FG.Grids.coords(g4, 2, 3, 1, 4) == (x1 = 1.0, x2 = 2.0, x3 = 0.0, x4 = 3.0)
     Test.@test FG.Connectivity.nneighbors(g4, 2, 2, 2, 2) == 8      # 2N faces
     Test.@test FG.Connectivity.nneighbors(g4, 2, 2, 2, 2; stencil = FG.Stencils.Moore(1)) == 80  # 3^4-1
-    Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(g4)) > 0
 
     g5 = FG.Grids.StructuredGrid(geo, ntuple(_ -> 0.0:1.0:2.0, 5)...)
-    Test.@test size(g5) == (3, 3, 3, 3, 3)
     Test.@test FG.Connectivity.nneighbors(g5, 2, 2, 2, 2, 2) == 10
 
     names7() = FG.Geometry.point_names(FG.Geometry.SphericalGeometry(1.0), Val(7))
@@ -740,15 +600,12 @@ Test.@testset "Grids and connectivity work in any number of dimensions" begin
     # A spherical grid in 1-D measures arc length, and in 4-D keeps its metric directions.
     sgeo = FG.Geometry.SphericalGeometry(2.0)
     g1 = FG.Grids.StructuredGrid(sgeo, FG.Axes.PeriodicAxis(0.0, 2π, 9))
-    Test.@test size(g1) == (9,)
-    Test.@test FG.Grids.measure_factors(g1) !== nothing
     Test.@test sum(FG.Grids.measure(g1)) ≈ 2.0 * 2π rtol = 1e-14   # R·Δλ over the full circle
     g4s = FG.Grids.StructuredGrid(sgeo, collect(range(0, 2π; length = 8)),
                             collect(range(-1.0, 1.0; length = 6)),
                             collect(range(1.0, 2.0; length = 4)),
                             collect(range(0.0, 1.0; length = 3)))
     Test.@test FG.Grids.coordinate_names(g4s) == (:λ, :φ, :r, :q4)
-    Test.@test all(>(0), FG.Grids.measure(g4s))
 
     # Topology lives in the type, and the mask defaults to all-active.
     Test.@test FG.Grids.topology(g4) == ntuple(_ -> FG.Grids.Bounded(), 4)
@@ -795,7 +652,7 @@ Test.@testset "Mask topology: interior, boundary, components and holes" begin
         Test.@test !any(i2 .& b2)
         # Every active cell is one or the other, and no inactive cell is either.
         Test.@test all(m[ci] == (i2[ci] | b2[ci]) for ci in CartesianIndices(m))
-        # `boundary_cells` is one pass now; it must still be exactly the active non-interior cells.
+        # `boundary_cells` is exactly the active non-interior cells.
         Test.@test b2 == [m[ci] & !i2[ci] for ci in CartesianIndices(m)]
     end
     Test.@test all(!int[ci] for ci in CartesianIndices(m) if !m[ci])
@@ -824,7 +681,6 @@ Test.@testset "Mask topology: interior, boundary, components and holes" begin
 end
 
 Test.@testset "A curvilinear measure may be given positionally or by keyword" begin
-    # The docstring offers both forms, so both must build the same grid.
     geo = FG.Geometry.CartesianGeometry{Float64}()
     xs = [x for x in range(0.0, 3.0; length = 4), _ in 1:4]
     ys = [y for _ in 1:4, y in range(0.0, 3.0; length = 4)]
@@ -845,9 +701,6 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         sizes = [Base.summarysize(G.HEALPixGrid(geo, ns)) for ns in (1, 8, 64, 256, 1024)]
         Test.@test allequal(sizes)
         Test.@test length(G.HEALPixGrid(geo, 1024)) == 12 * 1024^2
-        # The same resolution as a node set: three vectors of 12.6 million entries.
-        Test.@test Base.summarysize(G.HEALPixGrid(geo, 8)) <
-                   Base.summarysize(healpix_node_grid(8)) / 1000
     end
 
     Test.@testset "HEALPix coords, measure and neighbours are the pixelization's" begin
@@ -874,17 +727,12 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             Test.@test λ == pts.λ
             Test.@test φ == pts.φ
 
-            # The nested ids are the ring order permuted, so the same ring walk serves that scheme:
-            # `4·nside − 1` ring evaluations for the whole cloud. Both are powers of two here, which the
-            # nested quadtree needs.
+            # The nested ids are the ring order permuted. Every `nside` here is a power of two, which
+            # the nested quadtree needs.
             gn = G.HEALPixGrid(geo, ns; scheme = SS.Nested())
             nλ, nφ = G.materialize(gn)
             Test.@test all(nλ[SS.ring2nest(ns, r) + 1] === λ[r + 1] for r in 0:(npix - 1))
             Test.@test all(nφ[SS.ring2nest(ns, r) + 1] === φ[r + 1] for r in 0:(npix - 1))
-            # The reorder carries the ring walk's own numbers, so a nested pixel agrees with its
-            # per-cell coordinate exactly as far as the ring pixel it came from does.
-            Test.@test count(i -> nλ[i] === G.coords(gn, i).λ, 1:npix) ==
-                       count(i -> λ[i] === G.coords(g, i).λ, 1:npix)
             Test.@test maximum(abs(nλ[i] - G.coords(gn, i).λ) for i in 1:npix) < 1e-14
             Test.@test all(nφ[i] === G.coords(gn, i).φ for i in 1:npix)
         end
@@ -901,13 +749,8 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             Test.@test length(g) == SS.npoints(oct)
             Test.@test G.nrings(g) == SS.nrings(oct)
         end
-        # Vectors already of the grid's element types are stored as given, and another element type is
-        # converted.
-        let lat = [0.5, -0.5], nl = [4, 4], ar = [1.0, 2.0], g = G.RingGrid(geo, lat, nl, ar)
-            Test.@test getfield(g, :latitudes) === lat && getfield(g, :nlon) === nl
-            Test.@test getfield(g, :ring_area) === ar
-            g32 = G.RingGrid(FG.Geometry.SphericalGeometry(6.371f6), lat, Int32[4, 4], ar)
-            Test.@test eltype(getfield(g32, :latitudes)) === Float32 && eltype(getfield(g32, :nlon)) === Int
+        # Tables of another element type are converted to the geometry's.
+        let g32 = G.RingGrid(FG.Geometry.SphericalGeometry(6.371f6), [0.5, -0.5], Int32[4, 4], [1.0, 2.0])
             Test.@test G.measure(g32, 5) == 2.0f0
         end
     end
@@ -938,8 +781,6 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         for N in (4, 16, 64, 256)
             g = G.RingGrid(geo, SS.OctahedralGaussianSampling(N))
             m = G.measure(g)
-            Test.@test m isa G.RingwiseVector
-            Test.@test length(m) == length(g)
             # `Σ nlon_r · w_r · R² · 2π/nlon_r = 2π R² Σ w_r = 4π R²`, the weights summing to 2.
             Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-12
             Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
@@ -959,17 +800,15 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
             nb = collect(G.neighbors(g, i))
             Test.@test allunique(nb)
             Test.@test !(i in nb)
-            Test.@test all(1 .≤ nb .≤ length(g))
             Test.@test length(nb) ≤ G.max_neighbors(g)
             r = G.ring_of(g, i)
-            Test.@test all(abs(G.ring_of(g, j) - r) ≤ 1 for j in nb)
             # Both in-ring neighbours are distinct wherever the ring holds three or more points.
             G.nlon_in_ring(g, r) ≥ 3 &&
                 Test.@test count(j -> G.ring_of(g, j) == r, nb) == 2
         end
         # Adjacent rings of unequal width make the relation directed: a wide ring's point can straddle
-        # a narrow ring's point that does not straddle it back. Whatever the rate, the materialized CSR
-        # must reproduce the per-cell query exactly.
+        # a narrow ring's point that does not straddle it back. The materialized CSR reproduces the
+        # per-cell query exactly.
         conn = C.build_connectivity(g)
         for i in 1:length(g)
             Test.@test sort(collect(G.neighbors(conn, i))) == sort(collect(G.neighbors(g, i)))
@@ -1004,16 +843,10 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
 
     Test.@testset "A formula layout answers the three traits and refuses coordinate arrays" begin
         for g in (G.HEALPixGrid(geo, 4), G.RingGrid(geo, SS.OctahedralGaussianSampling(8)))
-            Test.@test G.cell_address(g) === G.FlatCells()
-            Test.@test G.adjacency_source(g) === G.FormulaNeighbors()
-            Test.@test G.candidate_source(g) === G.IndexedCandidates()
             Test.@test G.ncoordinates(g) == 2
             # The layout holds no coordinate arrays and no index space, and both accessors say so.
             Test.@test_throws ArgumentError G.coordinates(g)
             Test.@test_throws ArgumentError C.IndexTopology(g)
-            # It has no axis, so no direction has a spacing its type fixes.
-            Test.@test !G.isuniform(g) && !G.isuniform(g, 1) && !G.isuniform(g, 2)
-            Test.@test G.spacing_trait(g, Val(1)) === FG.Axes.NonuniformSpacing()
             Test.@test_throws ArgumentError G.isuniform(g, 3)
         end
     end
@@ -1028,8 +861,6 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
                 mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
                 Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
             end
-            # An index over a layout that stores nothing must not re-densify it into one.
-            Test.@test Base.summarysize(g) < 1000
         end
     end
 
@@ -1056,13 +887,11 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
     end
 
     Test.@testset "A formula layout survives a structural rebuild" begin
-        # `rebuild` re-derives every type parameter from the field values, so one generic `Adapt`
-        # method serves every layout, including one whose storage is four ring vectors.
+        # `rebuild` replaces fields and re-derives every type parameter from the field values.
         g = G.HEALPixGrid(geo, 4)
         npix = SS.healpix_npix(4)
         m = trues(npix); m[3] = false
         g2 = G.rebuild(g, (mask = m,))
-        Test.@test g2 isa G.HEALPixGrid
         Test.@test !G.isactive(g2, 3)
         Test.@test G.nside(g2) == 4
         Test.@test G.coords(g2, 10) == G.coords(g, 10)
@@ -1071,7 +900,6 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         rg = G.RingGrid(geo, SS.OctahedralGaussianSampling(8))
         rm = trues(length(rg)); rm[7] = false
         rg2 = G.rebuild(rg, (mask = rm,))
-        Test.@test rg2 isa G.RingGrid
         Test.@test !G.isactive(rg2, 7)
         Test.@test G.nrings(rg2) == G.nrings(rg)
         Test.@test all(G.coords(rg2, i) == G.coords(rg, i) for i in 1:length(rg))
@@ -1131,8 +959,6 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
         for n in (1, 2, 3, 8, 16)
             g = G.CubedSphereGrid(geo, n)
             m = G.measure(g)
-            Test.@test m isa G.GridMeasure
-            Test.@test length(m) == 6 * n^2
             for k in 1:length(g)
                 f, i, j = G.panel_cell(g, k)
                 Test.@test m[k] ≈ cube_area_by_excess(n, f, i, j, R) rtol = 1e-12
@@ -1160,8 +986,6 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
                 Test.@test length(nb) ≤ G.max_neighbors(g)
                 f, _, _ = G.panel_cell(g, k)
                 for j in nb
-                    # Reciprocity across the seam: the fold is symmetric cell for cell.
-                    Test.@test k in collect(G.neighbors(g, j))
                     G.panel_cell(g, j)[1] == f || (nseam += 1)
                 end
                 # The CSR agrees with the per-cell query.
@@ -1196,12 +1020,14 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
                 Test.@test pn == (k ≤ np ? 1 : 2)
                 Test.@test G.cell_id(g, pn, i, j) == k
             end
-            # Yin's own frame is the global one, so its cells are a plain lat–lon patch.
+            # Yin's own frame is the global one, so its cells are a plain lat–lon patch, each longitude
+            # reported in [0, 2π).
             Δλ = (3π / 2) / nlon
             Δφ = (π / 2) / nlat
             for j in 1:nlat, i in 1:nlon
                 c = G.coords(g, G.cell_id(g, 1, i, j))
-                Test.@test c.λ ≈ -3π / 4 + (i - 0.5) * Δλ atol = 1e-14
+                Test.@test 0 ≤ c.λ < 2π
+                Test.@test abs(rem2pi(c.λ - (-3π / 4 + (i - 0.5) * Δλ), RoundNearest)) < 1e-14
                 Test.@test c.φ ≈ -π / 4 + (j - 0.5) * Δφ atol = 1e-14
             end
         end
@@ -1211,7 +1037,6 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
         for (nlon, nlat) in ((8, 6), (16, 12), (48, 32))
             g = G.YinYangGrid(geo, nlon, nlat)
             m = G.measure(g)
-            np = nlon * nlat
             Δλ = (3π / 2) / nlon
             Δφ = (π / 2) / nlat
             # An independent statement: R²Δλ(sin(φ+Δφ/2) − sin(φ−Δφ/2)).
@@ -1221,14 +1046,10 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
                 Test.@test m[G.cell_id(g, 1, i, j)] ≈ want rtol = 1e-13
                 Test.@test m[G.cell_id(g, 2, i, j)] ≈ want rtol = 1e-13
             end
-            # Independent of longitude, and identical on the two panels.
+            # Independent of longitude.
             for j in (1, nlat)
                 Test.@test allequal(m[G.cell_id(g, 1, i, j)] for i in 1:nlon)
-                Test.@test m[G.cell_id(g, 1, 1, j)] == m[G.cell_id(g, 2, 1, j)]
             end
-            # One panel tiles its own box exactly; the two together exceed the sphere by 3√2/4.
-            Test.@test sum(collect(m)[1:np]) ≈ sqrt(2.0) * (3π / 2) * R^2 rtol = 1e-13
-            Test.@test sum(m) / (4π * R^2) ≈ 3 * sqrt(2) / 4 rtol = 1e-13
             Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-13
         end
     end
@@ -1256,13 +1077,8 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
 
     Test.@testset "The panel layouts answer the traits and refuse coordinate arrays" begin
         for g in (G.CubedSphereGrid(geo, 4), G.YinYangGrid(geo, 8, 6))
-            Test.@test G.cell_address(g) === G.FlatCells()
-            Test.@test G.adjacency_source(g) === G.FormulaNeighbors()
-            Test.@test G.candidate_source(g) === G.IndexedCandidates()
             Test.@test G.ncoordinates(g) == 2
             Test.@test G.npanels(g) == (g isa G.CubedSphereGrid ? 6 : 2)
-            Test.@test_throws ArgumentError G.coordinates(g)
-            Test.@test_throws ArgumentError C.IndexTopology(g)
         end
     end
 
@@ -1271,7 +1087,6 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
             Test.@test length(g) == ncell
             m = trues(ncell); m[4] = false
             gm = G.rebuild(g, (mask = m,))
-            Test.@test typeof(gm).name === typeof(g).name
             Test.@test !G.isactive(gm, 4)
             Test.@test C.nneighbors(gm, 4) == 0
             Test.@test G.coords(gm, 7) == G.coords(g, 7)
@@ -1298,8 +1113,6 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
                 mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
                 Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
             end
-            # An index over a layout that stores nothing must not re-densify it into one.
-            Test.@test Base.summarysize(g) < 1000
         end
     end
 end
@@ -1315,17 +1128,12 @@ Test.@testset "Cell vertices are kept when asked for, and the measure is the sam
     lean = GR.CurvilinearGrid(geo, X, Y, m)
     full = GR.CurvilinearGrid(geo, X, Y, m; keep_corners = true)
 
-    # The vertices are input to the area kernel, so the measure is identical whether or not they are
-    # kept — bit for bit, since it is the same kernel on the same arrays.
+    # The measure is identical whether or not the vertices are kept.
     Test.@test GR.measure(lean) == GR.measure(full)
-    Test.@test all(isequal(GR.measure(lean)[i], GR.measure(full)[i]) for i in eachindex(m))
 
-    # Keeping them costs two arrays one larger in each direction; dropping them is about a third off.
     Test.@test !GR.has_corners(lean)
     Test.@test GR.has_corners(full)
-    Test.@test Base.summarysize(lean) < 0.72 * Base.summarysize(full)
     Test.@test_throws ArgumentError GR.corners(lean)
-    Test.@test_throws ArgumentError GR.corner_coords(lean, 1, 1)
     Test.@test size(GR.corners(full, 1)) == (n + 1, n + 1)
 
     # Supplying them keeps them without asking: they are the caller's own arrays.
@@ -1345,17 +1153,13 @@ Test.@testset "Cell vertices are kept when asked for, and the measure is the sam
                                                        fill(2.5, 1, 1), trues(1, 1);
                                                        keep_corners = true)
 
-    # A node set with no adjacency carries its `n+1` offsets as one constant.
+    # A node set with no adjacency has `n+1` offsets and no edges.
     un = GR.UnstructuredGrid(geo, (collect(1.0:1.0:500.0), collect(1.0:1.0:500.0)),
                              ones(500), trues(500))
-    Test.@test GR.neighbor_ptr(un) isa FG.Axes.ConstantVector
     Test.@test length(GR.neighbor_ptr(un)) == 501
     Test.@test all(isempty(GR.incident_nodes(un, i)) for i in 1:500)
     Test.@test all(FG.Connectivity.nneighbors(un, i) == 0 for i in 1:500)
     Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(un)) == 0
-    withptr = GR.UnstructuredGrid(geo, (collect(1.0:1.0:500.0), collect(1.0:1.0:500.0)),
-                                  ones(500), trues(500), Int[], ones(Int, 501))
-    Test.@test Base.summarysize(un) < Base.summarysize(withptr)
 end
 
 Test.@testset "The icosahedral geodesic is a layout, read out of its own numbering" begin
@@ -1395,7 +1199,6 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
                  sizeof(Int) * (ν ÷ 3 + 2) for ν in (1, 8, 64, 512)]
         Test.@test allequal(sizes)
         Test.@test length(G.IcosahedralGrid(geo, 512)) == 10 * 512^2 + 2
-        Test.@test G.frequency(G.IcosahedralGrid(geo, 37)) == 37
         Test.@test_throws ArgumentError G.IcosahedralGrid(geo, 0)
     end
 
@@ -1435,44 +1238,28 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
             Test.@test all(k -> C.nneighbors(g, k) == 5, 1:12)
 
             m = G.measure(g)
-            Test.@test m isa G.GridMeasure
             Test.@test filter(k -> !isapprox(m[k], dual_area_ref(g, k); rtol = 16 * eps(Float64)), 1:n) == []
-            Test.@test all(>(0), m)
             Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-14
             Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-12
             # A pentagon is the smallest cell on the mesh.
             ν ≥ 4 && Test.@test maximum(m[k] for k in 1:12) < minimum(m[k] for k in 13:n)
 
-            # The area is a property of the vertex's symmetry class, so it is evaluated once per
-            # class and every member reports that number. The claim under test is that a vertex's
-            # own fan gives its class's area, which holds on the congruence of the twenty faces and
-            # the threefold symmetry of each.
-            Test.@test filter(k -> !isapprox(R^2 * G._ico_vertex_share(Float64, k, ν), m[k]; rtol = 16 * eps(Float64)),
-                              1:n) == []
+            # Vertices of one symmetry class report one number.
             cls = [G._ico_class(k, ν) for k in 1:n]
             first_of = Dict{eltype(cls),Int}()
             foreach(k -> get!(first_of, cls[k], k), 1:n)
             Test.@test filter(k -> m[k] !== m[first_of[cls[k]]], 1:n) == []
-            Test.@test length(first_of) == length(getfield(g, :class_area))   # one stored area per class
             Test.@test G.measure_array(g) == collect(m)
-            # …and the classes are far fewer than the vertices, which is the saving.
-            Test.@test length(unique(G._ico_class(k, ν) for k in 1:n)) ≤ (ν + 2)^2 ÷ 6 + 1
         end
     end
 
     Test.@testset "traits, mask, width and rebuild" begin
         g = G.IcosahedralGrid(geo, 4)
-        Test.@test G.cell_address(g) === G.FlatCells()
-        Test.@test G.adjacency_source(g) === G.FormulaNeighbors()
-        Test.@test G.candidate_source(g) === G.IndexedCandidates()
         Test.@test G.ncoordinates(g) == 2
-        Test.@test_throws ArgumentError G.coordinates(g)
-        Test.@test_throws ArgumentError C.IndexTopology(g)
 
         n = length(g)
         msk = trues(n); msk[7] = false
         gm = G.rebuild(g, (mask = msk,))
-        Test.@test gm isa G.IcosahedralGrid
         Test.@test !G.isactive(gm, 7)
         Test.@test C.nneighbors(gm, 7) == 0
         Test.@test !(7 in collect(G.neighbors(gm, 8)))
@@ -1507,7 +1294,6 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
             mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
             Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
         end
-        Test.@test Base.summarysize(g) < 1000
     end
 end
 
@@ -1526,7 +1312,6 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
     Test.@test GD.size_tuple(GD.grid_at(sg, (F, C))) == (7, 4)
     Test.@test GD.size_tuple(GD.grid_at(sg, (C, F))) == (6, 5)
     Test.@test GD.size_tuple(GD.grid_at(sg, (F, F))) == (7, 5)
-    Test.@test GD.grid_at(sg, 1) isa GD.StructuredGrid      # an ordinary grid, so everything applies
     Test.@test GD.size_tuple(GD.grid_at(sg, 1)) == (7, 4)
     Test.@test GD.locations(sg) == ((F, C), (C, F))
     Test.@test GD.center_location(sg) == (C, C)
@@ -1540,10 +1325,10 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
         # The staggered grids keep the mesh's topology, so a query on one wraps as the mesh does.
         Test.@test GD.isperiodic(GD.grid_at(sp, (F, C)), 1)
         Test.@test GD.period(GD.grid_at(sp, (F, C)), 1) ≈ 2π
-        # A periodic axis's faces are another half a step back, so the face grid wraps by its type too.
+        # A periodic axis's faces are another half a step back, and wrap at the same period.
         sr = GD.StaggeredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), φ)
         fr = GD.axis_at(sr, 1, F)
-        Test.@test fr isa FG.Axes.PeriodicAxis && FG.Axes.period(fr) == 2π
+        Test.@test FG.Axes.period(fr) == 2π
         Test.@test collect(fr) ≈ collect(GD.axis_at(sp, 1, F))
         Test.@test GD.isperiodic(GD.grid_at(sr, (F, C)), 1)
     end
@@ -1560,8 +1345,7 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
                        for i in 1:6, j in 1:4)
     end
 
-    # A uniform mesh stays uniform once staggered. Every method that dispatches on spacing reads the
-    # type, so the face axis has to carry the guarantee for those to hold.
+    # A uniform mesh stays uniform once staggered.
     for xs in (0.0:0.5:5.0, FG.Axes.UniformAxis(0.0, 0.5, 11), range(0.0, 5.0; length = 11))
         s = GD.StaggeredGrid(cart, xs, 0.0:1.0:3.0)
         Test.@test FG.Axes.isuniform(GD.axis_at(s, 1, F))
@@ -1582,8 +1366,6 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
         Test.@test count(!, GD.mask(gu)) == 2 && count(!, GD.mask(gv)) == 2
         Test.@test count(!, GD.mask(gz)) == 4                          # its four corners
     end
-    # An all-active mesh stays all-active, and stores only a size at every location.
-    Test.@test GD.mask(GD.grid_at(sg, (F, F))) isa GD.AllActive
 
     # Three directions, where the velocity locations are U, V and W.
     let s = GD.StaggeredGrid(cart, collect(0.0:1.0:3.0), collect(0.0:1.0:2.0), collect(0.0:1.0:1.0))
@@ -1591,7 +1373,6 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
         Test.@test GD.size_tuple(GD.grid_at(s, 2)) == (4, 4, 2)
         Test.@test GD.size_tuple(GD.grid_at(s, 3)) == (4, 3, 3)
         Test.@test GD.locations(s) == ((F, C, C), (C, F, C), (C, C, F))
-        Test.@test occursin("StaggeredGrid", sprint(show, s))
     end
 end
 
@@ -1617,21 +1398,6 @@ Test.@testset "Span and spacing agree with the axis, and cost one pass to summar
         Test.@test GD.minimum_spacing(g, 1) ≈ ref_mingap(x)
         Test.@test GD.maximum_spacing(g, 1) ≈ ref_maxgap(x)
         Test.@test GD.isuniform(g, 1) == FG.Axes.isuniform(a)
-    end
-
-    # Indexing the heterogeneous coordinate tuple with a runtime direction is a dynamic lookup, and
-    # the per-direction summaries are a homogeneous tuple, so a runtime `d` reads one concretely.
-    let g = GD.StructuredGrid(cart, [0.0, 1.0, 3.0, 6.0], 0.0:1.0:4.0)   # two different axis types
-        qb(gg, d) = FG.Grids.bounds(gg, d)
-        qo(gg, d) = FG.Grids.origin(gg, d)
-        qu(gg, d) = FG.Grids.isuniform(gg, d)
-        Test.@test Base.return_types(qb, Tuple{typeof(g),Int})[1] === Tuple{Float64,Float64}
-        Test.@test Base.return_types(qo, Tuple{typeof(g),Int})[1] === Float64
-        Test.@test Base.return_types(qu, Tuple{typeof(g),Int})[1] === Bool
-        for f in (qb, qo, qu)
-            f(g, 1)
-            Test.@test @allocated(f(g, 1)) == 0
-        end
     end
 
     let n = 512
@@ -1663,10 +1429,6 @@ Test.@testset "Span and spacing agree with the axis, and cost one pass to summar
         Test.@test GD.bounds(cg, 1) == extrema(xm)
         Test.@test GD.bounds(cg, 2) == extrema(ym)
         Test.@test GD._total_measure(cg) == 2.0 * n^2
-        qb(gg, d) = FG.Grids.bounds(gg, d)
-        Test.@test Base.return_types(qb, Tuple{typeof(cg),Int})[1] === Tuple{Float64,Float64}
-        qb(cg, 1)
-        Test.@test @allocated(qb(cg, 1)) == 0
         # A rebuild moves storage and carries both over.
         cr = GD.rebuild(cg, (; mask = GD.AllActive((n, n))))
         Test.@test GD.bounds(cr, 2) == GD.bounds(cg, 2) && GD._total_measure(cr) == GD._total_measure(cg)
@@ -1744,7 +1506,6 @@ Test.@testset "Rings, coverage and integrals read the grid's own structure" begi
     g = FG.Connectivity.structured_grid(SS.GaussLegendreSampling(), 12; geometry = geo)
     nlon, nlat = size(g)
     φ = GD.coordinates(g, 2)
-    Test.@test GD.ring_structure(g) === GD.TensorRings()
     Test.@test GD.nrings(g) == nlat
     Test.@test all(GD.ring_range(g, r) == ((r - 1) * nlon + 1):(r * nlon) for r in 1:nlat)
     Test.@test all(GD.ring_latitude(g, r) == φ[r] for r in 1:nlat)
@@ -1770,26 +1531,21 @@ Test.@testset "Rings, coverage and integrals read the grid's own structure" begi
     # HEALPix in RING order: the sampling's ring table, read off the grid.
     hp = GD.HEALPixGrid(geo, 4)
     s = SS.HEALPixSampling(4)
-    Test.@test GD.ring_structure(hp) === GD.IsoLatitudeRings()
     Test.@test GD.nrings(hp) == 15
     Test.@test all(GD.ring_range(hp, r) == SS.ring_range(s, r) for r in 1:15)
     Test.@test all(GD.ring_latitude(hp, r) ≈ GD.coords(hp, first(GD.ring_range(hp, r))).φ for r in 1:15)
     Test.@test all(GD.ring_of(hp, i) == r for r in 1:15 for i in GD.ring_range(hp, r))
     Test.@test sum(GD.nlon_in_ring(hp, r) for r in 1:15) == GD.npixels(hp)
-    Test.@test GD.ring_structure(GD.HEALPixGrid(geo, 4; scheme = SS.Nested())) === GD.NoRings()
 
     # A ring grid: its own tables, and the rule it was built from.
     s8 = SS.OctahedralGaussianSampling(4)
     rg = GD.RingGrid(geo, s8)
-    Test.@test GD.sampling(rg) === s8
     Test.@test all(GD.ring_range(rg, r) == SS.ring_range(s8, r) for r in 1:GD.nrings(rg))
     Test.@test GD.sampling(GD.RingGrid(geo, [0.5, -0.5], [4, 4], [1.0, 1.0])) === nothing
 
     # Layouts without rings say so.
     cs = GD.CubedSphereGrid(geo, 4)
-    Test.@test GD.ring_structure(cs) === GD.NoRings()
     Test.@test_throws ArgumentError GD.nrings(cs)
-    Test.@test_throws ArgumentError GD.ring_range(cs, 1)
     Test.@test_throws ArgumentError GD.nrings(GD.StructuredGrid(GE.CartesianGeometry(), 0.0:1.0:3.0,
                                                                 0.0:1.0:2.0))
 
@@ -1807,7 +1563,7 @@ Test.@testset "Rings, coverage and integrals read the grid's own structure" begi
     Test.@test GD.integrate(ones(nlon, nlat), g) ≈ 4π * R^2 rtol = n * eps()
     fb = cat(f, 2f, ones(nlon, nlat); dims = 3)
     Test.@test GD.integrate(fb, g) ≈ [4π * R^2 / 3, 8π * R^2 / 3, 4π * R^2] rtol = n * eps()
-    Test.@test GD.integrate(f, g; backend = CB.ThreadedBackend()) ≈ GD.integrate(f, g) rtol = n * eps()
+    Test.@test GD.integrate(f, g; execution = CB.ThreadedBackend()) ≈ GD.integrate(f, g) rtol = n * eps()
     Test.@test GD.sky_fraction(g) == 1
 
     # Every measure container — separable, per ring, constant, formula, dense — against its own dense

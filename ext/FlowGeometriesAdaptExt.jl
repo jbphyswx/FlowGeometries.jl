@@ -6,6 +6,7 @@ using FlowGeometries.Grids: Grids
 using FlowGeometries.Connectivity: Connectivity
 using FlowGeometries.Discretization: Discretization
 using FlowGeometries.Operators: Operators
+using FlowGeometries.Execution: Execution
 
 # Move a grid's array-backed fields to another storage (a GPU array type, a view wrapper, …). The
 # geometry and the periodic/period tuples are plain immutable scalars and travel unchanged.
@@ -14,6 +15,13 @@ using FlowGeometries.Operators: Operators
 # parameters.
 
 @inline _adapt_tuple(to, t::Tuple) = map(x -> Adapt.adapt(to, x), t)
+
+# A field that may be a mask. A `BitArray` moves as an `Array{Bool}` to a target that unpacks bits, and
+# as itself to any other.
+@inline _move(to, v) = Adapt.adapt(to, v)
+@inline _move(to, v::BitArray) = Adapt.adapt(to, Execution._unpack_bits(to) ? Array(v) : v)
+
+Execution._unpack_bits(::Any) = false
 
 # `SeparableMeasure` is its factors, so adapting it adapts each factor and the device receives
 # `O(∑ Nᵈ)` numbers. `AllActive` holds only a size, so it is already device-safe.
@@ -70,7 +78,7 @@ Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 
 function Adapt.adapt_structure(to, grid::Grids.AbstractGrid)
     changed = NamedTuple(
-        n => (v = getfield(grid, n); v isa Tuple ? _adapt_tuple(to, v) : Adapt.adapt(to, v))
+        n => (v = getfield(grid, n); v isa Tuple ? _adapt_tuple(to, v) : _move(to, v))
         for n in fieldnames(typeof(grid)) if _is_adaptable(getfield(grid, n))
     )
     return Grids.rebuild(grid, changed)
@@ -81,7 +89,7 @@ Adapt.adapt_structure(to, conn::Connectivity.CSRConnectivity) =
 
 Adapt.adapt_structure(to, p::Operators.MaskedStencilPlan) = Operators.MaskedStencilPlan(
     Adapt.adapt(to, p.row), Adapt.adapt(to, p.indices), Adapt.adapt(to, p.weights), p.dim, p.order,
-    p.distance,
+    p.distance, _move(to, p.mask),
 )
 
 # A uniform plan's arrays are its `O(K²)` shifted end rows; the centred row is a tuple and travels.
@@ -99,6 +107,19 @@ Adapt.adapt_structure(to, p::Discretization.TabulatedStencilPlan) =
 Adapt.adapt_structure(to, p::Operators.GradientPlan) = Operators.GradientPlan(
     Adapt.adapt(to, p.ptr), Adapt.adapt(to, p.nbr), _adapt_tuple(to, p.coeffs), p.names,
 )
+
+# One plan per direction, `nothing` where a direction carries no derivative.
+function Adapt.adapt_structure(to, p::Operators.StencilPlans{N}) where {N}
+    plans = _adapt_tuple(to, p.plans)
+    return Operators.StencilPlans{N,typeof(plans)}(plans)
+end
+
+# The metric factors a derivative's launch reads: one per direction-1 run, or the coordinates each cell's
+# factor is evaluated from.
+Adapt.adapt_structure(to, f::Operators._RowFactors) =
+    Operators._RowFactors(Adapt.adapt(to, f.inv_h), f.size, f.R)
+Adapt.adapt_structure(to, f::Operators._CellFactors) =
+    Operators._CellFactors(f.geometry, _adapt_tuple(to, f.coordinates), f.dim, f.floor, f.order)
 
 # A staggered grid is its centre grid and one face axis per direction.
 function Adapt.adapt_structure(to, s::Grids.StaggeredGrid{T,N}) where {T,N}
@@ -131,6 +152,6 @@ end
 
 Adapt.adapt_structure(::Any, t::Connectivity.IndexTopology{N,Nothing}) where {N} = t
 Adapt.adapt_structure(to, t::Connectivity.IndexTopology) =
-    Connectivity.IndexTopology(t.size, t.periodic, Adapt.adapt(to, t.mask))
+    Connectivity.IndexTopology(t.size, t.periodic, _move(to, t.mask))
 
 end # module

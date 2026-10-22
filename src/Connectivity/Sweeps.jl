@@ -46,13 +46,13 @@ function mapreduce_within(
     f::F, op::O, init, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
     self::Bool = false, topology = default_sweep_topology(grid, ball, active_only),
-    reach::AbstractReach = Unrestricted(), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    reach::AbstractReach = Unrestricted(), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {F,O}
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
     n = length(cells)
     if _buffered_candidates(topology.index)
-        return Execution._reduce_chunks(op, n, backend) do rng
+        return Execution._reduce_chunks(op, n, execution) do rng
             acc = init
             s = ball_scratch()
             @inbounds for t in rng
@@ -65,7 +65,7 @@ function mapreduce_within(
             return acc
         end
     end
-    return Execution.reduce_indices(op, init, n, backend) do t
+    return Execution.reduce_indices(op, init, n, execution) do t
         I = _sweep_index(grid, @inbounds cells[t])
         return _route_fold(init, reach, grid, I, ball, images, active_only, self,
                            topology, nothing) do a, J, d
@@ -80,7 +80,7 @@ end
 Call `f(I, J, d)` for every cell `I` of `grid` and every cell `J` within `ball` of it. The same hoisting
 as [`mapreduce_within`](@ref), for an `f` that writes.
 
-Under a parallel `backend`, `f` runs on disjoint spans of cells concurrently, so what it writes has to be
+Under a parallel `execution`, `f` runs on disjoint spans of cells concurrently, so what it writes has to be
 determined by `I` — the same contract the connectivity builders keep. `outputs` declares those writes as
 [`Execution.Written`](@ref) arrays, indexed by the cell's position in the sweep (column-major over a
 structured grid's cells); a `DistributedBackend` or an `MPIBackend` gathers them, and the other backends
@@ -90,12 +90,12 @@ function foreach_within(
     f::F, grid::Grids.AbstractGrid;
     ball, images::AbstractImageConvention = NearestImage(), active_only::Bool = true,
     self::Bool = false, topology = default_sweep_topology(grid, ball, active_only),
-    reach::AbstractReach = Unrestricted(), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    reach::AbstractReach = Unrestricted(), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     outputs::Tuple{Vararg{Execution.Written}} = (),
 ) where {F}
     _check_sweep_images(grid, images)
     cells = _sweep_cells(grid)
-    _sweep_cells_with(f, grid, cells, ball, images, active_only, self, topology, reach, backend,
+    _sweep_cells_with(f, grid, cells, ball, images, active_only, self, topology, reach, execution,
                       outputs...)
     return nothing
 end

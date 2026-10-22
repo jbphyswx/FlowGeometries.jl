@@ -23,8 +23,9 @@ struct Center <: AbstractLocation end
 Cell boundaries — `N+1` of them along a direction of `N` cells.
 
 Centres do not determine faces: `N` centres leave the `N+1` faces underdetermined by one. The
-convention here is that faces sit midway between neighbouring centres, with the two outermost placed
-by linear extrapolation, which is the same rule the curvilinear corner reconstruction uses.
+convention here is that faces sit midway between neighbouring centres. On a bounded axis the two
+outermost are placed by linear extrapolation, the rule the curvilinear corner reconstruction uses; on a
+wrapping one the first sits midway across the seam, as [`faces`](@ref)`(x, period)` places it.
 """
 struct Face <: AbstractLocation end
 

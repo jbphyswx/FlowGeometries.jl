@@ -3,9 +3,6 @@
 #
 # HEALPix RING neighbors follow the standard face-table algorithm (Górski et al. 2005; Reinecke 2003).
 
-using ..SphericalSampling: SphericalSampling
-using ..Geometry: Geometry
-
 # ---------------------------------------------------------------------------
 # CSR helpers
 # ---------------------------------------------------------------------------
@@ -54,18 +51,18 @@ out-of-range entries are removed here. `emit!` must touch only its own slice, an
 node — once to count the row, once to fill it — so it must be a pure function of `i`.
 
 Count, scan, fill. The scratch is one `maxdeg` buffer per task, and both node passes write only slots
-their own node owns, so both parallelize under a threaded `backend`.
+their own node owns, so both parallelize under a threaded `execution`.
 
 Host backends only: a work-item-per-node form needs `maxdeg` slots per item, an `n · maxdeg` scratch,
 and a device backend raises here. The grid layouts reach the same graph through
 [`build_connectivity`](@ref) on [`Grids.FormulaNeighbors`](@ref), which is device-resident end to end.
 """
 function _csr_from_candidates(
-    emit!::F, n::Integer, maxdeg::Integer; backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    emit!::F, n::Integer, maxdeg::Integer; execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {F}
     n = Int(n); maxdeg = Int(maxdeg)
     deg = Vector{Int}(undef, n)
-    Execution.run_chunks(n, backend, Execution.Written(deg)) do rng
+    Execution.run_chunks(n, execution, Execution.Written(deg)) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -74,8 +71,8 @@ function _csr_from_candidates(
     # The width is a runtime value, so the filling pass is entered through a concrete one, from a
     # branch that leaves each call site one method — see `_csr_total`.
     return _index_type(max(n + 1, sum(deg))) === Int32 ?
-        _csr_fill(Int32, emit!, deg, n, maxdeg, backend) :
-        _csr_fill(Int, emit!, deg, n, maxdeg, backend)
+        _csr_fill(Int32, emit!, deg, n, maxdeg, execution) :
+        _csr_fill(Int, emit!, deg, n, maxdeg, execution)
 end
 
 function _csr_fill(
@@ -193,7 +190,7 @@ _axes_and_weights(::Type{T}, s, nlat, nlon) where {T} =
     (; SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)..., w = nothing)
 
 """
-    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only, backend)
+    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only, execution)
 
 Sampling topology straight to CSR. A tensor-product sampling's neighbor graph is fixed by its axis
 lengths and longitude wrapping alone, so the axes themselves are never evaluated — for
@@ -207,14 +204,14 @@ function build_connectivity(
     periodic::Union{Nothing,NTuple{2,Bool}} = nothing,
     stencil = Stencils.Axial(1),
     active_only::Bool = true,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     sz = SphericalSampling.axes_lengths(s, nlat; nlon = nlon)
     # These samplings tile the full circle in longitude and stop at the poles in latitude.
     per = periodic === nothing ? (true, false) : periodic
     return build_connectivity(
         IndexTopology((sz.nlon, sz.nlat), per, mask);
-        stencil = stencil, active_only = active_only, backend = backend,
+        stencil = stencil, active_only = active_only, execution = execution,
     )
 end
 
@@ -290,7 +287,7 @@ has eight neighbours except the 24 cells at a cube corner, which have seven.
 """
 function build_connectivity(
     ::SphericalSampling.CubedSphereSampling, n::Integer;
-    stencil = Stencils.Axial(1), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    stencil = Stencils.Axial(1), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     n = Int(n)
     n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1"))
@@ -298,7 +295,7 @@ function build_connectivity(
     offs = _stencil_offsets(Val{2}(), sv)
     N = 6 * n * n
     nn = n
-    return _csr_from_candidates(N, length(offs); backend = backend) do buf, lo, lin
+    return _csr_from_candidates(N, length(offs); execution = execution) do buf, lo, lin
         f, i, j = SphericalSampling._cubed_unlin(lin, nn)
         m = 0
         @inbounds for δ in offs
@@ -325,7 +322,7 @@ standard Yin–Yang discrete topology, where the panels couple through interpola
 """
 function build_connectivity(
     ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
-    stencil = Stencils.Axial(1), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    stencil = Stencils.Axial(1), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     nlon = Int(nlon); nlat = Int(nlat)
     nlon ≥ 1 && nlat ≥ 1 || throw(ArgumentError("Yin–Yang nlon/nlat must be ≥ 1"))
@@ -334,7 +331,7 @@ function build_connectivity(
     npanel = nlon * nlat
     N = 2 * npanel
     sz = (nlon, nlat)
-    return _csr_from_candidates(N, length(offs); backend = backend) do buf, lo, lin
+    return _csr_from_candidates(N, length(offs); execution = execution) do buf, lo, lin
         base = ((lin - 1) ÷ npanel) * npanel
         p = lin - base - 1
         j, i = divrem(p, nlon)
@@ -480,11 +477,11 @@ HEALPix RING topological adjacency (usually 8 neighbors; 7 or 6 at singular pixe
 Julia node indices are 1-based (`pixel 0` → node `1`).
 """
 function build_connectivity(
-    s::SphericalSampling.HEALPixSampling; backend::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+    s::SphericalSampling.HEALPixSampling; execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
 )
     nside = s.nside
     npix = SphericalSampling.healpix_npix(nside)
-    return _csr_from_candidates(npix, 8; backend = backend) do buf, lo, node
+    return _csr_from_candidates(npix, 8; execution = execution) do buf, lo, node
         # Straight into this node's own slice — no scratch shared between calls, so the emit pass
         # parallelizes.
         slice = view(buf, (lo + 1):(lo + 8))
@@ -512,18 +509,18 @@ same count, scan, fill the layout's own builder makes, over `10ν² + 2` vertice
 """
 function build_connectivity(
     s::SphericalSampling.IcosahedralSampling;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
 )
     ν = Int(s.frequency)
     n = SphericalSampling.icosahedral_nvertices(ν)
-    deg = Execution.allocate(backend, Int, n)
-    Execution.run_indices(n, backend, Execution.Written(deg)) do k
+    deg = Execution.allocate(execution, Int, n)
+    Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds deg[k] = _ico_neighbor_ids(k, ν)[2]
     end
-    total = _csr_total(deg, n, backend)
+    total = _csr_total(deg, n, execution)
     return _index_type(max(n + 1, total)) === Int32 ?
-        _ico_fill(Int32, total, deg, n, ν, backend) :
-        _ico_fill(Int, total, deg, n, ν, backend)
+        _ico_fill(Int32, total, deg, n, ν, execution) :
+        _ico_fill(Int, total, deg, n, ν, execution)
 end
 
 function _ico_fill(::Type{I}, total::Int, deg, n::Int, ν::Int, backend) where {I<:Integer}

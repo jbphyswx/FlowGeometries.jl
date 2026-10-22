@@ -81,19 +81,19 @@ _int_counts(v::AbstractVector{Int}) = v
 _int_counts(v::AbstractVector{<:Integer}) = collect(Int, v)
 
 # A Gaussian ring's cell area is `R²·(2π/nlon_r)·w_r` with `w_r` the latitude quadrature weight, which
-# sums to `4πR²` because the weights sum to 2. One root solve gives the nodes and the weights; `μ`
-# ascends, so ring `r` (from the north) is entry `nring + 1 − r`.
+# sums to `4πR²` because the weights sum to 2. One root solve gives the latitudes and the weights, both
+# ascending, so ring `r` (from the north) is entry `nring + 1 − r`.
 function RingGrid(
     geometry::Geometry.AbstractSphericalGeometry{T},
     sampling::SphericalSampling.AbstractReducedGaussianSampling; mask = nothing,
 ) where {T<:AbstractFloat}
     nring = SphericalSampling.nrings(sampling)
-    μ = Vector{T}(undef, nring)
+    φ = Vector{T}(undef, nring)
     w = Vector{T}(undef, nring)
-    SphericalSampling._gauss_legendre!(T, μ, w, nring)
+    SphericalSampling._gauss_legendre!(T, nothing, w, nring; lat = φ)
     nlon = SphericalSampling.nlon_per_ring(sampling)
     R² = T(Geometry.radius(geometry))^2
-    lat = [asin(μ[nring + 1 - r]) for r in 1:nring]
+    lat = reverse!(φ)
     area = [R² * (T(2π) / T(nlon[r])) * w[nring + 1 - r] for r in 1:nring]
     return _ring_grid(geometry, lat, nlon, area, mask, sampling)
 end

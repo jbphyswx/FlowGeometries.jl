@@ -38,7 +38,7 @@ the gnomonic-plane coordinates its area is the solid angle of.
 end
 
 """
-    cubed_sphere_points!(λ, φ, panel, n; backend=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
+    cubed_sphere_points!(λ, φ, panel, n; execution=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
 
 Gnomonic cubed-sphere cell centres into caller-owned buffers of length `6n²`, plus each point's panel
 index. Pass `panel = nothing` when the panel id is not wanted, and it is not computed.
@@ -48,7 +48,7 @@ See [`cubed_sphere_points`](@ref) for the allocating form.
 function cubed_sphere_points!(
     λ::AbstractVector{T}, φ::AbstractVector{T},
     panel::Union{Nothing,AbstractVector{<:Integer}}, n::Integer;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
     n = Int(n)
     n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1, got $n"))
@@ -62,15 +62,13 @@ function cubed_sphere_points!(
     # panel's cells; points and connectivity then disagree and a grid built from them carries
     # coincident nodes. Cell centres give 6n² distinct points that match the connectivity, and n=1
     # (one cell per face, at the face centre) falls out of the same formula.
-    # Each output slot is a pure function of its own linear index, so chunks are independent.
+    # Each output slot is a pure function of its own linear index, so each index is a work item.
     outs = panel === nothing ? (Execution.Written(λ), Execution.Written(φ)) :
                                (Execution.Written(λ), Execution.Written(φ), Execution.Written(panel))
-    Execution.run_chunks(N, backend, outs...) do rng
-        @inbounds for k in rng
-            f, i, j = _cubed_unlin(k, n)
-            λ[k], φ[k] = _cubed_cell_lonlat(T, n, f, i, j)
-            _put!(panel, k, f)
-        end
+    Execution.run_indices(N, execution, outs...) do k
+        f, i, j = _cubed_unlin(k, n)
+        @inbounds λ[k], φ[k] = _cubed_cell_lonlat(T, n, f, i, j)
+        _put!(panel, k, f)
     end
     return (; λ, φ, panel)
 end
@@ -99,7 +97,7 @@ normalized. `atan(z, hypot(x, y))` is accurate relative to the latitude's distan
     (Geometry.wrap_longitude(atan(y, x)), atan(z, hypot(x, y)))
 
 """
-    cubed_sphere_points([T = Float64], n; backend=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
+    cubed_sphere_points([T = Float64], n; execution=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
 
 Gnomonic cubed-sphere cell centres: `6n²` distinct points, plus each point's panel index.
 
@@ -109,19 +107,19 @@ Allocating wrapper around [`cubed_sphere_points!`](@ref). Use
 cubed_sphere_points(n::Integer; kwargs...) = cubed_sphere_points(Float64, n; kwargs...)
 
 function cubed_sphere_points(
-    ::Type{T}, n::Integer; backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    ::Type{T}, n::Integer; execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
     N = npoints(CubedSphereSampling(), n)
     return cubed_sphere_points!(
-        Vector{T}(undef, N), Vector{T}(undef, N), Vector{Int}(undef, N), n; backend = backend,
+        Vector{T}(undef, N), Vector{T}(undef, N), Vector{Int}(undef, N), n; execution = execution,
     )
 end
 
 function spherical_points!(
     λ::AbstractVector{T}, φ::AbstractVector{T}, ::CubedSphereSampling, n::Integer;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
-    cubed_sphere_points!(λ, φ, nothing, n; backend = backend)   # panel id is not part of this result
+    cubed_sphere_points!(λ, φ, nothing, n; execution = execution)   # panel id is not part of this result
     return (; λ, φ)
 end
 
@@ -130,11 +128,11 @@ spherical_points(s::CubedSphereSampling, n::Integer; kwargs...) =
 
 function spherical_points(
     ::Type{T}, ::CubedSphereSampling, n::Integer;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
     N = npoints(CubedSphereSampling(), n)
     return spherical_points!(
-        Vector{T}(undef, N), Vector{T}(undef, N), CubedSphereSampling(), n; backend = backend,
+        Vector{T}(undef, N), Vector{T}(undef, N), CubedSphereSampling(), n; execution = execution,
     )
 end
 
@@ -248,7 +246,8 @@ function spherical_points!(Λ::AbstractVector{T}, Φ::AbstractVector{T}, ::YinYa
     n == 0 && return (; λ = Λ, φ = Φ)
     # Yang is written straight into the second half of the outputs — exactly an nlon×nlat block in the
     # order the panel fields use — and yin's axes into the leading elements of the first half. Nothing
-    # overlaps, so one call fills all four; yin is then expanded across its block in place.
+    # overlaps, so one call fills all four; yin is then expanded across its block in place, its
+    # panel-frame longitudes reduced to `[0, 2π)` as they are written.
     yang_λ = reshape(view(Λ, (np + 1):n), nlon, nlat)
     yang_φ = reshape(view(Φ, (np + 1):n), nlon, nlat)
     yin_yang_panels!(view(Λ, 1:nlon), view(Φ, 1:nlat), yang_λ, yang_φ, nlon, nlat)
@@ -256,7 +255,7 @@ function spherical_points!(Λ::AbstractVector{T}, Φ::AbstractVector{T}, ::YinYa
         φj = Φ[j]
         base = (j - 1) * nlon
         for i in nlon:-1:1
-            Λ[base + i] = Λ[i]
+            Λ[base + i] = Geometry.wrap_longitude(Λ[i])
             Φ[base + i] = φj
         end
     end

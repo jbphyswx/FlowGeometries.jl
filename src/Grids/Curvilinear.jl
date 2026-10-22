@@ -202,11 +202,11 @@ end
 # Exact planar quadrilateral area (shoelace) over the (Nx+1)×(Ny+1) corner arrays.
 function _corner_areas(
     ::G, xc::AbstractMatrix{T}, yc::AbstractMatrix{T}, Nx::Integer, Ny::Integer;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat, G<:Geometry.AbstractCartesianGeometry{T}}
     areas = similar(xc, T, Nx, Ny)
     columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
-    Execution.run_chunks(Int(Ny), backend, columns) do rows
+    Execution.run_chunks(Int(Ny), execution, columns) do rows
     @inbounds for j in rows, i in 1:Nx
         # Cell (i,j) has vertices (i,j)→(i+1,j)→(i+1,j+1)→(i,j+1) (counter-clockwise in index space).
         x1 = xc[i, j];         y1 = yc[i, j]
@@ -238,7 +238,7 @@ end
 # from the corner coordinates, so a cell's area keeps their relative precision whatever its size.
 function _corner_areas(
     geometry::G, λc::AbstractMatrix{T}, φc::AbstractMatrix{T}, Nx::Integer, Ny::Integer;
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     nk = Nx + 1
     R2 = Geometry.radius(geometry)^2
@@ -246,7 +246,7 @@ function _corner_areas(
     # Chunked over rows, each chunk with its own two-row buffer. A chunk re-derives its first row, at
     # one extra row of trig per chunk, which keeps the chunks independent.
     columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
-    Execution.run_chunks(Int(Ny), backend, columns) do rows
+    Execution.run_chunks(Int(Ny), execution, columns) do rows
         lo = Vector{NTuple{3,T}}(undef, nk)
         hi = Vector{NTuple{3,T}}(undef, nk)
         _fill_dir_row!(lo, λc, φc, first(rows), nk)
@@ -327,7 +327,7 @@ function _curvilinear_grid(
     geometry::G, coords::NTuple{N,AbstractArray}, measure_pos, mask::AbstractArray{Bool,N};
     corners = nothing, measure = nothing, keep_corners::Bool = false,
     topology = nothing, period = nothing, periodic = nothing,
-    backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     N == ndims(mask) || throw(ArgumentError(
         "got $N coordinate arrays for a $(ndims(mask))-dimensional mask",
@@ -368,7 +368,7 @@ function _curvilinear_grid(
         ))
         _to_arr(T, m)
     elseif N == 2
-        _corner_areas(geometry, kc[1], kc[2], size(mask, 1), size(mask, 2); backend = backend)
+        _corner_areas(geometry, kc[1], kc[2], size(mask, 1), size(mask, 2); execution = execution)
     else
         throw(ArgumentError(
             "a $N-dimensional CurvilinearGrid has no measure to derive: the corner-area kernel is a " *

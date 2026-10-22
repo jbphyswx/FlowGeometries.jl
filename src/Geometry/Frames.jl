@@ -277,31 +277,52 @@ and the basis is the same triad.
     return build_point(S, keys(Δ), Tuple(Δ))
 end
 
-@inline function _project_to_tangent_plane(
-    ::AbstractCartesianGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
-) where {T}
-    cx, cy = _at(T, center)
-    nx, ny = _at(T, neighbor)
-    return (; x = nx - cx, y = ny - cy)
-end
+@inline _project_to_tangent_plane(
+    geo::AbstractGeometry, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
+) = _displacement_on(geo, _local_frame(geo, center), neighbor)
+
+# A displacement in two steps, for many neighbours about one centre: `_local_frame` is what depends on
+# the centre alone, and `_displacement_on` resolves one neighbour against it.
+@inline _local_frame(::AbstractCartesianGeometry{T}, c::NTuple{N,Real}) where {T,N} = _at(T, c)
 
 # Written against [`embed`](@ref) and the frame, so it holds on a sphere and on a spheroid alike: the
-# chord between the two ambient positions, resolved on the tangent basis at the centre. The two differ
-# only in where each `(λ, φ)` sits.
-@inline function _project_to_tangent_plane(
-    geo::AbstractLonLatGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
-) where {T}
-    c = _at(T, center)
-    Pc = _embed(geo, c)
-    Pn = _embed(geo, _at(T, neighbor))
+# chord between the two ambient positions, resolved on the frame at the centre. The two differ only in
+# where each `(λ, φ)` sits.
+@inline function _local_frame(geo::AbstractLonLatGeometry{T}, c::NTuple{N,Real}) where {T,N}
+    cc = _at(T, c)
+    return (_embed(geo, cc), _enu_frame(geo, cc[1], cc[2]))
+end
+
+@inline function _displacement_on(::AbstractCartesianGeometry{T}, c::NTuple{2}, nb::NTuple{2,Real}) where {T}
+    nx, ny = _at(T, nb)
+    return (; x = nx - c[1], y = ny - c[2])
+end
+
+@inline function _displacement_on(::AbstractCartesianGeometry{T}, c::NTuple{3}, nb::NTuple{3,Real}) where {T}
+    nx, ny, nz = _at(T, nb)
+    return (; x = nx - c[1], y = ny - c[2], z = nz - c[3])
+end
+
+# The contractions are written flat. `sum(dr[i] * ê[i] for i in 1:3)` indexes the tuple with a loop
+# variable, which does not unroll.
+@inline function _displacement_on(geo::AbstractLonLatGeometry{T}, fr, nb::NTuple{2,Real}) where {T}
+    Pc, (êλ, êφ, _) = fr
+    Pn = _embed(geo, _at(T, nb))
     dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
-    êλ, êφ, _ = _enu_frame(geo, c[1], c[2])
-    # The contraction is written flat. `sum(dr[i] * ê[i] for i in 1:3)` indexes the tuple with a loop
-    # variable, which does not unroll.
     return (;
         λ = dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
         φ = dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
     )
+end
+
+@inline function _displacement_on(geo::AbstractLonLatGeometry{T}, fr, nb::NTuple{3,Real}) where {T}
+    Pc, (êλ, êφ, êr) = fr
+    Pn = _embed(geo, _at(T, nb))
+    dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
+    return build_point(NamedTuple, point_names(geo, Val(3)),
+                       (dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
+                        dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
+                        dx * êr[1] + dy * êr[2] + dz * êr[3]))
 end
 
 """
@@ -318,30 +339,8 @@ normal [`unit_vector`](@ref) gives.
 @inline local_displacement(geo::AbstractGeometry, center, neighbor) =
     _local_displacement(geo, as_ntuple(center), as_ntuple(neighbor))
 
-@inline _local_displacement(geo::AbstractGeometry, c::NTuple{2,Real}, nb::NTuple{2,Real}) =
-    _project_to_tangent_plane(geo, c, nb)
-
-@inline function _local_displacement(
-    ::AbstractCartesianGeometry{T}, c::NTuple{3,Real}, nb::NTuple{3,Real},
-) where {T}
-    cx, cy, cz = _at(T, c)
-    nx, ny, nz = _at(T, nb)
-    return (; x = nx - cx, y = ny - cy, z = nz - cz)
-end
-
-@inline function _local_displacement(
-    geo::AbstractLonLatGeometry{T}, c::NTuple{3,Real}, nb::NTuple{3,Real},
-) where {T}
-    cc = _at(T, c)
-    Pc = _embed(geo, cc)
-    Pn = _embed(geo, _at(T, nb))
-    dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
-    êλ, êφ, êr = _enu_frame(geo, cc[1], cc[2])
-    return build_point(NamedTuple, point_names(geo, Val(3)),
-                       (dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
-                        dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
-                        dx * êr[1] + dy * êr[2] + dz * êr[3]))
-end
+@inline _local_displacement(geo::AbstractGeometry, c::NTuple{N,Real}, nb::NTuple{N,Real}) where {N} =
+    _displacement_on(geo, _local_frame(geo, c), nb)
 
 """
     normal_coordinates(geo, center, point) -> NamedTuple

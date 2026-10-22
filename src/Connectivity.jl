@@ -6,17 +6,16 @@ using ..Execution: Execution
 using ..Geometry: Geometry
 using ..Stencils: Stencils
 using ..Discretization: Discretization
+using ..SphericalSampling: SphericalSampling
 using ..Grids: Grids
 
-# Connectivity is a property of the *grid architecture* or of a *spherical sampling*
-# that defines its own mesh topology:
-#   Structured / Curvilinear → index-topology stencil (periodicity + mask)
-#   Unstructured            → stored CSR on the grid
-#   Cubed-sphere / Yin–Yang / HEALPix / icosahedral / tensor-product samplings
-#                           → `build_connectivity(sampling, …)` (see `Connectivity/Spherical.jl`)
-#
-# Primary API dispatches on `grid` or `sampling`. `CSRConnectivity` is the sparse storage
-# format from `build_connectivity` when you need a flat graph.
+# A grid's neighbours come from its `Grids.adjacency_source`:
+#   Structured / Curvilinear / Rotated                  → index-topology stencil (periodicity + mask)
+#   HEALPix / Ring / Cubed-sphere / Yin–Yang / icosahedral → arithmetic on the cell id (`Formula.jl`)
+#   Unstructured                                         → stored CSR on the grid
+# A spherical sampling that defines a mesh builds the same graph with no grid, through
+# `build_connectivity(sampling, …)` (`Connectivity/Spherical.jl`). `CSRConnectivity` is the flat form
+# `build_connectivity` returns.
 
 include("Connectivity/CSR.jl")
 include("Connectivity/IndexStencil.jl")
@@ -29,8 +28,6 @@ include("Connectivity/Sweeps.jl")
 include("Connectivity/Build.jl")
 include("Connectivity/Adjacency.jl")
 include("Connectivity/MaskTopology.jl")
-
-
 include("Connectivity/Spherical.jl")
 
 end # module

@@ -12,18 +12,21 @@ degrades it, and `0` where the cell is written `masked`. Rebuilt rows follow the
 padded with zero weights to the table's width.
 
 `distance` marks weights solved over the window's distances, per line, with no table rows: the form of an
-`order ≥ 2` derivative along a direction whose own scale factor varies along it.
+`order ≥ 2` derivative along a direction whose own scale factor varies along it. `mask` is the mask the
+rows were resolved for; [`derivative!`](@ref) refuses a grid with another.
 
 The apply is one gather per cell, with no mask test and no weight solve, so it runs the same on the host
 and in a kernel. Build one with [`masked_stencil_plan`](@ref).
 """
-struct MaskedStencilPlan{R<:AbstractArray{Int32}, I<:AbstractMatrix{Int}, W<:AbstractMatrix{<:AbstractFloat}}
+struct MaskedStencilPlan{R<:AbstractArray{Int32}, I<:AbstractMatrix{Int}, W<:AbstractMatrix{<:AbstractFloat},
+                         K<:AbstractArray{Bool}}
     row::R
     indices::I
     weights::W
     dim::Int
     order::Int
     distance::Bool
+    mask::K
 end
 
 Base.show(io::IO, p::MaskedStencilPlan) = print(
@@ -78,12 +81,15 @@ end
 
 # No derivative of this order exists anywhere on an axis this short.
 _empty_masked_plan(::Type{T}, mask, d::Int, ord::Int, k::Int, distance::Bool) where {T} =
-    MaskedStencilPlan(zeros(Int32, size(mask)), Matrix{Int}(undef, 0, k), Matrix{T}(undef, 0, k), d, ord, distance)
+    MaskedStencilPlan(zeros(Int32, size(mask)), Matrix{Int}(undef, 0, k), Matrix{T}(undef, 0, k), d, ord, distance,
+                      mask)
 
-# An array as host data, which the build walks element by element: a device array is copied over.
+# An array as host data, which the build walks element by element: a device array is copied over, and
+# an analytic axis is its formula, evaluated where it is read.
 @inline _host_array(a::Array) = a
 @inline _host_array(a::BitArray) = a
 @inline _host_array(a::AbstractRange) = a
+@inline _host_array(a::Axes.AbstractAnalyticAxis) = a
 @inline _host_array(a::AbstractArray) = Array(a)
 
 # A grid with no inactive cell holds its mask as a size alone, readable anywhere.
@@ -138,7 +144,7 @@ function _masked_stencil_plan(
     ne = length(seen)
     indices = vcat(Matrix{Int}(idx), permutedims(reshape(extra_idx, k, ne)))
     weights = vcat(Matrix{T}(wts), permutedims(reshape(extra_w, k, ne)))
-    return MaskedStencilPlan(row, indices, weights, d, ord, false)
+    return MaskedStencilPlan(row, indices, weights, d, ord, false, mask)
 end
 
 # Every cell's weights solved over distance: node `q` of the window sits at
@@ -202,44 +208,53 @@ function _distance_stencil_plan(
     end
     ne = length(seen)
     return MaskedStencilPlan(
-        row, permutedims(reshape(out_idx, k, ne)), permutedims(reshape(out_w, k, ne)), d, ord, true,
+        row, permutedims(reshape(out_idx, k, ne)), permutedims(reshape(out_w, k, ne)), d, ord, true, mask,
     )
 end
 
 """
-    apply_stencil!(out, field, plan::MaskedStencilPlan; masked=zero, backend=SerialBackend()) -> out
+    apply_stencil!(out, field, plan::MaskedStencilPlan; masked=zero, execution=SerialBackend()) -> out
 
 Apply a held [`MaskedStencilPlan`](@ref) to `field`, which may carry trailing batch axes past the mask's.
-The plan's arrays live where `backend` runs.
+The plan is read in `execution`'s memory: one held on the host is moved there for the call, and one moved
+there once with `Execution.on_backend` is read as it is.
 """
 function apply_stencil!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, plan::MaskedStencilPlan;
-    masked = zero(S), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    masked = zero(S), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,N}
-    return _apply_masked_plan!(out, field, plan, masked, backend, nothing)
+    return _apply_masked_plan!(out, field, plan, masked, execution, nothing)
 end
 
 """
-    derivative!(out, field, grid, plan::MaskedStencilPlan; masked=zero, backend=SerialBackend()) -> out
+    derivative!(out, field, grid, plan::MaskedStencilPlan; masked=zero, execution=SerialBackend()) -> out
 
-[`derivative!`](@ref) along `plan.dim` from a held [`MaskedStencilPlan`](@ref) of `grid`. Where the
-derivative needs weights over distance, the plan must be the grid form's,
+[`derivative!`](@ref) along `plan.dim` from a held [`MaskedStencilPlan`](@ref) of `grid`, built for
+`grid`'s mask. Where the derivative needs weights over distance, the plan must be the grid form's,
 `masked_stencil_plan(grid, dim; order, nodes, policy)`.
 """
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T,G,N},
-    plan::MaskedStencilPlan; masked = zero(S), backend::CB.AbstractExecutionBackend = CB.SerialBackend(),
+    plan::MaskedStencilPlan; masked = zero(S), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), plan.dim)
-    plan.distance && return _apply_masked_plan!(out, field, plan, masked, backend, nothing)
+    _same_mask(Grids.mask(grid), plan.mask) || throw(ArgumentError(
+        "this plan's rows were resolved for another mask than the grid's; build it on the grid it differences",
+    ))
+    plan.distance && return _apply_masked_plan!(out, field, plan, masked, execution, nothing)
     _along_arc(grid, plan.dim, plan.order) && throw(ArgumentError(
         "an order-$(plan.order) derivative along direction $(plan.dim) of this grid needs weights over " *
         "distance, and this plan holds them over the coordinate; build it with " *
         "`masked_stencil_plan(grid, $(plan.dim); order = $(plan.order), …)`",
     ))
-    return _apply_masked_plan!(out, field, plan, masked, backend,
-                               _derivative_factors(grid, plan.dim, backend, plan.order))
+    return _apply_masked_plan!(out, field, plan, masked, execution,
+                               _derivative_factors(grid, plan.dim, execution, plan.order))
 end
+
+# Two masks of one array type are in one memory, where `==` runs; masks of two types are compared on the
+# host.
+@inline _same_mask(a::A, b::A) where {A<:AbstractArray{Bool}} = a === b || a == b
+@inline _same_mask(a::AbstractArray{Bool}, b::AbstractArray{Bool}) = _host_mask(a) == _host_mask(b)
 
 function _apply_masked_plan!(
     out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, plan::MaskedStencilPlan, masked, backend, fac,
@@ -249,9 +264,10 @@ function _apply_masked_plan!(
     ))
     vm = _plan_extent(plan.row, field)
     b = Execution.resolve(backend)
-    return _dispatch_dim(plan.dim, vm) do vdim
-        _dispatch_nodes(size(plan.weights, 2)) do vk
-            _masked_plan_sweep!(out, field, plan.row, plan.indices, plan.weights, vdim, masked, vk, vm, b, fac)
+    p = Execution.on_backend(b, plan)
+    return _dispatch_dim(p.dim, vm) do vdim
+        _dispatch_nodes(size(p.weights, 2)) do vk
+            _masked_plan_sweep!(out, field, p.row, p.indices, p.weights, vdim, masked, vk, vm, b, fac)
         end
     end
 end
