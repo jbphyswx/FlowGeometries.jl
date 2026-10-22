@@ -10,7 +10,9 @@ module Execution
 # writes across it, and `run_indices` applies a body to one index at a time. Only the second maps to a
 # kernel — a chunk body carries loop-carried state a device launch cannot express.
 
-using ComputationalBackends: ComputationalBackends as CB
+using ComputationalBackends: ComputationalBackends, ComputationalBackends as CB
+
+public ComputationalBackends, CB
 
 # The backends whose loops run in this process, over ordinary memory.
 const _HostBackend = Union{CB.AbstractSerialBackend, CB.AbstractThreadedBackend}
