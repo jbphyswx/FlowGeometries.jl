@@ -10,7 +10,8 @@ Only a rectilinear direction has a 1-D axis to difference along, so this is a `S
 function apply_stencil!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    active_only::Bool = true, masked = zero(S), backend = nothing,
+    active_only::Bool = true, masked = zero(S),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), Int(dim))
@@ -19,13 +20,13 @@ function apply_stencil!(
         out, field, Grids.coordinates(grid, dim), dim;
         order = order, nodes = nodes,
         period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
-        mask = msk, masked = masked, backend = backend, policy = policy, scratch = scratch,
+        mask = msk, masked = masked, execution = execution, policy = policy, scratch = scratch,
     )
 end
 
 # The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
-# past the last sample the pair is `(n, 1)` across the seam. `interpolation_weights` alone clamps to
-# the endpoint value there.
+# above the axis's largest sample the pair is `(n, 1)` across the seam, whichever way the axis runs.
+# `interpolation_weights` alone clamps to the endpoint value there.
 @inline function _interp_pair(grid::Grids.StructuredGrid{T, G,N}, d::Int, v::T) where {G,T,N}
     x = Grids.coordinates(grid, d)
     n = length(x)
@@ -37,10 +38,11 @@ end
             v = lo + mod(v - lo, L)
             @inbounds x1, xn = T(x[1]), T(x[n])
             asc = xn ≥ x1
-            beyond = asc ? v > xn : v < xn
-            if beyond
-                h = asc ? (x1 + L) - xn : (x1 - L) - xn
-                t = iszero(h) ? zero(T) : (v - xn) / h
+            # The seam gap runs from the largest sample to the smallest plus one period: from `xn` to
+            # `x1 + L` ascending, from `x1` to `xn + L` descending. `t` is the weight of sample 1.
+            if v > (asc ? xn : x1)
+                h = asc ? (x1 + L) - xn : (xn + L) - x1
+                t = iszero(h) ? zero(T) : (asc ? v - xn : (xn + L) - v) / h
                 return (n, 1, one(T) - t, t)
             end
         end
@@ -149,112 +151,125 @@ end
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
-    active_only::Bool = true, masked = zero(S), backend = nothing,
+    active_only::Bool = true, masked = zero(S),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     d = Int(dim)
-    geo = Grids.grid_geometry(grid)
-    # The blanking policy on the host is the path a plan serves; the degrading policies rebuild a window
-    # from the axis and a device launch has its own loop shape.
-    if backend === nothing && policy isa BlankMasked
-        _check_batched(out, field, grid, Val(N), d)
-        plan = Discretization.stencil_plan(grid, d; order = order, nodes = nodes)
-        msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-        if _fusable(out, field, geo, msk)
-            vm = _mask_rank(msk, Val(NA))
-            # The factors are built inside the switch, so the differenced direction is a type
-            # parameter there: `scale_factors(geo, pt)[dim]` folds to one component only then.
-            buf = _metric_scratch(T, _nfactors(grid))
-            _dispatch_dim(d, vm) do vdim
-                R = _metric_row_factors!(buf, grid, vdim, Val(N))
-                _plan_sweep_host!(out, field, plan, msk, masked, vdim, Val(NA), vm, buf, R)
-            end
-            return out
-        end
-        apply_stencil!(out, field, plan, d; mask = msk, masked = masked)
-        return _scale_by_metric!(out, grid, d, masked)
-    end
-    apply_stencil!(out, field, grid, dim; order = order, nodes = nodes,
-                                  active_only = active_only, masked = masked, backend = backend,
-                                  policy = policy, scratch = scratch)
-    return _scale_by_metric!(out, grid, d, masked)
+    ord = Int(order)
+    _check_batched(out, field, grid, Val(N), d)
+    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
+    _along_arc(grid, d, ord) &&
+        return _arc_derivative!(out, field, grid, d, ord, Int(nodes), msk, masked, execution, policy)
+    return _apply_axis!(out, field, Grids.coordinates(grid, d), d, ord, Int(nodes),
+                        Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, msk, masked,
+                        execution, policy, scratch, _derivative_factors(grid, d, execution, ord))
 end
 
 """
-    _fusable(out, field, geo, mask) -> Bool
-
-Whether the metric factor can be applied inside the sweep, which needs it to be constant across each
-contiguous direction-1 run the sweep writes.
-
-For a geometry that declares direction 1 metric-invariant the factor depends on directions `2:N`, so it
-is constant on every such run, whichever direction is differenced — the sweep scales run by run. A
-Cartesian metric is the identity and has nothing to apply, and the run addressing needs the linear
-layout.
-"""
-@inline function _fusable(out, field, geo, msk)
-    geo isa Geometry.AbstractCartesianGeometry && return false
-    1 in Geometry.metric_invariant_directions(geo) || return false
-    return _linear_layout(out, field, msk)
-end
-
-"""
-    derivative!(out, field, grid, plan, dim; active_only=true, masked=zero) -> out
+    derivative!(out, field, grid, plan, dim; active_only=true, masked=zero, execution=SerialBackend()) -> out
 
 [`derivative!`](@ref) from a held [`Discretization.stencil_plan`](@ref).
 
-The form to use in a loop: the weights and each row's metric factor depend on the grid alone, so both
-are built once here. Where the factor is constant across the span the sweep writes — see
-[`_fusable`](@ref) — it is applied to each row as that row is written, while it is still in cache,
-saving a second pass over `out`.
+The form to use in a loop: the weights depend on the grid alone, so they are built once, by the caller.
+Where the order is `2` or more along a direction whose own scale factor varies along it, the weights
+depend on the cell and are rebuilt per call; hold a [`masked_stencil_plan`](@ref) there.
 """
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     plan::Discretization.AbstractStencilPlan, dim::Integer;
     active_only::Bool = true, masked = zero(S),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,G,T,N,NA}
     d = Int(dim)
+    ord = Discretization.derivative_order(plan)
     _check_batched(out, field, grid, Val(N), d)
-    geo = Grids.grid_geometry(grid)
     msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    if _fusable(out, field, geo, msk)
-        vm = _mask_rank(msk, Val(NA))
-        buf = _metric_scratch(T, _nfactors(grid))
-        _dispatch_dim(d, vm) do vdim
-            R = _metric_row_factors!(buf, grid, vdim, Val(N))
-            _plan_sweep_host!(out, field, plan, msk, masked, vdim, Val(NA), vm, buf, R)
-        end
-        return out
-    end
-    apply_stencil!(out, field, plan, d; mask = msk, masked = masked)
-    return _scale_by_metric!(out, grid, d, masked)
+    _along_arc(grid, d, ord) && return _arc_derivative!(
+        out, field, grid, d, ord, Discretization.nnodes(plan), msk, masked, execution, BlankMasked(),
+    )
+    return _apply_plan_checked!(out, field, plan, d, msk, masked, execution,
+                                _derivative_factors(grid, d, execution, ord))
 end
 
 """
-    _metric_row_factors!(buf, grid, Val(dim), Val(N)) -> Int
+    _derivative_factors(grid, dim, backend, order) -> _RowFactors | _CellFactors | Nothing
 
-Write the inverse scale factor of every direction-1 run into `buf`, in column-major order over
-directions `2:N` — the order the sweep writes them in, for any differenced direction. Returns how many.
+The inverse metric factor to the power `order` that `derivative!` writes each value along `dim` with:
+`nothing` for a Cartesian metric, which is the identity; one factor per direction-1 run for a geometry
+that declares direction 1 metric-invariant, placed where `backend` runs; the per-cell evaluation
+otherwise. At `order ≥ 2` the power holds only where `dim` is one of the geometry's
+[`Geometry.scale_invariant_directions`](@ref); `_along_arc` routes the rest.
+"""
+@inline _derivative_factors(
+    ::Grids.StructuredGrid{T,G}, ::Int, _, ::Int,
+) where {T,G<:Geometry.AbstractCartesianGeometry} = nothing
 
-Direction 1 is metric-invariant here (see [`_fusable`](@ref)), so one factor covers a whole run and any
-axis-1 coordinate serves as the point's first component.
+function _derivative_factors(grid::Grids.StructuredGrid{T,G,N}, d::Int, backend, ord::Int) where {T,G,N}
+    geo = Grids.grid_geometry(grid)
+    b = Execution.resolve(backend)
+    if 1 in Geometry.metric_invariant_directions(geo)
+        buf = _metric_scratch(T, _nfactors(grid))
+        # The differenced direction is a type parameter inside the switch, so
+        # `scale_factors(geo, pt)[dim]` folds to one component.
+        R = _dispatch_dim(d, Val(N)) do vdim
+            _metric_row_factors!(buf, grid, vdim, Val(N), ord)
+        end
+        return _RowFactors(_factors_on(b, buf, R), Grids.size_tuple(grid))
+    end
+    return _CellFactors(geo, Execution.on_backend(b, Grids.coordinates(grid)), d,
+                        Discretization.metric_floor(geo, d), ord)
+end
+
+# Distance along a direction whose own scale factor `h_d` varies along it is not a multiple of the
+# coordinate, so its `order ≥ 2` derivative is no power of `1/h_d`: the weights are solved over the
+# window's distances instead, per cell (`_distance_stencil_plan`).
+@inline _along_arc(grid::Grids.StructuredGrid, d::Int, ord::Int) = _along_arc(Grids.grid_geometry(grid), d, ord)
+@inline _along_arc(::Geometry.AbstractCartesianGeometry, ::Int, ::Int) = false
+@inline _along_arc(geo::Geometry.AbstractGeometry, d::Int, ord::Int) =
+    ord ≥ 2 && !(d in Geometry.scale_invariant_directions(geo))
+
+function _arc_derivative!(out, field, grid::Grids.StructuredGrid, d::Int, ord::Int, k::Int, msk, masked, backend, policy)
+    mask = msk === nothing ? Grids.AllActive(Grids.size_tuple(grid)) : _host_mask(msk)
+    plan = _distance_stencil_plan(grid, mask, d, ord, k, policy)
+    b = Execution.resolve(backend)
+    return _apply_masked_plan!(out, field, Execution.on_backend(b, plan), masked, b, nothing)
+end
+
+# The factors where the sweep reads them: the task's own buffer on the host, its first `R` entries in
+# the backend's memory elsewhere.
+_factors_on(::Execution._HostBackend, buf::AbstractVector, ::Int) = buf
+_factors_on(b::CB.AbstractExecutionBackend, buf::AbstractVector, R::Int) =
+    Execution.on_backend(b, view(buf, 1:R))
+
+"""
+    _metric_row_factors!(buf, grid, Val(dim), Val(N), order) -> Int
+
+Write the inverse scale factor of every direction-1 run, to the power `order`, into `buf`, in
+column-major order over directions `2:N` — the order the sweep writes them in, for any differenced
+direction. Returns how many.
+
+Direction 1 is metric-invariant here, so one factor covers a whole run and any axis-1 coordinate serves
+as the point's first component. The other axes are read on the host.
 
 A degenerate factor — one at or below the geometry's [`Discretization.metric_floor`](@ref) — is stored
-as zero, and [`_scale_span!`](@ref) blanks a run whose factor is zero.
+as zero, and a kernel writes `masked` where its factor is zero.
 """
 function _metric_row_factors!(
-    buf::AbstractVector{T}, grid::Grids.StructuredGrid{T,G,N}, ::Val{dim}, ::Val{N},
+    buf::AbstractVector{T}, grid::Grids.StructuredGrid{T,G,N}, ::Val{dim}, ::Val{N}, ord::Int,
 ) where {G,T,N,dim}
     geo = Grids.grid_geometry(grid)
-    floor_ = Discretization.metric_floor(geo)
+    floor_ = Discretization.metric_floor(geo, dim)
     sz = Grids.size_tuple(grid)
-    @inbounds x1 = T(Grids.coordinates(grid, 1)[1])
-    rest = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
-    @inbounds for (r, Ir) in enumerate(rest)
-        pt = (x1, ntuple(d -> T(Grids.coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
+    x1 = T(Grids.origin(grid, 1))
+    ax = map(_host_array, Base.tail(Grids.coordinates(grid)))
+    rows = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
+    @inbounds for (r, Ir) in enumerate(rows)
+        pt = (x1, ntuple(d -> T(ax[d][Ir[d]]), Val(N - 1))...)
         h = Geometry.scale_factors(geo, pt)[dim]
-        buf[r] = abs(h) ≤ floor_ ? zero(T) : inv(h)
+        buf[r] = abs(h) ≤ floor_ ? zero(T) : inv(h)^ord
     end
-    return length(rest)
+    return length(rows)
 end
 
 """
@@ -263,8 +278,8 @@ end
 A task-held buffer of at least `n` factors, as
 [`Connectivity.ball_scratch`](@ref FlowGeometries.Connectivity.ball_scratch) is for a ball query.
 
-The fused sweeps are serial and call no user code, so one buffer per task is enough; it grows to the
-largest grid the task has swept and is refilled per call.
+It is filled before a sweep and only read during one, threaded chunks included, so one buffer per task
+is enough; it grows to the largest grid the task has swept and is refilled per call.
 """
 function _metric_scratch(::Type{T}, n::Int) where {T}
     v = get!(() -> T[], task_local_storage(), (:flowgeometries_metric_factors, T))::Vector{T}
@@ -299,112 +314,6 @@ end
     return nothing
 end
 
-# A Cartesian metric is the identity, so the derivative with respect to distance is already the one
-# `apply_stencil!` wrote and there is nothing to divide by.
-@inline _scale_by_metric!(
-    out::AbstractArray{S,NA}, ::Grids.StructuredGrid{T, G,N}, ::Int, _masked,
-) where {S,G<:Geometry.AbstractCartesianGeometry,T,N,NA} = out
-
-function _scale_by_metric!(
-    out::AbstractArray{S,NA}, grid::Grids.StructuredGrid{T, G,N}, dim::Int, masked,
-) where {S,G,T,N,NA}
-    geo = Grids.grid_geometry(grid)
-    # Whether the factor can be solved once per row is the geometry's to say: a geometry defined outside
-    # this package writes its own `scale_factors`, and hoisting one that varies along direction 1 gives
-    # a wrong derivative.
-    1 in Geometry.metric_invariant_directions(geo) ||
-        return _scale_by_metric_percell!(out, grid, dim, masked)
-    floor_ = Discretization.metric_floor(geo)
-    sz = Grids.size_tuple(grid)
-    # The factor is constant along axis 1 whichever direction is differenced: computed once per remaining
-    # index, then swept along the contiguous axis. Any axis-1 coordinate serves for the point it is
-    # evaluated at, so the first one is used.
-    @inbounds x1 = first(Grids.coordinates(grid, 1))
-    rest = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
-    # No scale factor depends on the batch either, so `h` is solved once per spatial index and reused
-    # across the batch.
-    #
-    # Addressed linearly: `rest` walks the spatial slabs in column-major order, so slab `p` starts at
-    # `(p-1)*sz[1]` and batch element `b` a whole grid further on. `out[i, tr..., Tuple(Ib)...]` costs
-    # a nested splat the compiler does not see through.
-    ncell = prod(sz)
-    nb = length(out) ÷ ncell
-    if IndexStyle(out) === IndexLinear() && !Base.has_offset_axes(out)
-        @inbounds for (p, Ir) in enumerate(rest)
-            pt = (x1, ntuple(d -> T(Grids.coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
-            h = Geometry.scale_factors(geo, pt)[dim]
-            sbase = (p - 1) * sz[1]
-            if abs(h) ≤ floor_
-                for b in 0:(nb - 1), i in 1:sz[1]
-                    out[b * ncell + sbase + i] = masked
-                end
-            else
-                inv_h = inv(h)
-                for b in 0:(nb - 1), i in 1:sz[1]
-                    out[b * ncell + sbase + i] *= inv_h
-                end
-            end
-        end
-        return out
-    end
-    # Anything that does not index linearly — an offset array, a strided view — asks the array for its
-    # own indexing instead.
-    batch = CartesianIndices(ntuple(d -> size(out, N + d), Val(NA - N)))
-    @inbounds for Ir in rest
-        pt = (x1, ntuple(d -> T(Grids.coordinates(grid, d + 1)[Ir[d]]), Val(N - 1))...)
-        h = Geometry.scale_factors(geo, pt)[dim]
-        tr = Tuple(Ir)
-        for Ib in batch
-            tb = Tuple(Ib)
-            if abs(h) ≤ floor_
-                for i in 1:sz[1]
-                    out[i, tr..., tb...] = masked
-                end
-            else
-                inv_h = inv(h)
-                for i in 1:sz[1]
-                    out[i, tr..., tb...] *= inv_h
-                end
-            end
-        end
-    end
-    return out
-end
-
-# The general path: the scale factor is evaluated at each cell's own point, direction 1 included. Taken
-# by a geometry that does not declare direction 1 metric-invariant, which is the safe default.
-function _scale_by_metric_percell!(
-    out::AbstractArray{S,NA}, grid::Grids.StructuredGrid{T, G,N}, dim::Int, masked,
-) where {S,G,T,N,NA}
-    geo = Grids.grid_geometry(grid)
-    floor_ = Discretization.metric_floor(geo)
-    sz = Grids.size_tuple(grid)
-    ncell = prod(sz)
-    nb = length(out) ÷ ncell
-    spatial = CartesianIndices(sz)
-    linear = IndexStyle(out) === IndexLinear() && !Base.has_offset_axes(out)
-    batch = CartesianIndices(ntuple(d -> size(out, N + d), Val(NA - N)))
-    @inbounds for (k, I) in enumerate(spatial)
-        pt = ntuple(d -> T(Grids.coordinates(grid, d)[I[d]]), Val(N))
-        h = Geometry.scale_factors(geo, pt)[dim]
-        degenerate = abs(h) ≤ floor_
-        inv_h = degenerate ? zero(T) : inv(h)
-        if linear
-            for b in 0:(nb - 1)
-                j = b * ncell + k
-                out[j] = degenerate ? masked : out[j] * inv_h
-            end
-        else
-            ti = Tuple(I)
-            for Ib in batch
-                J = (ti..., Tuple(Ib)...)
-                out[J...] = degenerate ? masked : out[J...] * inv_h
-            end
-        end
-    end
-    return out
-end
-
 """
     Discretization.axis_stencils(grid, dim; order=1, nodes=order+1) -> (indices, weights)
 
@@ -420,7 +329,7 @@ function Discretization.axis_stencils(
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     return Discretization.axis_stencils(
-        Grids.coordinates(grid, dim), order, nodes;
+        _host_array(Grids.coordinates(grid, dim)), order, nodes;
         period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
     )
 end
@@ -440,14 +349,14 @@ function Discretization.stencil_plan(
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     return Discretization.stencil_plan(
-        Grids.coordinates(grid, dim), order, nodes;
+        _host_array(Grids.coordinates(grid, dim)), order, nodes;
         period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
     )
 end
 
 """
     apply_stencil!(out, field, grid, indices, weights, dim; order=1, active_only=true,
-                   masked=zero, policy=BlankMasked(), backend=nothing) -> out
+                   masked=zero, policy=BlankMasked(), execution=SerialBackend()) -> out
 
 Apply a stencil table built by [`Discretization.axis_stencils`](@ref). The mask, the wrap period and
 the axis all come from `grid`.
@@ -461,7 +370,8 @@ part of the work that depends on the grid alone.
 function apply_stencil!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
+    order::Integer = 1, active_only::Bool = true, masked = zero(S),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), Int(dim))
@@ -470,10 +380,10 @@ function apply_stencil!(
     msk = Grids.mask(grid)
     if active_only && !(msk isa Grids.AllActive)
         return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), msk, masked,
-                           backend, policy, scratch)
+                           execution, policy, scratch)
     end
     return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), nothing, masked,
-                       backend, policy, scratch)
+                       execution, policy, scratch)
 end
 
 @inline function _apply_tbl!(
@@ -484,53 +394,35 @@ end
     return Grids.isperiodic(grid, dim) ?
         apply_stencil!(out, field, x, indices, weights, dim; order = order,
                                       period = Grids.period(grid, dim), mask = msk, masked = masked,
-                                      backend = backend, policy = policy, scratch = scratch) :
+                                      execution = backend, policy = policy, scratch = scratch) :
         apply_stencil!(out, field, x, indices, weights, dim; order = order,
                                       period = nothing, mask = msk, masked = masked,
-                                      backend = backend, policy = policy, scratch = scratch)
+                                      execution = backend, policy = policy, scratch = scratch)
 end
 
 """
     derivative!(out, field, grid, indices, weights, dim; order=1, active_only=true, masked=zero,
-                policy=BlankMasked(), backend=nothing) -> out
+                policy=BlankMasked(), execution=SerialBackend()) -> out
 
 [`derivative!`](@ref) from a table the caller holds — the same reuse as the `apply_stencil!` form
-above, for the entry point a geometry-aware caller actually uses.
-
-The metric fuses into the sweep here too, on the terms [`_fusable`](@ref) states.
+above, for the entry point a geometry-aware caller actually uses. Where the order is `2` or more along
+a direction whose own scale factor varies along it, the weights depend on the cell and are rebuilt per
+call; hold a [`masked_stencil_plan`](@ref) there.
 """
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     indices::AbstractMatrix{<:Integer}, weights::AbstractMatrix, dim::Integer;
-    order::Integer = 1, active_only::Bool = true, masked = zero(S), backend = nothing,
+    order::Integer = 1, active_only::Bool = true, masked = zero(S),
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
     d = Int(dim)
-    if backend === nothing && policy isa BlankMasked
-        _check_batched(out, field, grid, Val(N), d)
-        size(indices) == size(weights) || throw(DimensionMismatch(
-            "indices $(size(indices)) and weights $(size(weights)) must have the same size",
-        ))
-        size(indices, 1) == size(field, d) || throw(DimensionMismatch(
-            "got $(size(indices, 1)) stencil rows for direction $d of length $(size(field, d))",
-        ))
-        msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-        if _fusable(out, field, Grids.grid_geometry(grid), msk)
-            _check_mask_extent(msk, size(field), d)
-            vm = _mask_rank(msk, Val(NA))
-            buf = _metric_scratch(T, _nfactors(grid))
-            _dispatch_dim(d, vm) do vdim
-                R = _metric_row_factors!(buf, grid, vdim, Val(N))
-                _dispatch_nodes(size(indices, 2)) do vk
-                    _stencil_sweep_host!(out, field, indices, weights, msk, masked, vdim, vk,
-                                         Val(NA), vm, buf, R)
-                end
-            end
-            return out
-        end
-    end
-    apply_stencil!(out, field, grid, indices, weights, dim; order = order,
-                                  active_only = active_only, masked = masked, backend = backend,
-                                  policy = policy, scratch = scratch)
-    return _scale_by_metric!(out, grid, d, masked)
+    ord = Int(order)
+    _check_batched(out, field, grid, Val(N), d)
+    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
+    _along_arc(grid, d, ord) &&
+        return _arc_derivative!(out, field, grid, d, ord, size(indices, 2), msk, masked, execution, policy)
+    return _apply_axis_table!(out, field, Grids.coordinates(grid, d), indices, weights, d, ord,
+                              Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, msk,
+                              masked, execution, policy, scratch, _derivative_factors(grid, d, execution, ord))
 end

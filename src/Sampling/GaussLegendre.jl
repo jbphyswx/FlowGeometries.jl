@@ -76,7 +76,7 @@ end
 
 function _gauss_legendre_asy!(
     ::Type{T}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector},
-    n::Int, m::Int,
+    lat::Union{Nothing,AbstractVector}, n::Int, m::Int,
 ) where {T<:AbstractFloat}
     vn = 1 / (n + 0.5)
     vn² = vn * vn
@@ -125,29 +125,37 @@ function _gauss_legendre_asy!(
             end
         end
         wi = T(2 / (_j1sq_at_j0_zero(i) * (ai / sin(ai)) * W))
+        φt = T(π / 2 - node)                  # `node` is the colatitude
         # Index 1 is the root nearest +1, so it lands at the top of the ascending output.
-        _put!(μ, n + 1 - i, xt); _put!(w, n + 1 - i, wi)
-        _put!(μ, i, -xt);        _put!(w, i, wi)
+        _put!(μ, n + 1 - i, xt); _put!(w, n + 1 - i, wi); _put!(lat, n + 1 - i, φt)
+        _put!(μ, i, -xt);        _put!(w, i, wi);        _put!(lat, i, -φt)
     end
-    isodd(n) && _put!(μ, m, zero(T))
+    isodd(n) && (_put!(μ, m, zero(T)); _put!(lat, m, zero(T)))
     return nothing
 end
 
 """
-    _gauss_legendre!(T, μ, w, n)
+    _gauss_legendre!(T, μ, w, n; lat = nothing)
 
-Core solve. Either output may be `nothing`, so a caller that wants only the nodes or only the
-weights needs no scratch vector for the other half.
+Core solve, ascending in `μ`. Any output may be `nothing`, so a caller that wants only some of the
+nodes, the weights and the latitudes needs no scratch vector for the rest.
+
+`lat` receives the latitudes `asin(μ)`, formed as `π/2 − θ` from the colatitude `θ` the solve works in.
+Near a pole `μ` rounds next to `±1`, where `asin` amplifies that rounding by `1/sin θ`; the colatitude
+carries no such loss.
 """
 function _gauss_legendre!(
-    ::Type{T}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector}, n::Int,
+    ::Type{T}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector}, n::Int;
+    lat::Union{Nothing,AbstractVector} = nothing,
 ) where {T<:AbstractFloat}
     n ≥ 1 || throw(ArgumentError("need n ≥ 1"))
     μ === nothing || length(μ) == n || throw(DimensionMismatch("μ must have length n"))
     w === nothing || length(w) == n || throw(DimensionMismatch("w must have length n"))
+    lat === nothing || length(lat) == n || throw(DimensionMismatch("lat must have length n"))
     if n == 1
         _put!(μ, 1, zero(T))
         _put!(w, 1, T(2))
+        _put!(lat, 1, zero(T))
         return nothing
     end
     m = (n + 1) ÷ 2                       # roots are symmetric about 0; solve the upper half only
@@ -162,17 +170,19 @@ function _gauss_legendre!(
     #   Newton  8e-16  3e-14   5e-14   3e-12    2e-10
     #   asy     5e-9   2e-13   1e-15   3e-15    1e-14
     if TW === Float64 && n > 60
-        _gauss_legendre_asy!(T, μ, w, n, m)
+        _gauss_legendre_asy!(T, μ, w, lat, n, m)
     else
-        _gauss_legendre_newton!(T, TW, μ, w, n, m)
+        _gauss_legendre_newton!(T, TW, μ, w, lat, n, m)
     end
     return nothing
 end
 
 """
-    _gauss_legendre_newton!(T, TW, μ, w, n, m)
+    _gauss_legendre_newton!(T, TW, μ, w, lat, n, m)
 
-Nodes and weights by Newton on `Pₙ`, evaluated by the Bonnet recurrence from a Tricomi start.
+Nodes and weights by Newton on `Pₙ`, from a Tricomi start, each root iterated in the angle that
+resolves it to a relative `eps(TW)`: a root within `π/4` of the pole in its colatitude `θ`, any other in
+its latitude `φ`. See [`_gl_newton_colatitude`](@ref) and [`_gl_newton_latitude`](@ref).
 
 `O(n)` per root, so `O(n²)` overall — but it is exact arithmetic converging to `eps(TW)`, which the
 asymptotic expansion's fixed Float64 coefficient set cannot do. That makes it the right method for
@@ -181,34 +191,85 @@ cost is microseconds.
 """
 function _gauss_legendre_newton!(
     ::Type{T}, ::Type{TW}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector},
-    n::Int, m::Int,
+    lat::Union{Nothing,AbstractVector}, n::Int, m::Int,
 ) where {T<:AbstractFloat, TW<:AbstractFloat}
     tol = 4 * eps(TW)
     Tn = TW(n)
     @inbounds for i in 1:m
-        θ = TW(π) * (4 * TW(i) - 1) / (4 * Tn + 2)
-        x = (1 - (Tn - 1) / (8 * Tn^3)) * cos(θ)
-        dp = zero(TW)
-        for _ in 1:100
-            # Bonnet: p1 ends as Pₙ(x), p2 as Pₙ₋₁(x); P′ₙ follows from both.
-            p1 = one(TW); p2 = zero(TW)
-            for k in 1:n
-                p3 = p2; p2 = p1
-                p1 = ((2 * TW(k) - 1) * x * p2 - (TW(k) - 1) * p3) / TW(k)
-            end
-            dp = Tn * (x * p1 - p2) / (x * x - 1)
-            δ = p1 / dp
-            x -= δ
-            abs(δ) ≤ tol * (abs(x) + 1) && break
+        θ0 = TW(π) * (4 * TW(i) - 1) / (4 * Tn + 2)
+        θ = acos((1 - (Tn - 1) / (8 * Tn^3)) * cos(θ0))
+        if θ < TW(π) / 4
+            θ, dp = _gl_newton_colatitude(θ, n, tol)
+            x, φ = cos(θ), TW(π) / 2 - θ
+        else
+            φ, dp = _gl_newton_latitude(TW(π) / 2 - θ, n, tol)
+            x = sin(φ)
         end
-        wi = T(TW(2) / ((1 - x * x) * dp * dp))
+        # wᵢ = 2 / ((1 − x²) P′ₙ(x)²), which is 2 over the squared derivative in either angle
+        wi = T(TW(2) / (dp * dp))
         xt = T(x)
-        _put!(μ, i, -xt);        _put!(w, i, wi)
-        _put!(μ, n + 1 - i, xt); _put!(w, n + 1 - i, wi)
+        φt = T(φ)
+        _put!(μ, i, -xt);        _put!(w, i, wi);        _put!(lat, i, -φt)
+        _put!(μ, n + 1 - i, xt); _put!(w, n + 1 - i, wi); _put!(lat, n + 1 - i, φt)
     end
-    # For odd n the central root is exactly zero; the ± assignment above leaves it as -0.0.
-    isodd(n) && _put!(μ, m, zero(T))
+    # For odd n the central root is exactly zero; the ± assignment above leaves it at round-off.
+    isodd(n) && (_put!(μ, m, zero(T)); _put!(lat, m, zero(T)))
     return nothing
+end
+
+"""
+    _gl_newton_colatitude(θ, n, tol) -> (θ, dPₙ/dθ)
+
+Newton on `Pₙ(cos θ)` in `θ`. `Pₙ` is evaluated in `d = 1 − cos θ = 2sin²(θ/2)`, which holds a small
+colatitude to full precision where `cos θ` rounds next to 1, by the Bonnet recurrence written for the
+differences `qₖ = Pₖ − Pₖ₋₁`:
+
+    k qₖ = (k − 1) qₖ₋₁ − (2k − 1) d Pₖ₋₁
+"""
+@inline function _gl_newton_colatitude(θ::TW, n::Int, tol::TW) where {TW<:AbstractFloat}
+    Tn = TW(n)
+    dp = zero(TW)
+    for _ in 1:100
+        sh, ch = sincos(θ / 2)
+        d = 2 * sh * sh
+        p = one(TW); q = zero(TW)                      # P₀ and q₀; they end as Pₙ and qₙ
+        for k in 1:n
+            q = ((TW(k) - 1) * q - (2 * TW(k) - 1) * d * p) / TW(k)
+            p += q
+        end
+        # dPₙ(cos θ)/dθ = −sin θ P′ₙ(x) = n (x Pₙ − Pₙ₋₁) / sin θ, and x Pₙ − Pₙ₋₁ = qₙ − d Pₙ
+        dp = Tn * (q - d * p) / (2 * sh * ch)
+        δ = p / dp
+        θ -= δ
+        abs(δ) ≤ tol * θ && break
+    end
+    return θ, dp
+end
+
+"""
+    _gl_newton_latitude(φ, n, tol) -> (φ, dPₙ/dφ)
+
+Newton on `Pₙ(sin φ)` in `φ`, `Pₙ` by the Bonnet recurrence in `x = sin φ`, which holds a latitude to
+full precision away from the poles.
+"""
+@inline function _gl_newton_latitude(φ::TW, n::Int, tol::TW) where {TW<:AbstractFloat}
+    Tn = TW(n)
+    dp = zero(TW)
+    for _ in 1:100
+        x, c = sincos(φ)
+        p1 = one(TW); p2 = zero(TW)                    # they end as Pₙ(x) and Pₙ₋₁(x)
+        for k in 1:n
+            p3 = p2; p2 = p1
+            p1 = ((2 * TW(k) - 1) * x * p2 - (TW(k) - 1) * p3) / TW(k)
+        end
+        # dPₙ(sin φ)/dφ = cos φ P′ₙ(x) = −n (x Pₙ − Pₙ₋₁) / cos φ
+        dp = -Tn * (x * p1 - p2) / c
+        δ = p1 / dp
+        φ -= δ
+        # Relative to the root, floored at the root spacing's scale `1/n`: odd `n` has a root at 0.
+        abs(δ) ≤ tol * max(abs(φ), inv(Tn)) && break
+    end
+    return φ, dp
 end
 
 _gauss_legendre_μ(n::Integer) = _gauss_legendre_μ(Float64, n)

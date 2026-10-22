@@ -126,9 +126,7 @@ The metric scale factors `hᵈ` at `point`: the physical length of a unit step i
 direction. Cartesian gives `1` in every direction; spherical gives `(R cosφ, R)` on the surface and
 `(r cosφ, r, 1)` with a radius direction.
 
-They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`, so a divergence or a
-curl is assembled from these plus [`fd_weights`](@ref) at the call site, where the staggering and the
-boundary condition are chosen.
+They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`.
 
 `Val(N)` names how many components `point` has, giving a concrete `NTuple{N}` from a point whose
 length is a runtime value.
@@ -155,7 +153,7 @@ The working buffers a degrading [`apply_stencil!`](@ref FlowGeometries.Operators
 the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
 
 **One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
-so chunks cannot share them. A threaded `backend` therefore allocates its own set per chunk and ignores
+so chunks cannot share them. A threaded `execution` therefore allocates its own set per chunk and ignores
 one passed here.
 """
 struct StencilScratch{T<:AbstractFloat,VT<:AbstractVector{T},MT<:AbstractMatrix{T}}
@@ -291,19 +289,21 @@ end
 
 
 """
-    metric_floor(geometry) -> T
+    metric_floor(geometry, dim) -> T
 
-The magnitude below which a scale factor is treated as degenerate: `L·√eps(T)` for a curved geometry of
-size `L`, and `0` for a Cartesian one, whose metric never degenerates.
+The magnitude at or below which the scale factor along `dim` is degenerate: `√eps(T)` times the size of
+that factor where it does not degenerate — the radius for a sphere's longitude and latitude, the
+semi-major axis for a spheroid's, and one for a radius or a height, whose factor is one. `0` on a
+Cartesian geometry, whose metric never degenerates.
 
-It scales with both the geometry's size and the element type. At `Float32` on Earth's radius,
-`cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole around 0.28 m, above any fixed small constant.
+It scales with the geometry's size, the direction's units and the element type. At `Float32` on Earth's
+radius, `cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole around 0.28 m, above any fixed small
+constant, while `h_r = 1` stays far above its own floor.
 """
 function metric_floor end
 
-
-@inline metric_floor(::Geometry.AbstractCartesianGeometry{T}) where {T} = zero(T)
-@inline metric_floor(g::Geometry.AbstractSphericalGeometry{T}) where {T} =
-    Geometry.radius(g) * sqrt(eps(T))
-@inline metric_floor(g::Geometry.AbstractEllipsoidalGeometry{T}) where {T} =
-    Geometry.semimajor_axis(g) * sqrt(eps(T))
+@inline metric_floor(::Geometry.AbstractCartesianGeometry{T}, ::Integer) where {T} = zero(T)
+@inline metric_floor(g::Geometry.AbstractSphericalGeometry{T}, d::Integer) where {T} =
+    (d ≤ 2 ? Geometry.radius(g) : one(T)) * sqrt(eps(T))
+@inline metric_floor(g::Geometry.AbstractEllipsoidalGeometry{T}, d::Integer) where {T} =
+    (d ≤ 2 ? Geometry.semimajor_axis(g) : one(T)) * sqrt(eps(T))

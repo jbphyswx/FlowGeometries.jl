@@ -11,7 +11,7 @@ using FlowGeometries: FlowGeometries as FG
 using CairoMakie: CairoMakie as CM
 using FFTW: FFTW   # an FFT backend, so the O(n log n) equiangular path is what gets timed
 using Statistics: Statistics
-using Printf: @sprintf
+using Printf: Printf
 
 const ASSETS_DIR = joinpath(@__DIR__, "..", "src", "assets")
 mkpath(ASSETS_DIR)
@@ -113,7 +113,7 @@ function fig_cell_areas()
         a = FG.Grids.measure(g)
         rel = a ./ Statistics.mean(a)
         λ, φ = FG.Grids.materialize(g)
-        ax = disc_axis(fig, 2, k, @sprintf("%s — min/max %.2f", name, minimum(a) / maximum(a)))
+        ax = disc_axis(fig, 2, k, Printf.@sprintf("%s — min/max %.2f", name, minimum(a) / maximum(a)))
         xs = Float64[]; ys = Float64[]; cs = Float64[]
         for i in eachindex(λ)
             x, y, vis = ortho(λ[i], φ[i], VIEW...)
@@ -174,7 +174,7 @@ function fig_quadrature()
         p̂ = sum((lx .- Statistics.mean(lx)) .* (ly .- Statistics.mean(ly))) /
             sum((lx .- Statistics.mean(lx)) .^ 2)
         CM.scatterlines!(ax2, Float64.(sizes), t; color = col, linewidth = 2, markersize = 8,
-                         linestyle = styles[k], label = @sprintf("%s  (p = %.2f)", name, p̂))
+                         linestyle = styles[k], label = Printf.@sprintf("%s  (p = %.2f)", name, p̂))
     end
     CM.axislegend(ax2; position = :lt, framevisible = false)
 
@@ -273,7 +273,7 @@ function fig_cartesian()
         uni1 = FG.Grids.isuniform(g, 1)
         uni2 = FG.Grids.isuniform(g, 2)
         ax = CM.Axis(fig[2, k];
-                     title = @sprintf("%s\nisuniform = (%s, %s)", name, uni1, uni2),
+                     title = Printf.@sprintf("%s\nisuniform = (%s, %s)", name, uni1, uni2),
                      aspect = CM.DataAspect(), xlabel = "x", ylabel = "y")
         # shade each cell by its own measure first, so the cell boundaries stay legible on top of it
         m = FG.Grids.measure(g)
@@ -300,7 +300,7 @@ function fig_cartesian()
     bnd = FG.Connectivity.boundary_cells(gm)
     code = [!m[i, j] ? 0.0 : (int[i, j] ? 2.0 : 1.0) for i in 1:40, j in 1:40]
     ax3 = CM.Axis(fig[2, 3];
-                  title = @sprintf("mask topology\n%d holes, %d boundary cells", holes, count(bnd)),
+                  title = Printf.@sprintf("mask topology\n%d holes, %d boundary cells", holes, count(bnd)),
                   aspect = CM.DataAspect())
     CM.heatmap!(ax3, 1:40, 1:40, code; colormap = CM.cgrad([:white, :orangered, :steelblue], 3;
                                                            categorical = true))

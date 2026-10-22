@@ -15,18 +15,51 @@ components alone.
     _min_image(p0, pt, prd) -> NTuple
 
 `pt` brought to the image nearest `p0`, per component, for each direction with a nonzero wrap length.
-
-For an angular coordinate the geometry's own distance is already `2π`-periodic and this changes nothing
-(it also keeps Vincenty inside its `|Δλ| ≤ π` regime); on a periodic Cartesian coordinate it carries a
-pair across the seam. Per-component minimum image is the global minimum for a separable metric, which
-the Euclidean one is.
+Per-component minimum image is the global minimum for a separable metric, which the Euclidean one is.
 """
-@inline function _min_image(p0::NTuple{N,Any}, pt::NTuple{N,Any}, prd::NTuple{N,Any}) where {N}
-    return ntuple(Val(N)) do d
-        p = prd[d]
-        p > zero(p) ? p0[d] + (pt[d] - p0[d] - p * round((pt[d] - p0[d]) / p)) : pt[d]
-    end
+@inline _min_image(p0::NTuple{N,Any}, pt::NTuple{N,Any}, prd::NTuple{N,Any}) where {N} =
+    map((a, b, p) -> p > zero(p) ? a + _image_offset(a, b, p) : b, p0, pt, prd)
+
+"""
+    _image_offset(a, b, P) -> T
+
+`b − a` reduced to the image nearest `a` for wrap length `P > 0`. The raw difference is held exactly as
+its rounded value and the rounding error (Knuth's TwoSum), and a whole number of wraps is removed from
+the rounded value alone, so a pair either side of the seam keeps the precision of its gap.
+"""
+@inline function _image_offset(a::T, b::T, P::T) where {T<:AbstractFloat}
+    s = b - a
+    z = s - b
+    e = (b - (s - z)) + (-a - z)
+    return (s - round(s / P) * P) + e
 end
+
+@inline _image_offset(a::Real, b::Real, P::Real) = _image_offset(promote(float(a), b, P)...)
+
+# Each component's offset `b − a`, reduced where its direction wraps.
+@inline _offsets(p0::Tuple, pt::Tuple, prd::Tuple) =
+    map((a, b, p) -> p > zero(p) ? _image_offset(a, b, p) : b - a, p0, pt, prd)
+
+"""
+    _image_pair(geo, p0, pt, prd) -> (a, b)
+
+Two points whose distance under `geo` is the distance from `p0` to the image of `pt` nearest it, `prd`
+being each direction's wrap length (zero where it does not wrap).
+
+On the plane the distance depends on the offset alone, which is returned against the origin, each
+component formed by [`_image_offset`](@ref). On a sphere or a spheroid the geometry reduces a longitude
+difference by an exact `2π` itself, so the longitude is left as stored.
+"""
+@inline function _image_pair(::Geometry.AbstractCartesianGeometry, p0::Tuple, pt::Tuple, prd::Tuple)
+    Δ = _offsets(p0, pt, prd)
+    return (map(zero, Δ), Δ)
+end
+
+@inline _image_pair(::Geometry.AbstractLonLatGeometry, p0::Tuple, pt::Tuple, prd::Tuple) =
+    (p0, (first(pt), _min_image(Base.tail(p0), Base.tail(pt), Base.tail(prd))...))
+
+@inline _image_pair(::Geometry.AbstractGeometry, p0::Tuple, pt::Tuple, prd::Tuple) =
+    (p0, _min_image(p0, pt, prd))
 
 """
     displacement(grid, I, J) -> NTuple{N,T}
@@ -111,15 +144,22 @@ spatial index's answer back into a cell.
 # `Val(length(p0))`: `_raw_coords` returns an `NTuple` whose length is in its type, and that length is
 # the coordinate count on every architecture — the grid rank where the two coincide, and the node set's
 # coordinate count where they do not.
-@inline function _min_image_pair(grid::AbstractGrid, I, J)
+@inline function _cell_image_pair(grid::AbstractGrid, I, J)
     p0 = _cell_coords(grid, I)
-    q = _min_image(p0, _cell_coords(grid, J), _wrap_lengths(grid, Val(length(p0))))
-    return p0, q
+    return _image_pair(grid_geometry(grid), p0, _cell_coords(grid, J), _wrap_lengths(grid, Val(length(p0))))
 end
 
 @inline function displacement(grid::AbstractGrid, I, J)
-    p0, q = _min_image_pair(grid, I, J)
-    return ntuple(d -> q[d] - p0[d], Val(length(p0)))
+    p0 = _cell_coords(grid, I)
+    return _displacement(grid_geometry(grid), p0, _cell_coords(grid, J), _wrap_lengths(grid, Val(length(p0))))
+end
+
+@inline _displacement(::Geometry.AbstractGeometry, p0::Tuple, pt::Tuple, prd::Tuple) = _offsets(p0, pt, prd)
+
+# A wrapping longitude is reduced by an exact `2π`, as the geometry's own distance reduces it.
+@inline function _displacement(::Geometry.AbstractLonLatGeometry, p0::Tuple, pt::Tuple, prd::Tuple)
+    λ = first(prd) > zero(first(prd)) ? Geometry._lon_diff(first(p0), first(pt)) : first(pt) - first(p0)
+    return (λ, _offsets(Base.tail(p0), Base.tail(pt), Base.tail(prd))...)
 end
 
 """
@@ -135,13 +175,23 @@ periodic direction, where the point form on the raw coordinates gives the full e
 direction contributes its plain coordinate difference. See [`displacement`](@ref) for the offset it was
 taken from.
 """
-@inline function Geometry.distance(grid::AbstractGrid, I, J)
-    p0, q = _min_image_pair(grid, I, J)
-    return Geometry.distance(grid_geometry(grid), p0, q)
-end
+@inline Geometry.distance(grid::AbstractGrid, I, J) =
+    Geometry.distance(grid_geometry(grid), _cell_image_pair(grid, I, J)...)
+
+"""
+    Geometry.normal_coordinates(grid, I, J) -> NamedTuple
+
+[`Geometry.normal_coordinates`](@ref) of cell `J` about cell `I`, the pair reduced to the nearest image
+in every periodic direction as for [`Geometry.distance`](@ref)`(grid, I, J)`, whose value is their
+length.
+"""
+@inline Geometry.normal_coordinates(grid::AbstractGrid, I, J) =
+    Geometry.normal_coordinates(grid_geometry(grid), _cell_image_pair(grid, I, J)...)
 
 # `CartesianIndex` is what `CartesianIndices` hands a traversal, so accept it directly.
 @inline Geometry.distance(grid::AbstractGrid, I::CartesianIndex, J::CartesianIndex) =
     Geometry.distance(grid, Tuple(I), Tuple(J))
 @inline displacement(grid::AbstractGrid, I::CartesianIndex, J::CartesianIndex) =
     displacement(grid, Tuple(I), Tuple(J))
+@inline Geometry.normal_coordinates(grid::AbstractGrid, I::CartesianIndex, J::CartesianIndex) =
+    Geometry.normal_coordinates(grid, Tuple(I), Tuple(J))

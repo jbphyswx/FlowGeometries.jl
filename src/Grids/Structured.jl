@@ -73,7 +73,9 @@ end
 """
     sampling(grid) -> AbstractSphericalSampling | Nothing
 
-The node-set recipe `grid`'s axes were built from, or `nothing` where they were given directly.
+The node-set recipe `grid`'s cells come from, or `nothing` where its coordinates were given directly. A
+pixelization is its recipe: a HEALPix grid answers `HEALPixSampling(nside)`, a cubed-sphere, Yin–Yang or
+icosahedral grid its own sampling, a ring grid the reduced Gaussian rule it was built from.
 
 Coordinates do not determine it: Gauss–Legendre and an arbitrary lat–lon grid are the same numbers to
 within round-off, and only the recipe says which quadrature is exact on them. Keeping it means a grid
@@ -93,12 +95,18 @@ own.
 
 `fields` need only name what changes; everything else is carried over.
 """
-@inline function rebuild(grid::G, fields::NamedTuple) where {G<:AbstractGrid}
-    unknown = Base.setdiff(keys(fields), fieldnames(G))
-    isempty(unknown) || throw(ArgumentError(
-        "$(nameof(G)) has no field $(join(unknown, ", ")); it has $(join(fieldnames(G), ", "))",
-    ))
-    return _from_fields(G, map(n -> get(fields, n, getfield(grid, n)), fieldnames(G))...)
+@inline rebuild(grid::G, fields::NamedTuple) where {G<:AbstractGrid} =
+    _from_fields(G, _rebuilt_fields(grid, fields)...)
+
+# One value per field of `G`: the replacement where `fields` names it, the grid's own otherwise. The
+# names are type parameters, so the choice is made per field at compile time.
+@generated function _rebuilt_fields(grid::G, fields::NamedTuple{K}) where {G<:AbstractGrid, K}
+    names = fieldnames(G)
+    unknown = Tuple(k for k in K if !(k in names))
+    isempty(unknown) || return :(throw(ArgumentError($(
+        "$(nameof(G)) has no field $(join(unknown, ", ")); it has $(join(names, ", "))"))))
+    return Expr(:tuple, (n in K ? :(getfield(fields, $(QuoteNode(n)))) :
+                                  :(getfield(grid, $(QuoteNode(n)))) for n in names)...)
 end
 
 # Every type parameter is determined by the field types, so these re-derive the whole list from the
@@ -150,9 +158,13 @@ Positional coordinate values at indices `I`. Internal; prefer [`coords`](@ref).
 """
 @inline function _raw_coords(grid::AbstractStructuredGrid{G,T}, I::Vararg{Integer,N}) where {G,T,N}
     c = coordinates(grid)
+    length(c) == N || _index_count_error(grid, length(c), N)
     @boundscheck _checkaxes(c, I)
     return ntuple(d -> @inbounds(c[d][I[d]]), Val(N))
 end
+
+@noinline _index_count_error(grid, ndir::Int, nidx::Int) = throw(ArgumentError(
+    "$(nameof(typeof(grid))) has $ndir directions; got $nidx indices"))
 
 # CurvilinearGrid / UnstructuredGrid _raw_coords are defined after those types exist.
 
@@ -197,23 +209,19 @@ Write positional coordinates into a preallocated `AbstractVector` (`length(out) 
     return out
 end
 
-# Auto-detect axis-1 periodicity: on a spherical grid axis 1 is longitude, and a longitude axis
-# that closes the full 2π circle (to within one cell) is periodic; a regional span is bounded.
-# Cartesian axes are opt-in only, having no analogous auto-detectable physical closure.
-#
-# Compares magnitudes, so the answer is the same in either storage order.
-_auto_periodic_x(::Geometry.AbstractCartesianGeometry, x::AbstractVector) = false
-_auto_periodic_x(
-    ::Union{Geometry.AbstractSphericalGeometry,Geometry.AbstractEllipsoidalGeometry},
-    x::AbstractVector{T},
-) where {T<:AbstractFloat} = _closes_circle(x)
+# A direction's topology from its axis type: an `Axes.PeriodicAxis` wraps, any other axis ends.
+@inline _axis_topology(::Axes.PeriodicAxis) = Periodic()
+@inline _axis_topology(::AbstractVector) = Bounded()
 
-function _closes_circle(x::AbstractVector{T}) where {T<:AbstractFloat}
-    length(x) > 2 || return false
-    dλ = abs(x[2] - x[1])
-    iszero(dλ) && return false
-    return isapprox(abs(x[end] - x[1]) + dλ, T(2π); atol = dλ)
-end
+# A caller's topology for a direction, which a periodic axis requires to be `Periodic`.
+@inline _agree_topology(t::AbstractTopology, ::AbstractVector, ::Int) = t
+@inline _agree_topology(t::Periodic, ::Axes.PeriodicAxis, ::Int) = t
+@noinline _agree_topology(::Bounded, ::Axes.PeriodicAxis, d::Int) = throw(ArgumentError(
+    "direction $d is a PeriodicAxis, which wraps; a bounded direction takes another axis type"))
+
+_grid_topology(::Val{N}, ::Nothing, ax::Tuple) where {N} = map(_axis_topology, ax)
+_grid_topology(::Val{N}, topo, ax::Tuple) where {N} =
+    map(_agree_topology, _as_topology(Val(N), topo), ax, ntuple(identity, Val(N)))
 
 """
     _wrap_sign(x) -> ±1
@@ -241,15 +249,19 @@ generically be rebuilt at a new eltype. That case becomes an [`Axes.UniformAxis`
 also how a `Float32` axis stops carrying `Float64` internals. Call [`Axes.uniform_axis`](@ref) to
 convert at the call site.
 
-Four methods, ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
+Methods ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `AbstractRange` and an
 `AbstractVector{T}`, so the parameterized range form is needed to break that tie):
 - `AbstractRange{T}` / `AbstractVector{T}`: passthrough, zero cost, type preserved.
 - `AbstractRange` (wrong eltype): rebuilt as `UniformAxis{T}`, still uniform and now `isbits`.
+- [`Axes.PeriodicAxis`](@ref) (wrong eltype): rebuilt as a `PeriodicAxis{T}` of the same period.
 - `AbstractVector` (wrong eltype): copied with `similar`, so a device-resident array stays in its own
   storage.
 """
 _to_axis(::Type{T}, x::AbstractRange{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractRange) where {T<:AbstractFloat} = Axes.uniform_axis(T, x)
+_to_axis(::Type{T}, x::Axes.PeriodicAxis{T}) where {T<:AbstractFloat} = x
+_to_axis(::Type{T}, x::Axes.PeriodicAxis) where {T<:AbstractFloat} =
+    Axes.PeriodicAxis{T}(first(x), Axes.wrap_sign(x) * Axes.period(x), length(x))
 _to_axis(::Type{T}, x::AbstractVector{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = copyto!(similar(x, T), x)
 
@@ -334,22 +346,6 @@ end
     length(x) < 2 ? one(T) : T(length(x)) * abs(T(step(x)))
 
 """
-    _curvilinear_topology(geometry, x, topo) -> NTuple{2,AbstractTopology}
-
-Per-direction closure. Absent a caller's choice, direction 1 is auto-detected from the first row of
-centres read as a longitude-like axis, as [`StructuredGrid`](@ref) does.
-"""
-function _curvilinear_topology(
-    geometry::Geometry.AbstractGeometry, x::AbstractArray{<:Any,N}, topo,
-) where {N}
-    topo === nothing || return _as_topology(Val(N), topo)
-    # Auto-detection reads direction 1 along its own line through the first cell of every other.
-    line = @view x[:, ntuple(_ -> 1, Val(N - 1))...]
-    wraps = size(x, 1) ≥ 3 && _auto_periodic_x(geometry, line)
-    return ntuple(d -> d == 1 && wraps ? Periodic() : Bounded(), Val(N))
-end
-
-"""
     _curvilinear_periods(geometry, centers, topology, period) -> NTuple{N,T}
 
 Wrap length per periodic direction, zero where bounded. Spherical longitude closes at `2π`; a
@@ -378,13 +374,114 @@ function _curvilinear_periods(
 end
 
 """
+    _half_gaps(x, period) -> (below, above)
+
+Half the distance from each centre of an axis of `N ≥ 2` centres to its two faces, `below` toward
+smaller coordinates and `above` toward larger. Faces sit midway between neighbours; at a bounded end the
+outer face is as far out as the inner one, and at a periodic end it is half the seam gap out, so
+`below[i] + above[i]` is `Discretization.cell_width(x, i, period)`. Each entry is half a difference of two
+stored coordinates, so no face position is rounded.
+"""
+function _half_gaps(x::AbstractVector{T}, period::Union{Nothing,Real}) where {T<:AbstractFloat}
+    n = length(x)
+    d = abs.(view(x, 2:n) .- view(x, 1:(n - 1))) ./ T(2)
+    prev = similar(x, T, n)      # toward index i - 1
+    next = similar(x, T, n)      # toward index i + 1
+    @views prev[2:n] .= d
+    @views next[1:(n - 1)] .= d
+    if period === nothing
+        @views prev[1:1] .= d[1:1]
+        @views next[n:n] .= d[(n - 1):(n - 1)]
+    else
+        g = abs(T(period) - abs(@inbounds(x[n]) - @inbounds(x[1]))) / T(2)
+        @views prev[1:1] .= g
+        @views next[n:n] .= g
+    end
+    return Axes.wrap_sign(x) > 0 ? (prev, next) : (next, prev)
+end
+
+# `π/2 - T(π)/2`, the rounding error of `T(π)/2`, so `(T(π)/2 - |φ|) + _half_pi_lo(T)` is a colatitude
+# carrying no error from `π/2` itself.
+@inline _half_pi_lo(::Type{Float64}) = 6.123233995736766e-17
+@inline _half_pi_lo(::Type{Float32}) = -4.371139f-8
+@inline _half_pi_lo(::Type{T}) where {T<:AbstractFloat} = T(big(π) / 2 - big(T(π)) / 2)
+
+"""
+    _polar_cell(φ, below, above) -> (lo, width, north)
+
+The latitude cell centred at `φ`, in colatitude from the pole nearer `φ` (`north` says which): the span
+`[lo, lo + width]`, clamped to `[0, π]`. The centre's colatitude carries `π/2` as `T(π)/2` plus its
+rounding error, so near a pole it is as accurate as `φ`, and the span is built from the half-gaps
+without forming a face.
+"""
+@inline function _polar_cell(φ::T, below::T, above::T) where {T<:AbstractFloat}
+    north = !signbit(φ)
+    c = (T(π) / 2 - abs(φ)) + _half_pi_lo(T)
+    toward, away = north ? (above, below) : (below, above)
+    return (max(c - toward, zero(T)), min(toward, c) + min(away, T(π) - c), north)
+end
+
+# `|sin φ₊ - sin φ₋|` for the latitude cell, the area of its band on the unit sphere per radian of
+# longitude, as `2 sin(t̄) sin(w/2)` about the mid-colatitude `t̄` and width `w`: a narrow band and a
+# polar one lose no digits to cancellation.
+@inline function _band_sine(φ::T, below::T, above::T) where {T<:AbstractFloat}
+    lo, w, _ = _polar_cell(φ, below, above)
+    return 2 * sin(lo + w / 2) * sin(w / 2)
+end
+
+@inline _band_arc(φ::T, below::T, above::T) where {T<:AbstractFloat} = _polar_cell(φ, below, above)[2]
+
+# `(r₊³ - r₋³)/3`, the radial integral of `r²` over the cell, the lower face clamped at the origin.
+@inline function _shell_cube(r::T, below::T, above::T) where {T<:AbstractFloat}
+    lo = max(r - below, zero(T))
+    w = r ≥ below ? below + above : max(r + above, zero(T))
+    hi = lo + w
+    return w * (lo * lo + lo * hi + hi * hi) / T(3)
+end
+
+# `f(centre, below, above)` over every cell of an axis of `n ≥ 2` centres.
+@inline function _per_cell(f::F, x::AbstractVector, period) where {F}
+    below, above = _half_gaps(x, period)
+    return f.(x, below, above)
+end
+
+"""
+    _gl8(f, φ, below, above, nodes) -> T
+
+`∫ f(φ′, cos φ′) dφ′` over the latitude cell of [`_polar_cell`](@ref), by 8-point Gauss–Legendre in
+colatitude, `cos φ′` passed as the sine of the colatitude. The spheroid's latitude integrands are
+analytic within a distance of about 3 of the real axis, so the rule is exact to round-off for any cell
+on the sphere.
+"""
+@inline function _gl8(
+    f::F, φ::T, below::T, above::T, nodes::Tuple{NTuple{8,T},NTuple{8,T}},
+) where {F,T<:AbstractFloat}
+    lo, w, north = _polar_cell(φ, below, above)
+    x, wt = nodes
+    h = w / 2
+    s = zero(T)
+    @inbounds for k in 1:8
+        t = (lo + h) + h * x[k]
+        lat = (T(π) / 2 - t) + _half_pi_lo(T)
+        s += wt[k] * f(north ? lat : -lat, sin(t))
+    end
+    return h * s
+end
+
+function _gl8_nodes(::Type{T}) where {T<:AbstractFloat}
+    r = SphericalSampling._gauss_legendre_μ(T, 8)
+    return (ntuple(k -> @inbounds(r.μ[k]), Val(8)), ntuple(k -> @inbounds(r.w[k]), Val(8)))
+end
+
+"""
     _measure_factors(geometry, axes, periods) -> NTuple{N,AbstractVector}
 
 Per-axis factors whose outer product is the cell measure: `measure[I...] == prod(w[d][I[d]])`.
 
-Every rectilinear cell measure this package supports is separable in exactly this way — Cartesian
-`Δx·Δy·Δz`, and spherical `R²cosφ·Δλ·Δφ` = `(Δλ) · (R²cosφ·Δφ)` or `r²cosφ·Δλ·Δφ·Δr` =
-`(Δλ) · (cosφ·Δφ) · (r²·Δr)`. Building the measure as an outer product of these factors keeps the
+A cell spans the faces of [`_half_gaps`](@ref), latitude faces clamped to the poles, and its measure
+is the exact integral of the metric over that span: Cartesian `Δx·Δy·Δz`; spherical
+`Δλ · R²(sin φ₊ - sin φ₋)`, or `Δλ · (sin φ₊ - sin φ₋) · (r₊³ - r₋³)/3` with a radius direction; on a
+spheroid `Δλ · ∫ M(φ)N(φ)cos φ dφ`. Building the measure as an outer product of these factors keeps the
 result in whatever array type the axes use, and exposes the separability to a caller that can exploit
 it.
 
@@ -416,21 +513,20 @@ function _measure_factors(
         return (Discretization.cell_widths(λ, periods[1]),
                 Axes.ConstantVector(R * cos(@inbounds φ[1]), 1))
     elseif Nλ == 1
-        return (Axes.ConstantVector(one(T), 1), R .* Discretization.cell_widths(φ, periods[2]))
+        return (Axes.ConstantVector(one(T), 1), R .* _per_cell(_band_arc, φ, periods[2]))
     end
-    return (Discretization.cell_widths(λ, periods[1]),
-            (R^2) .* cos.(φ) .* Discretization.cell_widths(φ, periods[2]))
+    return (Discretization.cell_widths(λ, periods[1]), (R^2) .* _per_cell(_band_sine, φ, periods[2]))
 end
 
-# 3-D and above: `(Δλ)·(cosφ·Δφ)·(r²·Δr)`, further directions entering as plain widths.
+# 3-D and above: `(Δλ)·(sin φ₊ - sin φ₋)·((r₊³ - r₋³)/3)`, further directions entering as plain widths.
 function _measure_factors(
     geometry::G, axes::NTuple{N,AbstractVector{T}}, periods::NTuple{N,Union{Nothing,Real}},
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     λ, φ, r = axes[1], axes[2], axes[3]
     return (
         Discretization.cell_widths(λ, periods[1]),
-        cos.(φ) .* Discretization.cell_widths(φ, periods[2]),
-        (r .^ 2) .* Discretization.cell_widths(r, periods[3]),
+        length(φ) == 1 ? cos.(φ) : _per_cell(_band_sine, φ, periods[2]),
+        _per_cell(_shell_cube, r, periods[3]),
         ntuple(d -> Discretization.cell_widths(axes[d + 3], periods[d + 3]), Val(N - 3))...,
     )
 end
@@ -448,57 +544,99 @@ function _measure_factors(
 ) where {T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
     λ, φ = axes
     Nλ, Nφ = length(λ), length(φ)
-    # Closures, so each broadcast runs over `φ` alone — a geometry is not a broadcastable scalar.
-    _area_factor(φj) = Geometry.meridional_radius(geometry, φj) *
-                       Geometry.prime_vertical_radius(geometry, φj) * cos(φj)
-    _mer_factor(φj) = Geometry.meridional_radius(geometry, φj)
     if Nλ == 1 && Nφ == 1
         return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))
     elseif Nφ == 1
         φ1 = @inbounds φ[1]
         return (Discretization.cell_widths(λ, periods[1]),
                 Axes.ConstantVector(Geometry.prime_vertical_radius(geometry, φ1) * cos(φ1), 1))
-    elseif Nλ == 1
-        return (Axes.ConstantVector(one(T), 1),
-                _mer_factor.(φ) .* Discretization.cell_widths(φ, periods[2]))
     end
-    return (Discretization.cell_widths(λ, periods[1]),
-            _area_factor.(φ) .* Discretization.cell_widths(φ, periods[2]))
+    nodes = _gl8_nodes(T)
+    # Closures, so each broadcast runs over the axis alone — a geometry is not a broadcastable scalar.
+    arc(p, b, a) = _gl8((t, _) -> Geometry.meridional_radius(geometry, t), p, b, a, nodes)
+    band(p, b, a) = _gl8(p, b, a, nodes) do t, c
+        Geometry.meridional_radius(geometry, t) * Geometry.prime_vertical_radius(geometry, t) * c
+    end
+    Nλ == 1 && return (Axes.ConstantVector(one(T), 1), _per_cell(arc, φ, periods[2]))
+    return (Discretization.cell_widths(λ, periods[1]), _per_cell(band, φ, periods[2]))
 end
 
 """
-    _cell_measure(geometry, axes, periods)
+    _quadrature_weights(geometry, sampling, axes) -> AbstractVector | Nothing
+
+The sampling's latitude quadrature weights when they are the measure's latitude factor: a 2-D spherical
+grid on a sampling that has weights, both directions resolved. `nothing` otherwise, and the measure is
+the geometric one.
+"""
+_quadrature_weights(_, _, _) = nothing
+
+const _WeightedSampling = Union{
+    SphericalSampling.AbstractGaussLegendreSampling, SphericalSampling.AbstractDriscollHealySampling,
+    SphericalSampling.AbstractClenshawCurtisSampling,
+}
+
+function _quadrature_weights(
+    ::Geometry.AbstractSphericalGeometry{T}, s::_WeightedSampling, ax::NTuple{2,AbstractVector{T}},
+) where {T<:AbstractFloat}
+    (length(ax[1]) ≥ 2 && length(ax[2]) ≥ 2) || return nothing
+    return SphericalSampling.latitude_weights(T, s, length(ax[2]))
+end
+
+"""
+    _cell_measure(geometry, axes, periods, weights)
 
 The grid's stored measure: a [`SeparableMeasure`](@ref) wherever the metric factors per axis, and a
-[`SlabMeasure`](@ref) where one pair of directions is coupled and the rest are not.
+[`SlabMeasure`](@ref) where one pair of directions is coupled and the rest are not. Given latitude
+quadrature `weights`, the latitude factor is `R²·wⱼ`, so `Σ measure·f` is the sampling's quadrature.
 """
-_cell_measure(geometry, ax, per) = SeparableMeasure(_measure_factors(geometry, ax, per))
+_cell_measure(geometry, ax, per, ::Nothing) = SeparableMeasure(_measure_factors(geometry, ax, per))
+
+function _cell_measure(
+    geometry::Geometry.AbstractSphericalGeometry{T}, ax::NTuple{2,AbstractVector{T}},
+    per::NTuple{2,Union{Nothing,Real}}, w::AbstractVector{T},
+) where {T<:AbstractFloat}
+    λ, φ = ax
+    length(w) == length(φ) || throw(DimensionMismatch(
+        "$(length(w)) latitude weights for a latitude axis of $(length(φ))",
+    ))
+    wφ = (Geometry.radius(geometry)^2) .* copyto!(similar(φ, T, length(φ)), w)
+    return SeparableMeasure((Discretization.cell_widths(λ, per[1]), wφ))
+end
 
 # Geodetic `(λ, φ, h)`: the volume element `(N(φ)+h)cosφ·(M(φ)+h)` offsets each curvature radius by the
 # height, so φ and h are coupled and no product of per-axis factors reproduces it. Longitude enters
 # none of it, so φ and h alone are stored together — see [`SlabMeasure`](@ref). Further directions
-# still enter as plain widths.
+# still enter as plain widths. The height integral is exact and the latitude one [`_gl8`](@ref).
 function _cell_measure(
-    geometry::G, ax::NTuple{N,AbstractVector{T}}, per::NTuple{N,Union{Nothing,Real}},
+    geometry::G, ax::NTuple{N,AbstractVector{T}}, per::NTuple{N,Union{Nothing,Real}}, ::Nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
     N ≥ 3 || return SeparableMeasure(_measure_factors(geometry, ax, per))
     λ, φ, h = ax[1], ax[2], ax[3]
     wλ = Discretization.cell_widths(λ, per[1])
-    wφ = Discretization.cell_widths(φ, per[2])
-    wh = Discretization.cell_widths(h, per[3])
     rest = ntuple(d -> Discretization.cell_widths(ax[d + 3], per[d + 3]), Val(N - 3))
-    slab = similar(wλ, T, (length(φ), length(h)))
-    @inbounds for k in eachindex(h), j in eachindex(φ)
-        φj, hk = φ[j], h[k]
-        slab[j, k] = (Geometry.prime_vertical_radius(geometry, φj) + hk) * cos(φj) *
-                     (Geometry.meridional_radius(geometry, φj) + hk) * wφ[j] * wh[k]
+    nodes = _gl8_nodes(T)
+    bφ, aφ = _half_gaps(φ, per[2])
+    bh, ah = _half_gaps(h, per[3])
+    Nh = length(h)
+    # ∫(N+h)(M+h) dh = NM·Δh + (N+M)·Δ(h²)/2 + Δ(h³)/3, each difference in a form that does not cancel.
+    function cell(p, pb, pa, hk, hb, ha)
+        dh = hb + ha
+        lo, hi = hk - hb, hk + ha
+        h2 = dh * (lo + hi) / T(2)
+        h3 = dh * (lo * lo + lo * hi + hi * hi) / T(3)
+        return _gl8(p, pb, pa, nodes) do t, c
+            Nt = Geometry.prime_vertical_radius(geometry, t)
+            Mt = Geometry.meridional_radius(geometry, t)
+            c * (Nt * Mt * dh + (Nt + Mt) * h2 + h3)
+        end
     end
+    slab = cell.(φ, bφ, aφ, reshape(h, 1, Nh), reshape(bh, 1, Nh), reshape(ah, 1, Nh))
     return SlabMeasure(wλ, slab, rest)
 end
 
 """
-    StructuredGrid(geometry, axes...; mask = nothing, topology = nothing, period = nothing)
-    StructuredGrid(geometry, axes..., mask; topology = nothing, period = nothing)
+    StructuredGrid(geometry, axes...; mask, topology, period, periodic, sampling)
+    StructuredGrid(geometry, axes..., mask; topology, period, periodic, sampling)
 
 Build a rectilinear grid in **any** number of dimensions from one coordinate vector per direction,
 pre-computing the separable cell measure from the geometry.
@@ -510,9 +648,10 @@ preserves uniformity and keeps a device-resident axis on its device.
 For a `SphericalGeometry` the directions are `(λ, φ, r, …)`: longitude, geographic latitude, and — in
 3-D and above — the absolute radius from the origin. (A
 [`Geometry.SpheroidGeometry`](@ref FlowGeometries.Geometry.SpheroidGeometry)'s third direction is a
-height above the surface instead.) Measures are the metric elements `R·Δλ`, `R²cosφ·Δλ·Δφ` and
-`r²cosφ·Δλ·Δφ·Δr`, with further directions entering as plain widths. A `CartesianGeometry` measure is
-the product of the per-direction widths.
+height above the surface instead.) A cell's measure is the exact integral of the metric between its
+faces, latitude faces clamped to the poles: `R·Δλ`, `R²·Δλ·(sin φ₊ - sin φ₋)` and
+`Δλ·(sin φ₊ - sin φ₋)·(r₊³ - r₋³)/3`, `Δλ·∫M(φ)N(φ)cos φ dφ` on a spheroid, with further directions
+entering as plain widths. A `CartesianGeometry` measure is the product of the per-direction widths.
 
 # Keywords
 - `mask`: an `N`-D `Bool` array of active cells. Omit it (or pass `nothing`) for an all-active grid,
@@ -520,13 +659,22 @@ the product of the per-direction widths.
   axes.
 - `topology`: per-direction closure. Accepts [`Periodic`](@ref)/[`Bounded`](@ref) instances, a tuple
   of them, a `Bool`, or a tuple of `Bool`s; a single value or a short tuple applies to the leading
-  directions and the rest are `Bounded`. When omitted, direction 1 is auto-detected — on a spherical
-  grid a longitude axis spanning the full circle is `Periodic` and a regional span is not, in either
-  storage order — and every other direction is `Bounded`.
-- `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used:
-  `2π` for spherical longitude, and `extent + one spacing` for a Cartesian direction, which is exact
-  for a uniform axis (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer,
-  its seam gap being undetermined by its samples, so `period` is required there.
+  directions and the rest are `Bounded`. When omitted, a direction is `Periodic` where its axis is an
+  [`Axes.PeriodicAxis`](@ref) and `Bounded` otherwise. A `PeriodicAxis` direction declared `Bounded`
+  raises.
+- `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used: a
+  `PeriodicAxis`'s period (which on spherical longitude is `2π`), `2π` for any other spherical
+  longitude, and `extent + one spacing` for a Cartesian direction, which is exact for a uniform axis
+  (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer, its seam gap being
+  undetermined by its samples, so `period` is required there. A period given for a `PeriodicAxis`
+  direction is its own. A `PeriodicAxis` has a seam one step wide, so its cell widths, faces and
+  stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
+  whatever seam gap its period leaves.
+- `periodic`: the `topology` keyword under another name, for a `Bool` or a tuple of them.
+- `sampling`: the [`SphericalSampling.AbstractSphericalSampling`](@ref) the axes came from, kept on
+  the grid (see [`sampling`](@ref)). On a 2-D spherical grid a sampling with latitude quadrature
+  weights sets the latitude factor of the measure to `R²·wⱼ`, so `sum(f .* measure(grid))` is its
+  quadrature.
 """
 function StructuredGrid(
     geometry::Geometry.AbstractGeometry{T},
@@ -556,17 +704,17 @@ function _split_axes_mask(args::Tuple)
     return args, nothing
 end
 
+# `weights` are the sampling's latitude quadrature weights when the caller already holds them from the
+# solve that placed the axes.
 function _structured_grid(
     geometry::G, axes_in::NTuple{N,AbstractVector}, mask, topo, period, sampling,
+    weights = nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     N ≥ 1 || throw(ArgumentError("a StructuredGrid needs at least one axis"))
     ax = ntuple(d -> _to_axis(T, axes_in[d]), Val(N))
     dims = ntuple(d -> length(ax[d]), Val(N))
 
-    tp = topo === nothing ?
-        ntuple(d -> (d == 1 && _auto_periodic_x(geometry, ax[1])) ? Periodic() : Bounded(), Val(N)) :
-        _as_topology(Val(N), topo)
-
+    tp = _grid_topology(Val(N), topo, ax)
     per = _wrap_periods(geometry, ax, tp, period)
     # A bounded direction passes `nothing`, selecting the width kernel's non-wrapping branch.
     period_args = ntuple(d -> _is_periodic(tp[d]) ? per[d] : nothing, Val(N))
@@ -583,7 +731,8 @@ function _structured_grid(
         "mask size $(size(m)) does not match the axis lengths $dims",
     ))
 
-    measure = _cell_measure(geometry, ax, period_args)
+    w = weights === nothing ? _quadrature_weights(geometry, sampling, ax) : weights
+    measure = _cell_measure(geometry, ax, period_args, w)
     # One pass per axis, alongside the pass the measure factors already make.
     stats = ntuple(d -> _axis_summary(ax[d]), Val(N))
     return StructuredGrid{
@@ -601,12 +750,15 @@ function _wrap_periods(
         if !_is_periodic(tp[d])
             zero(T)
         elseif given[d] !== nothing
-            T(given[d])
+            _given_period(ax[d], T(given[d]))
         else
             _inferred_period(geometry, ax[d], d)
         end
     end
 end
+
+_given_period(::AbstractVector, P::T) where {T} = P
+_given_period(x::Axes.PeriodicAxis, P::T) where {T} = T(Axes.own_period(x, P))
 
 _period_tuple(::Val{N}, ::Type{T}, ::Nothing) where {N,T} = ntuple(_ -> nothing, Val(N))
 _period_tuple(::Val{N}, ::Type{T}, p::Real) where {N,T} =
@@ -625,13 +777,27 @@ _inferred_period(
         "direction $d of a spherical grid has no intrinsic period; pass `period` explicitly",
     ))
 
+# A periodic axis's period is its own; on longitude that has to be the circle.
+function _inferred_period(
+    ::Union{Geometry.AbstractSphericalGeometry{T},Geometry.AbstractEllipsoidalGeometry{T}},
+    x::Axes.PeriodicAxis, d::Int,
+) where {T}
+    P = T(Axes.period(x))
+    (d != 1 || P == T(2π)) || throw(ArgumentError(
+        "a longitude PeriodicAxis covers 2π = $(T(2π)); this one covers $P"))
+    return P
+end
+
+_inferred_period(::Geometry.AbstractCartesianGeometry{T}, x::Axes.PeriodicAxis, ::Int) where {T} =
+    T(Axes.period(x))
+
 # "extent + one spacing" is exact only when there IS one spacing; on a stretched axis the samples do
 # not determine the seam gap, so it must be given.
 function _inferred_period(
     ::Geometry.AbstractCartesianGeometry{T}, x::AbstractVector, d::Int,
 ) where {T}
     Axes.isuniform(x) || length(x) < 2 || throw(ArgumentError(
-        "a periodic Cartesian direction with NONUNIFORM spacing has no period to infer (its seam " *
+        "a periodic Cartesian direction with nonuniform spacing has no period to infer (its seam " *
         "gap is not determined by its samples); pass `period` explicitly for direction $d",
     ))
     return _cartesian_period(x)

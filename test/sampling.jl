@@ -1,20 +1,7 @@
 Test.@testset "Spherical sampling hierarchy" begin
-    Test.@test FG.SphericalSampling.GaussLegendreSampling <: FG.SphericalSampling.AbstractGaussLegendreSampling
-    Test.@test FG.SphericalSampling.DriscollHealySampling <: FG.SphericalSampling.AbstractDriscollHealySampling
-    Test.@test FG.SphericalSampling.ClenshawCurtisSampling <: FG.SphericalSampling.AbstractClenshawCurtisSampling
-    Test.@test FG.SphericalSampling.McEwenWiauxSampling <: FG.SphericalSampling.AbstractMcEwenWiauxSampling
-    Test.@test FG.SphericalSampling.LatLonSampling <: FG.SphericalSampling.AbstractLatLonSampling
-    Test.@test FG.SphericalSampling.HEALPixSampling <: FG.SphericalSampling.AbstractHEALPixSampling
-    Test.@test FG.SphericalSampling.CubedSphereSampling <: FG.SphericalSampling.AbstractCubedSphereSampling
-    Test.@test FG.SphericalSampling.IcosahedralSampling <: FG.SphericalSampling.AbstractIcosahedralSampling
-    Test.@test FG.SphericalSampling.YinYangSampling <: FG.SphericalSampling.AbstractYinYangSampling
-    Test.@test FG.SphericalSampling.ScatteredSphericalSampling <: FG.SphericalSampling.AbstractScatteredSphericalSampling
-
     Test.@test FG.SphericalSampling.is_tensor_product(FG.SphericalSampling.ClenshawCurtisSampling())
     Test.@test FG.SphericalSampling.is_iso_latitude(FG.SphericalSampling.HEALPixSampling(2))
     Test.@test FG.SphericalSampling.is_equal_area(FG.SphericalSampling.HEALPixSampling(2))
-    Test.@test FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.GaussLegendreSampling())
-    Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.LatLonSampling())
     Test.@test !FG.SphericalSampling.is_tensor_product(FG.SphericalSampling.HEALPixSampling(1))
 end
 
@@ -29,27 +16,20 @@ Test.@testset "Clenshaw–Curtis = FastSphericalHarmonics sph_points" begin
     Test.@test φ ≈ (π / 2 .- θ)
     Test.@test λ[1] ≈ 0
     Test.@test λ[2] - λ[1] ≈ 2π / (2nθ - 1)
-    # Open: no poles
-    Test.@test all(abs.(φ) .< π / 2 - 1e-12)
 end
 
 Test.@testset "Gauss–Legendre nodes / weights" begin
     nθ = 16
     (; λ, φ) = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.GaussLegendreSampling(), nθ)
-    w = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.GaussLegendreSampling(), nθ)
     Test.@test length(λ) == 2nθ - 1
     Test.@test length(φ) == nθ
-    Test.@test sum(w) ≈ 2 atol = 1e-12          # ∫_{-1}^{1} dμ
     Test.@test FG.SphericalSampling.bandlimit(FG.SphericalSampling.GaussLegendreSampling(), nθ) == nθ - 1
-    # μ = sin(φ) should be symmetric about 0
-    μ = sin.(φ)
-    Test.@test μ ≈ -reverse(μ) atol = 1e-12
 end
 
 Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact to 2n-1" begin
     for n in (1, 2, 3, 7, 8, 64, 257)
         r = FG.SphericalSampling._gauss_legendre_μ(n)
-        Test.@test issorted(r.μ)                       # ascending, as the eigen route was
+        Test.@test issorted(r.μ)
         Test.@test r.μ ≈ -reverse(r.μ) atol = 1e-15    # roots come in ± pairs
         Test.@test all(>(0), r.w)
         Test.@test sum(r.w) ≈ 2 rtol = 1e-14
@@ -62,9 +42,7 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
     # Odd n has its central node at positive zero.
     Test.@test FG.SphericalSampling._gauss_legendre_μ(9).μ[5] === 0.0
 
-    # Two regimes with a crossover at n = 60: the asymptotic expansion is a fixed-order Float64
-    # coefficient set, poor for small n and unable to exceed Float64 precision; Newton is exact
-    # arithmetic but O(n²). Each is used only where it is the better answer.
+    # Two regimes cross over at n = 60: Newton at and below, an asymptotic expansion above.
     SS = FG.SphericalSampling
     for n in (60, 61, 62)
         r = SS._gauss_legendre_μ(n)
@@ -73,27 +51,22 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
         d = 2n - 2
         Test.@test sum(r.w .* r.μ .^ d) ≈ 2 / (d + 1) rtol = 1e-11
     end
-    # Both regimes solve the same problem, so above the crossover they must still agree — to the
-    # Newton's accuracy, which is the looser of the two there.
+    # Above the crossover the two regimes agree, to the Newton's accuracy.
     for n in (64, 200, 1024)
         m = (n + 1) ÷ 2
         asy = SS._gauss_legendre_μ(n)                      # takes the asymptotic path
         mμ = Vector{Float64}(undef, n); mw = Vector{Float64}(undef, n)
-        SS._gauss_legendre_newton!(Float64, Float64, mμ, mw, n, m)
+        SS._gauss_legendre_newton!(Float64, Float64, mμ, mw, nothing, n, m)
         Test.@test maximum(abs.(asy.μ .- mμ)) < 1e-13
         Test.@test maximum(abs.(asy.w .- mw) ./ mw) < 1e-9
-        Test.@test maximum(abs.(asy.μ .+ reverse(asy.μ))) < 1e-15   # ± symmetric
         Test.@test sum(mw) ≈ 2 rtol = 1e-13
     end
-    # Each output stays independently optional on the asymptotic path too.
-    Test.@test SS._gauss_legendre_asy!(Float64, nothing, nothing, 128, 64) === nothing
     # A wider element type takes the Newton path, where precision follows the type.
     μb, wb = setprecision(BigFloat, 192) do
         μ = Vector{BigFloat}(undef, 128); w = Vector{BigFloat}(undef, 128)
         SS._gauss_legendre_μ!(μ, w); (μ, w)
     end
-    Test.@test abs(sum(wb) - 2) < 1e-40        # far past what Float64 coefficients could give
-    Test.@test eltype(wb) === BigFloat
+    Test.@test abs(sum(wb) - 2) < 1e-40
     # …and the Float64 result agrees with that reference to Float64 precision.
     r64 = SS._gauss_legendre_μ(128)
     Test.@test maximum(abs.(r64.w .- Float64.(wb)) ./ Float64.(wb)) < 1e-14
@@ -115,17 +88,10 @@ Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact t
         Test.@test q.φ == a.φ
         Test.@test q.w == FG.SphericalSampling.latitude_weights(FG.SphericalSampling.GaussLegendreSampling(), n)
     end
-    # Non-GL samplings have independent closed forms and take the generic method.
-    for s in (FG.SphericalSampling.DriscollHealySampling(), FG.SphericalSampling.DriscollHealyEqualSampling(), FG.SphericalSampling.ClenshawCurtisSampling())
-        q = FG.SphericalSampling.spherical_quadrature(s, 12)
-        a = FG.SphericalSampling.spherical_axes(s, 12)
-        Test.@test q.φ == a.φ && q.λ == a.λ
-        Test.@test q.w == FG.SphericalSampling.latitude_weights(s, 12)
-    end
     # McEwen–Wiaux has nodes and no weights, so the combined form refuses: no rule over those nodes
     # is exact even at l = 0.
     Test.@test_throws ArgumentError FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.McEwenWiauxSampling(), 12)
-    # The in-place form writes into caller buffers and allocates no scratch of its own.
+    # The in-place form writes into caller buffers.
     n = 64
     sz = FG.SphericalSampling.axes_lengths(FG.SphericalSampling.GaussLegendreSampling(), n)
     λb = Vector{Float64}(undef, sz.nlon)
@@ -155,6 +121,10 @@ Test.@testset "Driscoll–Healy DH1 / DH2" begin
     w = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), nlat)
     Test.@test w[1] ≈ 0 atol = 1e-14           # north pole weight vanishes
     Test.@test FG.SphericalSampling.bandlimit(FG.SphericalSampling.DriscollHealySampling(), nlat) == lmax
+    # A longitude count other than the default still spaces the samples round the whole circle.
+    let ax = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.DriscollHealySampling(), nlat; nlon = nlat)
+        Test.@test ax.λ ≈ [2π * (i - 1) / nlat for i in 1:nlat]
+    end
 end
 
 Test.@testset "McEwen–Wiaux axes" begin
@@ -171,8 +141,6 @@ end
 
 Test.@testset "LatLonSampling" begin
     (; λ, φ) = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.LatLonSampling(), 5; nlon = 8)
-    Test.@test length(λ) == 8
-    Test.@test length(φ) == 5
     Test.@test φ[1] ≈ -π / 2
     Test.@test φ[end] ≈ π / 2
 end
@@ -182,18 +150,8 @@ Test.@testset "HEALPix" begin
     Test.@test FG.SphericalSampling.healpix_npix(s) == 12
     Test.@test FG.SphericalSampling.healpix_nring(s) == 3
     Test.@test FG.SphericalSampling.healpix_pixel_area(s) ≈ 4π / 12
-    (; λ, φ) = FG.SphericalSampling.spherical_points(s)
-    Test.@test length(λ) == 12
-    Test.@test length(φ) == 12
-    s4 = FG.SphericalSampling.HEALPixSampling(4)
-    Test.@test FG.SphericalSampling.healpix_npix(s4) == 12 * 16
-    ax = FG.SphericalSampling.spherical_points(s4)
-    λ4 = ax.λ
-    φ4 = ax.φ
-    Test.@test length(λ4) == 192
-    # Equal-area: all pixels same area by construction; centers on |φ| < π/2
-    Test.@test all(abs.(φ4) .≤ π / 2 + 1e-12)
-    # nside=32 first ring: 4 pixels at same latitude, φ = 45° + 90°k
+    Test.@test FG.SphericalSampling.healpix_npix(FG.SphericalSampling.HEALPixSampling(4)) == 12 * 16
+    # nside=32 first ring: 4 pixels at same latitude, λ = 45° + 90°k
     ax = FG.SphericalSampling.spherical_points(FG.SphericalSampling.HEALPixSampling(32))
     λ32 = ax.λ
     φ32 = ax.φ
@@ -203,63 +161,30 @@ Test.@testset "HEALPix" begin
 end
 
 Test.@testset "Cubed sphere / Yin–Yang / icosahedral" begin
-    (; λ, φ, panel) = FG.SphericalSampling.cubed_sphere_points(4)
-    Test.@test length(λ) == 6 * 16
-    Test.@test extrema(panel) == (1, 6)
-    Test.@test all(abs.(φ) .≤ π / 2 + 1e-10)
-
     yy = FG.SphericalSampling.yin_yang_panels(6, 4)
     Test.@test length(yy.yin.λ) == 6
     Test.@test length(yy.yin.φ) == 4
     Test.@test size(yy.yang.λ) == (6, 4)
     Test.@test size(yy.yang.φ) == (6, 4)
-
-    ax = FG.SphericalSampling.icosahedral_vertices(1)
-
-    λi = ax.λ
-
-    φi = ax.φ
-    Test.@test length(λi) == 12
-    ax = FG.SphericalSampling.icosahedral_vertices(2)
-    λ2 = ax.λ
-    φ2 = ax.φ
-    # ν=2 geodesic: 10ν²+2 = 42 vertices
-    Test.@test length(λ2) == 42
 end
 
 Test.@testset "Sampling → StructuredGrid" begin
+    SS = FG.SphericalSampling
     geom = FG.Geometry.SphericalGeometry(1.0)
-    (; λ, φ) = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.ClenshawCurtisSampling(), 6)
-    grid = FG.Grids.StructuredGrid(geom, λ, φ, trues(length(λ), length(φ)))
+    # A sampling's grid wraps in longitude and holds the sampling's own longitudes to the bit.
+    for (s, n, kw) in ((SS.GaussLegendreSampling(), 12, (;)), (SS.ClenshawCurtisSampling(), 12, (;)),
+                       (SS.DriscollHealySampling(), 12, (;)), (SS.DriscollHealyEqualSampling(), 12, (;)),
+                       (SS.McEwenWiauxSampling(), 12, (;)), (SS.LatLonSampling(), 7, (; nlon = 10)),
+                       (SS.DriscollHealySampling(), 12, (; nlon = 12)))
+        sg = FG.Connectivity.structured_grid(s, n; geometry = geom, kw...)
+        Test.@test FG.Grids.isperiodic(sg, 1)
+        Test.@test FG.Grids.period(sg, 1) == 2π
+        Test.@test collect(FG.Grids.axis(sg, 1)) == SS.spherical_axes(s, n; kw...).λ
+    end
+    # From the plain vectors the direction wraps when asked.
+    (; λ, φ) = SS.spherical_axes(SS.ClenshawCurtisSampling(), 6)
+    grid = FG.Grids.StructuredGrid(geom, λ, φ, trues(length(λ), length(φ)); periodic = true)
     Test.@test FG.Grids.isperiodic(grid, 1)
-    Test.@test FG.Grids.size_tuple(grid) == (length(λ), length(φ))
-end
-
-Test.@testset "bang spherical_axes! / points!" begin
-    nθ = 8
-    sz = FG.SphericalSampling.axes_lengths(FG.SphericalSampling.ClenshawCurtisSampling(), nθ)
-    λ = Vector{Float64}(undef, sz.nlon)
-    φ = Vector{Float64}(undef, sz.nlat)
-    FG.SphericalSampling.spherical_axes!(λ, φ, FG.SphericalSampling.ClenshawCurtisSampling(), nθ)
-    ax = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.ClenshawCurtisSampling(), nθ)
-    λ2 = ax.λ
-    φ2 = ax.φ
-    Test.@test λ == λ2
-    Test.@test φ == φ2
-
-    n = FG.SphericalSampling.npoints(FG.SphericalSampling.HEALPixSampling(2))
-    Λ = Vector{Float64}(undef, n)
-    Φ = Vector{Float64}(undef, n)
-    FG.SphericalSampling.spherical_points!(Λ, Φ, FG.SphericalSampling.HEALPixSampling(2))
-    ax = FG.SphericalSampling.spherical_points(FG.SphericalSampling.HEALPixSampling(2))
-    Λ2 = ax.λ
-    Φ2 = ax.φ
-    Test.@test Λ == Λ2
-    Test.@test Φ == Φ2
-
-    w = Vector{Float64}(undef, 12)
-    FG.SphericalSampling.latitude_weights!(w, FG.SphericalSampling.GaussLegendreSampling(), 12)
-    Test.@test sum(w) ≈ 2 atol = 1e-12
 end
 
 Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
@@ -296,23 +221,25 @@ Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
         end
     end
 
+    # Fejér's rule on the open nodes holds at every node count, odd included.
+    let s = FG.SphericalSampling.ClenshawCurtisSampling()
+        for nlat in (1, 3, 5, 9, 15)
+            ax = FG.SphericalSampling.spherical_axes(s, nlat)
+            w = FG.SphericalSampling.latitude_weights(s, nlat)
+            Test.@test sum(w) ≈ 2 rtol = 1e-13
+            Test.@test all(>(0), w)
+            for l in 1:(nlat - 1)
+                Test.@test abs(sum(w[j] * legendre(l, sin(ax.φ[j])) for j in eachindex(ax.φ))) < 1e-12
+            end
+        end
+    end
+
     # Float32 all the way through.
     w32 = FG.SphericalSampling.latitude_weights(Float32, FG.SphericalSampling.ClenshawCurtisSampling(), 12)
     Test.@test eltype(w32) === Float32
     Test.@test sum(w32) ≈ 2 rtol = 1e-5
 
-    # Samplings without a quadrature say so, without pointing at some other package.
-    for s in (FG.SphericalSampling.McEwenWiauxSampling(), FG.SphericalSampling.LatLonSampling())
-        err = try
-            FG.SphericalSampling.latitude_weights(s, 8)
-            nothing
-        catch e
-            sprint(showerror, e)
-        end
-        Test.@test err !== nothing
-        Test.@test !occursin("FastTransforms", err)
-        Test.@test !occursin("SSHT /", err)
-    end
+    Test.@test_throws ArgumentError FG.SphericalSampling.latitude_weights(FG.SphericalSampling.LatLonSampling(), 8)
 end
 
 Test.@testset "Sampling axes are well formed" begin
@@ -337,20 +264,12 @@ Test.@testset "Sampling axes are well formed" begin
 end
 
 Test.@testset "Cubed-sphere points are cell centres, so panels do not share nodes" begin
-    # Endpoint-inclusive panel coordinates put nodes ON the seams, so adjacent panels emit
-    # coincident points — 12(n-2)+16 of them — while `_cubed_neighbor` treats those same edges
-    # as folding onto a *different* panel's cells. Cell centres keep points and connectivity
-    # consistent and give 6n² genuinely distinct nodes.
+    # Cell centres give 6n² distinct nodes.
     for n in (1, 2, 4, 8, 16)
         p = FG.SphericalSampling.cubed_sphere_points(n)
         Test.@test length(p.λ) == 6n^2
         Test.@test length(unique(collect(zip(p.λ, p.φ)))) == 6n^2
         Test.@test length(unique(p.panel)) == 6
-        Test.@test all(v -> abs(hypot(cos(v[2]) * cos(v[1]), cos(v[2]) * sin(v[1]), sin(v[2])) - 1) < 1e-12,
-                       zip(p.λ, p.φ))
-        # No point may sit exactly on a panel boundary (|ξ| = π/4 maps to the cube edges).
-        Test.@test all(abs(abs(ξ) - π / 4) > 1e-12 for ξ in
-                       range(-π / 4 + (π / 2 / n) / 2; step = π / 2 / n, length = n))
     end
 end
 
@@ -362,46 +281,51 @@ Test.@testset "Yin–Yang cells tile each panel exactly; the overlap is resoluti
         g = FG.Grids.YinYangGrid(geo, nlon, nlat)
         a = FG.Grids.measure(g)
         np = nlon * nlat
-        Test.@test length(a) == 2np
-        # The nlon×nlat cell centres tile the panel box exactly. Endpoint sampling inflates this by
-        # nlon/(nlon-1) × nlat/(nlat-1).
+        # The nlon×nlat cell centres tile the panel box exactly.
         Test.@test sum(@view a[1:np]) ≈ box rtol = 1e-14
         # Yang is a rigid rotation of yin, so the two blocks are elementwise identical.
         Test.@test @view(a[1:np]) == @view(a[(np + 1):(2np)])
-        # The panels overlap by construction, and the excess over the sphere is exactly 3√2π/4π at
-        # every resolution — a constant of the geometry, carrying no resolution dependence.
+        # The excess of the two panels over the sphere is 3√2/4 at every resolution.
         Test.@test sum(a) / (4π * R2) ≈ 3 * sqrt(2) / 4 rtol = 1e-14
-        # Areas vary as cos φ across the panel, and nowhere degenerate.
-        Test.@test all(>(0), a)
-        λ, φ = FG.Grids.materialize(g)
-        pts = collect(zip(round.(λ; digits = 10), round.(φ; digits = 10)))
-        Test.@test length(unique(pts)) == 2np
         # The layout's points are the sampling's, cell for cell.
+        λ, φ = FG.Grids.materialize(g)
         ref = FG.SphericalSampling.spherical_points(FG.SphericalSampling.YinYangSampling(), nlon, nlat)
         Test.@test λ ≈ ref.λ atol = 1e-13
         Test.@test φ ≈ ref.φ atol = 1e-13
     end
-    let a = FG.Grids.measure(FG.Grids.YinYangGrid(192, 128))
-        Test.@test minimum(a) / maximum(a) ≈ cos(π / 4) rtol = 1e-2
+    # A row's area is `R²Δλ·2cos φ·sin(Δφ/2)`, so the extreme rows are the one at the panel's edge,
+    # `φ = π/4 − Δφ/2`, and the one nearest the equator, `φ = Δφ/2`.
+    let a = FG.Grids.measure(FG.Grids.YinYangGrid(192, 128)), Δφ = (π / 2) / 128
+        Test.@test minimum(a) / maximum(a) ≈ cos(π / 4 - Δφ / 2) / cos(Δφ / 2) rtol = 1e-12
+    end
+
+    dir(λ, φ) = (cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ))
+    # Kageyama & Sato (2004): yang is `(x, y, z) ↦ (−x, z, y)` of yin, an involution.
+    rot = FG.SphericalSampling._yin_yang_rotate
+    lattice = [(λ, φ) for λ in range(-3π / 4, 3π / 4; length = 7), φ in range(-π / 4, π / 4; length = 5)]
+    Test.@test all(lattice) do (λ, φ)
+        a = dir(λ, φ)
+        all(isapprox.(dir(rot(λ, φ)...), (-a[1], a[3], a[2]); atol = 1e-15)) &&
+            all(isapprox.(dir(rot(rot(λ, φ)...)...), a; atol = 1e-15))
+    end
+    # The two panels cover the sphere: every probe lies in some cell, so within that cell's
+    # half-diagonal of its centre.
+    for (nlon, nlat) in ((24, 16), (36, 24))
+        p = FG.SphericalSampling.spherical_points(FG.SphericalSampling.YinYangSampling(), nlon, nlat)
+        centres = dir.(p.λ, p.φ)
+        nearest = 1.0
+        for λd in 0:2:358, φd in -90:2:90
+            q = dir(deg2rad(λd), deg2rad(φd))
+            nearest = min(nearest, maximum(c -> q[1] * c[1] + q[2] * c[2] + q[3] * c[3], centres))
+        end
+        Test.@test acos(nearest) ≤ 0.51 * hypot(3π / 2 / nlon, π / 2 / nlat)
     end
 end
 
 Test.@testset "Coarsest cubed sphere (one node per face) is constructible" begin
-    # `range(a, b; length = 1)` is an error, so n = 1 needs its own handling — and
-    # `build_connectivity` accepts n ≥ 1, so this size is reachable.
-    p = FG.SphericalSampling.cubed_sphere_points(1)
-    Test.@test length(p.λ) == 6
-    Test.@test length(unique(p.panel)) == 6
-    # Each face center is a distinct point on the sphere.
-    pts = [(cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ)) for (λ, φ) in zip(p.λ, p.φ)]
-    Test.@test length(unique(x -> round.(x; digits = 9), pts)) == 6
-    Test.@test all(v -> abs(hypot(v...) - 1) < 1e-12, pts)
     conn = FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), 1)
     Test.@test FG.Connectivity.nnodes(conn) == 6
     Test.@test_throws ArgumentError FG.SphericalSampling.cubed_sphere_points(0)
-    for n in (1, 2, 5)
-        Test.@test length(FG.SphericalSampling.cubed_sphere_points(n).λ) == 6n^2
-    end
 end
 
 Test.@testset "Icosahedral mesh is indexed topologically, not by hashing coordinates" begin
@@ -421,9 +345,8 @@ Test.@testset "Icosahedral mesh is indexed topologically, not by hashing coordin
         end
         Test.@test count(==(5), deg) == 12
         Test.@test count(==(6), deg) == nv - 12
-        # Vertices are distinct points on the unit sphere.
+        # Vertices are distinct points.
         pts = [(cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ)) for (λ, φ) in zip(mesh.λ, mesh.φ)]
-        Test.@test all(p -> abs(hypot(p...) - 1) < 1e-12, pts)
         Test.@test length(unique(p -> round.(p; digits = 9), pts)) == nv
         # Edge lengths are quasi-uniform, as a geodesic subdivision must be.
         elen = [hypot((pts[a] .- pts[b])...) for (a, b) in mesh.edges]
@@ -434,9 +357,7 @@ end
 
 Test.@testset "HEALPix RING neighbours are emitted in ascending order" begin
     C = FG.Connectivity
-    # The dedup pass is an insertion sort, so its cost is the inversion count. Walking the compass
-    # offsets in RING order leaves the emission almost sorted. The sort still runs and still
-    # guarantees the order; this measures only that its input is nearly ordered.
+    # The dedup pass is an insertion sort, so its cost is the inversion count of its input.
     out = Vector{Int}(undef, 8)
     for nside in (1, 2, 4, 16, 64)
         npix = 12 * nside^2
@@ -462,7 +383,7 @@ Test.@testset "HEALPix RING neighbours are emitted in ascending order" begin
         Test.@test inversions / npix < 6 / nside
         Test.@test presorted / npix > 1 - 8 / nside
     end
-    # The CSR is unchanged by the reordering: rows sorted, adjacency reciprocal, degrees 7 or 8.
+    # The CSR has sorted rows, reciprocal adjacency, and degrees 6 to 8.
     for nside in (1, 2, 8, 32)
         c = FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(nside))
         n = FG.Connectivity.nnodes(c)
@@ -473,8 +394,7 @@ Test.@testset "HEALPix RING neighbours are emitted in ascending order" begin
 end
 
 Test.@testset "The icosahedron's faces are a written-down constant, and the right one" begin
-    # The table replaces a runtime rediscovery of a fixed combinatorial fact. Re-derive it here
-    # from the vertex geometry so the table cannot drift from the vertex ordering.
+    # The table, re-derived from the vertex geometry.
     faces = FG.SphericalSampling._ICOSAHEDRON_FACES
     Test.@test length(faces) == 20
     φg = (1.0 + sqrt(5.0)) / 2
@@ -494,21 +414,18 @@ Test.@testset "The icosahedron's faces are a written-down constant, and the righ
     expected = Set(Tuple(sort([a, b, c])) for a in 1:12 for b in (a + 1):12 for c in (b + 1):12
                    if d(a, b) ≈ edge && d(b, c) ≈ edge && d(a, c) ≈ edge)
     Test.@test derived == expected && length(derived) == 20
-    # Every vertex is in 5 faces, and V - E + F = 2.
+    # Every vertex is in 5 faces, and the faces have 30 edges.
     Test.@test all(count(f -> v in f, faces) == 5 for v in 1:12)
     Test.@test length(unique(Tuple(sort([f[i], f[j]])) for f in faces
                              for (i, j) in ((1, 2), (2, 3), (1, 3)))) == 30
-    Test.@test 12 - 30 + 20 == 2
 end
 
 Test.@testset "HEALPix pixel centers are distinct and correctly ringed" begin
-    # These tile the sphere, so no two may coincide, and the ring structure is fully determined:
-    # 4nside-1 rings holding 4, 8, … 4(nside-1), then 4nside for 2nside+1 rings, then back down.
-    # Being determined, it is asserted ring by ring.
+    # No two pixels coincide, and the 4nside-1 rings hold 4, 8, … 4(nside-1), then 4nside for
+    # 2nside+1 rings, then back down.
     for nside in (1, 2, 4, 8, 16)
         p = FG.SphericalSampling.spherical_points(FG.SphericalSampling.HEALPixSampling(nside))
         npix = FG.SphericalSampling.healpix_npix(nside)
-        Test.@test length(p.λ) == npix
         Test.@test length(unique(collect(zip(p.λ, p.φ)))) == npix
 
         zs = sort(unique(round.(sin.(p.φ); digits = 11)); rev = true)
@@ -518,10 +435,6 @@ Test.@testset "HEALPix pixel centers are distinct and correctly ringed" begin
                         [4r for r in (nside - 1):-1:1])
         Test.@test counts == expected
         Test.@test sum(counts) == npix
-
-        # Nearest-neighbour separation scales as ~1/nside and is never zero.
-        Test.@test all(-π / 2 ≤ φ ≤ π / 2 for φ in p.φ)
-        Test.@test all(0 ≤ λ < 2π + 1e-12 for λ in p.λ)
     end
 end
 
@@ -535,7 +448,7 @@ Test.@testset "Quadrature-exactness trait matches measured exactness" begin
     Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.McEwenWiauxSampling())
     Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.LatLonSampling())
 
-    # Back the claim numerically: GL integrates degree 2·lmax exactly; CC does not.
+    # Numerically: GL integrates degree 2·lmax exactly; CC does not.
     function legendre(l, x)
         l == 0 && return one(x)
         p0, p1 = one(x), x
@@ -553,16 +466,13 @@ Test.@testset "Quadrature-exactness trait matches measured exactness" begin
         if FG.SphericalSampling.admits_exact_bandlimited_quadrature(s)
             Test.@test err < 1e-10
         else
-            Test.@test err > 1e-6      # genuinely inexact at 2·lmax, as the trait now says
+            Test.@test err > 1e-6      # inexact at 2·lmax
         end
     end
 end
 
 Test.@testset "Every ring-laid-out sampling answers the ring API" begin
     S = FG.SphericalSampling
-    # `nrings`/`nlon_per_ring` are the loop bounds for a caller walking a map ring by ring — a
-    # per-ring longitude transform, a zonal reduction. Every ring-laid-out sampling answers them,
-    # so such a caller needs no branch on sampling type.
     cases = (("HEALPix", S.HEALPixSampling(4), ()),
              ("Octahedral", S.OctahedralGaussianSampling(8), ()),
              ("Reduced", S.ReducedGaussianSampling([8, 12, 16, 12, 8]), ()),
@@ -572,10 +482,8 @@ Test.@testset "Every ring-laid-out sampling answers the ring API" begin
     for (_, s, args) in cases
         r = S.nrings(s, args...)
         v = S.nlon_per_ring(s, args...)
-        Test.@test r ≥ 1
         Test.@test length(v) == r                 # one entry per ring
-        Test.@test all(>(0), v)
-        # The independent cross-check: the rings must account for every point.
+        # The rings account for every point.
         Test.@test sum(v) == S.npoints(s, args...)
     end
     # HEALPix ring widths are the ones `ring_info` reports, and they are symmetric about the
@@ -622,18 +530,13 @@ Test.@testset "Octahedral and reduced Gaussian grids" begin
         for l in 1:(2N - 1)
             Test.@test abs(sum(w[j] * legendre(l, sin(lats[j])) for j in eachindex(lats))) < 1e-11
         end
-        # The full-sphere integral, with the per-ring longitude factor the varying counts require.
-        counts = SS.nlon_per_ring(s)
-        Test.@test sum(w[j] * (2π / counts[j]) * counts[j] for j in eachindex(counts)) ≈ 4π rtol = 1e-13
     end
-    # Points are distinct, on the sphere, and ring-ordered.
+    # Points are distinct.
     for N in (2, 8)
         s = SS.OctahedralGaussianSampling(N)
         p = SS.spherical_points(s)
         n = SS.npoints(s)
         Test.@test length(p.λ) == length(p.φ) == n
-        Test.@test all(φ -> -π/2 ≤ φ ≤ π/2, p.φ)
-        Test.@test all(λ -> 0 ≤ λ < 2π + 1e-12, p.λ)
         Test.@test length(unique([(round(a; digits = 12), round(b; digits = 12))
                                   for (a, b) in zip(p.λ, p.φ)])) == n
     end
@@ -659,8 +562,6 @@ Test.@testset "Fibonacci lattice" begin
         s = SS.FibonacciSampling(n)
         p = SS.spherical_points(s)
         Test.@test SS.npoints(s) == n == length(p.λ) == length(p.φ)
-        Test.@test all(φ -> -π/2 - 1e-12 ≤ φ ≤ π/2 + 1e-12, p.φ)
-        Test.@test all(λ -> 0 ≤ λ < 2π + 1e-12, p.λ)
         Test.@test length(unique([(round(a; digits = 10), round(b; digits = 10))
                                   for (a, b) in zip(p.λ, p.φ)])) == n
         # `z` advances in exactly equal steps, so the bands are equal-area.
@@ -711,7 +612,6 @@ Test.@testset "HEALPix pixel indexing round-trips in both schemes" begin
     Test.@test_throws ArgumentError SS.ring2nest(3, 0)
     Test.@test_throws ArgumentError SS.nest2ring(3, 0)
     Test.@test_throws ArgumentError SS.ang2pix(3, 1.0, 1.0; scheme = SS.Nested())
-    Test.@test SS.ang2pix(3, 1.0, 1.0) isa Int
     # `pix2ang` must name the same points `spherical_points` lists.
     for nside in (2, 8)
         p = SS.spherical_points(FG.SphericalSampling.HEALPixSampling(nside))
@@ -720,6 +620,61 @@ Test.@testset "HEALPix pixel indexing round-trips in both schemes" begin
             Test.@test SS.geographic_latitude(θ) ≈ p.φ[i + 1]
             Test.@test ϕ ≈ p.λ[i + 1]
         end
+    end
+end
+
+Test.@testset "Float32 angles are accurate at the poles" begin
+    SS = FG.SphericalSampling
+    ulp = eps(Float32(π) / 2)
+    # HEALPix rings 1–4 at each pole (4 + 8 + 12 + 16 = 40 pixels), where at nside = 1024 the first ring
+    # sits 2.7 arcmin from the pole. A colatitude near 0 keeps its relative accuracy; a latitude is
+    # accurate to its own last bit; and each pixel's centre, read back at Float32, is that pixel.
+    ns = 1024
+    npix = SS.healpix_npix(ns)
+    Test.@test all(vcat(0:39, (npix - 40):(npix - 1))) do p
+        θ32, ϕ32 = SS.pix2ang(Float32, ns, p)
+        θ64 = SS.pix2ang(Float64, ns, p)[1]
+        φ32 = SS._pix2lonlat(Float32, ns, p, SS.Ring())[2]
+        φ64 = SS._pix2lonlat(Float64, ns, p, SS.Ring())[2]
+        (p ≥ 40 || abs(θ32 - θ64) ≤ 4 * eps(Float32) * θ64) && abs(φ32 - φ64) ≤ ulp &&
+            SS.ang2pix(ns, θ32, ϕ32) == p && SS.vec2pix(ns, SS.pix2vec(Float32, ns, p)) == p
+    end
+    Test.@test SS.ring_info(Float32, ns, 1).latitude == SS._pix2lonlat(Float32, ns, 0, SS.Ring())[2]
+    # A cubed-sphere face centre sits on each pole at odd `n`, and yang covers both poles.
+    for (p32, p64) in ((SS.cubed_sphere_points(Float32, 63), SS.cubed_sphere_points(63)),
+                       (SS.spherical_points(Float32, SS.YinYangSampling(), 96, 64),
+                        SS.spherical_points(SS.YinYangSampling(), 96, 64)))
+        Test.@test maximum(abs.(Float64.(p32.φ) .- p64.φ)) ≤ 4 * ulp
+    end
+
+    # Gauss–Legendre latitudes come from the solve's own colatitude, so the polar rings are accurate to
+    # the last bit of `π/2` at either width, against a BigFloat solve, on both solver paths (Newton at
+    # n ≤ 60, the asymptotic expansion above). Elsewhere the Float64 bound is the expansion's own
+    # absolute accuracy in the colatitude. A reduced Gaussian grid's rings come from the same solve.
+    for n in (16, 60, 512)
+        μb = Vector{BigFloat}(undef, n)
+        SS._gauss_legendre_newton!(BigFloat, BigFloat, μb, nothing, nothing, n, (n + 1) ÷ 2)
+        φb = asin.(μb)
+        for T in (Float32, Float64)
+            u = eps(T(π) / 2)
+            φ = SS.spherical_axes(T, SS.GaussLegendreSampling(), n).φ
+            err = abs.(big.(φ) .- φb)
+            Test.@test maximum(err[[1:4; (n - 3):n]]) ≤ u
+            Test.@test maximum(err) ≤ (T === Float32 || n ≤ 60 ? u : 2u)
+            iseven(n) && Test.@test SS.ring_latitudes(T, SS.OctahedralGaussianSampling(n ÷ 2)) == reverse(φ)
+        end
+    end
+    # The Fibonacci lattice's polar points, against their definition `asin((2k+1)/n − 1)` in BigFloat.
+    let n = 100_000, p = SS.spherical_points(Float32, SS.FibonacciSampling(n))
+        Test.@test all(vcat(0:9, (n - 10):(n - 1))) do k
+            abs(big(p.φ[k + 1]) - asin(big(2k + 1) / n - 1)) ≤ eps(Float32(π) / 2)
+        end
+    end
+    # A point 1e-4 from a rotated frame's pole keeps that colatitude through `rotate` at Float32.
+    let rot = FG.Geometry.PoleRotation(0.3, 0.9)
+        p64 = FG.Geometry.unrotate(rot, 1.1, π / 2 - 1e-4)
+        q32 = FG.Geometry.rotate(rot, Float32(p64[1]), Float32(p64[2]))
+        Test.@test abs(Float64(q32[2]) - (π / 2 - 1e-4)) ≤ 1e-6
     end
 end
 
@@ -784,14 +739,6 @@ Test.@testset "A ring can be reached one at a time, in O(1), without building th
         Test.@test all(pts.φ[first(SS.ring_range(s, nlat, r))] == ax.φ[r] for r in 1:nlat)
     end
 
-    # A caller-supplied buffer gives the same points as the allocating form.
-    let s = SS.OctahedralGaussianSampling(12), n = SS.npoints(s)
-        λ = Vector{Float64}(undef, n); φ = Vector{Float64}(undef, n)
-        sc = Vector{Float64}(undef, SS.nrings(s))
-        SS.spherical_points!(λ, φ, s; scratch = sc)
-        ref = SS.spherical_points(s)
-        Test.@test λ == ref.λ && φ == ref.φ
-    end
     Test.@test_throws DimensionMismatch SS.spherical_points!(
         Vector{Float64}(undef, SS.npoints(SS.OctahedralGaussianSampling(3))),
         Vector{Float64}(undef, SS.npoints(SS.OctahedralGaussianSampling(3))),

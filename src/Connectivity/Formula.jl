@@ -98,20 +98,20 @@ A formula fixes the neighbour set, so `stencil` selects nothing here. The generi
 one absorbs the keywords that shape the others, as [`Grids.StoredMeshNeighbors`](@ref) does.
 """
 function build_connectivity(
-    grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true, backend = nothing,
-    _...,
+    grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true,
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
 )
     n = length(Grids.mask(grid))
     # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill
     # them run, and the build is device-resident end to end under a backend that launches kernels.
-    deg = Execution.allocate(backend, Int, n)
-    Execution.run_indices(n, backend) do k
+    deg = Execution.allocate(execution, Int, n)
+    Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
-    total = _csr_total(deg, n, backend)
+    total = _csr_total(deg, n, execution)
     return _index_type(max(n + 1, total)) === Int32 ?
-        _formula_fill(Int32, total, grid, deg, n, active_only, backend) :
-        _formula_fill(Int, total, grid, deg, n, active_only, backend)
+        _formula_fill(Int32, total, grid, deg, n, active_only, execution) :
+        _formula_fill(Int, total, grid, deg, n, active_only, execution)
 end
 
 function _formula_fill(
@@ -119,7 +119,7 @@ function _formula_fill(
 ) where {I<:Integer}
     ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
     nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend) do k
+    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _formula_ids(grid, k, active_only)
             slot = Int(ptr[k])
@@ -265,12 +265,13 @@ end
     Grids.formula_neighbors(grid::RingGrid, i)
 
 A ring grid's adjacency: the two points either side along the ring, wrapping in longitude, and on each
-adjacent ring the two points whose longitudes straddle this one's.
+adjacent ring the two points whose longitudes straddle this one's, or the one point at the same
+longitude where the rings line up.
 
-The straddling pair comes from proportional position, `⌊(j−1)·nlon[r′]/nlon[r]⌋` and its successor. Where
-adjacent rings differ in width this relation is directed — a wide ring's point can straddle a narrow
-ring's point that does not straddle it back — so the graph is not symmetric in general. It is symmetric
-whenever the two rings have equal counts, which is most of a Gaussian grid's interior.
+The straddling pair comes from proportional position, `(j−1)·nlon[r′]/nlon[r]`: its floor and, unless
+it is an integer, its successor. Where adjacent rings differ in width this relation is directed — a wide
+ring's point can straddle a narrow ring's point that does not straddle it back — so the graph is not
+symmetric in general. It is symmetric wherever two adjacent rings have equal counts.
 
 Duplicates are dropped, so a ring holding one or two points reports fewer than the six a wide ring does.
 """
@@ -292,9 +293,9 @@ Duplicates are dropped, so a ring holding one or two points reports fewer than t
         (1 ≤ rr ≤ nring) || continue
         mm = Grids.nlon_in_ring(grid, rr)
         bb = first(Grids.ring_range(grid, rr)) - 1
-        p = fld((j - 1) * mm, m)                     # 0-based position on the adjacent ring
+        p, s = fldmod((j - 1) * mm, m)               # 0-based position on the adjacent ring
         ids, n = _push_unique(ids, n, ic, bb + mod1(p + 1, mm))
-        ids, n = _push_unique(ids, n, ic, bb + mod1(p + 2, mm))
+        iszero(s) || ((ids, n) = _push_unique(ids, n, ic, bb + mod1(p + 2, mm)))
     end
     return (ids, n)
 end

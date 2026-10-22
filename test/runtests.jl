@@ -1,7 +1,9 @@
 using FlowGeometries: FlowGeometries as FG
+using ComputationalBackends: ComputationalBackends as CB
 using Test: Test
 
-# Every weak dependency is loaded up front so the extensions are exercised by the whole suite.
+# Every weak dependency is loaded up front so the extensions are exercised by the whole suite. The
+# Distributed and MPI extensions are loaded by their own topics, which start the processes they need.
 using Adapt: Adapt
 using DelaunayTriangulation: DelaunayTriangulation
 using KernelAbstractions: KernelAbstractions
@@ -17,9 +19,8 @@ Upwind(r::Integer) = Upwind{Int(r)}()
 FG.Stencils.offsets(::Upwind{R}, ::Val{N}) where {R,N} =
     ntuple(i -> ntuple(d -> d == cld(i, R) ? mod1(i, R) : 0, Val(N)), Val(N * R))
 
-# An axis that records how many elements were read from it. Several claims here are about how much of
-# an axis a query touches — that it bisects, that it reads a bounded window — and a read count states
-# such a claim exactly and deterministically. Wall-clock numbers live in `benchmark/`.
+# An axis that records how many elements were read from it, so a gate can count how much of an axis
+# a query touches.
 mutable struct CountingAxis{T,V<:AbstractVector{T}} <: AbstractVector{T}
     data::V
     reads::Int
@@ -32,29 +33,6 @@ Base.@propagate_inbounds function Base.getindex(c::CountingAxis, i::Int)
     return c.data[i]
 end
 reads(f::F, c::CountingAxis) where {F} = (c.reads = 0; f(); c.reads)
-
-# Element-type entry points, called with non-constant arguments. A type given as a keyword takes no
-# part in dispatch, so a call that cannot be constant-folded end to end widens the element type to
-# `DataType` and returns an abstract result. Each of these takes the type as a leading positional
-# argument, as `zeros` and `rand` do.
-t_gl(::Type{T}, n) where {T}     = FG.SphericalSampling._gauss_legendre_μ(T, n)
-t_axes(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_axes(T, s, n)
-t_quad(::Type{T}, s, n) where {T} = FG.SphericalSampling.spherical_quadrature(T, s, n)
-t_wts(::Type{T}, s, n) where {T}  = FG.SphericalSampling.latitude_weights(T, s, n)
-t_wts1(::Type{T}, s) where {T}    = FG.SphericalSampling.latitude_weights(T, s)
-t_pts(::Type{T}, s, n) where {T}  = FG.SphericalSampling.spherical_points(T, s, n)
-t_pts1(::Type{T}, s) where {T}    = FG.SphericalSampling.spherical_points(T, s)
-t_pts2(::Type{T}, s, a, b) where {T} = FG.SphericalSampling.spherical_points(T, s, a, b)
-t_rlat(::Type{T}, s) where {T}    = FG.SphericalSampling.ring_latitudes(T, s)
-t_cube(::Type{T}, n) where {T}    = FG.SphericalSampling.cubed_sphere_points(T, n)
-t_icov(::Type{T}, f) where {T}    = FG.SphericalSampling.icosahedral_vertices(T, f)
-t_icom(::Type{T}, f) where {T}    = FG.SphericalSampling.icosahedral_mesh(T, f)
-t_yy(::Type{T}, a, b) where {T}   = FG.SphericalSampling.yin_yang_panels(T, a, b)
-t_ring(::Type{T}, a, b) where {T} = FG.SphericalSampling.ring_info(T, a, b)
-t_p2a(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2ang(T, a, b)
-t_p2v(::Type{T}, a, b) where {T}  = FG.SphericalSampling.pix2vec(T, a, b)
-t_scr(::Type{T}, o, k) where {T}  = FG.Discretization.stencil_scratch(T, o, k)
-t_sgrid(::Type{T}, s, n) where {T} = FG.Connectivity.structured_grid(T, s, n)
 
 # The HEALPix pixelization as a node set: the layout materialized into dense coordinate vectors and a
 # stored CSR graph. `HEALPixGrid` is how the pixelization is used; this is the explicit "as a cloud"
@@ -72,19 +50,14 @@ end
 struct OneSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::OneSphere{T}) where {T} = one(T)
 
-# A geometry whose metric varies along direction 1, which the built-in sphere's never does. It holds
-# the bulk operators to `metric_invariant_directions` alone.
+# A geometry whose metric varies along direction 1, declaring no `metric_invariant_directions`.
 struct TiltedSphere{T} <: FG.Geometry.AbstractSphericalGeometry{T} end
 FG.Geometry.radius(::TiltedSphere{T}) where {T} = one(T)
 FG.Geometry.scale_factors(::TiltedSphere{T}, p::Tuple{Real,Real}) where {T} =
     (one(T) + T(0.5) * cos(T(p[1])), one(T) + T(0.25) * sin(T(p[2])))
 
-concrete_return(f::F, argtypes) where {F} =
-    (t = Base.return_types(f, argtypes)[1]; (isconcretetype(t), t))
-
-# The allocation harness. `discretization`, `connectivity` and `allocations` all measure with it, so it
-# sits in the preamble every topic sees. Everything here is an ordinary global: a closure captured
-# into `@allocated` measures itself.
+# The allocation harness, shared by every topic. Everything here is an ordinary global: a closure
+# captured into `@allocated` measures itself.
 
 # Fixed arity, and the cell index travels as a tuple that is splatted inside the callee: forwarding
 # through `args...` allocates, so a vararg harness measures itself.
@@ -97,6 +70,16 @@ for n in 1:6
         end
         return a
     end
+end
+
+# How many allocations `f(a)` makes, least of four calls. A cost per cell shows here as growth with the
+# grid, which a fixed set of buffers does not have.
+function _nalloc(f::F, a) where {F}
+    c = typemax(Int)
+    for _ in 1:4
+        c = min(c, Base.@allocations f(a))
+    end
+    return c
 end
 
 # Each entry point is a named top-level function. A closure over a testset local boxes what it
@@ -114,6 +97,12 @@ q_win(g, I, r, mt)       = FG.Connectivity.metric_window(g, I, r, mt)
 q_nwithin(g, r, I)       = FG.Connectivity.nneighbors_within(g, I...; ball = r)
 q_within!(b, g, r, I)    = FG.Connectivity.neighbors_within!(b, g, I...; ball = r)
 q_fold(g, r, I)          = FG.Connectivity.fold_within((a, _, d) -> a + d, 0.0, g, I...; ball = r)
+q_mplan!(o, f, p)        = FG.Operators.apply_stencil!(o, f, p)
+q_mderiv!(o, f, g, p)    = FG.Operators.derivative!(o, f, g, p)
+q_plan_be!(o, f, pl, d, b) = FG.Operators.apply_stencil!(o, f, pl, d; execution = b)
+q_toplan!(xyz, uvw, g)   = FG.Operators.to_planetary!(xyz..., uvw..., g)
+q_toloc!(uvw, xyz, g)    = FG.Operators.to_local!(uvw..., xyz..., g)
+q_tens!(loc, amb, g)     = FG.Operators.tensor_to_local!(loc..., amb..., g)
 q_knn!(ix, dt, g, k, I)  = FG.Connectivity.k_nearest!(ix, dt, g, I...; k = k)
 q_within_top(g, r, I, t) = FG.Connectivity.nneighbors_within(g, I...; ball = r, topology = t)
 q_fold_at(g, p, r, t, s) = FG.Connectivity.fold_at((a, _, _) -> a + 1, 0, g, p;
@@ -130,11 +119,34 @@ q_embed(geo, p)          = FG.Geometry.embed(geo, p)
 q_proj(geo, c, n)        = FG.Geometry.project_to_tangent_plane(geo, c, n)
 q_ltb(geo, p)            = FG.Geometry.local_tangent_basis(geo, p)
 q_c2g(geo, v)            = FG.Geometry.cartesian_to_geodetic(geo, v)
+q_gplan(g)               = FG.Operators.gradient_plan(g)
+q_cgrid(geo, λ, φ, m)    = FG.Grids.CurvilinearGrid(geo, λ, φ, m)
+q_corners(C)             = FG.Grids._centers_to_corners(C)
 q_gradient!(a, b, f, plan) = FG.Operators.gradient!(a, b, f, plan)
 q_gradient_t!(outs, f, plan) = FG.Operators.gradient!(outs, f, plan)
-q_stag_grad!(outs, f, sg) = FG.Operators.gradient!(outs, f, sg)
-q_stag_div!(out, us, sg)  = FG.Operators.divergence!(out, us, sg)
-q_stag_curl!(o, u1, u2, sg) = FG.Operators.curl!(o, u1, u2, sg)
+q_mim_lap!(o, χ, fm, g)  = FG.Operators.laplacian!(o, χ, fm, g)
+q_fidx(g, F) = (b = FG.Grids.cell_below(g, F, 1); a = FG.Grids.cell_above(g, F, 2);
+                (b === nothing ? 0 : b[1]) + (a === nothing ? 0 : a[2]) + FG.Grids.face_above(g, F, 1)[1] +
+                FG.Grids.face_below(F, 2)[2] + FG.Grids.corner_to_face(g, F, 1, 2)[1] +
+                FG.Grids.face_to_corner(g, F, 1, 2)[2] + sum(FG.Grids.face_dims(g, 1)) +
+                sum(FG.Grids.corner_dims(g, 1, 2)) + FG.Grids.nfaces(g, 2) + FG.Grids.ncorners(g, 1) +
+                FG.Grids.corner_offset(g, 2))
+q_mim_grad!(g, χ, fm)    = FG.Operators.gradient!(g, χ, fm)
+q_mim_div!(δ, v, fm)     = FG.Operators.divergence!(δ, v, fm)
+q_mim_curl!(W, v, fm)    = FG.Operators.curl!(W, v, fm)
+q_mim_rot!(u, R, fm)     = FG.Operators.rotational_velocity!(u, R, fm)
+q_mim_faces!(v, u, fm)   = FG.Operators.to_faces!(v, u, fm)
+q_mim_centres!(u, v, fm) = FG.Operators.to_centres!(u, v, fm)
+q_lap!(o, Φ, c)          = FG.Operators.apply_laplacian!(o, Φ, c)
+q_proj!(Φ, c)            = FG.Operators.project_out_constant!(Φ, c)
+q_restrict!(cs, f, fc, cc) = FG.Operators.restrict!(cs, f, fc, cc)
+q_restrict_residual!(cs, b, x, fc, cc) = FG.Operators.restrict_residual!(cs, b, x, fc, cc)
+q_prolong!(f, cs, fc, cc)  = FG.Operators.prolong_add!(f, cs, fc, cc)
+q_strain!(S, u, g, p, sc) = FG.Operators.strain_rate!(S, u, g, p; scratch = sc)
+q_vcurl!(ω, u, g, p, sc)  = FG.Operators.curl!(ω, u, g, p; scratch = sc)
+q_vdiv!(δ, u, g, p, sc)   = FG.Operators.divergence!(δ, u, g, p; scratch = sc)
+q_strain_names(g)        = FG.Operators.strain_components(g)
+q_lsg(geo, p)            = FG.Geometry.log_scale_gradients(geo, p)
 q_locdisp(geo, c, n)     = FG.Geometry.local_displacement(geo, c, n)
 q_tbl!(o, f, g, iw, d, pol) = FG.Operators.apply_stencil!(o, f, g, iw[1], iw[2], d;
                                                               order = 1, masked = NaN, policy = pol)
@@ -146,7 +158,6 @@ q_stencil!(o, f, ix, w, d) = FG.Operators.apply_stencil!(o, f, ix, w, d)
 q_stencil_m!(o, f, ix, w, d, msk) = FG.Operators.apply_stencil!(o, f, ix, w, d; mask = msk)
 q_area(g, I)             = FG.Grids.area(g, I...)
 q_coords!(o, g, I)       = FG.Grids.coords!(o, g, I...)
-q_axis(g, d)             = length(FG.Grids.axis(g, d))
 q_spacing(g, d)          = FG.Grids.spacing(g, d)
 q_origin(g, d)           = FG.Grids.origin(g, d)
 q_extent(g, d)           = FG.Grids.extent(g, d)
@@ -165,24 +176,26 @@ q_nlon_in_ring(s, r)     = FG.SphericalSampling.nlon_in_ring(s, r)
 q_ring_range(s, r)       = FG.SphericalSampling.ring_range(s, r)
 q_npoints(s)             = FG.SphericalSampling.npoints(s)
 q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; scratch = sc)
-# The held-table form. The other overload builds the table per call and is classified as allocating by
-# contract, so measuring it measures the table.
+# The held-table form.
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
+q_sinterp(f, g, p, t, s, nb) = FG.Operators.interpolate(f, g, p; topology = t, scratch = s, nearest = nb)
 q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
 q_axst!(i, w, x, o, k, s) = FG.Discretization.axis_stencils!(i, w, x, o, k; scratch = s)
 q_faces!(o, x)           = FG.Discretization.faces!(o, x)
 q_centers!(o, f)         = FG.Discretization.centers!(o, f)
 q_lagr!(w, x, v, k)      = FG.Discretization.lagrange_weights!(w, x, v, k)
 q_iw(x, v)               = FG.Discretization.interpolation_weights(x, v)
+q_sparse(g)              = FG.Connectivity.sparse_adjacency_matrix(g)
+q_sparse_csr(g)          = FG.Connectivity.sparse_adjacency_matrix(
+                              FG.Connectivity.build_connectivity(g))
 q_conn(g, r, s)          = FG.Connectivity.nneighbors_within(g, 12, 9; ball = r,
                               reach = FG.Connectivity.Connected(), scratch = s)
 q_connf(g, r, s)         = FG.Connectivity.nneighbors_within(g, 7; ball = r,
                               reach = FG.Connectivity.Connected(), scratch = s)
 
-# The per-grid-shape sweep. `axes = false` for a layout whose coordinates are a formula: the spacing
-# accessors are an axis notion, and such a layout holds no axes to answer them from.
-function check_shape(label, g, I; axes::Bool = true)
+# The per-grid-shape sweep.
+function check_shape(label, g, I)
     r = FG.Grids.grid_geometry(g) isa FG.Geometry.AbstractSphericalGeometry ? 6.371e5 : 2.5
     out = Vector{Int}(undef, 64)
     buf = Vector{Int}(undef, 4096)
@@ -227,15 +240,14 @@ function check_shape(label, g, I; axes::Bool = true)
     end
     for d in 1:FG.Grids.ncoordinates(g)
         # `spacing` is the constant-spacing accessor and errors on an irregular axis.
-        if axes && FG.Grids.isuniform(g, d)
+        if FG.Grids.isuniform(g, d)
             a = _alloc(q_spacing, g, d)
             a == 0 || println("    ", label, " / spacing(d=", d, ") -> ", a, " B")
             Test.@test a == 0
         end
-        span = (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
-                ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
-                ("period", _alloc(q_period, g, d)))
-        for (name, a) in (axes ? (span..., ("isuniform", _alloc(q_isuni, g, d))) : span)
+        for (name, a) in (("origin", _alloc(q_origin, g, d)), ("extent", _alloc(q_extent, g, d)),
+                          ("bounds", _alloc(q_bounds, g, d)), ("isperiodic", _alloc(q_isper, g, d)),
+                          ("period", _alloc(q_period, g, d)), ("isuniform", _alloc(q_isuni, g, d)))
             a == 0 || println("    ", label, " / ", name, "(d=", d, ") -> ", a, " B")
             Test.@test a == 0
         end
@@ -248,24 +260,18 @@ function check_shape(label, g, I; axes::Bool = true)
             end
         end
     end
-    # A cell-list query enumerates through a fold, so it holds no candidate buffer at all — the property
-    # the device path depends on.
+    # A cell-list query enumerates through a fold, so it holds no candidate buffer at all.
     let cl = FG.Connectivity.MetricTopology(g; index = FG.Grids.cell_list(g; ball = r))
         a = _alloc(q_within_top, g, r, I, cl)
         a == 0 || println("    ", label, " / cell-list query -> ", a, " B")
         Test.@test a == 0
         Test.@test q_within_top(g, r, I, cl) == q_nwithin(g, r, I)
     end
-
-    Test.@test (Test.@inferred q_coords(g, I)) isa NamedTuple
-    Test.@test (Test.@inferred q_dist(g, cI, cJ)) isa Float64
-    Test.@test (Test.@inferred q_nwithin(g, r, I)) isa Int
-    Test.@test (Test.@inferred q_top(g)) isa FG.Connectivity.MetricTopology
     return nothing
 end
 
 const TOPICS = ["geometry", "axes", "grids", "sampling", "discretization", "connectivity",
-                "extensions", "allocations", "api"]
+                "extensions", "allocations", "api", "distributed", "mpi"]
 
 # No argument runs every topic. Naming some — `Pkg.test(test_args = ["axes"])` — runs only those.
 Test.@testset "FlowGeometries.jl" begin

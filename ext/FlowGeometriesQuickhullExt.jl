@@ -8,25 +8,9 @@ using FlowGeometries.Grids: Grids
 # convex hull of the unit-sphere embedding, so a node's cell is the spherical polygon through the
 # circumcenters of its incident hull facets.
 #
-# Everything stays in unit vectors from hull to area. The circumcenters come out of the hull as
-# directions already, so converting them to (λ, φ) only to have the area formula convert them back
-# costs four transcendentals per (node, facet) pair and buys nothing.
-
-@inline function _circumcenter_direction(a::NTuple{3,T}, b::NTuple{3,T}, c::NTuple{3,T}) where {T}
-    ab = (b[1] - a[1], b[2] - a[2], b[3] - a[3])
-    ac = (c[1] - a[1], c[2] - a[2], c[3] - a[3])
-    n = (
-        ab[2] * ac[3] - ab[3] * ac[2],
-        ab[3] * ac[1] - ab[1] * ac[3],
-        ab[1] * ac[2] - ab[2] * ac[1],
-    )
-    nn = sqrt(n[1]^2 + n[2]^2 + n[3]^2)
-    n = (n[1] / nn, n[2] / nn, n[3] / nn)
-    s = n[1] * (a[1] + b[1] + c[1]) + n[2] * (a[2] + b[2] + c[2]) + n[3] * (a[3] + b[3] + c[3])
-    return s < 0 ? (-n[1], -n[2], -n[3]) : n
-end
-
-@inline _dot3(a::NTuple{3,T}, b::NTuple{3,T}) where {T} = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+# Each facet's circumcenter is held as its offset `O − v` from each of the facet's three nodes, formed
+# from the chords between the nodes' coordinates, so the fan of excesses around a node keeps the
+# relative precision of `T` however small its cell.
 
 function Grids._voronoi_tessellation(
     geo::Geometry.AbstractSphericalGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
@@ -61,9 +45,14 @@ function Grids._voronoi_tessellation(
         fv[3, fi] = f[3]
     end
 
-    centers = Vector{NTuple{3,T}}(undef, nf)
+    offsets = Vector{NTuple{3,NTuple{3,T}}}(undef, nf)
     @inbounds for fi in 1:nf
-        centers[fi] = _circumcenter_direction(vert(fv[1, fi]), vert(fv[2, fi]), vert(fv[3, fi]))
+        ia, ib, ic = fv[1, fi], fv[2, fi], fv[3, fi]
+        pa = (x[ia], y[ia])
+        u = Geometry._lonlat_chord(pa, (x[ib], y[ib]))
+        v = Geometry._lonlat_chord(pa, (x[ic], y[ic]))
+        oa = Geometry._circumcenter_offset(vert(ia), u, v)
+        offsets[fi] = (oa, map(-, oa, u), map(-, oa, v))
     end
 
     # Node → incident facets as CSR: count, scan, fill. No per-node vectors.
@@ -90,6 +79,7 @@ function Grids._voronoi_tessellation(
     end
     angs = Vector{T}(undef, maxdeg)
     order = Vector{Int}(undef, maxdeg)
+    offs = Vector{NTuple{3,T}}(undef, maxdeg)
 
     areas = Vector{T}(undef, N)
     @inbounds for i in 1:N
@@ -106,19 +96,20 @@ function Grids._voronoi_tessellation(
         ci = (cosφ * cosλ, cosφ * sinλ, sinφ)
         êλ = (-sinλ, cosλ, zero(T))
         êφ = (-sinφ * cosλ, -sinφ * sinλ, cosφ)
-        va = view(angs, 1:m)
-        vo = view(order, 1:m)
         for k in 1:m
-            c = centers[adj[lo + k - 1]]
-            chord = (c[1] - ci[1], c[2] - ci[2], c[3] - ci[3])
-            va[k] = atan(_dot3(chord, êφ), _dot3(chord, êλ))
+            fi = adj[lo + k - 1]
+            slot = fv[1, fi] == i ? 1 : (fv[2, fi] == i ? 2 : 3)
+            o = offsets[fi][slot]
+            offs[k] = o
+            angs[k] = atan(Geometry._dot3(o, êφ), Geometry._dot3(o, êλ))
         end
-        sortperm!(vo, va)
+        vo = view(order, 1:m)
+        sortperm!(vo, view(angs, 1:m))
         A = zero(T)
         for k in 1:m
-            c1 = centers[adj[lo + vo[k] - 1]]
-            c2 = centers[adj[lo + vo[mod1(k + 1, m)] - 1]]
-            A += Geometry.spherical_excess(ci, c1, c2)
+            o1 = offs[vo[k]]
+            o2 = offs[vo[mod1(k + 1, m)]]
+            A += Geometry._excess(ci, map(+, ci, o1), map(+, ci, o2), o1, o2)
         end
         areas[i] = Geometry.radius(geo)^2 * A
     end

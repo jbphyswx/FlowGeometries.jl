@@ -4,7 +4,7 @@
 
 """
     derivative!(out, field, grid, dim; order=1, nodes=order+1, policy=BlankMasked(),
-                masked=zero, active_only=true, backend=nothing) -> out
+                masked=zero, active_only=true, execution=SerialBackend(), scratch=nothing) -> out
 
 The derivative with respect to **distance** along direction `dim`: [`apply_stencil!`](@ref) divided by
 the metric factor,
@@ -14,16 +14,22 @@ the metric factor,
 On a Cartesian metric every `hᵈ` is `1` and this is `apply_stencil!` exactly, at no cost. Anywhere else
 it is the derivative a physical law is written in, singular points included.
 
+At `order = p` it is the `p`-th derivative with respect to distance. Along a direction in
+[`Geometry.scale_invariant_directions`](@ref), where `hᵈ` is constant along the direction, that is
+`(1/hᵈ)ᵖ·∂ᵖf/∂ξᵈᵖ`. Elsewhere — a spheroid's latitude, where `h_φ = M(φ)` — the weights are solved over
+the nodes' distances from the cell, [`Geometry.line_distance`](@ref).
+
 **Where the metric degenerates the derivative does not exist**, and `masked` is written. Longitude at a
 pole is the case: `h_λ = R cos φ → 0`, so `1/h_λ` diverges. The test scales with the geometry's own size
 and with the precision, `|h| ≤ L·√eps(T)`. A fixed threshold serves neither: `1e-12` is below
 `eps(Float32)`, and at `Float32` on Earth's radius `cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole
 around 0.28 m.
 
+Each value is multiplied by `(1/hᵈ)ᵖ` as it is written, so a cell written `masked` holds exactly `masked`.
 No scale factor in this package depends on **longitude**, so `hᵈ` is constant along the first axis
-whichever direction is differenced. The scaling is applied once per remaining index and swept along
-that contiguous axis. (It is *not* generally constant along the differenced direction — on a spheroid
-`h_φ = M(φ)` varies with `φ` — so it is not hoisted that way.)
+whichever direction is differenced, and it is solved once per direction-1 run. (It is *not* generally
+constant along the differenced direction — on a spheroid `h_φ = M(φ)` varies with `φ` — so it is not
+hoisted that way.)
 
 A divergence or a curl is still the caller's to assemble, needing a result location and a boundary
 policy this does not choose. Note the flux form when doing so: on a sphere

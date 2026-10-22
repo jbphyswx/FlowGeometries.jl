@@ -105,7 +105,7 @@ geometry's own metric:
 
 ```@example conn
 geo = FG.Geometry.SphericalGeometry()            # Earth radius, metres
-λ = range(0, 2π; length = 25)[1:24]
+λ = FG.Axes.PeriodicAxis(0.0, 2π, 24)             # 24 cells round the circle, so λ wraps
 φ = range(-π/2, π/2; length = 13)
 g = FG.Grids.StructuredGrid(geo, λ, φ)
 ball = S.MetricBall(2.0e6)                       # everything within 2000 km
@@ -275,7 +275,7 @@ FG.Connectivity.mapreduce_within((I, J, d) -> 1, +, 0, g; ball = 1.0e6)   # tota
 FG.Connectivity.mapreduce_within((I, J, d) -> d, +, 0.0, g; ball = 1.0e6) # and the total distance
 ```
 
-`foreach_within` is the same traversal for an `f` that writes; under a threaded `backend` it runs on
+`foreach_within` is the same traversal for an `f` that writes; under a threaded `execution` it runs on
 disjoint spans of cells, so what `f` writes must be determined by `I`.
 `build_connectivity_within` does the same hoisting internally.
 
@@ -448,11 +448,11 @@ FG.Connectivity.sort_neighbors!(conn)                       # order each node's 
 
 ## Threading
 
-Every builder takes an opt-in `backend`; see [Performance](@ref performance-page).
+Every builder takes an opt-in `execution`; see [Performance](@ref performance-page).
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())
+FG.Connectivity.build_connectivity(grid; execution = ThreadedBackend())
 ```
 
 Results are bit-identical to serial; the test suite asserts it with `==`.

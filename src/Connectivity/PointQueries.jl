@@ -29,15 +29,15 @@ function fold_at(
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
     sz = Grids.size_tuple(grid)
-    per = _periodic_flags(grid)
+    per = _query_flags(grid, _periodic_flags(grid), NearestImage())
     p0 = ntuple(d -> T(p[d]), Val(N))
     # A point outside a bounded direction has no cell; the nearest one still centres a window that
     # covers the ball, since the widening below accounts for how far the point sits from its centre.
     raw = Grids.locate(grid, p0)
     I0 = ntuple(d -> clamp(raw[d], 1, sz[d]), Val(N))
     c0 = Grids._raw_coords(grid, I0...)
-    prd = map(T, _wrap_lengths(grid, Val(N)))
-    d0 = Geometry.distance(geo, p0, _min_image(p0, c0, prd))
+    prd = _query_lengths(grid, Val(N), NearestImage())
+    d0 = Geometry.distance(geo, Grids._image_pair(geo, p0, c0, prd)...)
     w = _ball_window(grid, I0, r + d0, topology, NearestImage())
     msk = Grids.mask(grid)
     acc = init
@@ -47,8 +47,7 @@ function fold_at(
         J = ntuple(d -> per[d] ? mod1(I0[d] + δ[d], sz[d]) : I0[d] + δ[d], Val(N))
         any(d -> J[d] < 1 || J[d] > sz[d], 1:N) && continue
         active_only && !msk[J...] && continue
-        q = _min_image(p0, Grids._raw_coords(grid, J...), prd)
-        dist = Geometry.distance(geo, p0, q)
+        dist = Geometry.distance(geo, Grids._image_pair(geo, p0, Grids._raw_coords(grid, J...), prd)...)
         dist ≤ r || continue
         acc = f(acc, J, dist)
     end
@@ -79,14 +78,13 @@ function _fold_at_scattered(
     _check_index_covers(mt.index, active_only)
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
-    prd = map(T, _wrap_lengths(grid, Val(D)))
+    prd = map(T, Grids._wrap_lengths(grid, Val(D)))
     msk = Grids.mask(grid)
     return _fold_candidates_at(init, mt, grid, p0, r, scratch) do acc, lin
         J = sz === nothing ? lin : Tuple(@inbounds CartesianIndices(sz)[lin])
         @inbounds active_only && !(sz === nothing ? msk[lin] : msk[J...]) && return acc
-        q = _min_image(p0, sz === nothing ? Grids._raw_coords(grid, lin) :
-                           Grids._raw_coords(grid, J...), prd)
-        dist = Geometry.distance(geo, p0, q)
+        pt = sz === nothing ? Grids._raw_coords(grid, lin) : Grids._raw_coords(grid, J...)
+        dist = Geometry.distance(geo, Grids._image_pair(geo, p0, pt, prd)...)
         dist ≤ r || return acc
         return f(acc, J, dist)
     end
@@ -121,7 +119,7 @@ function neighbors_within(
     grid::Grids.AbstractGrid, p::NTuple{D,Real}; ball, active_only::Bool = true,
     topology = MetricTopology(grid), scratch = nothing,
 ) where {D}
-    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
+    sz = _linear_shape(grid)
     return fold_at(Int[], grid, p; ball = ball, active_only = active_only,
                    topology = topology, scratch = scratch) do v, J, _
         push!(v, sz === nothing ? J : _linidx(sz, J...))
@@ -165,20 +163,58 @@ function k_nearest!(
     kk = Int(k)
     kk ≥ 0 || throw(ArgumentError("k must be non-negative, got $k"))
     (kk == 0 || isempty(idx)) && return 0
-    sz = grid isa Grids.UnstructuredGrid ? nothing : Grids.size_tuple(grid)
-    r = _knn_seed_radius_at(grid, p, kk, topology)
-    rmax = _knn_radius_ceiling(grid, topology)
-    n = 0
+    (length(idx) ≥ kk && length(dist) ≥ kk) || throw(ArgumentError(
+        "idx and dist must hold at least k = $kk entries; got $(length(idx)) and $(length(dist))",
+    ))
+    p0 = ntuple(d -> T(p[d]), Val(D))
+    return first(_k_nearest_at!(idx, dist, grid, p0, kk, active_only, false, false, topology, scratch))
+end
+
+# The search behind the point-seeded `k_nearest!`, returning `(n, hidden)`.
+#
+# With `holes = true` the fold also visits inactive cells and offers only the active ones, and `hidden`
+# says whether an inactive cell lies at least as near as the farthest of the `k` kept: every kept cell
+# is within the last radius searched, so such a cell is always seen. With `early = true` the search
+# stops as soon as that is settled, which is once a round finds an inactive cell and fewer than `k`
+# active ones, the `k`-th then lying beyond the radius; `idx` then holds only the cells found so far.
+function _k_nearest_at!(
+    idx::AbstractVector{<:Integer}, dist::AbstractVector, grid::Grids.AbstractGrid{G,T},
+    p0::NTuple{D,T}, kk::Int, active_only::Bool, holes::Bool, early::Bool, topology, scratch,
+) where {G,T,D}
+    sz = _linear_shape(grid)
+    msk = Grids.mask(grid)
+    rmax = _knn_point_ceiling(grid, p0, topology)
+    r = _knn_seed_radius_at(grid, p0, kk)
+    n, hole = 0, T(Inf)
     while true
-        n = fold_at(0, grid, p; ball = r, active_only = active_only,
-                    topology = topology, scratch = scratch) do m, J, d
-            return _heap_offer!(dist, idx, m, kk, d, sz === nothing ? J : _linidx(sz, J...))
+        n, hole = fold_at((0, T(Inf)), grid, p0; ball = r, active_only = active_only && !holes,
+                          topology = topology, scratch = scratch) do (m, h), J, d
+            holes && !(@inbounds sz === nothing ? msk[J] : msk[J...]) && return (m, min(h, T(d)))
+            return (_heap_offer!(dist, idx, m, kk, d, sz === nothing ? J : _linidx(sz, J...)), h)
+        end
+        if n < kk && early && hole ≤ r
+            _heap_sort!(dist, idx, n)
+            return n, true
         end
         (n ≥ kk || r ≥ rmax) && break
         r = min(r * 2, rmax)
     end
     _heap_sort!(dist, idx, n)
-    return n
+    return n, n > 0 && hole ≤ @inbounds(dist[n])
+end
+
+# Every cell lies within `_knn_radius_ceiling` of every other, so within that plus `d(p, c)` of a point
+# `p`, for any cell `c`. On a sphere or a spheroid the ceiling already reaches every point.
+@inline _knn_point_ceiling(
+    grid::Grids.AbstractGrid{<:Union{Geometry.AbstractSphericalGeometry,Geometry.AbstractEllipsoidalGeometry}},
+    _p0, mt,
+) = _knn_radius_ceiling(grid, mt)
+
+@inline function _knn_point_ceiling(grid::Grids.AbstractGrid{G,T}, p0, mt) where {G,T}
+    c = _knn_radius_ceiling(grid, mt)
+    length(Grids.mask(grid)) == 0 && return c
+    q = Grids._cell_coords(grid, Grids._cell_from_linear(grid, 1))
+    return c + T(Geometry.distance(Grids.grid_geometry(grid), p0, q))
 end
 
 # Off the rectilinear grids there are no axes to bracket the point along, so the containing cell is the
@@ -189,17 +225,18 @@ function Grids.locate(
     active_only::Bool = false, topology = MetricTopology(grid), scratch = nothing,
 ) where {G,T,D}
     sz = _linear_shape(grid)
-    r = _knn_seed_radius_at(grid, p, 1, topology)
-    rmax = _knn_radius_ceiling(grid, topology)
+    p0 = ntuple(d -> T(p[d]), Val(D))
+    rmax = _knn_point_ceiling(grid, p0, topology)
+    r = _knn_seed_radius_at(grid, p0, 1)
     while true
-        best = fold_at((0, T(Inf)), grid, p; ball = r, active_only = active_only,
+        best = fold_at((0, T(Inf)), grid, p0; ball = r, active_only = active_only,
                        topology = topology, scratch = scratch) do acc, J, d
             lin = sz === nothing ? J : _linidx(sz, J...)
             # Ties go to the lower index, so an equidistant pair resolves the same way every call.
             return d < acc[2] || (d == acc[2] && lin < acc[1]) ? (lin, d) : acc
         end
         best[1] != 0 && return sz === nothing ? best[1] : Tuple(CartesianIndices(sz)[best[1]])
-        r ≥ rmax && return sz === nothing ? 0 : ntuple(_ -> 0, Val(D))
+        r ≥ rmax && return sz === nothing ? 0 : map(_ -> 0, sz)
         r = min(r * 2, rmax)
     end
 end
@@ -224,25 +261,18 @@ end
     Grids.locate(grid, Geometry.as_ntuple(p); kwargs...)
 
 # The cell the point falls in gives the local cell size to start from, exactly as the cell-seeded form
-# uses its own cell's measure.
-@inline function _knn_seed_radius_at(grid::Grids.StructuredGrid{T, G,N}, p, k::Int, mt) where {G,T,N}
+# uses its own cell's measure. A point is no cell, so the ball has `k` cells to hold.
+@inline function _knn_seed_radius_at(grid::Grids.StructuredGrid{T, G,N}, p, k::Int) where {G,T,N}
     sz = Grids.size_tuple(grid)
     raw = Grids.locate(grid, ntuple(d -> T(p[d]), Val(N)))
     return _knn_seed_radius(grid, ntuple(d -> clamp(raw[d], 1, sz[d]), Val(N)), k)
 end
 
-# Elsewhere there are no axes to locate along, so the scale comes from the mean cell. Only the starting
-# radius depends on it; the doubling reaches the rest.
-@inline function _knn_seed_radius_at(grid::Grids.AbstractGrid{G,T}, p, k::Int, mt) where {G,T}
-    D = Grids.ncoordinates(grid)
+# Elsewhere there are no axes to locate along, so the scale is the mean cell's, in the measure's own
+# units — metres on a sphere, where the coordinates are angles. Only the starting radius depends on it;
+# the doubling reaches the rest.
+@inline function _knn_seed_radius_at(grid::Grids.AbstractGrid{G,T}, _p, k::Int) where {G,T}
     ncell = length(Grids.mask(grid))
-    vol = one(T)
-    # The span comes from the topology, which reduced it once. Off a rectilinear grid the coordinates
-    # are fields with no order, so asking the grid is a scan per query.
-    for d in 1:D
-        e = @inbounds T(mt.span[d])
-        e > 0 && (vol *= e)
-    end
-    cell = ncell > 0 ? (vol / ncell)^(one(T) / D) : one(T)
-    return T(1.5) * cell * T(max(k, 1))^(one(T) / D)
+    m = ncell > 0 ? T(Grids._total_measure(grid)) / ncell : zero(T)
+    return _knn_ball_radius(m, k, Grids.ncoordinates(grid))
 end

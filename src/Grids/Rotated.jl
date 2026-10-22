@@ -100,7 +100,7 @@ The frame the mesh is read in.
 
 @inline function _raw_coords(grid::RotatedGrid{T}, I::Vararg{Integer,2}) where {T}
     λ, φ = _raw_coords(base_grid(grid), I...)
-    return grid.map(rotation(grid), λ, φ)
+    return getfield(grid, :map)(rotation(grid), λ, φ)
 end
 
 coordinates(grid::RotatedGrid) = throw(ArgumentError(
@@ -115,12 +115,14 @@ coordinates(grid::RotatedGrid) = throw(ArgumentError(
 # shared.
 @inline measure(grid::RotatedGrid) = measure(base_grid(grid))
 @inline measure(grid::RotatedGrid, I::Vararg{Integer,2}) = measure(base_grid(grid), I...)
+@inline _total_measure(grid::RotatedGrid) = sum(measure(base_grid(grid)))
 
 # ---- span -------------------------------------------------------------------
 
-# A rotation moves the patch off the base's per-axis bounds, so these are the sphere's own.
+# A rotation moves the patch off the base's per-axis bounds, so these are the sphere's own, longitude in
+# the `[0, 2π)` `rotate` and `unrotate` report.
 @inline bounds(grid::RotatedGrid{T}, d::Integer) where {T} =
-    _checked_direction((1, 2), d) == 1 ? (-T(π), T(π)) : (-T(π) / 2, T(π) / 2)
+    _checked_direction((1, 2), d) == 1 ? (zero(T), T(2π)) : (-T(π) / 2, T(π) / 2)
 
 @inline origin(grid::RotatedGrid, d::Integer) = bounds(grid, d)[1]
 

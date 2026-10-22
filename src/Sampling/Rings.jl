@@ -32,12 +32,12 @@ end
 # ring that reads it.
 function _reduced_gaussian_points!(
     λ::AbstractVector{T}, φ::AbstractVector{T}, s::AbstractReducedGaussianSampling,
-    μ::AbstractVector{T}, nring::Int,
+    lat::AbstractVector{T}, nring::Int,
 ) where {T<:AbstractFloat}
-    _gauss_legendre!(T, view(μ, 1:nring), nothing, nring)
+    _gauss_legendre!(T, nothing, nothing, nring; lat = view(lat, 1:nring))
     @inbounds for j in 1:nring
-        # `μ` ascends, so ring 1 (north) is its last entry.
-        φj = asin(μ[nring + 1 - j])
+        # The latitudes ascend, so ring 1 (north) is the last entry.
+        φj = lat[nring + 1 - j]
         rng = ring_range(s, j)
         dλ = T(2π) / T(length(rng))
         for (i, k) in enumerate(rng)
@@ -64,9 +64,9 @@ ring_latitudes(s::AbstractReducedGaussianSampling) = ring_latitudes(Float64, s)
 
 function ring_latitudes(::Type{T}, s::AbstractReducedGaussianSampling) where {T<:AbstractFloat}
     nring = nrings(s)
-    μ = Vector{T}(undef, nring)
-    _gauss_legendre!(T, μ, nothing, nring)
-    return [asin(μ[nring + 1 - j]) for j in 1:nring]
+    lat = Vector{T}(undef, nring)
+    _gauss_legendre!(T, nothing, nothing, nring; lat = lat)
+    return reverse!(lat)
 end
 
 """
@@ -101,8 +101,12 @@ function spherical_points!(
     golden = (one(T) + sqrt(T(5))) / T(2)
     dλ = T(2π) / golden
     @inbounds for k in 0:(n - 1)
-        z = T(2k + 1) / T(n) - one(T)
-        φ[k + 1] = asin(clamp(z, -one(T), one(T)))
+        # Point `k` sits at `z = (2k+1)/n − 1`, and `1 ∓ z` is a ratio of integers. The angle from the
+        # nearer pole is formed from it as `2asin(√((1 ∓ z)/2))`, which keeps a small angle to full
+        # precision.
+        south = 2k + 1 ≤ n
+        θp = 2 * asin(sqrt(T(south ? 2k + 1 : 2n - 2k - 1) / T(2n)))
+        φ[k + 1] = south ? θp - T(π) / 2 : T(π) / 2 - θp
         λ[k + 1] = mod(T(k) * dλ, T(2π))
     end
     return (; λ, φ)

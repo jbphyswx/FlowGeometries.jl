@@ -4,14 +4,15 @@
 [![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://jbphyswx.github.io/FlowGeometries.jl/dev/)
 [![Coverage](https://codecov.io/gh/jbphyswx/FlowGeometries.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/jbphyswx/FlowGeometries.jl)
 
-Coordinate metrics, spherical samplings, and grid types — with a **dependency-free core**.
+Coordinate metrics, spherical samplings, and grid types. The core depends only on
+ComputationalBackends, whose tags name how a bulk loop runs.
 
 ![Six spherical samplings](docs/src/assets/samplings.png)
 
-Fourteen samplings, eight grid layouts, three metrics — chosen independently of each other, in
+Fourteen samplings, nine grid layouts, three metrics — chosen independently of each other, in
 any number of dimensions. Spatial search, tessellation, sparse output, static vectors, FFT-based
-quadrature, device transfer and threading all arrive through package extensions, so you pay for
-exactly what you load.
+quadrature, device transfer, device kernels and multi-process execution all arrive through package
+extensions, so you pay for exactly what you load.
 
 **API style:** `using FlowGeometries: FlowGeometries as FG`, then qualified calls
 (`FG.Grids.coords`, `FG.Geometry.distance`, …). Nothing is exported and nothing is rebound at the top
@@ -33,10 +34,10 @@ The same three choices on a plane, with a stretched vertical direction:
 ```julia
 geo = FG.Geometry.CartesianGeometry()
 
-# uniform in x and y, stretched in z — each direction keeps its own answer
+# doubly periodic and uniform in x and y, stretched in z — each direction keeps its own answer
+x    = FG.Axes.PeriodicAxis(0.0, 1e5, 200)                 # 200 cells around a 100 km period
 z    = cumsum([0.0; fill(10.0, 4); fill(40.0, 4)])
-grid = FG.Grids.StructuredGrid(geo, range(0, 1e5; length = 201), range(0, 1e5; length = 201), z;
-                               periodic = (true, true), period = (1e5, 1e5))
+grid = FG.Grids.StructuredGrid(geo, x, x, z)
 
 FG.Grids.isuniform(grid, 1), FG.Grids.isuniform(grid, 3)   # (true, false)
 FG.Grids.spacing(grid, 1)                                   # 500.0, read from the type
@@ -63,9 +64,13 @@ FG.Grids.isuniform(grid, d)      # compile-time; const-folds
 FG.Grids.spacing(grid, d)        # the constant Δ, signed
 ```
 
-No code path inspects coordinate values to decide this, and there is no tolerance anywhere. Where the
+No code path inspects coordinate values to decide this, so no tolerance enters the decision. Where the
 data question matters, the spacing accessors answer it exactly — an axis is equally spaced precisely
 when `minimum_spacing == maximum_spacing`.
+
+Periodicity is the same. An `Axes.PeriodicAxis(origin, period, n)` is `n` equal cells around one
+period, and a grid direction built on one wraps; every other direction is bounded unless the
+constructor is given `periodic` or `topology`.
 
 A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
 is a few hundred bytes, and that is all a device receives.
@@ -120,7 +125,7 @@ D.faces(axis), D.nodes(axis, D.Face())
 D.interpolation_weights(axis, v)
 D.fd_weights([-1.0, 0.0, 1.0], 0.0, 2)   # [1, -2, 1]
 FG.Geometry.scale_factors(geo, point)    # (R cosφ, R) on a sphere
-D.apply_stencil!(out, field, grid, 1; order = 1, nodes = 5)   # along one direction
+FG.Operators.apply_stencil!(out, field, grid, 1; order = 1, nodes = 5)   # along one direction
 ```
 
 `apply_stencil!` touches a field along a single direction with the result left where the input was — a
@@ -129,25 +134,41 @@ bounded end and wraps on a periodic one, so no halo either.
 
 ## Staggered operators
 
-A `StaggeredGrid` is one rectilinear mesh read at any Arakawa C location — the tracer at cell centres,
-each velocity component on the faces it crosses, the vorticity at the corner. Every location is an
-ordinary `StructuredGrid`, so everything above applies at each of them unchanged.
+A scalar sits at cell centres, each velocity component on the faces it crosses, each component of a
+rotation potential on the corners of its pair of directions. One gradient defines the family — the
+divergence is its negative adjoint and the Laplacian their composition — so `L` is symmetric,
+`curl(grad χ) = 0` and `div(rot R) = 0` on every grid, and a boundary condition or a mask is a face of
+zero area.
 
 ```julia
-sg = FG.Grids.StaggeredGrid(geo, λ, φ)
-FG.Grids.grid_at(sg, 1)                  # the u-location grid, as a StructuredGrid
-u1, u2 = FG.Operators.gradient(f, sg)    # centres → faces
-FG.Operators.divergence((u1, u2), sg)    # faces  → centres
-FG.Operators.curl(u1, u2, sg)            # faces  → corners
+O = FG.Operators
+fm = O.face_metrics(grid, O.Neumann())                    # areas, gaps, edges, corner areas, once
+g  = O.gradient!(O.allocate_faces(Float64, grid), χ, fm)   # centres → faces
+O.divergence!(δ, g, fm)                                    # faces   → centres
+O.curl!(O.allocate_corners(Float64, grid), g, fm)          # faces   → corners
+c  = O.laplacian_coefficients(fm)                          # L = D G and its null space, for a solver
+O.apply_laplacian!(out, χ, c)
 ```
 
-These are the orthogonal-curvilinear forms built from the geometry's own `scale_factors`, so the same
-call is `∂/∂x` on a plane and `(1/(R cosφ))[∂u_λ/∂λ + ∂(cosφ·u_φ)/∂φ]` on a sphere. Each is a single
-difference across one cell evaluated where the result lives, so the divergence telescopes exactly and
-the curl of a discrete gradient is zero to round-off.
+Rectilinear grids of any dimension and two-dimensional curvilinear ones. On a rectilinear grid a value
+along a direction is taken along increasing coordinate, whichever way the axis is stored, and the three
+operators are exact for a linear field on a Cartesian grid and second order on a sphere. `coarsen` and
+`galerkin_coefficients` build a multigrid hierarchy as `R L P`. A `StaggeredGrid` gives the ordinary
+`StructuredGrid` at any Arakawa C location, for everything else in the package.
 
-The boundary condition is still the caller's: a face with a cell on one side only has no difference
-across it, and is written `masked`.
+## Strain rate, vorticity and divergence
+
+On a collocated grid, along the local frame — east, north and up on a sphere — with the frame's own
+turning added to the derivatives:
+
+```julia
+plans = O.stencil_plans(grid; nodes = 3)          # every direction's derivative weights, held
+S = O.strain_rate((uλ, uφ), grid, plans)          # (λλ = …, φφ = …, λφ = …)
+ω = O.curl((uλ, uφ), grid, plans)                 # d_λu_φ − d_φu_λ + u_λ tan φ / R
+δ = O.divergence((uλ, uφ), grid, plans)
+```
+
+On a curvilinear grid or a node set the derivatives come from a `gradient_plan`.
 
 ## Mask topology
 
@@ -161,9 +182,11 @@ FG.Connectivity.count_holes(grid)     # enclosed inactive regions; wrapping chan
 
 ![Cell area relative to the mean](docs/src/assets/cell_areas.png)
 
-Every built-in layout gets true cell areas with **no optional dependency** — the exact solid angle of
-its gnomonic rectangle for the cubed sphere, dual-cell areas from the mesh's own triangulation for
-icosahedral, lat–lon patches for Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
+Every built-in layout gets true cell areas with **no optional dependency** — the latitude band
+`R²Δλ(sin φ₊ − sin φ₋)` between a rectilinear cell's faces (the quadrature weight on a Gauss–Legendre,
+Driscoll–Healy or Clenshaw–Curtis grid), the exact solid angle of its gnomonic rectangle for the cubed
+sphere, dual-cell areas from the mesh's own triangulation for icosahedral, lat–lon patches for
+Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
 `4πR²/N` is exact only for HEALPix (flat colour above); on an icosahedral geodesic the largest cell is
 nearly twice the smallest, and every area-weighted integral feels the difference. The dark spots are
 the twelve pentagons.
@@ -277,11 +300,16 @@ FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 | `StaticArrays` | `SVector` / `MVector` points end to end |
 | `AbstractFFTs` | `O(n log n)` equiangular quadrature weights |
 | `Adapt` | move a grid to another storage backend |
-| `ComputationalBackends` | opt-in threading, bit-identical to serial |
+| `KernelAbstractions` | index-parallel loops as device kernels, under `GPUBackend(backend)` |
+| `Distributed` | bulk loops as one share per worker, under `DistributedBackend(inner)` |
+| `MPI` | bulk loops as one share per rank, under `MPIBackend(inner, comm)` |
+
+Every bulk entry point takes a ComputationalBackends tag as `execution`, `SerialBackend()` by default;
+`ThreadedBackend()` and `AutoBackend()` need no extension.
 
 ```julia
 using ComputationalBackends: ThreadedBackend
-FG.Connectivity.build_connectivity(grid; backend = ThreadedBackend())   # same CSR, built in parallel
+FG.Connectivity.build_connectivity(grid; execution = ThreadedBackend())   # same CSR, built in parallel
 ```
 
 ## Documentation

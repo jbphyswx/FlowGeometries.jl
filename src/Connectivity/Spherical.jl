@@ -3,9 +3,6 @@
 #
 # HEALPix RING neighbors follow the standard face-table algorithm (Górski et al. 2005; Reinecke 2003).
 
-using ..SphericalSampling: SphericalSampling
-using ..Geometry: Geometry
-
 # ---------------------------------------------------------------------------
 # CSR helpers
 # ---------------------------------------------------------------------------
@@ -54,16 +51,18 @@ out-of-range entries are removed here. `emit!` must touch only its own slice, an
 node — once to count the row, once to fill it — so it must be a pure function of `i`.
 
 Count, scan, fill. The scratch is one `maxdeg` buffer per task, and both node passes write only slots
-their own node owns, so both parallelize under a threaded `backend`.
+their own node owns, so both parallelize under a threaded `execution`.
 
 Host backends only: a work-item-per-node form needs `maxdeg` slots per item, an `n · maxdeg` scratch,
 and a device backend raises here. The grid layouts reach the same graph through
 [`build_connectivity`](@ref) on [`Grids.FormulaNeighbors`](@ref), which is device-resident end to end.
 """
-function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = nothing) where {F}
+function _csr_from_candidates(
+    emit!::F, n::Integer, maxdeg::Integer; execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
+) where {F}
     n = Int(n); maxdeg = Int(maxdeg)
     deg = Vector{Int}(undef, n)
-    Execution.run_chunks(n, backend) do rng
+    Execution.run_chunks(n, execution, Execution.Written(deg)) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -72,8 +71,8 @@ function _csr_from_candidates(emit!::F, n::Integer, maxdeg::Integer; backend = n
     # The width is a runtime value, so the filling pass is entered through a concrete one, from a
     # branch that leaves each call site one method — see `_csr_total`.
     return _index_type(max(n + 1, sum(deg))) === Int32 ?
-        _csr_fill(Int32, emit!, deg, n, maxdeg, backend) :
-        _csr_fill(Int, emit!, deg, n, maxdeg, backend)
+        _csr_fill(Int32, emit!, deg, n, maxdeg, execution) :
+        _csr_fill(Int, emit!, deg, n, maxdeg, execution)
 end
 
 function _csr_fill(
@@ -81,7 +80,7 @@ function _csr_fill(
 ) where {I<:Integer,F}
     ptr = Execution.exclusive_scan!(Vector{I}(undef, n + 1), deg, backend)
     nbrs = Vector{I}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend) do rng
+    Execution.run_chunks(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             d = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -150,11 +149,16 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    structured_grid([T], sampling, nlat; geometry, nlon, mask, periodic) -> StructuredGrid
+    structured_grid([T], sampling, nlat; geometry, nlon, mask) -> StructuredGrid
 
 Build a spherical `StructuredGrid` from a tensor-product sampling (Clenshaw–Curtis,
-Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). Longitude periodicity is
-auto-detected unless `periodic` is set.
+Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). The samplings space their longitudes
+evenly around the circle, so the longitude axis is an [`Axes.PeriodicAxis`](@ref) over `2π` and the grid
+wraps in longitude.
+
+A sampling with latitude quadrature weights (Gauss–Legendre, Driscoll–Healy, Clenshaw–Curtis) gives
+cells of measure `R²·Δλ·wⱼ`, so `sum(f .* measure(grid))` is that quadrature; the nodes and the
+weights come from one solve. Any other sampling gives the exact cell areas.
 
 `T` is the element type to build in, and defaults to the `geometry`'s own, a geometry fixing the width
 of every coordinate and metric factor computed against it. Naming `T` converts the geometry to that
@@ -172,20 +176,21 @@ function structured_grid(
     geometry::Geometry.AbstractSphericalGeometry = Geometry.SphericalGeometry(),
     nlon::Union{Nothing,Integer} = nothing,
     mask = nothing,
-    periodic = nothing,
 ) where {T<:AbstractFloat}
-    ax = SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)
-    λ = ax.λ
-    φ = ax.φ
-    m = mask === nothing ? Grids.AllActive((length(λ), length(φ))) : mask
-    # The geometry fixes the width of every coordinate and metric factor, so a grid built at `T`
-    # around a geometry of another width comes back promoted to that other width.
-    return Grids.StructuredGrid(Geometry.similar_geometry(T, geometry), λ, φ, m;
-                                periodic = periodic, sampling = s)
+    q = _axes_and_weights(T, s, nlat, nlon)
+    λ = Axes.PeriodicAxis{T}(zero(T), T(2π), length(q.λ))
+    m = mask === nothing ? Grids.AllActive((length(λ), length(q.φ))) : mask
+    return Grids._structured_grid(Geometry.similar_geometry(T, geometry), (λ, q.φ), m, nothing,
+                                  nothing, s, q.w)
 end
 
+_axes_and_weights(::Type{T}, s::Grids._WeightedSampling, nlat, nlon) where {T} =
+    SphericalSampling.spherical_quadrature(T, s, nlat; nlon = nlon)
+_axes_and_weights(::Type{T}, s, nlat, nlon) where {T} =
+    (; SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)..., w = nothing)
+
 """
-    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only)
+    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only, execution)
 
 Sampling topology straight to CSR. A tensor-product sampling's neighbor graph is fixed by its axis
 lengths and longitude wrapping alone, so the axes themselves are never evaluated — for
@@ -199,14 +204,14 @@ function build_connectivity(
     periodic::Union{Nothing,NTuple{2,Bool}} = nothing,
     stencil = Stencils.Axial(1),
     active_only::Bool = true,
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     sz = SphericalSampling.axes_lengths(s, nlat; nlon = nlon)
-    # These samplings tile the full circle in longitude and stop at the poles in latitude, the same
-    # closure `StructuredGrid`'s auto-detection reaches from the axes themselves.
+    # These samplings tile the full circle in longitude and stop at the poles in latitude.
     per = periodic === nothing ? (true, false) : periodic
     return build_connectivity(
         IndexTopology((sz.nlon, sz.nlat), per, mask);
-        stencil = stencil, active_only = active_only,
+        stencil = stencil, active_only = active_only, execution = execution,
     )
 end
 
@@ -215,51 +220,58 @@ end
 # ---------------------------------------------------------------------------
 
 """
-Exact face-neighbor under offset `(di,dj)` for the gnomonic cubed sphere matching
-`SphericalSampling._cubed_face_to_xyz` / `cubed_sphere_points!`.
+    _cubed_neighbor(f, i, j, di, dj, n) -> (f′, i′, j′)
 
-Panel interiors stay on-face. Crossing an edge uses cube face adjacency with index
-maps derived by matching cube XYZ along shared edges. Diagonal (corner) exits
-return `(0,0,0)` — no unique adjacent face.
+The cell the index offset `(di, dj)` reaches from cell `(i, j)` of face `f`, on the gnomonic cubed
+sphere of `SphericalSampling._cubed_face_to_xyz` and [`SphericalSampling.cubed_sphere_points!`](@ref).
+
+An offset that leaves the face through an edge lands on the adjacent face at the same depth past that
+edge, with the along-edge index carried by the edge's map; the maps come from matching cube XYZ along
+each shared edge. `(0, 0, 0)` when the offset leaves through a cube corner, where three faces meet and no
+single continuation exists, or reaches past the adjacent face.
 """
 function _cubed_neighbor(f::Int, i::Int, j::Int, di::Int, dj::Int, n::Int)
     ii, jj = i + di, j + dj
-    if 1 ≤ ii ≤ n && 1 ≤ jj ≤ n
-        return f, ii, jj
-    end
-    (di != 0 && dj != 0) && return 0, 0, 0
+    inI, inJ = 1 ≤ ii ≤ n, 1 ≤ jj ≤ n
+    inI && inJ && return f, ii, jj
+    (inI || inJ) || return 0, 0, 0
+    # Depth past the edge, 1 on the adjacent face's first row; `d` counts it from that face's low
+    # edge and `t` from its high one.
+    e = inI ? (jj < 1 ? 1 - jj : jj - n) : (ii < 1 ? 1 - ii : ii - n)
+    e > n && return 0, 0, 0
+    d, t = e, n + 1 - e
     r(k) = n + 1 - k
     # Face local (i,j) → gnomonic (X,Y); cube XYZ as in `_cubed_face_to_xyz`.
     if f == 1  # +z (X,Y,1)
-        jj < 1 && return 4, r(i), 1          # Y=-1 → -y, Y₄=-1
-        jj > n && return 2, i, 1             # Y=+1 → +y, Y₂=-1
-        ii < 1 && return 5, j, 1             # X=-1 → -x, Y₅=-1
-        ii > n && return 3, r(j), 1          # X=+1 → +x, Y₃=-1
+        jj < 1 && return 4, r(ii), d         # Y=-1 → -y, Y₄=-1
+        jj > n && return 2, ii, d            # Y=+1 → +y, Y₂=-1
+        ii < 1 && return 5, jj, d            # X=-1 → -x, Y₅=-1
+        ii > n && return 3, r(jj), d         # X=+1 → +x, Y₃=-1
     elseif f == 2  # +y (X, 1, -Y)
-        jj < 1 && return 1, i, n
-        jj > n && return 6, n, r(i)          # (X,1,-1) → face6 X₆=1, Y₆=-X
-        ii < 1 && return 5, n, j
-        ii > n && return 3, 1, j
+        jj < 1 && return 1, ii, t
+        jj > n && return 6, t, r(ii)         # (X,1,-1) → face6 X₆=1, Y₆=-X
+        ii < 1 && return 5, t, jj
+        ii > n && return 3, d, jj
     elseif f == 3  # +x (1, -X, -Y)
-        jj < 1 && return 1, n, r(i)
-        jj > n && return 6, r(i), 1          # (1,-X,-1) → face6 Y₆=-1, X₆=-X
-        ii < 1 && return 2, n, j
-        ii > n && return 4, 1, j
+        jj < 1 && return 1, t, r(ii)
+        jj > n && return 6, r(ii), d         # (1,-X,-1) → face6 Y₆=-1, X₆=-X
+        ii < 1 && return 2, t, jj
+        ii > n && return 4, d, jj
     elseif f == 4  # -y (-X, -1, -Y)
-        jj < 1 && return 1, r(i), 1
-        jj > n && return 6, 1, i             # (-X,-1,-1) → face6 X₆=-1, Y₆=X
-        ii < 1 && return 3, n, j
-        ii > n && return 5, 1, j
+        jj < 1 && return 1, r(ii), d
+        jj > n && return 6, d, ii            # (-X,-1,-1) → face6 X₆=-1, Y₆=X
+        ii < 1 && return 3, t, jj
+        ii > n && return 5, d, jj
     elseif f == 5  # -x (-1, X, -Y)
-        jj < 1 && return 1, 1, i
-        jj > n && return 6, i, n             # (-1,X,-1) → face6 Y₆=+1, X₆=X
-        ii < 1 && return 4, n, j
-        ii > n && return 2, 1, j
+        jj < 1 && return 1, d, ii
+        jj > n && return 6, ii, t            # (-1,X,-1) → face6 Y₆=+1, X₆=X
+        ii < 1 && return 4, t, jj
+        ii > n && return 2, d, jj
     else  # f == 6, -z (-Y, X, -1); i→X (cube y), j→Y (cube x = -Y)
-        jj < 1 && return 3, r(i), n          # Y=-1 → cube x=+1 → +x top
-        jj > n && return 5, i, n             # Y=+1 → cube x=-1 → -x top
-        ii < 1 && return 4, j, n             # X=-1 → cube y=-1 → -y top
-        ii > n && return 2, r(j), n          # X=+1 → cube y=+1 → +y top
+        jj < 1 && return 3, r(ii), t         # Y=-1 → cube x=+1 → +x top
+        jj > n && return 5, ii, t            # Y=+1 → cube x=-1 → -x top
+        ii < 1 && return 4, jj, t            # X=-1 → cube y=-1 → -y top
+        ii > n && return 2, r(jj), t         # X=+1 → cube y=+1 → +y top
     end
     return 0, 0, 0
 end
@@ -269,10 +281,13 @@ end
 
 Six-panel gnomonic cubed sphere with cross-face seams. Indexing matches
 [`SphericalSampling.cubed_sphere_points!`](@ref).
+
+A stencil reaches across a seam as it does inside a panel, so under `Moore(1)` with `n ≥ 2` every cell
+has eight neighbours except the 24 cells at a cube corner, which have seven.
 """
 function build_connectivity(
     ::SphericalSampling.CubedSphereSampling, n::Integer;
-    stencil = Stencils.Axial(1), backend = nothing,
+    stencil = Stencils.Axial(1), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     n = Int(n)
     n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1"))
@@ -280,7 +295,7 @@ function build_connectivity(
     offs = _stencil_offsets(Val{2}(), sv)
     N = 6 * n * n
     nn = n
-    return _csr_from_candidates(N, length(offs); backend = backend) do buf, lo, lin
+    return _csr_from_candidates(N, length(offs); execution = execution) do buf, lo, lin
         f, i, j = SphericalSampling._cubed_unlin(lin, nn)
         m = 0
         @inbounds for δ in offs
@@ -307,7 +322,7 @@ standard Yin–Yang discrete topology, where the panels couple through interpola
 """
 function build_connectivity(
     ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
-    stencil = Stencils.Axial(1), backend = nothing,
+    stencil = Stencils.Axial(1), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 )
     nlon = Int(nlon); nlat = Int(nlat)
     nlon ≥ 1 && nlat ≥ 1 || throw(ArgumentError("Yin–Yang nlon/nlat must be ≥ 1"))
@@ -316,7 +331,7 @@ function build_connectivity(
     npanel = nlon * nlat
     N = 2 * npanel
     sz = (nlon, nlat)
-    return _csr_from_candidates(N, length(offs); backend = backend) do buf, lo, lin
+    return _csr_from_candidates(N, length(offs); execution = execution) do buf, lo, lin
         base = ((lin - 1) ÷ npanel) * npanel
         p = lin - base - 1
         j, i = divrem(p, nlon)
@@ -461,10 +476,12 @@ end
 HEALPix RING topological adjacency (usually 8 neighbors; 7 or 6 at singular pixels).
 Julia node indices are 1-based (`pixel 0` → node `1`).
 """
-function build_connectivity(s::SphericalSampling.HEALPixSampling; backend = nothing, _...)
+function build_connectivity(
+    s::SphericalSampling.HEALPixSampling; execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+)
     nside = s.nside
     npix = SphericalSampling.healpix_npix(nside)
-    return _csr_from_candidates(npix, 8; backend = backend) do buf, lo, node
+    return _csr_from_candidates(npix, 8; execution = execution) do buf, lo, node
         # Straight into this node's own slice — no scratch shared between calls, so the emit pass
         # parallelizes.
         slice = view(buf, (lo + 1):(lo + 8))
@@ -490,23 +507,26 @@ A vertex's neighbours are arithmetic in `(ν, id)` — see [`_ico_neighbor_ids`]
 same count, scan, fill the layout's own builder makes, over `10ν² + 2` vertices. The triangulation's
 `20ν²` triangles and `30ν²` edges are never formed.
 """
-function build_connectivity(s::SphericalSampling.IcosahedralSampling; backend = nothing, _...)
+function build_connectivity(
+    s::SphericalSampling.IcosahedralSampling;
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+)
     ν = Int(s.frequency)
     n = SphericalSampling.icosahedral_nvertices(ν)
-    deg = Execution.allocate(backend, Int, n)
-    Execution.run_indices(n, backend) do k
+    deg = Execution.allocate(execution, Int, n)
+    Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds deg[k] = _ico_neighbor_ids(k, ν)[2]
     end
-    total = _csr_total(deg, n, backend)
+    total = _csr_total(deg, n, execution)
     return _index_type(max(n + 1, total)) === Int32 ?
-        _ico_fill(Int32, total, deg, n, ν, backend) :
-        _ico_fill(Int, total, deg, n, ν, backend)
+        _ico_fill(Int32, total, deg, n, ν, execution) :
+        _ico_fill(Int, total, deg, n, ν, execution)
 end
 
 function _ico_fill(::Type{I}, total::Int, deg, n::Int, ν::Int, backend) where {I<:Integer}
     ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
     nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend) do k
+    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _ico_neighbor_ids(k, ν)
             slot = Int(ptr[k])
@@ -583,55 +603,17 @@ function unstructured_grid(
     mesh = SphericalSampling.icosahedral_mesh(T, s.frequency)
     conn = _csr_from_undirected_edges(length(mesh.λ), mesh.edges)
     geo = Geometry.similar_geometry(T, geometry)
-    a = areas === nothing ?
-        _icosahedral_dual_areas(geo, mesh.verts, mesh.triangles, length(mesh.λ)) : areas
+    a = areas === nothing ? _icosahedral_dual_areas(geo, s.frequency) : areas
     return _unstructured_from_points_conn(geo, mesh.λ, mesh.φ, conn, a; mask = mask)
 end
 
-"""
-    _icosahedral_dual_areas(geometry, verts, triangles, nvert) -> Vector
+# The geodesic's spherical Voronoi dual areas, in the mesh's vertex numbering: the `IcosahedralGrid`'s,
+# which numbers its vertices the same way.
+_icosahedral_dual_areas(geometry::Geometry.AbstractSphericalGeometry, ν::Integer) =
+    Grids.measure_array(Grids.IcosahedralGrid(geometry, ν))
 
-Exact spherical-Voronoi dual-cell areas from the mesh's own triangulation — no convex hull, no
-optional dependency.
-
-Each triangle is divided among its three vertices by the three arcs from its circumcenter `O` to its
-edge midpoints. Those arcs *are* the perpendicular bisectors of the edges — `O` is equidistant from
-all three vertices and each midpoint is equidistant from its two — so vertex `a`'s share is the
-spherical quadrilateral `(a, M_ab, O, M_ca)`, exactly its Voronoi cell restricted to that triangle.
-The three shares tile the triangle, so accumulating over all `20ν²` triangles tiles the sphere and
-the areas sum to `4πR²` identically. Ordering the cells' corners is never needed, so there is no
-per-vertex `sortperm` and no incident-triangle list.
-"""
-function _icosahedral_dual_areas(
-    geometry::Geometry.AbstractSphericalGeometry{TG},
-    verts::AbstractVector{NTuple{3,TV}},
-    triangles::AbstractVector{NTuple{3,Int}},
-    nvert::Integer,
-) where {TG<:AbstractFloat,TV<:AbstractFloat}
-    T = promote_type(TG, TV)
-    areas = zeros(T, Int(nvert))
-    R2 = T(Geometry.radius(geometry))^2
-    @inline nrm(p) = (r = sqrt(p[1]^2 + p[2]^2 + p[3]^2); (p[1] / r, p[2] / r, p[3] / r))
-    @inbounds for (ia, ib, ic) in triangles
-        A = verts[ia]; B = verts[ib]; C = verts[ic]
-        # Circumcenter: the plane through A, B, C has a unit normal equidistant from all three.
-        ux = B[1] - A[1]; uy = B[2] - A[2]; uz = B[3] - A[3]
-        vx = C[1] - A[1]; vy = C[2] - A[2]; vz = C[3] - A[3]
-        O = nrm((uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx))
-        O[1] * A[1] + O[2] * A[2] + O[3] * A[3] < 0 && (O = (-O[1], -O[2], -O[3]))
-        Mab = nrm((A[1] + B[1], A[2] + B[2], A[3] + B[3]))
-        Mbc = nrm((B[1] + C[1], B[2] + C[2], B[3] + C[3]))
-        Mca = nrm((C[1] + A[1], C[2] + A[2], C[3] + A[3]))
-        areas[ia] += R2 * (Geometry.spherical_excess(A, Mab, O) + Geometry.spherical_excess(A, O, Mca))
-        areas[ib] += R2 * (Geometry.spherical_excess(B, Mbc, O) + Geometry.spherical_excess(B, O, Mab))
-        areas[ic] += R2 * (Geometry.spherical_excess(C, Mca, O) + Geometry.spherical_excess(C, O, Mbc))
-    end
-    return areas
-end
-
-_icosahedral_dual_areas(
-    ::Geometry.AbstractCartesianGeometry{T}, ::AbstractVector, ::AbstractVector, nvert::Integer,
-) where {T<:AbstractFloat} = ones(T, Int(nvert))
+_icosahedral_dual_areas(::Geometry.AbstractCartesianGeometry{T}, ν::Integer) where {T<:AbstractFloat} =
+    ones(T, SphericalSampling.icosahedral_nvertices(ν))
 
 # `areas` is required: a node set's control volumes come from its own tessellation, and each sampling
 # that reaches here computes them in closed form before calling.

@@ -52,7 +52,8 @@ re-resolved at the new width from `(λp, φp)`.
 """
     rotate(rot, λ, φ) -> (λ′, φ′)
 
-`(λ, φ)` expressed in the rotated frame. The rotation's own pole maps to `φ′ = π/2`.
+`(λ, φ)` expressed in the rotated frame, `λ′` in `[0, 2π)`. The rotation's own pole maps to
+`φ′ = π/2`.
 """
 @inline rotate(rot::PoleRotation, λ::Real, φ::Real) = _rotate(_at_point_width(rot, λ, φ)...)
 
@@ -65,13 +66,14 @@ function _rotate(rot::PoleRotation{T}, λ::T, φ::T) where {T}
     z = sinφ
     xr = rot.cosθ * x + rot.sinθ * z
     zr = -rot.sinθ * x + rot.cosθ * z
-    return (mod(atan(y, xr), T(2π)), asin(clamp(zr, -one(T), one(T))))
+    # `atan(z, hypot(x, y))`: near the pole `hypot` keeps the small colatitude that `asin(z)` loses.
+    return (wrap_longitude(atan(y, xr)), atan(zr, hypot(xr, y)))
 end
 
 """
     unrotate(rot, λ′, φ′) -> (λ, φ)
 
-Inverse of [`rotate`](@ref).
+Inverse of [`rotate`](@ref), `λ` in `[0, 2π)`.
 """
 @inline unrotate(rot::PoleRotation, λ::Real, φ::Real) = _unrotate(_at_point_width(rot, λ, φ)...)
 
@@ -83,7 +85,7 @@ function _unrotate(rot::PoleRotation{T}, λ::T, φ::T) where {T}
     z = sinφ
     xr = rot.cosθ * x - rot.sinθ * z
     zr = rot.sinθ * x + rot.cosθ * z
-    return (mod(atan(y, xr) + rot.λp, T(2π)), asin(clamp(zr, -one(T), one(T))))
+    return (wrap_longitude(atan(y, xr) + rot.λp), atan(zr, hypot(xr, y)))
 end
 
 """

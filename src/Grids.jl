@@ -1,5 +1,6 @@
 module Grids
 
+using ComputationalBackends: ComputationalBackends as CB
 using ..Execution: Execution
 using ..Axes: Axes
 using ..Geometry: Geometry
@@ -13,6 +14,7 @@ include("Grids/Measure.jl")
 include("Grids/Structured.jl")
 include("Grids/Staggered.jl")
 include("Grids/Curvilinear.jl")
+include("Grids/Faces.jl")
 include("Grids/Rotated.jl")
 include("Grids/Unstructured.jl")
 include("Grids/HEALPix.jl")
@@ -20,6 +22,8 @@ include("Grids/Ring.jl")
 include("Grids/CubedSphere.jl")
 include("Grids/YinYang.jl")
 include("Grids/Icosahedral.jl")
+include("Grids/Rings.jl")
+include("Grids/Coverage.jl")
 include("Grids/Embedding.jl")
 include("Grids/SpatialIndex.jl")
 include("Grids/Distance.jl")

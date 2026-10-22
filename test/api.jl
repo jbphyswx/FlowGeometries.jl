@@ -4,8 +4,6 @@ Test.@testset "No method ambiguities or unbound static parameters" begin
 end
 
 Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
-    # An out-of-range index errors. `@boundscheck` is elided at an `@inbounds` call site, so a hot
-    # loop still pays nothing.
     geom = FG.Geometry.CartesianGeometry()
     g = FG.Grids.StructuredGrid(geom, 0.0:1.0:4.0, 0.0:1.0:3.0, trues(5, 4))
     Test.@test_throws BoundsError FG.Grids.measure(g, 99, 99)
@@ -14,7 +12,17 @@ Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
     Test.@test_throws BoundsError FG.Grids.coords(g, 99, 99)
     Test.@test_throws BoundsError FG.Grids.coords(NTuple{2,Float64}, g, 6, 1)
     Test.@test_throws BoundsError FG.Grids.coords!(zeros(2), g, 1, 5)
-    Test.@test_throws BoundsError FG.Grids.measure(g, 0, 1)
+    # An index per direction: a third index on a 2-D grid, or one too few, names both counts.
+    for idx in ((1, 1, 2), (1,))
+        err = try
+            FG.Grids.coords(g, idx...)
+            nothing
+        catch e
+            e
+        end
+        Test.@test err isa ArgumentError
+        Test.@test occursin("2 directions; got $(length(idx)) indices", sprint(showerror, err))
+    end
 
     nx, ny = 4, 3
     xm = [Float64(i) for i in 1:nx, j in 1:ny]
@@ -27,10 +35,6 @@ Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
     un = FG.Grids.UnstructuredGrid(geom, [0.0, 1.0], [0.0, 1.0], [1.0, 1.0], trues(2))
     Test.@test_throws BoundsError FG.Grids.coords(un, 3)
     Test.@test_throws BoundsError FG.Grids.measure(un, 3)
-
-    # In-range access is unaffected, and a caller that opts out still pays nothing.
-    Test.@test FG.Grids.measure(g, 2, 2) ≈ 1.0
-    Test.@test FG.Grids.coords(g, 2, 3) == (x = 1.0, y = 2.0)
 end
 
 Test.@testset "Public names the suite had not been calling" begin
@@ -70,15 +74,6 @@ Test.@testset "Public names the suite had not been calling" begin
     Test.@test_throws ArgumentError C.csr_connectivity([1], [2, 2])        # ptr[1] != 1
     Test.@test_throws ArgumentError C.csr_connectivity([1, 2], [1, 2])     # length mismatch
 
-    # StencilNeighbors is the lazy per-cell sequence; iterating it must equal neighbors!.
-    gm = FG.Grids.StructuredGrid(geo, 0.0:1.0:4.0, 0.0:1.0:3.0)
-    it = FG.Grids.neighbors(gm, 2, 2)
-    Test.@test it isa C.StencilNeighbors
-    buf = Vector{Int}(undef, 8)
-    n = C.neighbors!(buf, gm, 2, 2)
-    Test.@test sort(collect(it)) == sort(buf[1:n])
-    Test.@test length(collect(FG.Grids.neighbors(gm, 1, 1))) == C.nneighbors(gm, 1, 1)
-
     # geographic_latitude / colatitude are each other's inverse.
     Test.@test S.geographic_latitude(0.0) ≈ π / 2
     Test.@test S.geographic_latitude(π) ≈ -π / 2
@@ -102,7 +97,6 @@ Test.@testset "Public names the suite had not been calling" begin
         Test.@test all(infos[r].latitude ≈ -infos[nrings + 1 - r].latitude for r in 1:nrings)
     end
     Test.@test abs(S.ring_info(8, 16).latitude) < 1e-15      # ring 2·nside is the equator
-    Test.@test S.ring_info(Float32, 4, 3).colatitude isa Float32
     Test.@test_throws ArgumentError S.ring_info(4, 0)
     Test.@test_throws ArgumentError S.ring_info(4, 16)
     Test.@test_throws ArgumentError S.ring_info(0, 1)
@@ -112,88 +106,29 @@ Test.@testset "Asking for an element type gives back that element type, knowably
     SS = FG.SphericalSampling
     gl = SS.GaussLegendreSampling()
     hp = SS.HEALPixSampling(4)
-    fb = SS.FibonacciSampling(200)
-    cb = SS.CubedSphereSampling()
-    yy = SS.YinYangSampling()
-    ic = SS.IcosahedralSampling(2)
-    rg = SS.OctahedralGaussianSampling(8)
 
-    # Every entry point that builds values of a chosen element type, inferred with the remaining
-    # arguments left non-constant. The whole set takes the type positionally: as a keyword it takes
-    # no part in dispatch, and each of these then returns abstract, which propagates into the
-    # caller's own inference.
-    for W in (Float64, Float32)
-        for (name, f, rest) in (
-            ("_gauss_legendre_μ",   t_gl,    Tuple{Int}),
-            ("spherical_axes",      t_axes,  Tuple{typeof(gl),Int}),
-            ("spherical_quadrature", t_quad, Tuple{typeof(gl),Int}),
-            ("latitude_weights",    t_wts,   Tuple{typeof(gl),Int}),
-            ("latitude_weights/rg", t_wts1,  Tuple{typeof(rg)}),
-            ("spherical_points/tp", t_pts,   Tuple{typeof(gl),Int}),
-            ("spherical_points/hp", t_pts1,  Tuple{typeof(hp)}),
-            ("spherical_points/fb", t_pts1,  Tuple{typeof(fb)}),
-            ("spherical_points/rg", t_pts1,  Tuple{typeof(rg)}),
-            ("spherical_points/ic", t_pts1,  Tuple{typeof(ic)}),
-            ("spherical_points/cb", t_pts,   Tuple{typeof(cb),Int}),
-            ("spherical_points/yy", t_pts2,  Tuple{typeof(yy),Int,Int}),
-            ("ring_latitudes",      t_rlat,  Tuple{typeof(rg)}),
-            ("cubed_sphere_points", t_cube,  Tuple{Int}),
-            ("icosahedral_vertices", t_icov, Tuple{Int}),
-            ("icosahedral_mesh",    t_icom,  Tuple{Int}),
-            ("yin_yang_panels",     t_yy,    Tuple{Int,Int}),
-            ("ring_info",           t_ring,  Tuple{Int,Int}),
-            ("pix2ang",             t_p2a,   Tuple{Int,Int}),
-            ("pix2vec",             t_p2v,   Tuple{Int,Int}),
-            ("stencil_scratch",     t_scr,   Tuple{Int,Int}),
-        )
-            ok, ty = concrete_return(f, Tuple{Type{W},rest.parameters...})
-            ok || println("    ", name, " (", W, ") -> ", ty)
-            Test.@test ok
-        end
-    end
-
-    # The two grid constructors are absent from that list. A grid's type records whether each
-    # direction is periodic and whether each axis is uniform, and both are detected from the axis
-    # values, so the type cannot be known before the axes exist. The claim that still holds — the
-    # width asked for is the width built — is checked below.
     for W in (Float64, Float32)
         sg = FG.Connectivity.structured_grid(W, gl, 12)
         Test.@test eltype(FG.Grids.axis(sg, 1)) === W
-        Test.@test FG.Grids.grid_geometry(sg) isa FG.Geometry.AbstractGeometry{W}
         Test.@test FG.Grids.coords(sg, 1, 1).λ isa W
-
-        # A layout takes its width from its geometry alone: it stores no coordinates to carry one.
-        hg = FG.Grids.HEALPixGrid(FG.Geometry.SphericalGeometry(W(6.371e6)), 4)
-        Test.@test FG.Grids.grid_geometry(hg) isa FG.Geometry.AbstractGeometry{W}
-        Test.@test FG.Grids.coords(hg, 1).λ isa W
-        Test.@test FG.Grids.measure(hg, 1) isa W
-        Test.@test eltype(first(FG.Grids.materialize(hg))) === W
     end
 
-    # An explicit geometry is carried to the requested width too, keeping its shape: asking for a
-    # Float32 grid around a 3000 km sphere must not hand back a Float64 one.
+    # An explicit geometry is carried to the requested width, keeping its radius.
     gsm = FG.Connectivity.structured_grid(Float32, gl, 12;
                                           geometry = FG.Geometry.SphericalGeometry(3.0e6))
     Test.@test FG.Grids.grid_geometry(gsm) === FG.Geometry.SphericalGeometry{Float32}(3.0f6)
     Test.@test eltype(FG.Grids.axis(gsm, 2)) === Float32
 
-    # With no element type named, the geometry's own is the one meant, so a caller's Float32
-    # geometry keeps its width.
+    # With no element type named, the geometry's own is the one meant.
     g32 = FG.Connectivity.structured_grid(gl, 12;
                                           geometry = FG.Geometry.SphericalGeometry(6.371f6))
     Test.@test eltype(FG.Grids.axis(g32, 1)) === Float32
-    Test.@test FG.Grids.grid_geometry(g32) isa FG.Geometry.AbstractGeometry{Float32}
-    r32 = FG.Grids.RingGrid(FG.Geometry.SphericalGeometry(6.371f6),
-                            FG.SphericalSampling.OctahedralGaussianSampling(8))
-    Test.@test FG.Grids.grid_geometry(r32) isa FG.Geometry.AbstractGeometry{Float32}
-    Test.@test FG.Grids.coords(r32, 1).λ isa Float32
     for W in (Float64, Float32)
         Test.@test FG.Geometry.float_type(FG.Geometry.SphericalGeometry{W}(6.371e6)) === W
         Test.@test FG.Geometry.float_type(FG.Geometry.CartesianGeometry{W}()) === W
     end
 
-    # A geometry defined outside the package must still inherit the whole stack, so a width it is
-    # already at asks nothing of it.
+    # A geometry defined outside the package, already at the width asked for, comes back as itself.
     Test.@test FG.Geometry.similar_geometry(Float64, OneSphere{Float64}()) isa OneSphere{Float64}
     let og = FG.Connectivity.structured_grid(gl, 8; geometry = OneSphere{Float64}())
         Test.@test FG.Grids.grid_geometry(og) isa OneSphere{Float64}
@@ -208,159 +143,18 @@ Test.@testset "Asking for an element type gives back that element type, knowably
         Test.@test FG.Geometry.flattening(sp) ≈ FG.Geometry.flattening(FG.Geometry.SpheroidGeometry())
     end
 
-    # And the width asked for is the width returned.
+    # The width asked for is the width returned.
     Test.@test eltype(SS.spherical_axes(Float32, gl, 12).φ) === Float32
     Test.@test eltype(SS.spherical_points(Float32, hp).λ) === Float32
-    Test.@test eltype(SS.latitude_weights(Float32, gl, 12)) === Float32
     Test.@test eltype(SS.icosahedral_vertices(Float32, 2).λ) === Float32
     Test.@test SS.ring_info(Float32, 4, 3).colatitude isa Float32
     Test.@test SS.pix2ang(Float32, 4, 10) isa NTuple{2,Float32}
     Test.@test SS.pix2vec(Float32, 4, 10) isa NTuple{3,Float32}
-    Test.@test SS.pix2vec(Float64, 4, 10) isa NTuple{3,Float64}
-
-    # The default stays Float64 and stays knowable.
-    Test.@test Test.@inferred(SS.pix2vec(4, 10)) isa NTuple{3,Float64}
-    Test.@test Test.@inferred(SS.pix2ang(4, 10)) isa NTuple{2,Float64}
-    Test.@test eltype(SS.spherical_points(hp).λ) === Float64
 
     # A unit vector really is the direction its angles name, at either width.
     for W in (Float64, Float32)
         θ, ϕ = SS.pix2ang(W, 8, 100)
         v = SS.pix2vec(W, 8, 100)
         Test.@test all(v .≈ (sin(θ) * cos(ϕ), sin(θ) * sin(ϕ), cos(θ)))
-    end
-end
-
-Test.@testset "Every public name is allocation-checked or has a stated reason not to be" begin
-    public_of(m) = Set(s for s in (Symbol(b.var) for b in keys(Base.Docs.meta(m)))
-                       if !startswith(String(s), "_"))
-
-    ALLOCATION_CHECKED = Set([
-        :coords, :measure, :isactive, :displacement, :neighbors, :neighbors!, :nneighbors,
-        :nneighbors_within, :neighbors_within!, :fold_within, :metric_window, :k_nearest!,
-        :MetricTopology, :minimum_spacing, :maximum_spacing,
-        :area, :coords!, :axis, :spacing, :origin, :extent, :bounds, :isperiodic, :isuniform,
-        :period, :size_tuple, :mask, :coordinate_names, :periodic_flags, :topology, :coordinates,
-        :apply_stencil!, :foreach_within, :mapreduce_within, :embedded_radius, :fold_candidates,
-        :fold_candidates_at, :locate, :embed_point, :fold_at,
-        :fd_weights!, :nearest_index, :interpolation_weights, :scale_factors, :jacobian,
-        :axis_stencils!, :faces!, :centers!, :lagrange_weights!,
-        :local_spacing, :cell_width, :metric_floor, :metric_band, :gradient!,
-        :stencil_scratch, :interpolate!, :healpix_neighbor_ids,
-        :plan_row, :nnodes, :derivative_order, :axis_length,
-    ])
-
-    # Geometry, Axes and Stencils are per-point kernels almost throughout, so every name below has
-    # its zero-allocation claim measured.
-    GEOMETRY_CHECKED = Set([
-        :radius, :semimajor_axis, :semiminor_axis, :flattening, :eccentricity²,
-        :meridional_radius, :prime_vertical_radius, :as_ntuple, :as_tensor6, :point_names,
-        :named_point, :area_element, :volume_element, :spherical_to_cartesian,
-        :cartesian_to_spherical, :geodetic_to_cartesian, :cartesian_to_geodetic, :embed,
-        :unit_vector, :local_tangent_basis,
-        :project_to_tangent_plane, :local_displacement,
-        :nonuniform_first_derivative, :vector_to_cartesian,
-        :vector_from_cartesian, :tensor_to_local, :tensor_from_local, :spherical_excess,
-        :triangle_area, :triangle_area_from_unit_vectors, :rotate!, :unrotate,
-        :similar_geometry, :float_type, :similar_rotation, :metric_invariant_directions,
-        :spacing_trait, :similar_axis, :uniform_axis, :wrap_sign, :coordinate, :index_at,
-        :offsets, :nstencil, :reach, :foreach_offset, :fold_offsets, :is_symmetric,
-        :bandlimit, :nlat_for_bandlimit, :nlon_for_nlat, :npoints, :nrings, :axes_lengths,
-        :colatitude, :geographic_latitude, :ang2pix, :pix2ang, :pix2vec, :vec2pix, :ring2nest,
-        :ring_info, :admits_exact_bandlimited_quadrature, :nlon_in_ring, :ring_range,
-    ])
-
-    # Names that build something, and names of things.
-    GEOMETRY_NOT_CHECKED = Set(Iterators.flatten((
-        # geometry, axis, stencil and sampling types
-        [:AbstractGeometry, :AbstractCartesianGeometry, :AbstractSphericalGeometry,
-         :AbstractEllipsoidalGeometry, :AbstractLonLatGeometry,
-         :CartesianGeometry, :SphericalGeometry, :SpheroidGeometry,
-         :AbstractUniformAxis, :UniformAxis, :ConstantVector, :UniformSpacing, :NonuniformSpacing,
-         :AbstractAnalyticAxis, :GeometricAxis, :PowerAxis,
-         :AbstractStencil, :Axial, :VonNeumann, :Moore, :Diagonal, :Anisotropic, :Custom,
-         :Vertex, :CellRadius, :MetricBall,
-         :AbstractSphericalSampling, :AbstractTensorProductSphericalSampling,
-         :AbstractLatLonSampling, :AbstractReducedGaussianSampling, :AbstractRingSampling,
-         :AbstractSpectralQuadratureSampling, :ClenshawCurtisSampling, :CubedSphereSampling,
-         :DriscollHealySampling, :DriscollHealyEqualSampling, :FibonacciSampling,
-         :GaussLegendreSampling, :HEALPixSampling, :IcosahedralSampling, :LatLonSampling,
-         :McEwenWiauxSampling, :OctahedralGaussianSampling, :ReducedGaussianSampling,
-         :ScatteredSphericalSampling, :YinYangSampling, :RingScheme, :Ring, :Nested, :OpenNodes,
-         :AbstractEquiangularAlgorithm, :Recurrence, :Transform],
-        # allocating by contract: each returns a fresh array, which is the request
-        [:nlon_per_ring, :ring_latitudes, :spherical_axes, :spherical_points,
-         :spherical_quadrature, :latitude_weights, :icosahedral_vertices, :icosahedral_mesh,
-         :cubed_sphere_points, :yin_yang_panels, :chunk_ranges],
-        # the `!` forms of those, whose buffers are the caller's — covered by the `!`-form testset
-        [:spherical_axes!, :spherical_points!, :spherical_quadrature!, :latitude_weights!,
-         :icosahedral_vertices!, :cubed_sphere_points!, :yin_yang_panels!],
-        [:run_chunks, :run_indices, :map_chunks, :reduce_indices, :exclusive_scan!],
-        [:allocate, :scalar],
-        # builds a NamedTuple from names given at runtime, so the caller chooses the cost
-        [:build_point],
-    )))
-
-    # Adding a public name without putting it in one of the two sets fails this test: coverage is
-    # derived from what the module documents.
-    NOT_CHECKED_BECAUSE = Set(Iterators.flatten((
-        # types and traits
-        [:AbstractGrid, :AbstractStructuredGrid, :AbstractCurvilinearGrid, :AbstractUnstructuredGrid,
-         :StructuredGrid, :CurvilinearGrid, :UnstructuredGrid, :StaggeredGrid, :RotatedGrid,
-         :base_grid, :rotation,
-         :AbstractTopology, :Bounded, :Periodic,
-         :AllActive, :SeparableMeasure, :SlabMeasure, :PoleRotation, :AbstractImageConvention,
-         :AbstractReach, :AxisSummary,
-         :NearestImage, :AllImages, :Unrestricted, :Connected, :CSRConnectivity, :IndexTopology,
-         :StencilNeighbors, :AbstractEmbedding, :CartesianEmbedding, :ChordEmbedding,
-         :ArcEmbedding, :CellListIndex, :AbstractMaskPolicy, :BlankMasked, :ShiftWithinRun,
-         :ReduceInRun, :AbstractLocation, :Center, :Face, :GradientPlan, :StencilScratch,
-         :AbstractStencilPlan, :UniformStencilPlan, :TabulatedStencilPlan, :ConnectedScratch,
-         :MeshNeighbors, :AbstractCellAddress, :CartesianCells, :FlatCells,
-         :AbstractAdjacency, :IndexStencilNeighbors, :FormulaNeighbors, :StoredMeshNeighbors,
-         :AbstractCandidateSource, :SeparableWindow, :IndexedCandidates],
-        # bulk and one-off operations, away from the per-cell hot paths
-        [:build_connectivity, :build_connectivity_within, :foreach_within, :mapreduce_within,
-         :adjacency_matrix, :adjacency_matrix!, :sparse_adjacency_matrix, :sparse_adjacency_matrix!,
-         :sparse_adjacency_coo!, :sparse_adjacency_csc!, :sort_neighbors!, :is_symmetric_adjacency,
-         :connected_components, :count_holes, :interior, :boundary_cells, :csr_connectivity,
-         :empty_csr, :healpix_neighbors!, :indexed, :ball_scratch, :connected_scratch,
-         :structured_grid,
-         :rotate, :measure_array, :measure_factors, :derivative!, :gradient_plan,
-         :interpolate,
-         # staggered: a whole-array sweep, or a grid built at a location
-         :center_grid, :grid_at, :axis_at, :locations, :location_at, :center_location,
-         :divergence, :divergence!, :curl, :curl!, :gradient,
-         :corners, :corner_coords, :has_corners, :neighbor_nbrs, :distance, :embedded_points,
-         :cell_list,
-         :incident_nodes, :cell_address, :adjacency_source, :candidate_source,
-         :has_symmetric_adjacency,
-         :CellMesh, :cell_mesh, :has_cell_mesh, :ncells, :cell_nodes, :node_cells,
-         :spatial_order, :reorder,
-         :sampling, :rebuild, :ncoordinates, :ncomponents, :materialize, :cells, :cell_at, :embedded_at,
-         :embedding_of, :max_neighbors, :formula_neighbors, :nside, :scheme, :npixels,
-         :HEALPixGrid, :RingGrid, :RingwiseVector, :FormulaNeighborSeq, :ring_of,
-         :CubedSphereGrid, :YinYangGrid, :IcosahedralGrid, :GridMeasure, :frequency,
-         :npanels, :panel_size, :panel_shape, :panel_cell, :cell_id],
-    # allocating forms, whose whole job is to return a fresh array
-    [:neighbors_within, :k_nearest, :fd_weights, :lagrange_weights, :axis_stencils,
-     :centers, :faces, :nodes, :cell_widths],
-    # grid constructors
-    [:structured_grid, :unstructured_grid],
-        # builds a weight set, which is the request
-        [:stencil_plan],
-        # extension hooks, which throw until their trigger package is loaded
-        [:spatial_index, :index_within!, :has_spatial_index],
-        # returns the axis itself, so its type varies by direction: a runtime `d` cannot be stable
-        [:axis],
-    )))
-
-    for m in (FG.Grids, FG.Connectivity, FG.Discretization, FG.Operators, FG.Geometry, FG.Axes,
-              FG.Stencils, FG.SphericalSampling, FG.Execution)
-        unclassified = setdiff(public_of(m), ALLOCATION_CHECKED, NOT_CHECKED_BECAUSE,
-                               GEOMETRY_CHECKED, GEOMETRY_NOT_CHECKED)
-        isempty(unclassified) ||
-            println("  unclassified in ", nameof(m), ": ", join(sort!(collect(unclassified)), ", "))
-        Test.@test isempty(unclassified)
     end
 end

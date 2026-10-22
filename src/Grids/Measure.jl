@@ -17,11 +17,42 @@ const _MultiplicativeF = Union{
 Base.mapreduce(f::_MultiplicativeF, ::typeof(Base.add_sum), m::SeparableMeasure) =
     prod(fac -> sum(f, fac), m.factors)
 
-# ∏_{i,j} f(wxᵢ·wyⱼ) = ∏ᵈ (∏ᵢ f(wᵈᵢ))^(∏_{e≠d} Nᵉ)
+# ∏_{i,j} f(wxᵢ·wyⱼ) = ∏ᵈ (∏ᵢ f(wᵈᵢ))^(∏_{e≠d} Nᵉ). Each partial product is carried as a significand in
+# [0.5, 1) and a binary exponent, so it neither overflows nor underflows before the whole does.
 function Base.mapreduce(f::_MultiplicativeF, ::typeof(Base.mul_prod), m::SeparableMeasure{T,N}) where {T,N}
     n = size(m)
     total = prod(n)
-    return prod(ntuple(d -> prod(f, m.factors[d])^(total ÷ n[d]), Val(N)))
+    acc = (one(T), 0)
+    for d in 1:N
+        acc = _split_mul(acc, _split_pow(_split_prod(f, m.factors[d]), total ÷ n[d]))
+    end
+    return ldexp(acc[1], acc[2])
+end
+
+@inline function _split_mul((a, ea), (b, eb))
+    s, e = frexp(a * b)
+    return (s, ea + eb + e)
+end
+
+function _split_prod(f, fac::AbstractVector{T}) where {T}
+    acc = (one(T), 0)
+    for v in fac
+        acc = _split_mul(acc, frexp(T(f(v))))
+    end
+    return acc
+end
+
+_split_prod(f, fac::Axes.ConstantVector{T}) where {T} = _split_pow(frexp(T(f(fac.value))), length(fac))
+
+# `x^k` by squaring, renormalized at every step.
+function _split_pow(x::Tuple{T,Int}, k::Int) where {T}
+    acc = (one(T), 0)
+    while k > 0
+        isodd(k) && (acc = _split_mul(acc, x))
+        x = _split_mul(x, x)
+        k >>= 1
+    end
+    return acc
 end
 
 Base.mapreduce(f::_MultiplicativeF, ::typeof(max), m::SeparableMeasure) = _sep_extrema(f, m)[2]
@@ -162,13 +193,40 @@ The cell measure of a ring grid, held as its per-ring values.
 
 Every cell of an iso-latitude ring has the same area, so `npoints` entries carry only `nrings` numbers
 — `O(√npoints)`. A genuine `AbstractVector`: indexing, broadcasting and `collect` behave as for the
-dense equivalent.
+dense equivalent, an entry reading its ring in `O(1)`.
 
 `sum` is specialized to `Σᵣ nlonᵣ·valueᵣ`, `O(nrings)` against the dense `O(npoints)`.
 """
-struct RingwiseVector{T,V<:AbstractVector{T},O<:AbstractVector{Int}} <: AbstractVector{T}
+struct RingwiseVector{T,V<:AbstractVector{T},O<:AbstractVector{Int},K<:AbstractVector{<:Integer}} <:
+       AbstractVector{T}
     value::V     # one per ring
     offset::O    # points before each ring; length nrings + 1
+    bucket::K    # the ring holding point `(b − 1)·width + 1`
+    width::Int   # the shortest ring's length
+end
+
+RingwiseVector(value::AbstractVector, offset::AbstractVector{Int}) =
+    RingwiseVector(value, offset, _ring_buckets(offset)...)
+
+# A run of `width` consecutive points, `width` the shortest ring's length, meets at most two rings, so the
+# ring of each run's first point and one comparison place any point.
+function _ring_buckets(offset::AbstractVector{Int})
+    nring = length(offset) - 1
+    width = nring == 0 ? 1 : minimum(r -> offset[r + 1] - offset[r], 1:nring)
+    bucket = Vector{Int32}(undef, cld(last(offset), width))
+    r = 1
+    @inbounds for b in eachindex(bucket)
+        while offset[r + 1] ≤ (b - 1) * width
+            r += 1
+        end
+        bucket[b] = r
+    end
+    return bucket, width
+end
+
+@inline function _ring_at(offset, bucket, width::Int, i::Int)
+    @inbounds r = Int(bucket[(i - 1) ÷ width + 1])
+    return @inbounds r + (i - 1 ≥ offset[r + 1])
 end
 
 @inline Base.size(v::RingwiseVector) = (last(v.offset),)
@@ -176,7 +234,7 @@ Base.IndexStyle(::Type{<:RingwiseVector}) = IndexLinear()
 
 @inline function Base.getindex(v::RingwiseVector, i::Int)
     @boundscheck checkbounds(v, i)
-    return @inbounds v.value[searchsortedlast(v.offset, i - 1)]
+    return @inbounds v.value[_ring_at(v.offset, v.bucket, v.width, i)]
 end
 
 @inline function Base.sum(v::RingwiseVector{T}) where {T}

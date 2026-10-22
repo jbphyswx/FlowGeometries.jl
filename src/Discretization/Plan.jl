@@ -105,9 +105,8 @@ A uniform axis gives a [`UniformStencilPlan`](@ref) and a stretched one a
 [`TabulatedStencilPlan`](@ref); which it is comes from the axis's type through
 [`Axes.spacing_trait`](@ref), never from inspecting its values.
 
-A wrapping uniform axis takes the uniform form only when the `period` given is the one the axis's own
-spacing implies, `n·h`. This checks the argument against the axis type, and reads no coordinate: any
-other period puts a seam gap other than `h` at the wrap, which the tabulated form describes.
+With a `period`, an [`Axes.PeriodicAxis`](@ref) gives the uniform form, its seam being one step wide. Any
+other axis given a period gives the tabulated form, which describes whatever seam gap the period leaves.
 """
 function stencil_plan(
     x::AbstractVector{T}, order::Integer, nodes::Integer; period::Union{Nothing,Real} = nothing,
@@ -125,23 +124,28 @@ end
 _stencil_plan(::Axes.NonuniformSpacing, x::AbstractVector, ord::Int, ::Val{K}, period) where {K} =
     TabulatedStencilPlan(axis_stencils(x, ord, K; period = period)..., ord)
 
+_stencil_plan(::Axes.UniformSpacing, x::AbstractVector, ord::Int, ::Val{K}, period::Real) where {K} =
+    TabulatedStencilPlan(axis_stencils(x, ord, K; period = period)..., ord)
+
 function _stencil_plan(
-    ::Axes.UniformSpacing, x::AbstractVector{T}, ord::Int, ::Val{K}, period,
+    ::Axes.UniformSpacing, x::Axes.PeriodicAxis{T}, ord::Int, ::Val{K}, period::Real,
+) where {T,K}
+    Axes.own_period(x, period)
+    h = step(x)
+    left = (K - 1) ÷ 2
+    return UniformStencilPlan{T,K,Matrix{Int},Matrix{T}}(
+        _uniform_row(T, h, -left, Val(K), ord), left, K - 1 - left, length(x), ord, true,
+        Matrix{Int}(undef, 0, K), Matrix{T}(undef, 0, K),
+    )
+end
+
+function _stencil_plan(
+    ::Axes.UniformSpacing, x::AbstractVector{T}, ord::Int, ::Val{K}, ::Nothing,
 ) where {T,K}
     n = length(x)
     h = T(Axes.spacing(x))
     left = (K - 1) ÷ 2
     right = K - 1 - left
-    if period !== nothing
-        # The wrapped step is `period/n`, which has to be the axis's own `h` for the seam to be uniform.
-        P = T(period) * Axes.wrap_sign(x)
-        isapprox(P, T(n) * h; rtol = 8 * eps(T)) ||
-            return TabulatedStencilPlan(axis_stencils(x, ord, K; period = period)..., ord)
-        return UniformStencilPlan{T,K,Matrix{Int},Matrix{T}}(
-            _uniform_row(T, h, -left, Val(K), ord), left, right, n, ord, true,
-            Matrix{Int}(undef, 0, K), Matrix{T}(undef, 0, K),
-        )
-    end
     # A bounded window shifts inward at the ends: rows `1:left` all read the first `K` samples and rows
     # `n-right+1:n` the last `K`, each from its own sample's point of view.
     rows = vcat(1:left, (n - right + 1):n)

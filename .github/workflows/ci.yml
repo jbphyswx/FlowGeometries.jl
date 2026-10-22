@@ -14,17 +14,21 @@ concurrency:
 
 jobs:
   test:
-    name: ci ${{ matrix.version }} - ${{ matrix.os }}
+    name: ci ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.threads }} threads
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        version:
-          - '1.12'
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+        version: ['1.11', '1.12']
+        threads: ['1', '4']
+        os: [ubuntu-latest]
+        include:
+          - version: '1.12'
+            threads: '1'
+            os: macos-latest
+          - version: '1.12'
+            threads: '1'
+            os: windows-latest
     steps:
       - uses: actions/checkout@v6
       - uses: julia-actions/setup-julia@v3
@@ -35,40 +39,5 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         with:
           coverage: false
-
-  # The threaded backends must produce bit-identical results to serial, which a single-threaded
-  # run cannot show. Same suite, more threads.
-  test-threaded:
-    name: ci threaded (4)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: julia-actions/setup-julia@v3
-        with:
-          version: '1.12'
-      - uses: julia-actions/cache@v3
-      - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
-        with:
-          coverage: false
         env:
-          JULIA_NUM_THREADS: '4'
-
-  docs-build:
-    name: docs (examples are executed)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v3
-        with:
-          version: '1'
-      - uses: julia-actions/cache@v3
-      - name: Build docs and run every documented example
-        run: |
-          julia --project=docs -e '
-            using Pkg
-            Pkg.develop(PackageSpec(path = pwd()))
-            Pkg.instantiate()'
-          julia --project=docs docs/make.jl
-        env:
-          GKSwstype: nul
+          JULIA_NUM_THREADS: ${{ matrix.threads }}

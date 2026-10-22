@@ -194,7 +194,7 @@ IndexTopology(grid, ::Grids.FlatCells) = throw(ArgumentError(
 
 @inline function _check_index(t::IndexTopology{N}, Ii::NTuple{N,Int}) where {N}
     @inbounds for d in 1:N
-        (1 ≤ Ii[d] ≤ t.size[d]) || throw(BoundsError(t.mask, Ii))
+        (1 ≤ Ii[d] ≤ t.size[d]) || throw(BoundsError(CartesianIndices(t.size), Ii))
     end
     return nothing
 end

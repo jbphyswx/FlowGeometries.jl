@@ -29,22 +29,31 @@ end
     return _steps(one(T), Δ / (2 * asin(x)), n)   # w = ceil(σ_cut / Δ), through the same clamp
 end
 
-# The smallest interior gap of direction `d`, including the seam gap where it wraps: a periodic axis's
-# seam can be its narrowest gap, and a window bound omitting it under-covers across the seam.
+# The smallest interior gap of direction `d`, including the seam gap where a query wraps it: a seam can
+# be the narrowest gap, and a window bound omitting it under-covers across the seam.
 #
 # `Grids.minimum_spacing` is an `O(N)` scan on a stretched axis, so this is computed once into a
 # `MetricTopology` and read from there by every query.
 @inline function _min_step_scan(grid::Grids.AbstractGrid{G,T}, d::Int) where {G,T}
     s = T(Grids.minimum_spacing(grid, d))
-    if Grids.isperiodic(grid, d)
-        p = T(Grids.period(grid, d))
-        if @inbounds(Grids.size_tuple(grid)[d]) ≥ 2 && p > 0
-            seam = p - T(Grids.extent(grid, d))
-            seam > 0 && (s = min(s, seam))
-        end
+    if _query_wraps(grid, d) && @inbounds(Grids.size_tuple(grid)[d]) ≥ 2
+        p = T(_query_period(grid, d))
+        seam = p - T(Grids.extent(grid, d))
+        (p > 0 && seam > 0) && (s = min(s, seam))
     end
     return s
 end
+
+# A longitude identifies on a sphere or a spheroid, so a ball query wraps it with period 2π whether or
+# not the grid's cells close the ring: across a regional box's seam, cells are as near as their distance
+# says. Every other direction wraps where the grid is periodic.
+@inline _angular_longitude(::Grids.AbstractGrid{G}, d::Int) where {G} =
+    d == 1 && G <: Union{Geometry.AbstractSphericalGeometry, Geometry.AbstractEllipsoidalGeometry}
+
+@inline _query_wraps(grid::Grids.AbstractGrid, d::Int) = Grids.isperiodic(grid, d) || _angular_longitude(grid, d)
+
+@inline _query_period(grid::Grids.AbstractGrid{G,T}, d::Int) where {G,T} =
+    Grids.isperiodic(grid, d) ? T(Grids.period(grid, d)) : T(2π)
 
 """
     MetricTopology(grid; index = nothing)
@@ -53,7 +62,7 @@ What a distance query reads that depends on the grid alone: the tightest per-dir
 which sizes the search window, the coordinate span, and a spatial index where the layout has no
 separable axes to bound with. [`IndexTopology`](@ref) is its counterpart for a stencil query.
 
-Constructing one is `O(1)` on a rectilinear grid, so passing `topology` to a query is optional. The
+Constructing one is `O(1)` on every layout, so passing `topology` to a query is optional. The
 **index** is worth hoisting: building a k-d tree for a single query costs more than the scan it
 replaces, so it is left out by default. [`foreach_within`](@ref) and [`mapreduce_within`](@ref) hoist
 one for a sweep, and [`indexed`](@ref) builds one explicitly.
@@ -68,9 +77,7 @@ struct MetricTopology{N,T,S}
     index::S
 end
 
-# The per-direction extent, reduced once here and read by every query. On a rectilinear grid it is two
-# endpoint reads; off one the coordinates are per-cell fields with no order, so it is a scan, and a
-# `k`-nearest query needs it to size its opening radius.
+# The per-direction extent, read by every query; `Grids.extent` answers it in `O(1)` on every layout.
 @inline _span_of(grid::Grids.AbstractGrid{G,T}, ::Val{N}) where {G,T,N} =
     ntuple(d -> T(Grids.extent(grid, d)), Val(N))
 
@@ -174,6 +181,15 @@ A candidate buffer to hand to repeated ball queries through their `scratch` argu
 task; an indexed query then holds one allocation across any number of calls.
 """
 ball_scratch() = Int[]
+
+"""
+    ball_scratch(topology::MetricTopology) -> Union{Vector{Int},Nothing}
+
+The candidate buffer ball queries through `topology` fill: a [`ball_scratch`](@ref)`()` where its index
+hands back candidate lists, and `nothing` where candidates are enumerated without one (a separable
+window, a cell list).
+"""
+ball_scratch(topology::MetricTopology) = _buffered_candidates(topology.index) ? ball_scratch() : nothing
 
 # The smallest `f(x[j])` over the index window, bounding a scale factor that varies across it. Walks
 # the clamped window; a periodic direction can reach every sample, so it walks all of them.
@@ -513,6 +529,17 @@ end
 @inline _delta_range(w::Int, i::Int, n::Int, periodic::Bool, ::AllImages) =
     periodic ? ((-w):w) : (max(1 - i, -w):min(n - i, w))
 
+# The directions a ball query wraps, and their wrap lengths, under each image convention. Summing images
+# keeps the grid's own periodicity, which an angular direction never has under it.
+@inline _query_flags(_grid, per::NTuple{N,Bool}, ::AllImages) where {N} = per
+@inline _query_flags(grid, per::NTuple{N,Bool}, ::NearestImage) where {N} =
+    ntuple(d -> per[d] || _angular_longitude(grid, d), Val(N))
+
+@inline _query_lengths(grid::Grids.AbstractGrid{G,T}, ::Val{N}, ::AllImages) where {G,T,N} =
+    map(T, Grids._wrap_lengths(grid, Val(N)))
+@inline _query_lengths(grid::Grids.AbstractGrid{G,T}, ::Val{N}, ::NearestImage) where {G,T,N} =
+    ntuple(d -> _query_wraps(grid, d) ? _query_period(grid, d) : zero(T), Val(N))
+
 # Consecutive images of one cell are `period` apart, which is the relevant step for a direction holding a
 # single sample — there `_min_step` has no interior gap to report.
 @inline function _image_step(grid::Grids.AbstractStructuredGrid{G,T}, d::Int, mt::MetricTopology) where {G,T}
@@ -565,26 +592,24 @@ end
 @inline _ball_window(grid, I, ball, mt, ::NearestImage) = metric_window(grid, I, ball, mt)
 @inline _ball_window(grid, _I, ball, mt, ::AllImages) = _image_window(grid, ball, mt)
 
-# The candidate's position. Under `NearestImage` the stored coordinate reduced to the image nearest the
-# centre; under `AllImages` the image the offset actually names, built as
-# `x[mod1(raw, n)] + (periods wrapped)·L`, the same construction `Discretization.axis_stencils` uses for
-# a wrapped stencil node. Minimum image is not applied to it.
-@inline _cand_coords(
-    grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::NearestImage,
-) where {N} = _min_image(p0, Grids._raw_coords(grid, J...), prd)
+# The centre and the candidate as a pair whose distance is the one the query gates on. Under
+# `NearestImage` the stored coordinate at the image nearest the centre (see `Grids._image_pair`); under
+# `AllImages` the image the offset actually names, built as `x[mod1(raw, n)] + (periods wrapped)·L`, the
+# same construction `Discretization.axis_stencils` uses for a wrapped stencil node. The axes are mapped
+# over as a tuple, each at its own type: a direction picked by a runtime index from axes of different
+# types boxes.
+@inline _cand_pair(
+    geo, grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::NearestImage,
+) where {N} = Grids._image_pair(geo, p0, Grids._raw_coords(grid, J...), prd)
 
-@inline function _cand_coords(
-    grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::AllImages,
-) where {N}
-    return ntuple(Val(N)) do d
-        x = Grids.coordinates(grid, d)
-        raw = I[d] + δ[d]
-        @inbounds per[d] ?
-            x[mod1(raw, sz[d])] + oftype(prd[d], fld(raw - 1, sz[d])) * prd[d] * sgn[d] : x[raw]
-    end
+@inline _cand_pair(
+    geo, grid, p0, I::NTuple{N,Int}, δ::NTuple{N,Int}, J::NTuple{N,Int}, sz, per, prd, sgn, ::AllImages,
+) where {N} = (p0, map(_image_coord, Grids.coordinates(grid), I, δ, sz, per, prd, sgn))
+
+@inline function _image_coord(x, i::Int, δ::Int, n::Int, periodic::Bool, L, s)
+    raw = i + δ
+    return @inbounds periodic ? x[mod1(raw, n)] + oftype(L, fld(raw - 1, n)) * L * s : x[raw]
 end
-
-using ..Grids: _min_image, _wrap_lengths
 
 """
     neighbors_within!(out, grid, I...; ball, active_only=true, topology, scratch, reach) -> n_written
@@ -683,23 +708,77 @@ function fold_within end
     geo = Grids.grid_geometry(grid)
     r = T(_ball_radius(ball))
     w = _ball_window(grid, I, ball, mt, images)
-    prd = map(T, _wrap_lengths(grid, Val(N)))
-    sgn = ntuple(d -> T(Grids._wrap_sign(Grids.coordinates(grid, d))), Val(N))
+    wrap = _query_flags(grid, per, images)
+    prd = _query_lengths(grid, Val(N), images)
+    sgn = map(x -> T(Grids._wrap_sign(x)), Grids.coordinates(grid))
     p0 = Grids._raw_coords(grid, I...)
     msk = Grids.mask(grid)
     acc = init
     # Getting past the activity check above means the centre is active, so no further test is needed.
     self && (acc = f(acc, I, zero(T)))
-    rng = ntuple(d -> _delta_range(w[d], I[d], sz[d], per[d], images), Val(N))
+    rng = ntuple(d -> _delta_range(w[d], I[d], sz[d], wrap[d], images), Val(N))
     @inbounds for ci in CartesianIndices(rng)
         δ = Tuple(ci)
         all(iszero, δ) && continue
-        J = ntuple(d -> per[d] ? mod1(I[d] + δ[d], sz[d]) : I[d] + δ[d], Val(N))
+        J = ntuple(d -> wrap[d] ? mod1(I[d] + δ[d], sz[d]) : I[d] + δ[d], Val(N))
         active_only && !msk[J...] && continue
-        q = _cand_coords(grid, p0, I, δ, J, sz, per, prd, sgn, images)
-        dist = Geometry.distance(geo, p0, q)
+        dist = Geometry.distance(geo, _cand_pair(geo, grid, p0, I, δ, J, sz, wrap, prd, sgn, images)...)
         dist ≤ r || continue
         acc = f(acc, J, dist)
+    end
+    return acc
+end
+
+# A sphere's ball, row by row. The window gives every row the longitude reach of its widest one, the
+# row nearest a pole. Row `j`'s own reach comes from the haversine the distance gate evaluates,
+# `a = A + B·sin²(Δλ/2)` with `A, B` the row's terms, formed once per row: a cell in the ball has
+# `a ≤ a_r = sin²(r/2R)`, so `sin²(Δλ/2) ≤ q = (a_r − A)/B`, widened by `q`'s rounding, and the row
+# walks that band one step wider. A row whose nearest point, at `Δλ = 0`, lies beyond `r` under that same
+# distance is skipped, every cell in it having `a ≥ A`. The cells visited are the window's that can lie in
+# the ball, in the window's order, each at the distance `Geometry.distance` gives, so the fold is the
+# window's.
+@inline function _fold_within(
+    f::F, init, grid::Grids.StructuredGrid{T,G,2}, I::NTuple{2,Int}, ball, images::NearestImage,
+    active_only::Bool, self::Bool, mt::MetricTopology, _scratch, ::Grids.SeparableWindow,
+) where {F,T,G<:Geometry.AbstractSphericalGeometry}
+    sz = Grids.size_tuple(grid)
+    Grids._cell_checkbounds(grid, I)
+    (active_only && !Grids.isactive(grid, I...)) && return init
+    geo = Grids.grid_geometry(grid)
+    r = T(_ball_radius(ball))
+    R = T(Geometry.radius(geo))
+    ar = r ≥ T(π) * R ? one(T) : sin(r / (2 * R))^2
+    wrap = _query_flags(grid, _periodic_flags(grid), images)
+    prd = _query_lengths(grid, Val(2), images)
+    p0 = Grids._raw_coords(grid, I...)
+    λ0, φ0 = p0
+    λs, φs = Grids.coordinates(grid)
+    msk = Grids.mask(grid)
+    acc = init
+    self && (acc = f(acc, I, zero(T)))
+    wφ = _angle_steps(r, 2 * R, _min_step(mt, 2), sz[2])
+    s1 = _min_step(mt, 1)
+    @inbounds for δ2 in _delta_range(wφ, I[2], sz[2], wrap[2], images)
+        j = wrap[2] ? mod1(I[2] + δ2, sz[2]) : I[2] + δ2
+        φj = last(Grids._image_pair(geo, p0, (λ0, φs[j]), prd))[2]
+        hr = Geometry._hav_row(φ0, φj)
+        Geometry._hav_distance(geo, hr, zero(T)) ≤ r || continue
+        A, B = hr
+        q = (ar - A) / B
+        k = if q < one(T)                              # `B = 0` at a pole gives `±Inf` or `NaN`: whole row
+            δq = 8 * eps(T) * (ar + A + B) / B
+            _steps(2 * asin(sqrt(min(one(T), max(q, zero(T)) + δq))), s1, sz[1]) + 1
+        else
+            sz[1]
+        end
+        for δ1 in _delta_range(k, I[1], sz[1], wrap[1], images)
+            (δ1 == 0 && δ2 == 0) && continue
+            i = wrap[1] ? mod1(I[1] + δ1, sz[1]) : I[1] + δ1
+            active_only && !msk[i, j] && continue
+            dist = Geometry._hav_distance(geo, hr, Geometry._lon_diff(λ0, λs[i]))
+            dist ≤ r || continue
+            acc = f(acc, (i, j), dist)
+        end
     end
     return acc
 end
@@ -808,9 +887,9 @@ end
 # A non-nearest image convention raises here: summing images needs a periodic direction to be a
 # translation of the domain, and these layouts visit each cell once.
 @inline function _fold_within(
-    f::F, init, grid::Grids.AbstractGrid, I, ball, images::AbstractImageConvention,
+    f::F, init, grid::Grids.AbstractGrid{G,T}, I, ball, images::AbstractImageConvention,
     active_only::Bool, self::Bool, mt::MetricTopology, scratch, ::Grids.IndexedCandidates,
-) where {F}
+) where {F,G,T}
     images isa NearestImage || throw(ArgumentError(
         "`images = $(images)` needs a separable periodic direction; $(nameof(typeof(grid))) visits " *
         "each cell once, so use NearestImage()",
@@ -819,17 +898,16 @@ end
     Grids._cell_checkbounds(grid, I)
     (active_only && !Grids._cell_active(grid, I)) && return init
     geo = Grids.grid_geometry(grid)
-    r = _ball_radius(ball)
+    r = T(_ball_radius(ball))
     p0 = Grids._cell_coords(grid, I)
-    prd = map(x -> oftype(first(p0), x), _wrap_lengths(grid, Val(length(p0))))
+    prd = map(x -> oftype(first(p0), x), Grids._wrap_lengths(grid, Val(length(p0))))
     acc = init
     self && (acc = f(acc, I, zero(eltype(p0))))
     return _fold_candidates(acc, mt, grid, I, r, scratch) do a, lin
         J = Grids._cell_from_linear(grid, lin)
         J == I && return a
         active_only && !Grids._cell_active(grid, J) && return a
-        q = _min_image(p0, Grids._cell_coords(grid, J), prd)
-        dist = Geometry.distance(geo, p0, q)
+        dist = Geometry.distance(geo, Grids._image_pair(geo, p0, Grids._cell_coords(grid, J), prd)...)
         dist ≤ r || return a
         return f(a, J, dist)
     end

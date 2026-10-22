@@ -95,26 +95,20 @@ Base.show(io::IO, m::CellMesh) =
 # ---------------------------------------------------------------------------
 
 """
-    UnstructuredGrid{T, G, V, VA, B, VI}
+    UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP,MH}
 
-Unstructured mesh (e.g. radial data, finite volume, or triangular mesh) where coords are 1D vectors.
+A node set: `N` coordinate vectors of one length, a control volume per node, and each node's neighbours
+as a CSR list.
 
-# Type parameters
-- `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
-  raises a type error. `T` therefore precedes `G`: Julia binds type parameters left to right, and
-  `G<:AbstractGeometry{T}` requires `T` already bound. [`CurvilinearGrid`](@ref) follows the same
-  convention.
-- `C`: tuple type of the per-direction node-coordinate vectors.
-- `VA`: vector type of the derived `measure` field, independent of `C`, a Voronoi tessellation having
-  no reason to match the coordinate vectors' storage type.
-- `B`: mask storage type.
-- `VN`/`VP`: CSR neighbour-list and offset storage types, independent of each other. Their element type
-  is a free `Integer`, so a large mesh carries `Int32` indices — half the memory and bandwidth of
-  `Int64`, and the width a GPU kernel wants — through this same type.
+- `T`, `G`: the coordinate float type, and the geometry over it, `G <: AbstractGeometry{T}`.
+- `N`, `C`: the coordinate count, and the tuple type of the coordinate vectors.
+- `VA`: the measure vector's type.
+- `B`: the mask's storage type.
+- `TP`: the per-direction topology, each `Periodic` or `Bounded`.
+- `VN`, `VP`: the neighbour list and its offsets, each of any integer element type.
+- `MH`: the [`CellMesh`](@ref) a tessellation produced, or `Nothing`.
 
-Neighbour adjacency is CSR: a flat `neighbor_nbrs` with `neighbor_ptr` offsets, node `t` owning
-`neighbor_ptr[t]:neighbor_ptr[t+1]-1`. The adjacency is immutable after construction, so the whole
-graph is two contiguous allocations and a traversal reads them in order.
+Node `t`'s neighbours are `neighbor_nbrs[neighbor_ptr[t]:neighbor_ptr[t+1]-1]`.
 """
 struct UnstructuredGrid{
     T<:AbstractFloat,
@@ -137,15 +131,24 @@ struct UnstructuredGrid{
     topology::TP       # per-direction closure of the enclosing domain (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
     mesh::MH           # the cells, where a triangulation produced them; see `CellMesh`
+    bounds::NTuple{N,Tuple{T,T}}   # (lo, hi) of each coordinate vector, taken at construction
+    total_measure::T   # Σ measure, taken at construction
 end
 
+# `bounds` and `total_measure` travel as values: a rebuild serves a storage change, which leaves every
+# coordinate and the measure unchanged.
 @inline _from_fields(
     ::Type{<:UnstructuredGrid},
     geometry::G, coordinates::C, measure::VA, mask::B, neighbor_nbrs::VN, neighbor_ptr::VP,
-    topology::TP, period::NTuple{N,T}, mesh::MH,
+    topology::TP, period::NTuple{N,T}, mesh::MH, bounds::NTuple{N,Tuple{T,T}}, total_measure::T,
 ) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP,MH} =
     UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP,MH}(geometry, coordinates, measure, mask, neighbor_nbrs,
-                                               neighbor_ptr, topology, period, mesh)
+                                               neighbor_ptr, topology, period, mesh, bounds,
+                                               total_measure)
+
+@inline bounds(grid::UnstructuredGrid, d::Integer) =
+    @inbounds getfield(grid, :bounds)[_checked_direction(getfield(grid, :bounds), d)]
+@inline _total_measure(grid::UnstructuredGrid) = getfield(grid, :total_measure)
 
 """
     cell_mesh(grid) -> CellMesh | Nothing
@@ -205,20 +208,24 @@ function spatial_order(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
     # seam are neighbours in space whose `λ` differ by a whole turn. The ambient position has no seam,
     # so the curve does not cut there.
     pts = [embed_point(grid, _raw_coords(grid, i)) for i in 1:n]
-    D = length(first(pts))
+    return sortperm(_morton_keys(pts, T))
+end
+
+# The embedded dimension `D` is a type parameter here, so each node's key is built from stack tuples.
+function _morton_keys(pts::AbstractVector{<:NTuple{D,Real}}, ::Type{T}) where {D,T}
     bits = min(64 ÷ D, 21)
     span = UInt64(1) << bits - one(UInt64)
-    lo = ntuple(d -> minimum(p[d] for p in pts), D)
-    hi = ntuple(d -> maximum(p[d] for p in pts), D)
+    lo = ntuple(d -> minimum(p[d] for p in pts), Val(D))
+    hi = ntuple(d -> maximum(p[d] for p in pts), Val(D))
     # A direction of zero extent quantizes to a single bucket, with no division.
-    scale = ntuple(d -> hi[d] > lo[d] ? T(span) / T(hi[d] - lo[d]) : zero(T), D)
-    keys = Vector{UInt64}(undef, n)
-    @inbounds for i in 1:n
+    scale = ntuple(d -> hi[d] > lo[d] ? T(span) / T(hi[d] - lo[d]) : zero(T), Val(D))
+    keys = Vector{UInt64}(undef, length(pts))
+    @inbounds for i in eachindex(pts, keys)
         p = pts[i]
-        u = ntuple(d -> UInt64(round(clamp((T(p[d]) - T(lo[d])) * scale[d], zero(T), T(span)))), D)
+        u = ntuple(d -> UInt64(round(clamp((T(p[d]) - T(lo[d])) * scale[d], zero(T), T(span)))), Val(D))
         keys[i] = _morton_key(u, bits)
     end
-    return sortperm(keys)
+    return keys
 end
 
 """
@@ -319,7 +326,7 @@ function UnstructuredGrid(
     ))
     return UnstructuredGrid{
         T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p), typeof(mesh),
-    }(geometry, c, m, mask, nb, p, per, prd, mesh)
+    }(geometry, c, m, mask, nb, p, per, prd, mesh, map(_lohi, c), T(sum(m)))
 end
 
 # Two-direction convenience forms. Node coordinates are all `AbstractVector`s, so — unlike a
@@ -377,6 +384,30 @@ Wrap length of coordinate direction `d`, meaningful only where [`isperiodic`](@r
 """
 @inline period(grid::UnstructuredGrid, d::Integer) =
     @inbounds getfield(grid, :period)[_checked_direction(getfield(grid, :period), d)]
+
+"""
+    node_counts(grid::UnstructuredGrid) -> NTuple{N,Int}
+
+How many nodes lie along each direction. Nodes that are the product of their distinct coordinates form
+a lattice, and each count is that direction's number of distinct values. Otherwise each count is the one
+a uniform density of the nodes gives over the direction's span, its [`period`](@ref) where it wraps and
+its [`extent`](@ref) where not; a direction of zero span holds one.
+"""
+function node_counts(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
+    x = coordinates(grid)
+    n = length(first(x))
+    distinct = map(v -> length(unique(v)), x)
+    prod(distinct) == n && return distinct
+    spans = ntuple(d -> isperiodic(grid, d) ? period(grid, d) : extent(grid, d), Val(N))
+    ρ = (n / prod(s -> s > 0 ? s : one(T), spans))^(1 / count(>(0), spans))
+    return map(s -> s > 0 ? max(2, round(Int, s * ρ)) : 1, spans)
+end
+
+function _bounded_domain_length(grid::UnstructuredGrid, d::Integer)
+    n = @inbounds node_counts(grid)[_checked_direction(coordinates(grid), d)]
+    e = extent(grid, d)
+    return n > 1 ? e * n / (n - 1) : one(e)
+end
 
 
 # ---------------------------------------------------------------------------

@@ -224,10 +224,12 @@ end
     local_tangent_basis(geo, coords) -> NamedTuple
     local_tangent_basis(S, geo, coords) -> NamedTuple of `S`
 
-Coordinate-aligned unit vectors at `coords`, in the ambient Cartesian frame:
-- Cartesian: `(; x = ê_x, y = ê_y)`, 2-component
-- Spherical and spheroidal: `(; λ = ê_λ, φ = ê_φ)`, 3-component — the eastward and northward tangents,
-  which are the same triad on either (see [`AbstractLonLatGeometry`](@ref))
+Coordinate-aligned unit vectors at `coords`, in the ambient Cartesian frame, one per coordinate and
+named as the coordinates are:
+- Cartesian: `(; x = ê_x, y = ê_y)` in two coordinates and `(; x, y, z)` in three
+- Spherical and spheroidal at `(λ, φ)`: `(; λ = ê_λ, φ = ê_φ)`, 3-component — the eastward and northward
+  tangents, which are the same triad on either (see [`AbstractLonLatGeometry`](@ref)). At three
+  coordinates the outward normal `ê_r` joins them, named `r` on a sphere and `h` on a spheroid.
 
 The basis vectors themselves are `Tuple`s by default; pass a leading `S` to get them as `SVector`s
 (or any other representation) so they can be used with vector arithmetic directly.
@@ -242,10 +244,18 @@ end
     return (; x = (one(T), zero(T)), y = (zero(T), one(T)))
 end
 
+@inline function _local_tangent_basis(::AbstractCartesianGeometry{T}, ::Tuple{Real,Real,Real}) where {T}
+    o, z = one(T), zero(T)
+    return (; x = (o, z, z), y = (z, o, z), z = (z, z, o))
+end
+
 @inline function _local_tangent_basis(geo::AbstractLonLatGeometry{T}, coords::Tuple{Real,Real}) where {T}
     êλ, êφ, _ = _enu_frame(geo, coords[1], coords[2])
     return (; λ = êλ, φ = êφ)
 end
+
+@inline _local_tangent_basis(geo::AbstractLonLatGeometry, coords::Tuple{Real,Real,Real}) =
+    NamedTuple{point_names(geo, Val(3))}(_enu_frame(geo, coords[1], coords[2]))
 
 """
     project_to_tangent_plane(geo, center, neighbor) -> NamedTuple
@@ -267,31 +277,52 @@ and the basis is the same triad.
     return build_point(S, keys(Δ), Tuple(Δ))
 end
 
-@inline function _project_to_tangent_plane(
-    ::AbstractCartesianGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
-) where {T}
-    cx, cy = _at(T, center)
-    nx, ny = _at(T, neighbor)
-    return (; x = nx - cx, y = ny - cy)
-end
+@inline _project_to_tangent_plane(
+    geo::AbstractGeometry, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
+) = _displacement_on(geo, _local_frame(geo, center), neighbor)
+
+# A displacement in two steps, for many neighbours about one centre: `_local_frame` is what depends on
+# the centre alone, and `_displacement_on` resolves one neighbour against it.
+@inline _local_frame(::AbstractCartesianGeometry{T}, c::NTuple{N,Real}) where {T,N} = _at(T, c)
 
 # Written against [`embed`](@ref) and the frame, so it holds on a sphere and on a spheroid alike: the
-# chord between the two ambient positions, resolved on the tangent basis at the centre. The two differ
-# only in where each `(λ, φ)` sits.
-@inline function _project_to_tangent_plane(
-    geo::AbstractLonLatGeometry{T}, center::Tuple{Real,Real}, neighbor::Tuple{Real,Real},
-) where {T}
-    c = _at(T, center)
-    Pc = _embed(geo, c)
-    Pn = _embed(geo, _at(T, neighbor))
+# chord between the two ambient positions, resolved on the frame at the centre. The two differ only in
+# where each `(λ, φ)` sits.
+@inline function _local_frame(geo::AbstractLonLatGeometry{T}, c::NTuple{N,Real}) where {T,N}
+    cc = _at(T, c)
+    return (_embed(geo, cc), _enu_frame(geo, cc[1], cc[2]))
+end
+
+@inline function _displacement_on(::AbstractCartesianGeometry{T}, c::NTuple{2}, nb::NTuple{2,Real}) where {T}
+    nx, ny = _at(T, nb)
+    return (; x = nx - c[1], y = ny - c[2])
+end
+
+@inline function _displacement_on(::AbstractCartesianGeometry{T}, c::NTuple{3}, nb::NTuple{3,Real}) where {T}
+    nx, ny, nz = _at(T, nb)
+    return (; x = nx - c[1], y = ny - c[2], z = nz - c[3])
+end
+
+# The contractions are written flat. `sum(dr[i] * ê[i] for i in 1:3)` indexes the tuple with a loop
+# variable, which does not unroll.
+@inline function _displacement_on(geo::AbstractLonLatGeometry{T}, fr, nb::NTuple{2,Real}) where {T}
+    Pc, (êλ, êφ, _) = fr
+    Pn = _embed(geo, _at(T, nb))
     dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
-    êλ, êφ, _ = _enu_frame(geo, c[1], c[2])
-    # The contraction is written flat. `sum(dr[i] * ê[i] for i in 1:3)` indexes the tuple with a loop
-    # variable, which does not unroll.
     return (;
         λ = dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
         φ = dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
     )
+end
+
+@inline function _displacement_on(geo::AbstractLonLatGeometry{T}, fr, nb::NTuple{3,Real}) where {T}
+    Pc, (êλ, êφ, êr) = fr
+    Pn = _embed(geo, _at(T, nb))
+    dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
+    return build_point(NamedTuple, point_names(geo, Val(3)),
+                       (dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
+                        dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
+                        dx * êr[1] + dy * êr[2] + dz * êr[3]))
 end
 
 """
@@ -308,30 +339,100 @@ normal [`unit_vector`](@ref) gives.
 @inline local_displacement(geo::AbstractGeometry, center, neighbor) =
     _local_displacement(geo, as_ntuple(center), as_ntuple(neighbor))
 
-@inline _local_displacement(geo::AbstractGeometry, c::NTuple{2,Real}, nb::NTuple{2,Real}) =
-    _project_to_tangent_plane(geo, c, nb)
+@inline _local_displacement(geo::AbstractGeometry, c::NTuple{N,Real}, nb::NTuple{N,Real}) where {N} =
+    _displacement_on(geo, _local_frame(geo, c), nb)
 
-@inline function _local_displacement(
-    ::AbstractCartesianGeometry{T}, c::NTuple{3,Real}, nb::NTuple{3,Real},
-) where {T}
-    cx, cy, cz = _at(T, c)
-    nx, ny, nz = _at(T, nb)
-    return (; x = nx - cx, y = ny - cy, z = nz - cz)
+"""
+    normal_coordinates(geo, center, point) -> NamedTuple
+
+`point` in Riemann normal coordinates about `center`: the vector of length
+[`distance`](@ref)`(geo, center, point)` along the geodesic's initial direction, resolved on the local
+frame at `center`. One component per coordinate, named as the coordinates are.
+
+| geometry, coordinates | normal coordinates |
+|---|---|
+| Cartesian | the coordinate difference |
+| sphere or spheroid, `(λ,)` | the signed arc of the equator, `Δλ` in `[-π, π]` |
+| sphere, `(λ, φ)` | `R·σ·(sin α, cos α)`, `σ` the central angle and `α` the azimuth east of north |
+| spheroid, `(λ, φ)` | `s·(sin α₁, cos α₁)`, from Vincenty's inverse |
+| sphere or spheroid, three coordinates | the chord on `(ê_λ, ê_φ, ê_r)` at `center` |
+
+On the sphere every component is formed from half-angle differences, so its relative error is a few
+`eps(T)` at any separation.
+"""
+@inline normal_coordinates(geo::AbstractGeometry, center, point) =
+    _normal_coordinates(geo, as_ntuple(center), as_ntuple(point))
+
+@inline function _normal_coordinates(
+    geo::AbstractCartesianGeometry{T}, c::Tuple{Vararg{Real,N}}, p::Tuple{Vararg{Real,N}},
+) where {T,N}
+    a = _at(T, c)
+    b = _at(T, p)
+    return named_point(geo, ntuple(d -> b[d] - a[d], Val(N)))
 end
 
-@inline function _local_displacement(
-    geo::AbstractLonLatGeometry{T}, c::NTuple{3,Real}, nb::NTuple{3,Real},
-) where {T}
-    cc = _at(T, c)
-    Pc = _embed(geo, cc)
-    Pn = _embed(geo, _at(T, nb))
-    dx = Pn[1] - Pc[1]; dy = Pn[2] - Pc[2]; dz = Pn[3] - Pc[3]
-    êλ, êφ, êr = _enu_frame(geo, cc[1], cc[2])
-    return build_point(NamedTuple, point_names(geo, Val(3)),
-                       (dx * êλ[1] + dy * êλ[2] + dz * êλ[3],
-                        dx * êφ[1] + dy * êφ[2] + dz * êφ[3],
-                        dx * êr[1] + dy * êr[2] + dz * êr[3]))
+@inline function _normal_coordinates(geo::AbstractLonLatGeometry{T}, c::Tuple{Real}, p::Tuple{Real}) where {T}
+    Δλ = _lon_diff(convert(T, c[1]), convert(T, p[1]))
+    return NamedTuple{point_names(geo, Val(1))}((_equator_radius(geo) * Δλ,))
 end
+
+@inline _equator_radius(geo::AbstractSphericalGeometry) = radius(geo)
+@inline _equator_radius(geo::AbstractEllipsoidalGeometry) = semimajor_axis(geo)
+
+# `(pe, pn, hav)`: the unit vector to `(λ₂, φ₂)` on the frame at `(λ₁, φ₁)`, east and north, and the
+# haversine of the central angle, `sin²(σ/2)`, its third component being `1 − 2·hav`.
+#
+#     pe = cos φ₂ sin Δλ
+#     pn = sin Δφ + 2 sin φ₁ cos φ₂ sin²(Δλ/2)
+#     hav = sin²(Δφ/2) + cos φ₁ cos φ₂ sin²(Δλ/2)
+@inline function _unit_on_frame(::Type{T}, c::Tuple{Real,Real}, p::Tuple{Real,Real}) where {T}
+    λ1, φ1 = _at(T, c)
+    λ2, φ2 = _at(T, p)
+    sinφ1, cosφ1 = sincos(φ1)
+    cosφ2 = cos(φ2)
+    Δλ = _lon_diff(λ1, λ2)
+    Δφ = φ2 - φ1
+    s = sin(Δλ / T(2))
+    s² = s * s
+    pe = cosφ2 * sin(Δλ)
+    pn = sin(Δφ) + T(2) * sinφ1 * cosφ2 * s²
+    hav = sin(Δφ / T(2))^2 + cosφ1 * cosφ2 * s²
+    return pe, pn, hav
+end
+
+@inline function _normal_coordinates(
+    geo::AbstractSphericalGeometry{T}, c::Tuple{Real,Real}, p::Tuple{Real,Real},
+) where {T}
+    pe, pn, hav = _unit_on_frame(T, c, p)
+    σ = T(2) * atan(sqrt(hav), sqrt(max(zero(T), one(T) - hav)))
+    sσ = hypot(pe, pn)
+    R = radius(geo)
+    names = point_names(geo, Val(2))
+    iszero(sσ) && return NamedTuple{names}((zero(T), R * σ))
+    k = R * σ / sσ
+    return NamedTuple{names}((k * pe, k * pn))
+end
+
+# The chord `r₂·x̂₂ − r₁·x̂₁` on the frame at the centre, whose outward component
+# `r₂·(1 − 2·hav) − r₁` is written `(r₂ − r₁) − 2 r₂ hav`.
+@inline function _normal_coordinates(
+    geo::AbstractSphericalGeometry{T}, c::Tuple{Real,Real,Real}, p::Tuple{Real,Real,Real},
+) where {T}
+    pe, pn, hav = _unit_on_frame(T, (c[1], c[2]), (p[1], p[2]))
+    r1 = convert(T, c[3])
+    r2 = convert(T, p[3])
+    return NamedTuple{point_names(geo, Val(3))}((r2 * pe, r2 * pn, (r2 - r1) - T(2) * r2 * hav))
+end
+
+@inline function _normal_coordinates(
+    geo::AbstractEllipsoidalGeometry{T}, c::Tuple{Real,Real}, p::Tuple{Real,Real},
+) where {T}
+    s, sinα, cosα = _vincenty_inverse(geo, c, p)
+    return NamedTuple{point_names(geo, Val(2))}((s * sinα, s * cosα))
+end
+
+@inline _normal_coordinates(geo::AbstractEllipsoidalGeometry, c::NTuple{3,Real}, p::NTuple{3,Real}) =
+    _local_displacement(geo, c, p)
 
 # ---------------------------------------------------------------------------
 # Metric scale factors
@@ -344,9 +445,10 @@ end
 Physical length of a unit coordinate step in each direction at `point` — see
 [`FlowGeometries.Discretization.scale_factors`](@ref).
 
-Cartesian: `1` in every direction, the metric being the identity. Spherical: `(R·cosφ, R)` on the
-surface of radius `R`, and `(r·cosφ, r, 1)` where a radius direction is present, `r` being that
-point's own radius.
+Cartesian: `1` in every direction, the metric being the identity. Spherical: `(R,)` for a lone `(λ,)`,
+a point on the equator as [`distance`](@ref) reads it; `(R·cosφ, R)` on the surface of radius `R`; and
+`(r·cosφ, r, 1)` where a radius direction is present, `r` being that point's own radius. A spheroid's
+lone `(λ,)` gives `(a,)`. A point of any other width raises an `ArgumentError`.
 
 The result is one factor per direction, so from a point whose length is a runtime value — an
 `AbstractVector` — its width is one too. `Val(N)` names that width, checks it, and gives a concrete
@@ -354,6 +456,8 @@ The result is one factor per direction, so from a point whose length is a runtim
 """
 @inline scale_factors(::AbstractCartesianGeometry{T}, p::Tuple{Vararg{Real,N}}) where {T,N} =
     ntuple(_ -> one(T), Val(N))
+
+@inline scale_factors(geo::AbstractSphericalGeometry, ::Tuple{Real}) = (radius(geo),)
 
 @inline function scale_factors(geo::AbstractSphericalGeometry{T}, p::Tuple{Real,Real}) where {T}
     φ = convert(T, p[2])
@@ -369,6 +473,43 @@ end
 
 @inline scale_factors(geo::AbstractGeometry, p) = scale_factors(geo, as_ntuple(p))
 @inline scale_factors(geo::AbstractGeometry, p, v::Val) = scale_factors(geo, as_ntuple(p, v))
+
+# A tuple no method above takes is a width this geometry has no metric for.
+@noinline scale_factors(geo::AbstractGeometry, p::Tuple) = throw(ArgumentError(
+    "$(nameof(typeof(geo))) defines no scale factors for a point of $(length(p)) coordinate(s)"))
+
+"""
+    log_scale_gradients(geo, point) -> NTuple{N,NTuple{N,T}}
+
+`γ[i][k] = (1/(hᵢ hₖ)) ∂hᵢ/∂xₖ`, the change of `log hᵢ` per unit distance along direction `k`, with
+`γ[i][i] = 0`: the terms the turning of the local frame adds to a strain rate, a curl or a divergence
+written in the geometry's own coordinates.
+
+Zero throughout on a plane. On a sphere at `(λ, φ)`, `γ[1][2] = −tan φ/R`; with a radius direction
+`(λ, φ, r)`, `γ[1][2] = −tan φ/r` and `γ[1][3] = γ[2][3] = 1/r`. On a spheroid `R` (and `r`) is the
+prime-vertical radius plus the height, and `γ[2][3] = 1/(M + h)`. Every other entry is zero.
+"""
+@inline log_scale_gradients(geo::AbstractGeometry, p) = log_scale_gradients(geo, as_ntuple(p))
+
+@inline log_scale_gradients(::AbstractCartesianGeometry{T}, ::Tuple{Vararg{Real,N}}) where {T,N} =
+    ntuple(_ -> ntuple(_ -> zero(T), Val(N)), Val(N))
+
+@inline log_scale_gradients(::AbstractSphericalGeometry{T}, ::Tuple{Real}) where {T} = ((zero(T),),)
+
+@inline function log_scale_gradients(geo::AbstractSphericalGeometry{T}, p::Tuple{Real,Real}) where {T}
+    z = zero(T)
+    return ((z, -tan(convert(T, p[2])) / radius(geo)), (z, z))
+end
+
+@inline function log_scale_gradients(::AbstractSphericalGeometry{T}, p::Tuple{Real,Real,Real}) where {T}
+    z = zero(T)
+    ir = inv(convert(T, p[3]))
+    return ((z, -tan(convert(T, p[2])) * ir, ir), (z, z, ir), (z, z, z))
+end
+
+@noinline log_scale_gradients(geo::AbstractGeometry, p::Tuple) = throw(ArgumentError(
+    "$(nameof(typeof(geo))) defines no `log_scale_gradients` for a point of $(length(p)) " *
+    "coordinate(s); add a method alongside its `scale_factors`"))
 
 """
     metric_invariant_directions(geo) -> NTuple{K,Int}
@@ -389,6 +530,45 @@ metric_invariant_directions(::AbstractGeometry) = ()
 
 # `(R·cosφ, R)` and `(r·cosφ, r, 1)`: longitude enters neither.
 metric_invariant_directions(::SphericalGeometry{T}) where {T} = (1,)
+
+"""
+    scale_invariant_directions(geo) -> NTuple{K,Int}
+
+The coordinate directions `d` whose own scale factor `h_d` does not vary along `d`. Distance along such
+a direction is `h_d` times the coordinate, so its `p`-th derivative with respect to distance is
+`h_d⁻ᵖ ∂ᵖ/∂ξᵈᵖ`.
+
+The default is `()`, and each concrete geometry declares its own, as for
+[`metric_invariant_directions`](@ref).
+"""
+function scale_invariant_directions end
+
+scale_invariant_directions(::AbstractGeometry) = ()
+
+# `h_λ = r·cosφ` has no λ, `h_φ = r` no φ, `h_r = 1`.
+scale_invariant_directions(::SphericalGeometry{T}) where {T} = (1, 2, 3)
+
+"""
+    line_distance(geo, point, d, a, b) -> T
+
+Distance along coordinate direction `d` from coordinate value `a` to `b`, the other coordinates those of
+`point`: `∫ₐᵇ h_d dξ`, negative for `b < a`.
+
+Along a direction in [`scale_invariant_directions`](@ref) this is `h_d·(b − a)`. A geometry whose `h_d`
+varies along `d` defines its own method, as [`SpheroidGeometry`](@ref) does for latitude with
+[`meridian_distance`](@ref).
+"""
+function line_distance(geo::AbstractGeometry{T}, p::Tuple, d::Int, a::Real, b::Real) where {T}
+    d in scale_invariant_directions(geo) || throw(ArgumentError(
+        "the scale factor of $(nameof(typeof(geo))) varies along direction $d, so the distance along it " *
+        "is the geometry's to define: add a method `Geometry.line_distance(::$(nameof(typeof(geo))), " *
+        "point, d, a, b)`",
+    ))
+    return scale_factors(geo, p)[d] * (convert(T, b) - convert(T, a))
+end
+
+line_distance(::AbstractCartesianGeometry{T}, ::Tuple, ::Int, a::Real, b::Real) where {T} =
+    convert(T, b) - convert(T, a)
 
 """
     jacobian(geo, point) -> T

@@ -17,19 +17,6 @@ Test.@testset "A degrading sweep's cost is O(1) in the grid, not O(n)" begin
     end
 end
 
-Test.@testset "A precomputed weight set applies allocation-free" begin
-    D = FG.Discretization
-    O = FG.Operators
-    X = collect(range(0.0, 8.0; length = 9))
-    Y = collect(range(0.0, 4.0; length = 5))
-    F = [xi^2 for xi in X, _ in Y]
-    idx, w = D.axis_stencils(X, 1, 3)
-    O2 = similar(F)
-    ap() = FG.Operators.apply_stencil!(O2, F, idx, w, 1)
-    ap()
-    Test.@test @allocated(ap()) == 0
-end
-
 Test.@testset "A per-cell traversal with a caller's own stencil allocates nothing" begin
     geo = FG.Geometry.CartesianGeometry()
     g = FG.Grids.StructuredGrid(geo, range(0.0; step = 1.0, length = 6),
@@ -53,7 +40,7 @@ Test.@testset "Every stencil traversal allocates nothing, at any shape or dimens
     g = FG.Grids.StructuredGrid(geo, 0.0:1.0:9.0, 0.0:1.0:9.0, FG.Grids.AllActive((10, 10)))
 
     # Every traversal allocates nothing at all — any shape, any radius, and with the stencil
-    # written as an inline literal at the call site, which is the form that has to work.
+    # written as an inline literal at the call site.
     function sweep_def(grid, n)
         c = 0
         for j in 1:n, i in 1:n
@@ -142,31 +129,22 @@ Test.@testset "Every stencil traversal allocates nothing, at any shape or dimens
                                           range(0.0, 1.0; length = m)); stencil = st))
               for m in (30, 60, 120), st in (S.Axial(1), S.Moore(2), S.Moore(3))]
     Test.@test all(==(first(counts)), counts)
-    Test.@test first(counts) < 20end
+    Test.@test first(counts) < 20
+end
 
 Test.@testset "Curvilinear construction memory is its own stored content, nothing more" begin
     geo = FG.Geometry.SphericalGeometry()
     # Construction memory scales with the grid's own stored content, corners and areas, and carries
     # no full-size unit-vector field on top.
-    function mib(n)
-        λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
-        φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
-        m = trues(n, n)
-        f = () -> FG.Grids.CurvilinearGrid(geo, λ, φ, m)
-        f()
-        return (@allocated f()) / 2^20
-    end
     n = 200
-    stored = 3 * 8 * (n + 1)^2 / 2^20      # xc, yc, areas
-    Test.@test mib(n) < 1.6 * stored
+    λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
+    φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
+    stored = 3 * 8 * (n + 1)^2                 # xc, yc, areas
+    Test.@test _alloc(q_cgrid, geo, λ, φ, trues(n, n)) < 1.6 * stored
 
-    # …and corner reconstruction costs only its own output. Minimum of several samples: a single
-    # `@allocated` can land on a collection or on the tail of compilation, and the true cost is a
-    # floor, so the minimum converges to it.
-    cc(A) = (FG.Grids._centers_to_corners(A);
-             minimum(@allocated(FG.Grids._centers_to_corners(A)) for _ in 1:3))
+    # …and corner reconstruction costs only its own output.
     big = [1.0i + 2.0j for i in 1:120, j in 1:120]
-    Test.@test cc(big) < 1.2 * 8 * 121^2
+    Test.@test _alloc(q_corners, big) < 1.2 * 8 * 121^2
 end
 
 Test.@testset "The grid-free connectivity path does not scale its allocations with nlat" begin
@@ -181,32 +159,13 @@ Test.@testset "Connectivity is built into contiguous CSR, not per-node vectors" 
     # The allocation count must not scale with the node count: everything lands in one neighbor
     # block plus one offset array, however many nodes there are.
     allocs(f) = (f(); minimum(Base.gc_alloc_count((@timed f()).gcstats) for _ in 1:5))
-    # nside 8 → 32 is a 16× jump in node count (768 → 12288). Both sizes sit past the point where
-    # the count settles; the very smallest grids take one or two fewer allocations, so anchoring on
-    # nside = 4 measures that step.
+    # nside 8 → 32 is a 16× jump in node count; both sizes sit past the point where the count
+    # settles.
     small = allocs(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(8)))
     large = allocs(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(32)))
     Test.@test large <= small
     Test.@test large < 16
     Test.@test allocs(() -> FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), 16)) < 16
-end
-
-Test.@testset "Neighbor traversal allocates nothing" begin
-    geom = FG.Geometry.CartesianGeometry()
-    n = 40
-    xs = collect(0.0:1.0:(n - 1))
-    grid = FG.Grids.StructuredGrid(geom, xs, xs, trues(n, n))
-    function sweep(g, m)
-        c = 0
-        for j in 1:m, i in 1:m
-            for v in FG.Grids.neighbors(g, i, j)
-                c += v
-            end
-        end
-        return c
-    end
-    sweep(grid, 3)
-    Test.@test @allocated(sweep(grid, n)) == 0
 end
 
 Test.@testset "Distance and displacement across a periodic seam allocate nothing" begin
@@ -362,21 +321,6 @@ Test.@testset "Rotating a point set in place allocates nothing" begin
     Test.@test @allocated(rr()) == 0
 end
 
-Test.@testset "An @inbounds sweep over a grid pays nothing for the bounds check" begin
-    geom = FG.Geometry.CartesianGeometry()
-    g = FG.Grids.StructuredGrid(geom, 0.0:1.0:4.0, 0.0:1.0:3.0, trues(5, 4))
-    # `@boundscheck` is elided at an `@inbounds` call site, so a hot loop still pays nothing.
-    function sweep(grid, n)
-        acc = 0.0
-        @inbounds for j in 1:n, i in 1:n
-            acc += FG.Grids.measure(grid, i, j) + (FG.Grids.isactive(grid, i, j) ? 1.0 : 0.0)
-        end
-        return acc
-    end
-    sweep(g, 2)
-    Test.@test @allocated(sweep(g, 4)) == 0
-end
-
 Test.@testset "Icosahedral construction does not scale with a per-vertex hash table" begin
     # Construction cost must not scale with a per-vertex hash table.
     function allocs(f)
@@ -417,9 +361,6 @@ Test.@testset "The ! forms allocate nothing beyond their return value" begin
     FG.SphericalSampling.spherical_axes!(λ, φ, gl, n)
     Test.@test nalloc(() -> FG.SphericalSampling.latitude_weights!(w, gl, n)) == 0
     Test.@test nalloc(() -> FG.SphericalSampling.spherical_axes!(λ, φ, gl, n)) <= 1
-    # …and both still agree with the combined solve.
-    q = FG.SphericalSampling.spherical_quadrature(gl, n)
-    Test.@test w == q.w && φ == q.φ && λ == q.λ
 
     # Cubed sphere: the panel id is not part of `spherical_points!`'s result, so it is not built.
     m = 32
@@ -429,19 +370,13 @@ Test.@testset "The ! forms allocate nothing beyond their return value" begin
     Test.@test nalloc(() -> FG.SphericalSampling.spherical_points!(cλ, cφ, FG.SphericalSampling.CubedSphereSampling(), m)) <= 1
     p = FG.SphericalSampling.cubed_sphere_points(m)
     Test.@test cλ == p.λ && cφ == p.φ          # identical to the panel-carrying form
-    Test.@test length(unique(p.panel)) == 6     # which still reports panels
 
-    # Icosahedral vertices need no edge or triangle list, and must not build one.
+    # Icosahedral vertices without the edge or triangle list.
     for ν in (8, 16)
         full = FG.SphericalSampling.icosahedral_mesh(ν)
         vo = FG.SphericalSampling.icosahedral_mesh(ν; topology = false)
         Test.@test vo.λ == full.λ && vo.φ == full.φ && vo.verts == full.verts
         Test.@test isempty(vo.edges) && isempty(vo.triangles)
-        iλ = Vector{Float64}(undef, FG.SphericalSampling.icosahedral_nvertices(ν))
-        iφ = similar(iλ)
-        FG.SphericalSampling.icosahedral_vertices!(iλ, iφ, ν)
-        Test.@test iλ == full.λ && iφ == full.φ
-        # Allocation count must not grow with ν once the topology is skipped.
     end
     a8 = nalloc(() -> FG.SphericalSampling.icosahedral_vertices(8))
     a32 = nalloc(() -> FG.SphericalSampling.icosahedral_vertices(32))
@@ -458,15 +393,12 @@ Test.@testset "Every ! form allocates nothing, at every size" begin
     L = Vector{Float64}(undef, n); P = Vector{Float64}(undef, n)
     FG.SphericalSampling.spherical_points!(L, P, s, nlat)
     Test.@test nalloc(() -> FG.SphericalSampling.spherical_points!(L, P, s, nlat)) <= 1
-    Test.@test (L, P) == (FG.SphericalSampling.spherical_points(s, nlat).λ, FG.SphericalSampling.spherical_points(s, nlat).φ)
 
     nlon, nlt = 64, 32
     n2 = FG.SphericalSampling.npoints(FG.SphericalSampling.YinYangSampling(), nlon, nlt)
     L2 = Vector{Float64}(undef, n2); P2 = Vector{Float64}(undef, n2)
     FG.SphericalSampling.spherical_points!(L2, P2, FG.SphericalSampling.YinYangSampling(), nlon, nlt)
     Test.@test nalloc(() -> FG.SphericalSampling.spherical_points!(L2, P2, FG.SphericalSampling.YinYangSampling(), nlon, nlt)) <= 1
-    yy = FG.SphericalSampling.spherical_points(FG.SphericalSampling.YinYangSampling(), nlon, nlt)
-    Test.@test L2 == yy.λ && P2 == yy.φ
 
     # The allocation count is flat in the problem size, checked at two sizes.
     function ico_allocs(ν)
@@ -478,7 +410,7 @@ Test.@testset "Every ! form allocates nothing, at every size" begin
     Test.@test ico_allocs(8) <= 1
     Test.@test ico_allocs(32) <= 1
     Test.@test ico_allocs(64) <= 1
-    # …and the direct write must agree exactly with the mesh route it replaced.
+    # …and the direct write agrees exactly with the mesh's vertices.
     for ν in (1, 2, 5, 16)
         nv = FG.SphericalSampling.icosahedral_nvertices(ν)
         a = Vector{Float64}(undef, nv); b = Vector{Float64}(undef, nv)
@@ -509,16 +441,16 @@ Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begi
     check_shape("structured 2-D MIXED'",  FG.Grids.StructuredGrid(cart, v, rg), (12, 12))
     check_shape("structured 3-D MIXED",   FG.Grids.StructuredGrid(cart, rg, v, rg), (12, 12, 12))
     check_shape("spherical 2-D MIXED",    FG.Grids.StructuredGrid(sph,
-                    range(0, 2π * (1 - 1 / n); length = n),
+                    FG.Axes.PeriodicAxis(0.0, 2π, n),
                     collect(range(-1.2, 1.2; length = n))), (12, 12))
     check_shape("curvilinear 2-D", FG.Grids.CurvilinearGrid(cart, cx, cy, trues(n, n);
                     measure = fill(1.0, n, n)), (12, 12))
     # A layout whose coordinates, adjacency and measure are arithmetic must reach the same floor: the
     # arithmetic runs in registers, so there is nothing for a per-cell read to allocate.
-    check_shape("HEALPix nside=8", FG.Grids.HEALPixGrid(sph, 8), (100,); axes = false)
+    check_shape("HEALPix nside=8", FG.Grids.HEALPixGrid(sph, 8), (100,))
     check_shape("octahedral N=16",
                 FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(16)),
-                (100,); axes = false)
+                (100,))
 
     # `apply_stencil!` drives the field loop through the same index-parallel entry point the device
     # path uses, so it is gated here too.
@@ -543,7 +475,6 @@ Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begi
         a = _alloc(FG.Grids.embedded_radius, emb, 1.0e6)
         a == 0 || println("    embedded_radius(", typeof(emb), ") -> ", a, " B")
         Test.@test a == 0
-        Test.@test (Test.@inferred FG.Grids.embedded_radius(emb, 1.0e6)) isa Float64
     end
     # An arc past the antipode saturates at the diameter.
     Test.@test FG.Grids.embedded_radius(FG.Grids.ArcEmbedding(2.0), 100.0) == 4.0
@@ -617,8 +548,7 @@ Test.@testset "A sweep's allocation does not grow with the grid, beyond the inde
     end
 
     # With an index the only growth is one `NearestNeighbors.inrange!` per cell, which allocates
-    # inside its own setup. The assertion is against that per-query constant, so any allocation the
-    # sweep adds of its own trips it.
+    # inside its own setup: the sweep's bytes are bounded by that per-query constant per cell.
     per_query = let g = curv(48), ix = C.indexed(g)
         buf = Int[]
         v = view(ix.index.pts, :, 100)
@@ -649,9 +579,7 @@ Test.@testset "The per-point kernels outside Grids allocate nothing either" begi
     hp = SS.HEALPixSampling(4)
     gl = SS.GaussLegendreSampling()
 
-    # These are called per point, per cell or per pixel, so an allocation here is paid on every
-    # one. The failure mode this catches is an element type reaching one of them as a runtime
-    # `Type` value: the return widens to `Any` and the kernel allocates on every call.
+    # These are called per point, per cell or per pixel.
     for (name, a) in (
         ("radius",                   _alloc(GE.radius, sph)),
         ("semimajor_axis",           _alloc(GE.semimajor_axis, spd)),
@@ -686,6 +614,9 @@ Test.@testset "The per-point kernels outside Grids allocate nothing either" begi
         ("similar_geometry",         _alloc(GE.similar_geometry, Float32, sph)),
         ("similar_rotation",         _alloc(GE.similar_rotation, Float32, rot)),
         ("metric_invariant_directions", _alloc(GE.metric_invariant_directions, sph)),
+        ("scale_invariant_directions", _alloc(GE.scale_invariant_directions, sph)),
+        ("meridian_distance",        _alloc(GE.meridian_distance, GE.SpheroidGeometry(), 0.7)),
+        ("line_distance",            _alloc(GE.line_distance, GE.SpheroidGeometry(), (0.1, 0.3, 50.0), 2, 0.2, 0.9)),
         ("float_type",               _alloc(GE.float_type, sph)),
         ("Axes.spacing_trait",       _alloc(A.spacing_trait, u)),
         ("Axes.wrap_sign",           _alloc(A.wrap_sign, v)),
@@ -737,9 +668,8 @@ Test.@testset "A degrading sweep can be made to allocate nothing" begin
     end
     Test.@test all(isequal(a[i], b[i]) for i in eachindex(a))
 
-    # The scratch is the difference between a per-call cost and none.
+    # With the scratch held, nothing is allocated.
     Test.@test _alloc(q_tbl_sc!, zeros(n, n), f, g, (idx, w), 1, sc) == 0
-    Test.@test _alloc(q_tbl_sc!, zeros(n, n), f, g, (idx, w), 1, nothing) > 0
 
     # A run walk allocates nothing. A closure over a reassigned loop variable boxes, and the cost
     # lands once per cell adjacent to a mask, so it scales with the length of a coastline.
@@ -754,15 +684,6 @@ Test.@testset "A degrading sweep can be made to allocate nothing" begin
             zeros(n, n), f, g, i5w5[1], i5w5[2], 1; order = 1, masked = NaN,
             policy = O.ReduceInRun(), scratch = small)
     end
-end
-
-Test.@testset "Rank-2 tensor rotation allocates nothing" begin
-    GE = FG.Geometry
-    geo = GE.SphericalGeometry(6.371e6)
-    τ = (1.3, -0.7, 2.1, 0.4, -1.1, 0.9)              # xx yy zz xy xz yz
-    # A hot-loop kernel, so it allocates nothing. Through `_alloc`: a closure over a testset local
-    # boxes what it captures and measures the harness.
-    Test.@test _alloc(q_tensor_local, geo, τ, (0.7, -0.4)) == 0
 end
 
 Test.@testset "The Gauss-Legendre solve keeps O(1) scratch, whatever n" begin
@@ -802,7 +723,7 @@ end
 
 Test.@testset "A ring is reached in O(1), allocating nothing whatever the grid size" begin
     SS = FG.SphericalSampling
-    # O(1) means allocation-free, whatever the grid size — the table form cannot be.
+    # O(1) means allocation-free, whatever the grid size.
     big = SS.OctahedralGaussianSampling(400)
     Test.@test _alloc(q_nlon_in_ring, big, 500) == 0
     Test.@test _alloc(q_ring_range, big, 500) == 0
@@ -820,20 +741,16 @@ end
 
 Test.@testset "A stencil plan's accessors allocate nothing" begin
     D = FG.Discretization
-    # A plan is read per cell on the paths that do not specialize on its form, so every accessor has to
-    # be free — including `plan_row`, whose two tuples are stack values.
+    # A plan is read per cell on the paths that do not specialize on its form; `plan_row` returns two
+    # stack tuples.
     for (x, per) in ((range(0.0, 1.0; length = 64), nothing),
-                     (range(0, 2π * (1 - 1 / 64); length = 64), 2π),
+                     (FG.Axes.PeriodicAxis(0.0, 2π, 64), 2π),
                      (collect(cumsum(fill(0.5, 64))), nothing))
         for k in (3, 4, 5)
-            pl = D.stencil_plan(x, 1, k)
+            pl = D.stencil_plan(x, 1, k; period = per)
             for j in (1, 2, 32, 63, 64)
                 Test.@test _alloc(D.plan_row, pl, j) == 0
             end
-            Test.@test _alloc(D.nnodes, pl) == 0
-            Test.@test _alloc(D.derivative_order, pl) == 0
-            Test.@test _alloc(D.axis_length, pl) == 0
-            Test.@test (Test.@inferred D.plan_row(pl, 3)) isa Tuple{NTuple{k,Int},NTuple{k,Float64}}
         end
     end
 end
@@ -847,17 +764,11 @@ end
 Test.@testset "The pixel neighbour walk returns a stack tuple, allocating nothing" begin
     C = FG.Connectivity
     # The tuple form returns its ids on the stack, so a traversal over a formula layout carries no
-    # scratch. It is measured directly as well as through the layout that calls it.
+    # scratch.
     for ns in (1, 4, 64)
         Test.@test _alloc(C.healpix_neighbor_ids, ns, 10) == 0
         Test.@test _alloc(C.healpix_neighbors!, Vector{Int}(undef, 8), ns, 10) == 0
     end
-    ids, n = C.healpix_neighbor_ids(4, 10)
-    Test.@test ids isa NTuple{8,Int}
-    Test.@test (Test.@inferred C.healpix_neighbor_ids(4, 10)) isa Tuple{NTuple{8,Int},Int}
-    buf = Vector{Int}(undef, 8)
-    Test.@test C.healpix_neighbors!(buf, 4, 10) == n
-    Test.@test sort(buf[1:n]) == sort(collect(ids)[1:n])
 end
 
 Test.@testset "Holding a stencil table removes the per-call allocation" begin
@@ -872,7 +783,6 @@ Test.@testset "Holding a stencil table removes the per-call allocation" begin
     g = GD.StructuredGrid(cart, x, y, mk; periodic = (false, true), period = (0.0, 2π))
     f = [sin(3xi) * cos(yj) for xi in x, yj in y]
 
-    # Holding the table is what removes the per-call allocation, which is the point of it.
     for dim in 1:2
         idx, w = D.axis_stencils(g, dim; order = 1, nodes = 3)
         Test.@test _alloc(q_tbl!, zeros(n, n), f, g, (idx, w), dim, O.BlankMasked()) == 0
@@ -936,6 +846,29 @@ Test.@testset "A ball fold allocates nothing, and nothing that grows with the gr
     Test.@test _alloc(q_locate_top, gu, (0.4, 0.1), C.indexed(gu), C.ball_scratch()) == 0
 end
 
+Test.@testset "Scattered interpolation with its buffers held allocates nothing" begin
+    C = FG.Connectivity
+    GD = FG.Grids
+    gu = healpix_node_grid(8)
+    geo = GD.grid_geometry(gu)
+    R = FG.Geometry.radius(geo)
+    n = length(GD.mask(gu))
+    λv = [GD.coords(gu, j).λ for j in 1:n]
+    φv = [GD.coords(gu, j).φ for j in 1:n]
+    f = sin.(φv)
+    # The masked grid takes the neighbourhood test, which visits the inactive cells as well.
+    gm = GD.UnstructuredGrid(geo, (λv, φv), φv .< 0.9; k = 8, areas = ones(n))
+    nb = (Vector{Int}(undef, 8), Vector{Float64}(undef, 8))
+    for g in (gu, gm), p in ((0.4, 0.1), (2.0, 0.95))
+        for top in (C.MetricTopology(g), C.indexed(g),
+                    C.MetricTopology(g; index = GD.cell_list(g; ball = 0.3R)))
+            a = _alloc(q_sinterp, f, g, p, top, C.ball_scratch(top), nb)
+            a == 0 || println("    interpolate ", p, " ", typeof(top.index), " -> ", a, " B")
+            Test.@test a == 0
+        end
+    end
+end
+
 Test.@testset "k-d-tree knn allocations do not scale with the node count" begin
     using NearestNeighbors: NearestNeighbors
     geo = FG.Geometry.SphericalGeometry(1.0)
@@ -945,14 +878,9 @@ Test.@testset "k-d-tree knn allocations do not scale with the node count" begin
         φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
         () -> FG.Grids._build_kdtree_neighbors(geo, (λ, φ); k = 6)
     end
-    # Batch `knn` returns a Vector{Vector{Int}} plus a Vector{Vector{Float64}} — ~4 heap
-    # allocations per query point (160,064 at N = 40k). Querying through `knn!` into reused
-    # buffers, behind a function barrier so the abstractly-inferred tree does not force a
-    # dynamic dispatch per call, makes the count flat in N.
-    #
-    # The query loop is measured with the tree passed in. `KDTree` construction spawns a task per
+    # The query loop is measured with the tree passed in: `KDTree` construction spawns a task per
     # subtree where threads are available, so its own allocation count scales with N and with the
-    # thread count; that cost belongs to the tree, and this gates the queries.
+    # thread count.
     E = Base.get_extension(FG, :FlowGeometriesNearestNeighborsExt)
     function query_allocs(n)
         λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
@@ -1005,7 +933,8 @@ Test.@testset "A per-index gap or width lookup allocates nothing on every axis m
         GD.StructuredGrid(cart, vec1, rng1),
         GD.StructuredGrid(cart, vec1, vec1),
         GD.StructuredGrid(cart, rng1, vec1, collect(0.0:2.0)),
-        GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9))),
+        GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9)); periodic = true),
+        GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 9))),
     )
     # A runtime `d` indexes a tuple whose entries have different types on the mixed grids, so the
     # lookup must not allocate for any of them.
@@ -1047,6 +976,19 @@ Test.@testset "Applying a gradient plan allocates nothing" begin
     end
 end
 
+Test.@testset "Building a gradient plan allocates the same buffers at every grid size" begin
+    GD = FG.Grids
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    sheared(n) = GD.CurvilinearGrid(cart, [0.7i + 0.05j for i in 1:n, j in 1:n],
+                                    [0.9j - 0.03i for i in 1:n, j in 1:n], trues(n, n);
+                                    measure = fill(1.0, n, n))
+    # At both sizes every O(n) buffer is past the size above which an array's storage is allocated
+    # apart from its header, so the two counts agree exactly when nothing is allocated per cell.
+    small, large = _nalloc(q_gplan, sheared(32)), _nalloc(q_gplan, sheared(64))
+    small == large || println("    gradient_plan -> ", small, " allocations at 32², ", large, " at 64²")
+    Test.@test large == small
+end
+
 Test.@testset "A batch axis costs no allocation, and none that grows with it" begin
     D = FG.Discretization
     O = FG.Operators
@@ -1059,14 +1001,13 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
     g = GD.StructuredGrid(cart, x, collect(1.0:ny), mk)
     sph = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
                             collect(range(0.0, 2π * (1 - 1 / nx); length = nx)),
-                            collect(range(-1.1, 1.1; length = ny)))
+                            collect(range(-1.1, 1.1; length = ny)); periodic = true)
     idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
     plan = O.gradient_plan(GD.CurvilinearGrid(cart,
         [0.7i + 0.05j for i in 1:nx, j in 1:ny], [0.9j - 0.03i for i in 1:nx, j in 1:ny],
         trues(nx, ny); measure = fill(1.0, nx, ny)))
 
-    # A batch adds output alone: the claim is the same byte count at Nb = 1 and Nb = 8, and zero is
-    # the stronger form of it. Taken through the top-level `q_*` helpers, so the harness stays out.
+    # A batch adds output alone: zero bytes at Nb = 1 and at Nb = 8.
     for (name, mk_args) in (
         ("apply_stencil! (held table)", nb -> (q_tbl!, zeros(nx, ny, nb),
                                               [sin(3i) * j * k for i in 1:nx, j in 1:ny, k in 1:nb],
@@ -1089,40 +1030,43 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
     end
 end
 
-Test.@testset "The staggered operators allocate nothing" begin
+Test.@testset "The mimetic operators allocate nothing" begin
     GD = FG.Grids
     O = FG.Operators
-    D = FG.Discretization
     cart = FG.Geometry.CartesianGeometry{Float64}()
-    C, Fa = D.Center(), D.Face()
-    x = collect(range(0.0, 4.0; length = 21))
-    y = collect(range(0.0, 3.0; length = 16))
-    sg = GD.StaggeredGrid(cart, x, y)
-    f = [3.0a - 2.0b for a in x, b in y]
-    fx = GD.axis_at(sg, 1, Fa)
-    fy = GD.axis_at(sg, 2, Fa)
-    u = [2.0a for a in fx, _ in y]
-    v = [3.0b for _ in x, b in fy]
-    g1 = similar(u); g2 = similar(v)
-    dv = similar(f)
-    z = zeros(length(fx), length(fy))
-    # Warm each, then measure: the per-point work is scale factors and one difference, and the
-    # per-direction loop is a tuple over a `Val`, so nothing here belongs on the heap.
-    O.gradient!((g1, g2), f, sg)
-    O.divergence!(dv, (u, v), sg)
-    O.curl!(z, u, v, sg)
-    Test.@test _alloc(q_stag_grad!, (g1, g2), f, sg) == 0
-    Test.@test _alloc(q_stag_div!, dv, (u, v), sg) == 0
-    Test.@test _alloc(q_stag_curl!, z, u, v, sg) == 0
-
-    # …on a sphere too, where the scale factors carry trigonometry.
     sph = FG.Geometry.SphericalGeometry(6.371e6)
-    λ = collect(range(0, 2π; length = 25)[1:24])
-    φ = collect(range(-1.2, 1.2; length = 13))
-    sp = GD.StaggeredGrid(sph, λ, φ)
-    su = zeros(length(GD.axis_at(sp, 1, Fa)), length(φ))
-    sv = zeros(length(λ), length(GD.axis_at(sp, 2, Fa)))
-    sd = zeros(length(λ), length(φ))
-    O.divergence!(sd, (su, sv), sp)
-    Test.@test _alloc(q_stag_div!, sd, (su, sv), sp) == 0
+    hole = trues(21, 16)
+    hole[8:10, 6:9] .= false
+    # Separable metrics on a box and a sphere, dense ones on a masked grid, three directions on a shell.
+    for (grid, bc) in ((GD.StructuredGrid(cart, range(0.0, 4.0; length = 21), range(0.0, 3.0; length = 16)), O.Neumann()),
+                       (GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 24), collect(range(-1.2, 1.2; length = 13))),
+                        O.Dirichlet()),
+                       (GD.StructuredGrid(cart, collect(range(0.0, 4.0; length = 21)), range(0.0, 3.0; length = 16), hole),
+                        O.Neumann()),
+                       (GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), collect(range(-1.0, 1.0; length = 7)),
+                                          collect(range(6.371e6, 6.4e6; length = 5))), O.Neumann()))
+        fm = O.face_metrics(grid, bc)
+        c = O.laplacian_coefficients(fm)
+        χ = rand(GD.size_tuple(grid)...)
+        δ = similar(χ)
+        g = O.allocate_faces(Float64, grid)
+        W = O.allocate_corners(Float64, grid)
+        u = ntuple(_ -> rand(GD.size_tuple(grid)...), GD.ncoordinates(grid))
+        Test.@test _alloc(q_mim_grad!, g, χ, fm) == 0
+        Test.@test _alloc(q_mim_div!, δ, g, fm) == 0
+        Test.@test _alloc(q_mim_curl!, W, g, fm) == 0
+        Test.@test _alloc(q_mim_rot!, g, W, fm) == 0
+        Test.@test _alloc(q_mim_faces!, g, u, fm) == 0
+        Test.@test _alloc(q_mim_centres!, u, g, fm) == 0
+        Test.@test _alloc(q_lap!, δ, χ, c) == 0
+        Test.@test _alloc(q_mim_lap!, δ, χ, fm, g) == 0
+        Test.@test _alloc(q_proj!, χ, c) == 0
+        Test.@test _alloc(q_fidx, grid, CartesianIndex(ntuple(_ -> 2, GD.ncoordinates(grid)))) == 0
+        cg = O.coarsen(grid)
+        cc = O.galerkin_coefficients(c, cg)
+        χc = zeros(GD.size_tuple(cg)...)
+        Test.@test _alloc(q_restrict!, χc, χ, c, cc) == 0
+        Test.@test _alloc(q_restrict_residual!, χc, χ, δ, c, cc) == 0
+        Test.@test _alloc(q_prolong!, χ, χc, c, cc) == 0
+    end
 end

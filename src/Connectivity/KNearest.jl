@@ -53,16 +53,26 @@ end
     return nothing
 end
 
-# A radius to start the search from: the cell's own size scaled to hold roughly `k` of them. Too small
-# costs a doubling, and the doubling makes the result independent of the guess.
-#
-# The root is over the coordinate directions, which turns a measure into a length: a spherical cell's
-# measure is an area and its square root a distance, whatever the rank of the index space.
-@inline function _knn_seed_radius(grid::Grids.AbstractGrid{G,T}, I, k::Int) where {G,T}
-    D = Grids.ncoordinates(grid)
-    m = T(Grids.measure(grid, I...))
-    cell = m > 0 ? m^(one(T) / D) : one(T)
-    return T(1.5) * cell * T(max(k, 1))^(one(T) / D)
+# A radius to start the search from, holding about `cells` cells the size of cell `I`.
+@inline _knn_seed_radius(grid::Grids.AbstractGrid{G,T}, I, cells::Int) where {G,T} =
+    _knn_ball_radius(T(Grids.measure(grid, I...)), cells, Grids.ncoordinates(grid))
+
+# The radius of a ball holding about `2k` cells of measure `m` in `D` coordinate directions:
+# `V_D ρᴰ = 2k m`, with `V_D` the measure of the unit ball. A search opening there finishes in one round
+# where the cells are even, and doubles where they are sparse; the doubling makes the result
+# independent of the guess. The `D`-th root turns a measure into a length: a spherical cell's measure is
+# an area and its square root a distance, whatever the rank of the index space.
+@inline function _knn_ball_radius(m::T, k::Int, D::Int) where {T}
+    return (2 * max(k, 1) * (m > 0 ? m : one(T)) / _unit_ball(T, D))^(one(T) / D)
+end
+
+# `V_D = (2π/D) V_{D-2}`, from `V_0 = 1` and `V_1 = 2`.
+@inline function _unit_ball(::Type{T}, D::Int) where {T}
+    v = isodd(D) ? T(2) : one(T)
+    for d in (isodd(D) ? 3 : 2):2:D
+        v *= 2 * T(π) / d
+    end
+    return v
 end
 
 """
@@ -97,7 +107,7 @@ function _k_nearest!(
     (length(idx) ≥ kk && length(dist) ≥ kk) || throw(ArgumentError(
         "idx and dist must hold at least k = $kk entries; got $(length(idx)) and $(length(dist))",
     ))
-    r = _knn_seed_radius(grid, Iraw, kk)
+    r = _knn_seed_radius(grid, Iraw, kk + 1)      # the ball holds the cell itself
     rmax = _knn_radius_ceiling(grid, topology)
     n = 0
     while true
@@ -148,8 +158,6 @@ end
 @inline function _knn_radius_ceiling(grid::Grids.AbstractGrid{G,T}, mt) where {G,T}
     D = Grids.ncoordinates(grid)
     s = zero(T)
-    # The topology's span, reduced once. Off a rectilinear grid the coordinate fields have no order,
-    # so asking the grid is a scan per query.
     for d in 1:D
         e = @inbounds T(mt.span[d])
         s += e * e

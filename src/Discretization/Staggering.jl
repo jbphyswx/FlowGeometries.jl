@@ -23,8 +23,9 @@ struct Center <: AbstractLocation end
 Cell boundaries — `N+1` of them along a direction of `N` cells.
 
 Centres do not determine faces: `N` centres leave the `N+1` faces underdetermined by one. The
-convention here is that faces sit midway between neighbouring centres, with the two outermost placed
-by linear extrapolation, which is the same rule the curvilinear corner reconstruction uses.
+convention here is that faces sit midway between neighbouring centres. On a bounded axis the two
+outermost are placed by linear extrapolation, the rule the curvilinear corner reconstruction uses; on a
+wrapping one the first sits midway across the seam, as [`faces`](@ref)`(x, period)` places it.
 """
 struct Face <: AbstractLocation end
 
@@ -83,6 +84,47 @@ function faces(a::AbstractRange{T}) where {T<:AbstractFloat}
     n = length(a)
     Δ = T(step(a))
     return Axes.UniformAxis{T}(n == 0 ? T(first(a)) : T(first(a)) - Δ / T(2), Δ, n + 1)
+end
+
+"""
+    faces(x, period) -> AbstractVector
+    faces!(out, x, period) -> out
+
+[`faces`](@ref) of an axis that wraps with `period`: the boundary between the last centre and the first
+sits midway across the seam, `(x[N] − P + x[1])/2`, and face `N+1` is face `1` one period on. With
+`period = nothing` these are the bounded forms.
+
+An [`Axes.PeriodicAxis`](@ref) has a seam one step wide, so its faces are another uniform axis.
+"""
+faces(x::AbstractVector{T}, ::Nothing) where {T<:AbstractFloat} = faces(x)
+
+function faces(x::AbstractVector{T}, period::Real) where {T<:AbstractFloat}
+    n = length(x)
+    n == 0 && return similar(x, T, 0)
+    return faces!(similar(x, T, n + 1), x, period)
+end
+
+function faces(a::Axes.PeriodicAxis{T}, period::Real) where {T<:AbstractFloat}
+    Axes.own_period(a, period)
+    return faces(a)
+end
+
+faces!(out::AbstractVector{T}, x::AbstractVector{T}, ::Nothing) where {T<:AbstractFloat} = faces!(out, x)
+
+function faces!(out::AbstractVector{T}, x::AbstractVector{T}, period::Real) where {T<:AbstractFloat}
+    n = length(x)
+    want = iszero(n) ? 0 : n + 1
+    length(out) == want || throw(DimensionMismatch(
+        "out holds $(length(out)) faces for an axis of $n centres, which has $want",
+    ))
+    n == 0 && return out
+    P = T(period) * Axes.wrap_sign(x)
+    @inbounds for i in 2:n
+        out[i] = (x[i-1] + x[i]) / T(2)
+    end
+    @inbounds out[1] = ((x[n] - P) + x[1]) / T(2)
+    @inbounds out[n+1] = out[1] + P
+    return out
 end
 
 """

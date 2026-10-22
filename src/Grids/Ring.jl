@@ -9,10 +9,9 @@
 Iso-latitude rings whose longitude count varies by ring: the reduced Gaussian family, of which the
 octahedral grid is the operational case.
 
-Storage is `O(nrings) = O(√npoints)` — one latitude, one longitude count, one offset and one cell area
-per ring. A point's longitude is `(j−1)·2π/nlon[r]`, and its latitude and area are its ring's, so all
-three come from the ring's four numbers. At `N = 1280` that is four vectors of 2560 entries, covering
-6.6 million points.
+Storage is one latitude, one longitude count, one offset and one cell area per ring, and the ring of
+every `w`-th point, `w` the shortest ring's length, which finds any point's ring in one comparison. A
+point's longitude is `(j−1)·2π/nlon[r]`, and its latitude and area are its ring's.
 
 Cells are numbered ring by ring from the north, matching
 [`SphericalSampling.ring_range`](@ref) and the order `spherical_points` writes.
@@ -24,20 +23,34 @@ struct RingGrid{
     T<:AbstractFloat,
     G<:Geometry.AbstractSphericalGeometry{T},
     VT<:AbstractVector{T},
+    VA<:AbstractVector{T},
     VI<:AbstractVector{Int},
+    VO<:AbstractVector{Int},
     B<:AbstractVector{Bool},
+    Sm<:Union{Nothing,SphericalSampling.AbstractReducedGaussianSampling},
+    VK<:AbstractVector{<:Integer},
 } <: AbstractGrid{G,T}
     geometry::G
     latitudes::VT      # one per ring, north to south
     nlon::VI           # points in each ring
-    offset::VI         # points BEFORE each ring; length nrings + 1, so offset[end] == npoints
-    ring_area::VT      # cell area within each ring; every cell of a ring has the same one
+    offset::VO         # points before each ring; length nrings + 1, so offset[end] == npoints
+    ring_area::VA      # cell area within each ring; every cell of a ring has the same one
     mask::B
+    sampling::Sm       # the rule the rings came from, `nothing` where the tables were given
+    bucket::VK         # the ring holding point `(b − 1)·width + 1`
+    width::Int         # the shortest ring's length
 end
 
 function RingGrid(
     geometry::Geometry.AbstractSphericalGeometry{T}, latitudes::AbstractVector,
     nlon_per_ring::AbstractVector{<:Integer}, ring_area::AbstractVector; mask = nothing,
+) where {T<:AbstractFloat}
+    return _ring_grid(geometry, latitudes, nlon_per_ring, ring_area, mask, nothing)
+end
+
+function _ring_grid(
+    geometry::Geometry.AbstractSphericalGeometry{T}, latitudes::AbstractVector,
+    nlon_per_ring::AbstractVector{<:Integer}, ring_area::AbstractVector, mask, sampling,
 ) where {T<:AbstractFloat}
     nring = length(latitudes)
     length(nlon_per_ring) == nring || throw(DimensionMismatch(
@@ -55,26 +68,34 @@ function RingGrid(
     n = off[end]
     m = mask === nothing ? AllActive((n,)) : mask
     length(m) == n || throw(DimensionMismatch("mask holds $(length(m)) entries for $n points"))
-    lat = collect(T, latitudes)
-    area = collect(T, ring_area)
-    nlon = collect(Int, nlon_per_ring)
-    return RingGrid{T,typeof(geometry),typeof(lat),typeof(nlon),typeof(m)}(
-        geometry, lat, nlon, off, area, m,
-    )
+    lat = _to_arr(T, latitudes)
+    area = _to_arr(T, ring_area)
+    nlon = _int_counts(nlon_per_ring)
+    bucket, width = _ring_buckets(off)
+    return RingGrid{T,typeof(geometry),typeof(lat),typeof(area),typeof(nlon),typeof(off),typeof(m),
+                    typeof(sampling),typeof(bucket)}(geometry, lat, nlon, off, area, m, sampling, bucket, width)
 end
 
+# The caller's counts as given when they are `Int` already, converted otherwise.
+_int_counts(v::AbstractVector{Int}) = v
+_int_counts(v::AbstractVector{<:Integer}) = collect(Int, v)
+
 # A Gaussian ring's cell area is `R²·(2π/nlon_r)·w_r` with `w_r` the latitude quadrature weight, which
-# sums to `4πR²` because the weights sum to 2.
+# sums to `4πR²` because the weights sum to 2. One root solve gives the latitudes and the weights, both
+# ascending, so ring `r` (from the north) is entry `nring + 1 − r`.
 function RingGrid(
     geometry::Geometry.AbstractSphericalGeometry{T},
     sampling::SphericalSampling.AbstractReducedGaussianSampling; mask = nothing,
 ) where {T<:AbstractFloat}
-    lat = SphericalSampling.ring_latitudes(T, sampling)
+    nring = SphericalSampling.nrings(sampling)
+    φ = Vector{T}(undef, nring)
+    w = Vector{T}(undef, nring)
+    SphericalSampling._gauss_legendre!(T, nothing, w, nring; lat = φ)
     nlon = SphericalSampling.nlon_per_ring(sampling)
-    w = SphericalSampling.latitude_weights(T, sampling)
     R² = T(Geometry.radius(geometry))^2
-    area = [R² * (T(2π) / T(nlon[r])) * w[r] for r in eachindex(nlon)]
-    return RingGrid(geometry, lat, nlon, area; mask = mask)
+    lat = reverse!(φ)
+    area = [R² * (T(2π) / T(nlon[r])) * w[nring + 1 - r] for r in 1:nring]
+    return _ring_grid(geometry, lat, nlon, area, mask, sampling)
 end
 
 RingGrid(sampling::SphericalSampling.AbstractReducedGaussianSampling; kwargs...) =
@@ -82,44 +103,30 @@ RingGrid(sampling::SphericalSampling.AbstractReducedGaussianSampling; kwargs...)
 
 @inline _from_fields(
     ::Type{<:RingGrid},
-    geometry::G, latitudes::VT, nlon::VI, offset::VI, ring_area::VT, mask::B,
-) where {T,G<:Geometry.AbstractSphericalGeometry{T},VT<:AbstractVector{T},VI,B} =
-    RingGrid{T,G,VT,VI,B}(geometry, latitudes, nlon, offset, ring_area, mask)
+    geometry::G, latitudes::VT, nlon::VI, offset::VO, ring_area::VA, mask::B, sampling::Sm, bucket::VK,
+    width::Int,
+) where {T,G<:Geometry.AbstractSphericalGeometry{T},VT<:AbstractVector{T},VA<:AbstractVector{T},VI,VO,B,Sm,VK} =
+    RingGrid{T,G,VT,VA,VI,VO,B,Sm,VK}(geometry, latitudes, nlon, offset, ring_area, mask, sampling, bucket,
+                                       width)
 
-"""
-    nrings(grid::RingGrid) -> Int
+@inline sampling(grid::RingGrid) = getfield(grid, :sampling)
 
-How many iso-latitude rings the grid has.
-"""
+# The ring accessors, read off the per-ring tables. Rings are counted from the north.
 @inline nrings(grid::RingGrid) = length(getfield(grid, :nlon))
 
-"""
-    nlon_in_ring(grid::RingGrid, r::Integer) -> Int
+@inline nlon_in_ring(grid::RingGrid, r::Integer) =
+    @inbounds getfield(grid, :nlon)[_check_ring(Int(r), nrings(grid))]
 
-Points in ring `r`, counted from the north.
-"""
-@inline nlon_in_ring(grid::RingGrid, r::Integer) = @inbounds getfield(grid, :nlon)[r]
-
-"""
-    ring_range(grid::RingGrid, r::Integer) -> UnitRange{Int}
-
-The cells of ring `r`, as a contiguous slice of the flattened numbering. `O(1)`.
-"""
 @inline function ring_range(grid::RingGrid, r::Integer)
     off = getfield(grid, :offset)
-    @inbounds return (off[r] + 1):off[r + 1]
+    k = _check_ring(Int(r), nrings(grid))
+    @inbounds return (off[k] + 1):off[k + 1]
 end
 
-"""
-    ring_of(grid::RingGrid, i::Integer) -> Int
-
-Which ring cell `i` belongs to.
-
-`O(log nrings)` by bisection of the cumulative counts. A closed form exists for the octahedral rule
-alone; a tabulated reduced grid's counts are arbitrary, so the search is what serves both.
-"""
-@inline ring_of(grid::RingGrid, i::Integer) =
-    searchsortedlast(getfield(grid, :offset), Int(i) - 1)
+@inline function ring_of(grid::RingGrid, i::Integer)
+    @boundscheck checkbounds(mask(grid), Int(i))
+    return _ring_at(getfield(grid, :offset), getfield(grid, :bucket), getfield(grid, :width), Int(i))
+end
 
 # ---- the three traits -------------------------------------------------------
 
@@ -132,7 +139,7 @@ alone; a tabulated reduced grid's counts are arbitrary, so the search is what se
 @inline ncoordinates(::RingGrid) = 2
 
 @inline function _raw_coords(grid::RingGrid{T}, i::Integer) where {T}
-    r = ring_of(grid, i)
+    r = @inbounds ring_of(grid, i)
     @inbounds off = getfield(grid, :offset)[r]
     @inbounds m = getfield(grid, :nlon)[r]
     j = Int(i) - off                                  # 1-based position within the ring
@@ -160,13 +167,13 @@ end
 
 # ---- measure ----------------------------------------------------------------
 
-@inline measure(grid::RingGrid) =
-    RingwiseVector(getfield(grid, :ring_area), getfield(grid, :offset))
+@inline measure(grid::RingGrid) = RingwiseVector(getfield(grid, :ring_area), getfield(grid, :offset),
+                                                  getfield(grid, :bucket), getfield(grid, :width))
+@inline _total_measure(grid::RingGrid) = sum(measure(grid))
 
 # ---- materialization --------------------------------------------------------
 
-# A ring walk: the ring a cell belongs to is known from the loop, so no cell pays the `O(log nrings)`
-# bisection `ring_of` does.
+# A ring walk: the ring a cell belongs to is known from the loop.
 function materialize(grid::RingGrid{T}) where {T}
     n = length(grid)
     λ = Vector{T}(undef, n)

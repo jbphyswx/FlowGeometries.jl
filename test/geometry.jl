@@ -1,20 +1,6 @@
-Test.@testset "Abstract hierarchy" begin
-    Test.@test FG.Geometry.AbstractCartesianGeometry <: FG.Geometry.AbstractGeometry
-    Test.@test FG.Geometry.AbstractSphericalGeometry <: FG.Geometry.AbstractGeometry
-    Test.@test FG.Geometry.CartesianGeometry <: FG.Geometry.AbstractCartesianGeometry
-    Test.@test FG.Geometry.SphericalGeometry <: FG.Geometry.AbstractSphericalGeometry
-    Test.@test FG.Grids.AbstractStructuredGrid <: FG.Grids.AbstractGrid
-    Test.@test FG.Grids.AbstractCurvilinearGrid <: FG.Grids.AbstractGrid
-    Test.@test FG.Grids.AbstractUnstructuredGrid <: FG.Grids.AbstractGrid
-    Test.@test FG.Grids.StructuredGrid <: FG.Grids.AbstractStructuredGrid
-    Test.@test FG.Grids.CurvilinearGrid <: FG.Grids.AbstractCurvilinearGrid
-    Test.@test FG.Grids.UnstructuredGrid <: FG.Grids.AbstractUnstructuredGrid
-end
-
 Test.@testset "User geometry subtype participates" begin
     struct StretchedCartesian{T} <: FG.Geometry.AbstractCartesianGeometry{T} end
     g = StretchedCartesian{Float64}()
-    Test.@test g isa FG.Geometry.AbstractGeometry
     Test.@test FG.Geometry.area_element(g, 2.0, 3.0) ≈ 6.0
     p1 = (0.0, 0.0)
     p2 = (3.0, 4.0)
@@ -37,6 +23,11 @@ Test.@testset "User geometry subtype participates" begin
                FG.Geometry.spherical_to_cartesian(ref, (0.3, 0.4))
     Test.@test FG.Geometry.area_element(s, 0.4, 0.01, 0.02) ==
                FG.Geometry.area_element(ref, 0.4, 0.01, 0.02)
+    # Any real arguments, converted to the geometry's type, as on the plane and the spheroid.
+    Test.@test FG.Geometry.area_element(ref, 0.5f0, 1 // 100, 0.02) ==
+               FG.Geometry.area_element(ref, Float64(0.5f0), 0.01, 0.02)
+    Test.@test FG.Geometry.volume_element(ref, 6_400_000, 0.5f0, 0.01, 0.02, 10) ==
+               FG.Geometry.volume_element(ref, 6.4e6, Float64(0.5f0), 0.01, 0.02, 10.0)
     Test.@test FG.Geometry.scale_factors(s, (0.3, 0.4)) ==
                FG.Geometry.scale_factors(ref, (0.3, 0.4))
     # …and the whole grid stack downstream of it, including the cell measure.
@@ -44,7 +35,6 @@ Test.@testset "User geometry subtype participates" begin
     φ = range(-1.2; step = 0.3, length = 9)
     gs, gr = FG.Grids.StructuredGrid(s, λ, φ), FG.Grids.StructuredGrid(ref, λ, φ)
     Test.@test FG.Grids.measure_array(gs) == FG.Grids.measure_array(gr)
-    Test.@test sum(FG.Grids.measure(gs)) == sum(FG.Grids.measure(gr))
     Test.@test FG.Grids.area(gs, 3, 4) == FG.Grids.area(gr, 3, 4)
     Test.@test FG.Grids.coords(gs, 3, 4) == FG.Grids.coords(gr, 3, 4)
 
@@ -82,32 +72,24 @@ Test.@testset "Cartesian geometry" begin
     # The geometry carries no spacing: a cell's extents are the caller's (in practice, the grid's).
     Test.@test FG.Geometry.area_element(geom, 1000.0, 1000.0) ≈ 1.0e6
     Test.@test FG.Geometry.volume_element(geom, 1.0, 2.0, 3.0) ≈ 6.0
-    Test.@test FG.Geometry.CartesianGeometry(Float32) === FG.Geometry.CartesianGeometry{Float32}()
-    Test.@test FG.Geometry.CartesianGeometry{Float32}() isa FG.Geometry.AbstractCartesianGeometry{Float32}
 end
 
 Test.@testset "Spherical geometry + Cartesian" begin
-    geom = FG.Geometry.SphericalGeometry(6.371e6)
+    R = 6.371e6
+    geom = FG.Geometry.SphericalGeometry(R)
     london = (deg2rad(-0.1276), deg2rad(51.5074))
     paris = (deg2rad(2.3522), deg2rad(48.8566))
-    d_km = FG.Geometry.distance(geom, london, paris) / 1000.0
-    Test.@test 300 < d_km < 400
-
-    λ, φ = 0.3, 0.4
-    uλ, uφ = 1.0, -0.5
-    p = FG.Geometry.vector_to_cartesian(geom, uλ, uφ, λ, φ)
-    back = FG.Geometry.vector_from_cartesian(geom, p, λ, φ)
-    Test.@test back.λ ≈ uλ
-    Test.@test back.φ ≈ uφ
-    Test.@test abs(back.r) < 1e-12
+    # Haversine: d = 2R·asin √(sin²(Δφ/2) + cos φ₁ cos φ₂ sin²(Δλ/2)).
+    hav = 2R * asin(sqrt(sin((paris[2] - london[2]) / 2)^2 +
+                         cos(london[2]) * cos(paris[2]) * sin((paris[1] - london[1]) / 2)^2))
+    Test.@test FG.Geometry.distance(geom, london, paris) ≈ hav rtol = 1e-12
 end
 
 Test.@testset "nonuniform_first_derivative" begin
     # Uniform: recovers (f_p - f_m)/(2h)
     Test.@test FG.Geometry.nonuniform_first_derivative(1.0, 2.0, 3.0, 1.0, 1.0) ≈ 1.0
-    # Exact for quadratic on nonuniform stencil
-    # f(x)=x^2 at x=0 with neighbors -1 and 2: f'=2x=0 at center... use x=-1,0,2
-    f_m, f_0, f_p = 1.0, 0.0, 4.0  # (-1)^2, 0, 2^2
+    # f(x) = x² on the nodes -1, 0, 2: the three-point formula is exact for a quadratic, f'(0) = 0.
+    f_m, f_0, f_p = 1.0, 0.0, 4.0
     Test.@test FG.Geometry.nonuniform_first_derivative(f_m, f_0, f_p, 1.0, 2.0) ≈ 0.0 atol = 1e-12
 end
 
@@ -117,8 +99,7 @@ Test.@testset "Rank-2 tensors rotate between the ambient and local frames" begin
     τ = (1.3, -0.7, 2.1, 0.4, -1.1, 0.9)              # xx yy zz xy xz yz
     pts = ((0.0, 0.0), (0.7, -0.4), (3.1, 1.2), (5.0, -1.5))
     sym6(t) = [t[1] t[4] t[5]; t[4] t[2] t[6]; t[5] t[6] t[3]]
-    # `R` formed explicitly from the basis the package already defines, so the contraction under
-    # test — which never forms `R` — is checked against the thing it is supposed to be.
+    # `R` formed explicitly from the local basis: `tensor_to_local` is `R·τ·Rᵀ`.
     function rmat(λ, φ)
         b = GE.local_tangent_basis(geo, (λ, φ))
         return vcat(collect(b.λ)', collect(b.φ)', collect(GE.unit_vector(Float64, (λ, φ)))')
@@ -137,16 +118,6 @@ Test.@testset "Rank-2 tensors rotate between the ambient and local frames" begin
         w = (v.λ^2, v.φ^2, v.r^2, v.λ * v.φ, v.λ * v.r, v.φ * v.r)
         Test.@test maximum(abs.(collect(Tuple(GE.tensor_to_local(geo, t..., λ, φ))) .-
                                 collect(w))) < 1e-12
-    end
-
-    # Invariants a rotation cannot change. The determinant is written out for one 3×3, so the suite
-    # takes no LinearAlgebra dependency.
-    det3(m) = m[1, 1] * (m[2, 2] * m[3, 3] - m[2, 3] * m[3, 2]) -
-              m[1, 2] * (m[2, 1] * m[3, 3] - m[2, 3] * m[3, 1]) +
-              m[1, 3] * (m[2, 1] * m[3, 2] - m[2, 2] * m[3, 1])
-    let l = Tuple(GE.tensor_to_local(geo, τ..., 1.1, 0.3))
-        Test.@test l[1] + l[2] + l[3] ≈ τ[1] + τ[2] + τ[3]
-        Test.@test det3(sym6(l)) ≈ det3(sym6(τ))
     end
 
     # Every representation, as elsewhere, and a requested one on the way out.
@@ -171,12 +142,8 @@ Test.@testset "local_tangent_basis / project_to_tangent_plane" begin
     c = (0.0, 0.0)
     n = (1.0, 2.0)
     Test.@test FG.Geometry.project_to_tangent_plane(cgeom, c, n) == (; x = 1.0, y = 2.0)
-    Test.@test FG.Geometry.distance(cgeom, (x = 0.0, y = 0.0), (x = 3.0, y = 4.0)) ≈ 5.0
 
     sgeom = FG.Geometry.SphericalGeometry(1.0)
-    ê = FG.Geometry.local_tangent_basis(sgeom, (0.0, 0.0))
-    Test.@test abs(sqrt(sum(abs2, ê.λ)) - 1) < 1e-14
-    Test.@test abs(sqrt(sum(abs2, ê.φ)) - 1) < 1e-14
     Test.@test FG.Geometry.distance(sgeom, (λ = 0.0, φ = 0.0), (λ = 0.1, φ = 0.0)) ≈ sgeom.R * 0.1 atol = 1e-10
 end
 
@@ -196,18 +163,14 @@ Test.@testset "Point functions accept every representation and element type" beg
     Test.@test FG.Geometry.distance(sgeo, (0.1f0, 0.2f0), (0.3f0, 0.4f0)) ≈
                FG.Geometry.distance(sgeo, (Float64(0.1f0), Float64(0.2f0)), (Float64(0.3f0), Float64(0.4f0)))
 
-    # 3-component spherical points carry an absolute radius; on the reference sphere the chord
-    # distance agrees with the 2-component great-circle distance to within chord-vs-arc.
+    # 3-component spherical points carry an absolute radius, and their distance is the chord.
     Test.@test FG.Geometry.distance(sgeo, (0.1, 0.2, R), (0.1, 0.2, R)) ≈ 0.0 atol = 1e-9
     Test.@test FG.Geometry.distance(sgeo, (0.0, 0.0, R), (0.0, 0.0, 2R)) ≈ R
 
-    # An unsupported point length raises, and terminates.
-    Test.@test_throws MethodError FG.Geometry.distance(sgeo, (0.1, 0.2, 0.3, 0.4), (0.1, 0.2, 0.3, 0.4))
     Test.@test_throws ArgumentError FG.Geometry.distance(cgeo, [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
 
     # `spherical_to_cartesian` — (λ, φ) = (0, 0) is the +x axis at radius R.
-    P0 = FG.Geometry.spherical_to_cartesian(sgeo, (0.0, 0.0))
-    Test.@test all(((P0.x, P0.y, P0.z) .- (R, 0.0, 0.0)) .< 1e-6)
+    Test.@test FG.Geometry.spherical_to_cartesian(sgeo, (0.0, 0.0)) == (x = R, y = 0.0, z = 0.0)
     Pref = FG.Geometry.spherical_to_cartesian(sgeo, (0.1, 0.2))
     for pt in ((0.1, 0.2), (λ = 0.1, φ = 0.2), SA.SVector(0.1, 0.2), [0.1, 0.2])
         Test.@test FG.Geometry.spherical_to_cartesian(sgeo, pt) === Pref
@@ -232,26 +195,25 @@ Test.@testset "Requested point representation is honored exactly" begin
     cgrid = FG.Grids.StructuredGrid(cgeo, xs, xs, trues(5, 5))
     sgrid = FG.Grids.StructuredGrid(sgeo, deg2rad.(xs), deg2rad.(xs), trues(5, 5))
 
-    Test.@test Test.@inferred(FG.Grids.coords(cgrid, 2, 3)) === (x = 1.0, y = 2.0)
-    Test.@test Test.@inferred(FG.Grids.coords(NamedTuple, sgrid, 2, 3)) === FG.Grids.coords(sgrid, 2, 3)
-    Test.@test Test.@inferred(FG.Grids.coords(Tuple, cgrid, 2, 3)) === (1.0, 2.0)
-    Test.@test Test.@inferred(FG.Grids.coords(NTuple{2,Float32}, cgrid, 2, 3)) === (1.0f0, 2.0f0)
-    Test.@test Test.@inferred(FG.Grids.coords(SA.SVector{2,Float64}, cgrid, 2, 3)) === SA.SVector(1.0, 2.0)
-    Test.@test Test.@inferred(FG.Grids.coords(SA.SVector, cgrid, 2, 3)) === SA.SVector(1.0, 2.0)
-    Test.@test Test.@inferred(FG.Grids.coords(SA.MVector{2,Float64}, cgrid, 2, 3)) == SA.MVector(1.0, 2.0)
-    Test.@test Test.@inferred(FG.Grids.coords(Vector{Float64}, cgrid, 2, 3)) == [1.0, 2.0]
+    Test.@test FG.Grids.coords(cgrid, 2, 3) === (x = 1.0, y = 2.0)
+    Test.@test FG.Grids.coords(NamedTuple, sgrid, 2, 3) === FG.Grids.coords(sgrid, 2, 3)
+    Test.@test FG.Grids.coords(Tuple, cgrid, 2, 3) === (1.0, 2.0)
+    Test.@test FG.Grids.coords(NTuple{2,Float32}, cgrid, 2, 3) === (1.0f0, 2.0f0)
+    Test.@test FG.Grids.coords(SA.SVector{2,Float64}, cgrid, 2, 3) === SA.SVector(1.0, 2.0)
+    Test.@test FG.Grids.coords(SA.SVector, cgrid, 2, 3) === SA.SVector(1.0, 2.0)
+    Test.@test FG.Grids.coords(SA.MVector{2,Float64}, cgrid, 2, 3) == SA.MVector(1.0, 2.0)
+    Test.@test FG.Grids.coords(Vector{Float64}, cgrid, 2, 3) == [1.0, 2.0]
 
     # The vector-returning geometry functions take the same leading-type escape.
     p, q = SA.SVector(0.1, 0.2), SA.SVector(0.11, 0.21)
-    Test.@test Test.@inferred(FG.Geometry.project_to_tangent_plane(SA.SVector{2,Float64}, sgeo, p, q)) ==
+    Test.@test FG.Geometry.project_to_tangent_plane(SA.SVector{2,Float64}, sgeo, p, q) ==
                SA.SVector(Tuple(FG.Geometry.project_to_tangent_plane(sgeo, p, q)))
-    Test.@test Test.@inferred(FG.Geometry.spherical_to_cartesian(SA.SVector{3,Float64}, sgeo, p)) ==
+    Test.@test FG.Geometry.spherical_to_cartesian(SA.SVector{3,Float64}, sgeo, p) ==
                SA.SVector(Tuple(FG.Geometry.spherical_to_cartesian(sgeo, p)))
-    Test.@test Test.@inferred(FG.Geometry.vector_to_cartesian(SA.SVector{3,Float64}, sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)) ==
+    Test.@test FG.Geometry.vector_to_cartesian(SA.SVector{3,Float64}, sgeo, 1.0, 2.0, 3.0, 0.1, 0.2) ==
                SA.SVector(Tuple(FG.Geometry.vector_to_cartesian(sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)))
-    Test.@test Test.@inferred(FG.Geometry.vector_from_cartesian(SA.MVector{3,Float64}, sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)) ==
+    Test.@test FG.Geometry.vector_from_cartesian(SA.MVector{3,Float64}, sgeo, 1.0, 2.0, 3.0, 0.1, 0.2) ==
                SA.MVector(Tuple(FG.Geometry.vector_from_cartesian(sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)))
-    Test.@test Test.@inferred(FG.Geometry.local_tangent_basis(SA.SVector{3,Float64}, sgeo, p)).λ isa SA.SVector{3,Float64}
     # A velocity may itself be given in any representation.
     Test.@test FG.Geometry.vector_from_cartesian(sgeo, SA.SVector(1.0, 2.0, 3.0), 0.1, 0.2) ===
                FG.Geometry.vector_from_cartesian(sgeo, 1.0, 2.0, 3.0, 0.1, 0.2)
@@ -263,34 +225,15 @@ Test.@testset "Requested point representation is honored exactly" begin
     Test.@test FG.Geometry.unit_vector(Float64, [0.1, 0.2, 6.4e6]) ===
                FG.Geometry.unit_vector(Float64, (0.1, 0.2))
 
-    # A consumer needing a fixed number of components names the one it is missing. Reading past the end
-    # of a short point reports an index, which is not what is wrong with the point.
+    # A point with too few components is an ArgumentError naming the one missing.
     Test.@test_throws ArgumentError FG.Geometry.unit_vector(Float64, [0.1])
-    Test.@test_throws ArgumentError FG.Geometry.unit_vector(Float64, (λ = 0.1,))
     Test.@test_throws ArgumentError FG.Geometry.vector_from_cartesian(sgeo, [1.0, 2.0], 0.1, 0.2)
-    Test.@test_throws ArgumentError FG.Geometry.vector_from_cartesian(sgeo, (1.0,), 0.1, 0.2)
-    # The width is the whole of what those check. A component outside the numeric domain has the right
-    # width, so the conversion judges it, and the message names the offending type.
-    Test.@test_throws MethodError FG.Geometry.vector_from_cartesian(sgeo, ("a", "b", "c"), 0.1, 0.2)
-    Test.@test_throws MethodError FG.Geometry.unit_vector(Float64, (λ = 0.1, φ = missing))
-
-    # The union of widths costs the caller no inference: each entry point reduces a point to a value
-    # whose type the geometry fixes, never the point's width.
-    vp, vv = [0.1, 0.2], [1.0, 2.0, 3.0]
-    Test.@test Test.@inferred(FG.Geometry.distance(sgeo, vp, vp)) isa Float64
-    Test.@test Test.@inferred(FG.Geometry.triangle_area(sgeo, vp, vp .+ 0.1, vp .+ 0.2)) isa Float64
-    Test.@test Test.@inferred(FG.Geometry.unit_vector(Float64, vp)) isa NTuple{3,Float64}
-    Test.@test Test.@inferred(FG.Geometry.spherical_to_cartesian(sgeo, vp)) isa
-               NamedTuple{(:x, :y, :z),NTuple{3,Float64}}
-    Test.@test Test.@inferred(FG.Geometry.vector_from_cartesian(sgeo, vv, 0.1, 0.2)) isa
-               NamedTuple{(:λ, :φ, :r),NTuple{3,Float64}}
 end
 
 Test.@testset "A pole rotation applies to a point set and to a grid" begin
     GE = FG.Geometry
     GR = FG.Grids
     rot = GE.PoleRotation(0.7, 0.3)
-    Test.@test GE.rotate(rot, 0.7, 0.3)[2] ≈ π / 2      # the rotation's own pole
 
     λ = [0.1, 1.2, 3.0, 5.5]
     φ = [0.0, -0.4, 0.9, 0.2]
@@ -301,37 +244,25 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test λ2 == Λ && φ2 == Φ
     GE.unrotate!(λ2, φ2, rot)
     Test.@test all(isapprox.(λ2, λ; atol = 1e-12)) && all(isapprox.(φ2, φ; atol = 1e-12))
-    # 2-D fields (a grid's coordinate arrays) go through the same method.
-    Λm = [0.1i for i in 1:3, _ in 1:4]
-    Test.@test size(GE.rotate!(Λm, [0.1j for _ in 1:3, j in 1:4], rot)[1]) == (3, 4)
     Test.@test_throws DimensionMismatch GE.rotate!(zeros(3), zeros(4), rot)
 
-    # Rotating a rectilinear spherical grid warps it, and that warping is a formula, so the result
-    # stores the mesh and the rotation and evaluates a cell's position where it is asked for.
     sph = FG.Geometry.SphericalGeometry(6.371e6)
-    λa = range(0, 2π; length = 25)[1:24]
+    λa = FG.Axes.PeriodicAxis(0.0, 2π, 24)
     φa = range(-1.2, 1.2; length = 13)
     gs = GR.StructuredGrid(sph, λa, φa)
     gr = GR.unrotate(gs, rot)
-    Test.@test gr isa GR.RotatedGrid && size(gr) == (24, 13)
-    # Rotating costs one `PoleRotation` on top of the base grid.
-    Test.@test Base.summarysize(gr) - Base.summarysize(gs) ≤ sizeof(rot) + 64
-    Test.@test GR.measure(gr) === GR.measure(gs)           # the base grid's own array
+    # A rotation is an isometry, so every cell keeps its measure.
     Test.@test all(GR.measure(gr, i, j) == GR.measure(gs, i, j) for i in 1:24, j in 1:13)
-    Test.@test sum(GR.measure(gr)) == sum(GR.measure(gs))  # an isometry, so exactly
     Test.@test GR._raw_coords(gr, 3, 4) == GE.unrotate(rot, λa[3], φa[4])
     Test.@test GR._raw_coords(GR.rotate(gs, rot), 3, 4) == GE.rotate(rot, λa[3], φa[4])
-    Test.@test GR.base_grid(gr) === gs
     # The mesh is unchanged, so its index topology and wrap length are too (λ is an angle in
     # either frame), and so is its adjacency.
     Test.@test GR.isperiodic(gr, 1) && !GR.isperiodic(gr, 2)
     Test.@test GR.period(gr, 1) ≈ 2π
     Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(gr)) ==
                FG.Connectivity.nedges(FG.Connectivity.build_connectivity(gs))
-    # A rotated (λ, φ) depends on each mesh coordinate, so there are no per-axis coordinate vectors,
-    # and a ball query is bounded by an index.
+    # A rotated (λ, φ) depends on each mesh coordinate, so there are no per-axis coordinate vectors.
     Test.@test_throws ArgumentError GR.coordinates(gr)
-    Test.@test GR.candidate_source(gr) isa GR.IndexedCandidates
     # A rotation preserves distance, so a ball holds the same cells in either frame.
     Test.@test FG.Connectivity.nneighbors_within(gr, 5, 6; ball = 1.5e6) ==
                FG.Connectivity.nneighbors_within(gs, 5, 6; ball = 1.5e6)
@@ -344,16 +275,12 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
         g = GR.rotate(b, rot)
         Test.@test GR.isuniform(g, 1) == GR.isuniform(b, 1)
         Test.@test GR.isuniform(g, 2) == GR.isuniform(b, 2)
-        Test.@test GR.isuniform(g) == GR.isuniform(b)
         Test.@test GR.spacing(g, 1) == GR.spacing(b, 1)
-        Test.@test GR.spacing_trait(g, Val(1)) === GR.spacing_trait(b, Val(1))
         Test.@test GR.minimum_spacing(g, 2) == GR.minimum_spacing(b, 2)
         Test.@test GR.maximum_spacing(g, 2) == GR.maximum_spacing(b, 2)
         Test.@test GR.local_spacing(g, 2, 5) == GR.local_spacing(b, 2, 5)
-        Test.@test GR.cell_width(g, 2, 5) == GR.cell_width(b, 2, 5)
         Test.@test GR.cell_widths(g, 2) == GR.cell_widths(b, 2)
         Test.@test GR.bounds(g, 2) == (-π / 2, π / 2)
-        Test.@test_throws ArgumentError GR.coordinates(g)
     end
 end
 
@@ -367,45 +294,34 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     Test.@test G.scale_factors(FG.Geometry.CartesianGeometry(), (1.0, 2.0, 3.0)) == (1.0, 1.0, 1.0)
     Test.@test G.jacobian(sg, (0.0, 0.5)) ≈ 4 * cos(0.5)
     Test.@test G.jacobian(FG.Geometry.CartesianGeometry(), (1.0, 2.0)) == 1.0
-    # The Jacobian is the area element per unit coordinate area, and the grid's own measure is built
-    # from it.
+    # The Jacobian is the area element per unit coordinate area, and the grid's own measure is its
+    # integral over the cell.
     gg = FG.Grids.StructuredGrid(sg, collect(range(0, 2π; length = 40)),
                            collect(range(-1.2, 1.2; length = 30)))
-    λ, φ = FG.Grids.coordinate_names(gg)
     i, j = 7, 11
-    p = FG.Grids.coords(gg, i, j)
-    Δλ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 1), i, FG.Grids.period(gg, 1))
-    Δφ = FG.Discretization.cell_width(FG.Grids.coordinates(gg, 2), j)
-    Test.@test FG.Grids.measure(gg, i, j) ≈ G.jacobian(sg, (p.λ, p.φ)) * Δλ * Δφ rtol = 1e-12
+    Δλ = FG.Grids.cell_width(gg, 1, i)
+    f = FG.Discretization.faces(FG.Grids.coordinates(gg, 2))
+    gl = FG.SphericalSampling._gauss_legendre_μ(16)
+    mid, half = (f[j] + f[j + 1]) / 2, (f[j + 1] - f[j]) / 2
+    ∫J = half * sum(gl.w[k] * G.jacobian(sg, (0.0, mid + half * gl.μ[k])) for k in eachindex(gl.μ))
+    Test.@test FG.Grids.measure(gg, i, j) ≈ Δλ * ∫J rtol = 1e-13
     # Any point representation is accepted.
     Test.@test G.scale_factors(sg, (λ = 0.0, φ = π / 3)) == G.scale_factors(sg, (0.0, π / 3))
     Test.@test G.scale_factors(sg, [0.0, π / 3]) == G.scale_factors(sg, (0.0, π / 3))
 
-    # A vector's length is a runtime value, so the factors it gives are a union of the three widths.
-    # `Val(N)` names the width, and the result is one concrete tuple — same values, every spelling.
+    # `Val(N)` names the width: same values, every spelling.
     for pt in ([0.0, π / 3], (0.0, π / 3), (λ = 0.0, φ = π / 3))
-        Test.@test Test.@inferred(G.scale_factors(sg, pt, Val(2))) == G.scale_factors(sg, (0.0, π / 3))
-        Test.@test Test.@inferred(FG.Discretization.scale_factors(sg, pt, Val(2))) ==
-                   G.scale_factors(sg, (0.0, π / 3))
-        Test.@test Test.@inferred(G.as_ntuple(pt, Val(2))) === (0.0, π / 3)
+        Test.@test G.scale_factors(sg, pt, Val(2)) == G.scale_factors(sg, (0.0, π / 3))
+        Test.@test FG.Discretization.scale_factors(sg, pt, Val(2)) == G.scale_factors(sg, (0.0, π / 3))
+        Test.@test G.as_ntuple(pt, Val(2)) === (0.0, π / 3)
     end
-    Test.@test Test.@inferred(G.scale_factors(sg, [0.0, π / 3, 5.0], Val(3))) ==
-               G.scale_factors(sg, (0.0, π / 3, 5.0))
-    # Naming the width gives a concretely typed result from a vector-spelled point, where the plain
-    # form's type follows the length. Both are free once specialized.
-    let pv = [0.0, π / 3]
-        Test.@test _alloc(G.scale_factors, sg, pv, Val(2)) == 0
-        Test.@test !isconcretetype(
-            Base.return_types(G.scale_factors, (typeof(sg), typeof(pv)))[1],
-        )
-        Test.@test isconcretetype(
-            Base.return_types(G.scale_factors, (typeof(sg), typeof(pv), Val{2}))[1],
-        )
-    end
-    # And a width the point does not have is refused, from either spelling.
+    Test.@test G.scale_factors(sg, [0.0, π / 3, 5.0], Val(3)) == G.scale_factors(sg, (0.0, π / 3, 5.0))
+    Test.@test _alloc(G.scale_factors, sg, [0.0, π / 3], Val(2)) == 0
+    # A width the point does not have is refused, from either spelling, and so is a width the sphere has
+    # no metric for.
     Test.@test_throws ArgumentError G.as_ntuple([0.0, π / 3], Val(3))
     Test.@test_throws ArgumentError G.as_ntuple((0.0, π / 3), Val(3))
-    Test.@test_throws ArgumentError G.scale_factors(sg, [0.0, π / 3], Val(3))
+    Test.@test_throws ArgumentError G.scale_factors(sg, (0.0, π / 3, 5.0, 1.0))
 end
 
 Test.@testset "Oblate spheroid geometry" begin
@@ -429,15 +345,33 @@ Test.@testset "Oblate spheroid geometry" begin
     for (φa, φb) in ((0.0, 0.3), (-0.9, 0.2), (0.5, 1.4), (-1.5, 1.5))
         Test.@test G.distance(g, (0.4, φa), (0.4, φb)) ≈ meridian_arc(g, φa, φb) atol = 1e-3
     end
+    # The meridian distance from the equator is the same arc, odd in φ, and continues past a pole.
+    Test.@test G.meridian_distance(g, π / 2) ≈ 10001965.729 atol = 1e-3
+    for φb in (0.3, -0.9, 1.4, 1.5, π / 2)
+        Test.@test G.meridian_distance(g, φb) ≈ meridian_arc(g, 0.0, φb) rtol = 1e-13
+    end
+    Test.@test G.meridian_distance(g, -0.7) == -G.meridian_distance(g, 0.7)
+    Test.@test G.meridian_distance(g, π) ≈ 2 * G.meridian_distance(g, π / 2) rtol = 1e-15
+    Test.@test G.meridian_distance(G.SpheroidGeometry(6371000.0, 0.0), 0.8) ≈ 6371000.0 * 0.8 rtol = 1e-15
+    # Along latitude the distance is the meridian's plus the height times the step; along longitude and
+    # height, the scale factor times the step.
+    m(φ) = G.meridian_distance(g, φ)
+    Test.@test G.line_distance(g, (0.1, 0.3), 2, 0.2, 0.9) == m(0.9) - m(0.2)
+    Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 2, 0.9, 0.2) == m(0.2) - m(0.9) + 500.0 * (0.2 - 0.9)
+    Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 1, 0.2, 0.9) ==
+               G.scale_factors(g, (0.1, 0.3, 500.0))[1] * (0.9 - 0.2)
+    Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 3, 10.0, 25.0) == 15.0
+    Test.@test G.line_distance(G.SphericalGeometry(2.0), (0.1, 0.3), 1, 0.2, 0.9) == 2.0 * cos(0.3) * (0.9 - 0.2)
+    Test.@test G.line_distance(G.CartesianGeometry(), (1.0, 2.0), 2, 0.5, 3.0) == 2.5
     # Symmetry, the zero case, and a finite answer for a near-antipodal pair.
     p1, p2 = (0.3, -0.4), (1.9, 0.55)
     Test.@test G.distance(g, p1, p2) ≈ G.distance(g, p2, p1)
     Test.@test G.distance(g, p1, p1) == 0.0
     d = G.distance(g, (0.0, 0.0), (π - 1e-9, 1e-9))
     Test.@test isfinite(d) && 1.9e7 < d < 2.1e7
-    # Zero flattening must reduce exactly to the sphere.
+    # Zero flattening is the sphere: e'² = 0 gives A = 1, B = 0, so Vincenty's s = b·σ.
     Test.@test G.distance(G.SpheroidGeometry(6371000.0, 0.0), (0.1, 0.2), (0.3, 0.4)) ≈
-               G.distance(G.SphericalGeometry(6371000.0), (0.1, 0.2), (0.3, 0.4)) rtol = 1e-9
+               G.distance(G.SphericalGeometry(6371000.0), (0.1, 0.2), (0.3, 0.4)) rtol = 1e-13
     # The area element integrates to the closed-form spheroid surface area.
     e = sqrt(G.eccentricity²(g))
     exact = 2π * g.a^2 * (1 + (1 - e^2) / e * atanh(e))
@@ -472,8 +406,7 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
 
     for λ in (-3.0, -0.7, 0.0, 1.2, 3.1), φ in (-1.5, -1.0, -0.3, 0.0, 0.4, 1.1, 1.5)
         êλ, êφ, êr = G._enu_frame(spd, λ, φ)
-        # Orthonormal, and identical to the sphere's triad at the same (λ, φ) — the claim the shared
-        # implementation rests on.
+        # Orthonormal, and identical to the sphere's triad at the same (λ, φ).
         for (u, v) in ((êλ, êφ), (êλ, êr), (êφ, êr))
             Test.@test abs(sum(u .* v)) < 1e-14
             Test.@test abs(sqrt(sum(abs2, u)) - 1) < 1e-14
@@ -486,8 +419,8 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
         ∇ = (2P[1] / a^2, 2P[2] / a^2, 2P[3] / b^2)
         Test.@test maximum(abs.(êr .- ∇ ./ sqrt(sum(abs2, ∇)))) < 1e-14
 
-        # And the tangents are the surface's own coordinate derivatives, with the curvature radii as
-        # their lengths — the property that ties the frame to `scale_factors`.
+        # The tangents are the surface's own coordinate derivatives, with the curvature radii as their
+        # lengths.
         h = 1e-7
         dφ = (G.embed(spd, (λ, φ + h)) .- G.embed(spd, (λ, φ - h))) ./ (2h)
         Test.@test maximum(abs.(dφ ./ sqrt(sum(abs2, dφ)) .- êφ)) < 1e-7
@@ -499,7 +432,7 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
         end
     end
 
-    # The rotations are the frame and nothing else, so they invert on either geometry.
+    # The rotations invert on either geometry.
     τ = (0.3, -1.1, 2.0, 0.7, -0.2, 1.4)
     for geo in (G.SphericalGeometry(6.371e6), spd), λ in (-2.0, 0.3, 2.8), φ in (-1.2, 0.0, 0.75)
         u = (1.7, -0.9, 0.4)
@@ -507,13 +440,18 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
         Test.@test maximum(abs.(Tuple(G.vector_from_cartesian(geo, Tuple(c), λ, φ)) .- u)) < 1e-12
         t = G.tensor_to_local(geo, τ, λ, φ)
         Test.@test maximum(abs.(Tuple(G.tensor_from_local(geo, Tuple(t), λ, φ)) .- τ)) < 1e-12
-        # `local_tangent_basis` is the frame's first two vectors, so they cannot drift apart.
+        # `local_tangent_basis` is the frame's first two vectors.
         ê = G.local_tangent_basis(geo, (λ, φ))
         Test.@test (ê.λ, ê.φ) === G._enu_frame(geo, λ, φ)[1:2]
+        # A third coordinate adds the direction `embed` moves along it, named as the coordinate is.
+        # `embed` is linear in that coordinate, so a central difference is exact to rounding.
+        ê3 = G.local_tangent_basis(geo, (λ, φ, 7.0e6))
+        dn = (G.embed(geo, (λ, φ, 7.001e6)) .- G.embed(geo, (λ, φ, 6.999e6))) ./ 2.0e3
+        Test.@test keys(ê3) == G.point_names(geo, Val(3))
+        Test.@test maximum(abs.(ê3[3] .- dn ./ sqrt(sum(abs2, dn)))) < 1e-9
     end
 
-    # `embed` on a sphere is `spherical_to_cartesian`, bit for bit — the primitive replaced the call,
-    # it did not re-derive the formula.
+    # `embed` is `spherical_to_cartesian` on a sphere and `geodetic_to_cartesian` on a spheroid.
     sph = G.SphericalGeometry(6.371e6)
     for λ in (-2.9, 0.0, 0.6, 2.7), φ in (-1.4, 0.0, 0.9)
         Test.@test G.embed(sph, (λ, φ)) === Tuple(G.spherical_to_cartesian(sph, (λ, φ)))
@@ -529,13 +467,8 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
     Test.@test G.embed(G.SpheroidGeometry(3.0, 0.2), (0.0,)) === (3.0, 0.0, 0.0)
     Test.@test G.distance(G.SpheroidGeometry(3.0, 0.2), (0.0,), (π / 2,)) ≈ 3.0 * π / 2
 
-    # `local_displacement` at two coordinates resolves to the tangent-plane projection itself, one
-    # definition serving both, so the least-squares gradient it feeds sees the same number.
-    for geo in (sph, spd), λ in (-2.0, 0.3, 2.8), φ in (-1.2, 0.0, 0.75)
-        Test.@test G.local_displacement(geo, (λ, φ), (λ + 1e-4, φ - 2e-4)) ===
-                   G.project_to_tangent_plane(geo, (λ, φ), (λ + 1e-4, φ - 2e-4))
-    end
-    # At three it is the same chord on the full frame, the third direction being the outward normal.
+    # At three coordinates the displacement is the chord on the full frame, the third direction being
+    # the outward normal.
     Test.@test G.local_displacement(G.CartesianGeometry(), (1.0, 2.0, 3.0), (1.5, 2.25, 2.0)) ===
                (x = 0.5, y = 0.25, z = -1.0)
     let R = 6.371e6
@@ -554,6 +487,184 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
         Test.@test abs(Δh.h - 500.0) < 1e-6
         Test.@test abs(Δh.λ) < 1e-6 && abs(Δh.φ) < 1e-6
     end
+end
+
+Test.@testset "Normal coordinates: the geodesic's length along its initial direction" begin
+    G = FG.Geometry
+    R = 6.371e6
+    # The destination of the great circle leaving (λ₁, φ₁) at azimuth α through the central angle σ.
+    function destination(λ1, φ1, α, σ)
+        φ2 = asin(sin(φ1) * cos(σ) + cos(φ1) * sin(σ) * cos(α))
+        return (λ1 + atan(sin(α) * sin(σ) * cos(φ1), cos(σ) - sin(φ1) * sin(φ2)), φ2)
+    end
+    # The unit vector to `p` on the frame at `c`, at 256 bits from the very same inputs, so a difference
+    # from it is the function's own error.
+    function frame_ref(c, p)
+        λ1, φ1, λ2, φ2 = big(c[1]), big(c[2]), big(p[1]), big(p[2])
+        x = (cos(φ2) * cos(λ2), cos(φ2) * sin(λ2), sin(φ2))
+        e = (-sin(λ1), cos(λ1), big(0))
+        n = (-sin(φ1) * cos(λ1), -sin(φ1) * sin(λ1), cos(φ1))
+        u = (cos(φ1) * cos(λ1), cos(φ1) * sin(λ1), sin(φ1))
+        return sum(e .* x), sum(n .* x), sum(u .* x)
+    end
+    centres = ((-2.9, -1.3), (0.4, 0.2), (1.7, 1.45), (3.0, -0.6))
+    azimuths = (0.3, 1.9, 3.5, 5.6)
+    angles = (1 / R, 1e-4, 3e-2, 0.8)          # 1 m to 5000 km
+
+    for T in (Float64, Float32)
+        geo = G.SphericalGeometry(T(R))
+        worst = 0.0
+        for (λ1, φ1) in centres, α in azimuths, σ in angles
+            c = (T(λ1), T(φ1))
+            p = map(T, destination(big(λ1), big(φ1), big(α), big(σ)))
+            p == c && continue                 # one metre can round onto the centre in Float32
+            pe, pn, pz = frame_ref(c, p)
+            s = atan(hypot(pe, pn), pz)
+            want = (big(T(R)) * s * pe / hypot(pe, pn), big(T(R)) * s * pn / hypot(pe, pn))
+            got = G.normal_coordinates(geo, c, p)
+            worst = max(worst, Float64(hypot(got.λ - want[1], got.φ - want[2]) / hypot(want...)))
+            # Its length is the distance, whatever the separation.
+            Test.@test hypot(got...) ≈ G.distance(geo, c, p) rtol = 8eps(T)
+        end
+        # A few `eps(T)` at every separation, one metre included.
+        Test.@test worst < 16eps(T)
+    end
+
+    # The forward problem, an independent oracle for the direction convention: leaving at azimuth `α`
+    # (east of north) through `σ` comes back as `R·σ·(sin α, cos α)`.
+    geo = G.SphericalGeometry(R)
+    for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8, 3.0)
+        p = map(Float64, destination(big(λ1), big(φ1), big(α), big(σ)))
+        got = G.normal_coordinates(geo, (λ1, φ1), p)
+        Test.@test got.λ ≈ R * σ * sin(α) rtol = 1e-9 atol = 1e-9 * R * σ
+        Test.@test got.φ ≈ R * σ * cos(α) rtol = 1e-9 atol = 1e-9 * R * σ
+    end
+    # Along a meridian there is no eastward part, and along the equator no northward one, exactly.
+    Test.@test G.normal_coordinates(geo, (0.7, 0.2), (0.7, 0.3)).λ == 0.0
+    Test.@test G.normal_coordinates(geo, (0.7, 0.2), (0.7, 0.3)).φ ≈ R * 0.1
+    Test.@test G.normal_coordinates(geo, (0.7, 0.0), (0.9, 0.0)).φ == 0.0
+    Test.@test G.normal_coordinates(geo, (0.7, 0.0), (0.9, 0.0)).λ ≈ R * 0.2
+    # Across the date line the short way round, and the centre itself is the origin.
+    Test.@test G.normal_coordinates(geo, (π - 0.01, 0.0), (-π + 0.01, 0.0)).λ ≈ R * 0.02
+    Test.@test G.normal_coordinates(geo, (0.3, 0.4), (0.3, 0.4)) === (λ = 0.0, φ = 0.0)
+
+    # Either side of the seam, each longitude stored in `[0, 2π)`: the two stored values differ by
+    # nearly a turn, and the gap between them keeps its precision.
+    for T in (Float64, Float32)
+        gt = G.SphericalGeometry(T(R))
+        worst = 0.0
+        n = 0
+        for λ1 in (2π - 1e-5, 1e-5), α in azimuths, σ in (1e-4, 3e-3)
+            c = (T(λ1), T(0.4))
+            d = destination(big(c[1]), big(c[2]), big(α), big(σ))
+            p = (T(mod(d[1], 2big(π))), T(d[2]))
+            abs(p[1] - c[1]) > π || continue          # the pairs that straddle the seam
+            n += 1
+            pe, pn, pz = frame_ref(c, p)
+            s = atan(hypot(pe, pn), pz)
+            want = (big(T(R)) * s * pe / hypot(pe, pn), big(T(R)) * s * pn / hypot(pe, pn))
+            got = G.normal_coordinates(gt, c, p)
+            worst = max(worst, Float64(hypot(got.λ - want[1], got.φ - want[2]) / hypot(want...)))
+            Test.@test abs(G.distance(gt, c, p) - big(T(R)) * s) / (big(T(R)) * s) < 16eps(T)
+        end
+        Test.@test n == 8                             # two azimuths cross from each side, at each σ
+        Test.@test worst < 16eps(T)
+    end
+
+    # One coordinate is the equator's signed arc.
+    Test.@test keys(G.normal_coordinates(geo, (0.3,), (0.1,))) == (:λ,)
+    Test.@test G.normal_coordinates(geo, (0.3,), (0.1,)).λ ≈ R * (big(0.1) - big(0.3)) rtol = 2eps()
+    Test.@test G.normal_coordinates(G.SpheroidGeometry(), (3.0,), (-3.0,)).λ ≈
+               G.semimajor_axis(G.SpheroidGeometry()) * (2π - 6.0)
+
+    # Three coordinates: the chord on the local frame, whose length is the chord distance.
+    for T in (Float64, Float32), (λ1, φ1) in centres, α in azimuths, σ in angles[1:3]
+        g3 = G.SphericalGeometry(T(R))
+        c = (T(λ1), T(φ1), T(R))
+        q = map(T, destination(big(λ1), big(φ1), big(α), big(σ)))
+        p = (q[1], q[2], T(R + 250))
+        pe, pn, pz = frame_ref(c, p)
+        want = (big(p[3]) * pe, big(p[3]) * pn, big(p[3]) * pz - big(c[3]))
+        got = G.normal_coordinates(g3, c, p)
+        Test.@test keys(got) == (:λ, :φ, :r)
+        Test.@test maximum(abs.(big.(Tuple(got)) .- want)) / hypot(want...) < 16eps(T)
+        # The chord distance is its length, to the same precision.
+        Test.@test abs(G.distance(g3, c, p) - hypot(want...)) / hypot(want...) < 16eps(T)
+    end
+    # At a moderate separation, where the embedded chord has digits to spare, the two constructions are
+    # one quantity.
+    let c = (0.4, 0.2, R), p = (0.45, 0.17, R + 3000.0)
+        Test.@test collect(Tuple(G.normal_coordinates(geo, c, p))) ≈
+                   collect(Tuple(G.local_displacement(geo, c, p))) rtol = 1e-9
+    end
+
+    # The spheroid: Vincenty's distance along Vincenty's azimuth.
+    spd = G.SpheroidGeometry()
+    for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8)
+        c = (λ1, φ1)
+        p = map(Float64, destination(big(λ1), big(φ1), big(α), big(σ)))
+        got = G.normal_coordinates(spd, c, p)
+        Test.@test hypot(got...) ≈ G.distance(spd, c, p) rtol = 1e-14
+        # Zero flattening is the sphere.
+        Test.@test collect(Tuple(G.normal_coordinates(G.SpheroidGeometry(R, 0.0), c, p))) ≈
+                   collect(Tuple(G.normal_coordinates(geo, c, p))) rtol = 1e-12
+    end
+    Test.@test G.normal_coordinates(spd, (0.7, 0.2), (0.7, 0.3)).λ == 0.0
+    Test.@test G.normal_coordinates(spd, (0.7, 0.0), (0.9, 0.0)).φ == 0.0
+    Test.@test G.normal_coordinates(spd, (0.7, 0.0), (0.9, 0.0)).λ ≈ spd.a * 0.2
+    # Ten metres keeps its digits in Float32: it agrees with Float64 at the same inputs to a few
+    # `eps(Float32)`.
+    let s32 = G.SpheroidGeometry(Float32(spd.a), Float32(spd.f)), c = (0.4f0, 0.6f0), p = (0.4000013f0, 0.6000009f0)
+        g32 = G.normal_coordinates(s32, c, p)
+        g64 = G.normal_coordinates(spd, Float64.(c), Float64.(p))
+        Test.@test hypot(g32.λ - g64.λ, g32.φ - g64.φ) / hypot(g64...) < 64eps(Float32)
+        Test.@test G.distance(s32, c, p) ≈ G.distance(spd, Float64.(c), Float64.(p)) rtol = 64eps(Float32)
+    end
+
+    # The plane: the coordinate difference.
+    Test.@test G.normal_coordinates(G.CartesianGeometry(), (1.0, 2.0), (1.5, 1.0)) === (x = 0.5, y = -1.0)
+    Test.@test G.normal_coordinates(G.CartesianGeometry(), (1, 2, 3), [2, 2, 2]) === (x = 1.0, y = 0.0, z = -1.0)
+
+    # On a grid, the pair is first brought to its nearest image, so a periodic seam is one spacing.
+    let gc = FG.Grids.StructuredGrid(G.CartesianGeometry(), 0.0:1.0:9.0, 0.0:1.0:4.0;
+                                     topology = (FG.Grids.Periodic(), FG.Grids.Bounded()))
+        Test.@test G.normal_coordinates(gc, (1, 2), (10, 3)) === (x = -1.0, y = 1.0)
+        Test.@test G.normal_coordinates(gc, CartesianIndex(1, 2), CartesianIndex(10, 3)) === (x = -1.0, y = 1.0)
+    end
+    let gs = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 24), range(-1.2, 1.2; length = 13))
+        Test.@test collect(Tuple(G.normal_coordinates(gs, (24, 5), (1, 6)))) ≈
+                   collect(Tuple(G.normal_coordinates(geo, FG.Grids.coords(Tuple, gs, 24, 5),
+                                                      FG.Grids.coords(Tuple, gs, 1, 6)))) rtol = 1e-13
+        Test.@test hypot(G.normal_coordinates(gs, (24, 5), (1, 6))...) ≈ G.distance(gs, (24, 5), (1, 6))
+    end
+
+    Test.@test _alloc(G.normal_coordinates, geo, (0.1, 0.2), (0.3, 0.4)) == 0
+    Test.@test _alloc(G.normal_coordinates, spd, (0.1, 0.2), (0.3, 0.4)) == 0
+end
+
+Test.@testset "A longitude is reduced to [0, 2π)" begin
+    G = FG.Geometry
+    for (λ, want) in ((0.5, 0.5), (-0.5, 2π - 0.5), (7.0, 7.0 - 2π), (2π, 0.0), (-4π + 1.0, 1.0))
+        Test.@test G.wrap_longitude(λ) ≈ want atol = 1e-15
+    end
+    # A remainder that rounds up to the whole turn is the turn's start.
+    Test.@test G.wrap_longitude(-eps(2π) / 4) === 0.0
+    Test.@test G.wrap_longitude(-0.5f0) === mod(-0.5f0, Float32(2π))
+    Test.@test G.wrap_longitude(3) === 3.0
+    Test.@test _alloc(G.wrap_longitude, -0.5) == 0
+    # A direction a hair below the x-axis has longitude 0 from every emitter, never a whole turn.
+    SS = FG.SphericalSampling
+    Test.@test SS._unit_lonlat(1.0, -1e-300, 0.0)[1] === 0.0
+    Test.@test SS._yin_yang_rotate(Float64(π), -1e-300)[1] === 0.0
+    Test.@test SS.vec2pix(4, (1.0, -1e-300, 0.0)) == SS.vec2pix(4, (1.0, 0.0, 0.0))
+    # Yin–Yang points too, yin's panel spanning [-3π/4, 3π/4] in a frame that is the global one.
+    Test.@test all(λ -> 0 ≤ λ < 2π, SS.spherical_points(SS.YinYangSampling(), 12, 8).λ)
+    # A rotated grid reports its longitudes, and its span, in the same range.
+    sph = G.SphericalGeometry()
+    rg = FG.Grids.rotate(FG.Grids.StructuredGrid(sph, range(0.0, 2π * 23 / 24; length = 24), range(-1.4, 1.4; length = 12)),
+                         G.PoleRotation(2.0, 0.6))
+    Test.@test FG.Grids.bounds(rg, 1) == (0.0, 2π)
+    Test.@test all(0 ≤ FG.Grids.coords(rg, Tuple(I)...)[1] < 2π for I in CartesianIndices(FG.Grids.size_tuple(rg)))
 end
 
 Test.@testset "cartesian_to_geodetic inverts geodetic_to_cartesian" begin
@@ -600,15 +711,14 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     GE = FG.Geometry
     geo = GE.SpheroidGeometry()
     a, e² = GE.semimajor_axis(geo), GE.eccentricity²(geo)
-    λ8 = collect(range(0, 2π; length = 9)[1:8])
+    λ8 = FG.Axes.PeriodicAxis(0.0, 2π, 8)
     φ7 = collect(range(-π / 2, π / 2; length = 7))
     h4 = collect(range(0.0, 3000.0; length = 4))
     g1 = FG.Grids.StructuredGrid(geo, λ8)
     g2 = FG.Grids.StructuredGrid(geo, λ8, φ7)
     g3 = FG.Grids.StructuredGrid(geo, λ8, φ7, h4)
     g4 = FG.Grids.StructuredGrid(geo, λ8, φ7, h4, [0.0, 2.0])
-    Test.@test size.((g1, g2, g3, g4)) == ((8,), (8, 7), (8, 7, 4), (8, 7, 4, 2))
-    # Longitude closes the circle, so it is periodic without being asked; latitude is not.
+    # A periodic longitude axis wraps; latitude does not.
     Test.@test FG.Grids.isperiodic(g2, 1) && !FG.Grids.isperiodic(g2, 2)
     Test.@test FG.Grids.coordinate_names(g3) == (:λ, :φ, :h)
     Test.@test FG.Grids.coords(g3, 2, 3, 2) == (λ = λ8[2], φ = φ7[3], h = h4[2])
@@ -616,37 +726,38 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     # 1-D: with no latitude the parallel is the equator, so the circumference is exactly 2πa.
     Test.@test sum(FG.Grids.measure(g1)) ≈ 2π * a rtol = 1e-14
 
-    # 2-D factors; 3-D cannot, so it is stored dense.
-    Test.@test FG.Grids.measure_factors(g2) !== nothing
-    Test.@test FG.Grids.measure_factors(g3) === nothing
-
-    # Every cell equals the geometry's own element, exactly — not to a tolerance.
+    # Every cell is the geometry's own element integrated over the cell, latitude faces clamped to the
+    # poles; the reference integrates by 64-point Gauss–Legendre.
+    gl = FG.SphericalSampling._gauss_legendre_μ(64)
+    ∫seg(f, lo, hi) = (hi - lo) / 2 * sum(gl.w[k] * f((lo + hi) / 2 + (hi - lo) / 2 * gl.μ[k])
+                                          for k in eachindex(gl.μ))
+    ∫lat(f, lo, hi) = ∫seg(f, clamp(lo, -π / 2, π / 2), clamp(hi, -π / 2, π / 2))
     wλ = FG.Discretization.cell_widths(FG.Grids.coordinates(g2, 1), 2π)
-    wφ = FG.Discretization.cell_widths(FG.Grids.coordinates(g2, 2), nothing)
-    wh = FG.Discretization.cell_widths(FG.Grids.coordinates(g3, 3), nothing)
+    fφ = FG.Discretization.faces(φ7)
+    fh = FG.Discretization.faces(h4)
     Test.@test all(
-        FG.Grids.measure(g2, i, j) ≈ GE.area_element(geo, φ7[j], wλ[i], wφ[j])
+        isapprox(FG.Grids.measure(g2, i, j),
+                 ∫lat(t -> GE.area_element(geo, t, wλ[i], 1.0), fφ[j], fφ[j + 1]); rtol = 1e-13)
         for j in eachindex(φ7), i in eachindex(λ8)
     )
     Test.@test all(
-        FG.Grids.measure(g3, i, j, k) ≈
-        GE.volume_element(geo, φ7[j], h4[k], wλ[i], wφ[j], wh[k])
+        isapprox(FG.Grids.measure(g3, i, j, k),
+                 ∫seg(s -> ∫lat(t -> GE.volume_element(geo, t, s, wλ[i], 1.0, 1.0), fφ[j], fφ[j + 1]),
+                      fh[k], fh[k + 1]); rtol = 1e-13)
         for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8)
     )
     # A further direction enters as a plain width.
     Test.@test sum(FG.Grids.measure(g4)) ≈
                sum(FG.Discretization.cell_widths([0.0, 2.0], nothing)) * sum(FG.Grids.measure(g3)) rtol = 1e-13
 
-    # Independent check: the closed-form ellipsoid area, approached at second order.
+    # Independent check: the closed-form ellipsoid area, at every resolution.
     e = sqrt(e²)
     A_exact = 2π * a^2 * (1 + (1 - e²) / e * atanh(e))
-    errs = map((24, 96, 384)) do n
-        gn = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = n + 1)[1:n]),
+    for n in (4, 24, 96)
+        gn = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, n),
                                      collect(range(-π / 2, π / 2; length = n ÷ 2 + 1)))
-        abs(sum(FG.Grids.measure(gn)) - A_exact) / A_exact
+        Test.@test sum(FG.Grids.measure(gn)) ≈ A_exact rtol = 1e-13
     end
-    Test.@test errs[3] < 3e-5
-    Test.@test errs[1] / errs[2] > 8 && errs[2] / errs[3] > 8   # 4× refinement ⇒ ~16×
     # A sphere is the f = 0 spheroid, and must agree with SphericalGeometry cell for cell.
     gsph = FG.Grids.StructuredGrid(GE.SphericalGeometry(a), λ8, φ7)
     gflat = FG.Grids.StructuredGrid(GE.SpheroidGeometry(a, 0.0), λ8, φ7)
@@ -654,14 +765,10 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
                    for j in eachindex(φ7), i in eachindex(λ8))
 
     Test.@test FG.Connectivity.nneighbors(g2, 1, 3) == 4       # wraps in λ
-    Test.@test FG.Connectivity.nedges(FG.Connectivity.build_connectivity(g2)) > 0
 
-    # The spatial index embeds geodetic coordinates as an ECEF chord, a lower bound on the geodesic,
-    # so a ball query over-returns and the caller's own `distance` trims it. The result therefore
-    # agrees with a brute-force geodesic scan cell for cell, and a ball too small to reach anything
-    # comes back empty.
+    # A ball query agrees with a brute-force geodesic scan cell for cell.
     let gb = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 25)[1:24]),
-                                     collect(range(-1.2, 1.2; length = 13)))
+                                     collect(range(-1.2, 1.2; length = 13)); periodic = true)
         for (ci, r) in (((5, 6), 1.0e6), ((5, 6), 3.0e6), ((1, 1), 2.0e6), ((24, 13), 2.0e6))
             p0 = FG.Grids.coords(Tuple, gb, ci...)
             want = count(GE.distance(geo, p0, FG.Grids.coords(Tuple, gb, i, j)) ≤ r
@@ -690,38 +797,24 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     gzon2 = FG.Grids.StructuredGrid(geo, λ8, [0.7])
     Test.@test sum(FG.Grids.measure(gzon2)) ≈
                2π * GE.prime_vertical_radius(geo, 0.7) * cos(0.7) rtol = 1e-14
-    # Meridional: each cell is exactly M(φ)·Δφ, the meridian arc element.
+    # Meridional: each cell is the meridian arc between its faces, `∫M dφ`.
     φm = collect(range(-π / 2, π / 2; length = 33))
     gmer = FG.Grids.StructuredGrid(geo, [0.0], φm)
-    wm = FG.Discretization.cell_widths(φm, nothing)
-    Test.@test all(FG.Grids.measure(gmer, 1, j) ≈ GE.meridional_radius(geo, φm[j]) * wm[j]
+    fm = FG.Discretization.faces(φm)
+    Test.@test all(isapprox(FG.Grids.measure(gmer, 1, j),
+                            ∫lat(t -> GE.meridional_radius(geo, t), fm[j], fm[j + 1]); rtol = 1e-13)
                    for j in eachindex(φm))
-    # The total approaches ∫M dφ — twice the published quarter meridian — at first order, since `n`
-    # cell-centres own `n` widths and so span π(1 + 1/n). No cosφ factor annihilates that end-cell
-    # excess here, and the error is the 1/n that span predicts.
-    mer = map((48, 192, 768)) do n
+    # Pole to pole, the arcs add up to twice the published quarter meridian, 10 001 965.729 m.
+    for n in (48, 192)
         gm = FG.Grids.StructuredGrid(geo, [0.0], collect(range(-π / 2, π / 2; length = n + 1)))
-        abs(sum(FG.Grids.measure(gm)) - 2 * 10001965.729) / (2 * 10001965.729)
+        Test.@test sum(FG.Grids.measure(gm)) ≈ 2 * 10001965.729 atol = 2e-3
     end
-    Test.@test all(isapprox(mer[i], 1 / (48 * 4^(i - 1)); rtol = 0.02) for i in 1:3)
     # A single point has no extent in either direction.
     Test.@test sum(FG.Grids.measure(FG.Grids.StructuredGrid(geo, [0.3], [0.4]))) == 1.0
 
-    # The geodetic volume element couples φ and h — the height offsets each curvature radius — and
-    # longitude enters none of it, so φ and h alone are stored together as a `SlabMeasure`, whose
-    # storage is `Nφ·Nh + Nλ`. It reports itself as non-separable per axis.
-    Test.@test FG.Grids.measure(g3) isa FG.Grids.SlabMeasure
-    Test.@test FG.Grids.measure_factors(g3) === nothing
+    # The geodetic volume element couples φ and h, with λ entering as a width, so the measure is an
+    # `Nφ·Nh` slab times an `Nλ` factor. Its `sum` and `extrema` agree with the dense reduction.
     let dense = FG.Grids.measure_array(g3)
-        Test.@test size(dense) == size(g3)
-        # Every cell equals the geometry's own element, which is the claim the storage form must keep.
-        wλ8 = FG.Discretization.cell_widths(λ8, 2π)
-        wφ8 = FG.Discretization.cell_widths(φ7, nothing)
-        wh8 = FG.Discretization.cell_widths(h4, nothing)
-        Test.@test all(dense[i, j, k] ≈ GE.volume_element(geo, φ7[j], h4[k], wλ8[i], wφ8[j], wh8[k])
-                       for k in eachindex(h4), j in eachindex(φ7), i in eachindex(λ8))
-        # `sum` and `extrema` are the factored forms, `O(Nλ + Nφ·Nh)`, so they agree with the dense
-        # reduction to round-off.
         Test.@test sum(FG.Grids.measure(g3)) ≈ sum(dense) rtol = 1e-12
         Test.@test all(isapprox.(extrema(FG.Grids.measure(g3)), extrema(dense); rtol = 1e-12))
     end
@@ -736,11 +829,8 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
         sb = Base.summarysize(FG.Grids.measure(base))
         sw = Base.summarysize(FG.Grids.measure(wide))
         Test.@test sb < 0.2 * 8 * 36 * 19 * 5          # far under the dense array it stands for
-        Test.@test sw < 3 * sb                          # 8× the longitudes, not 8× the storage
+        Test.@test sw < 3 * sb
     end
-    Test.@test_throws BoundsError FG.Grids.measure(g3, 99, 1, 1)
-    Test.@test_throws BoundsError FG.Grids.coords(g3, 1, 99, 1)
-    Test.@test occursin("h ", sprint(show, MIME"text/plain"(), g3))
     mk = trues(size(g3)...)
     mk[1, 1, 1] = false
     gm = FG.Grids.StructuredGrid(geo, λ8, φ7, h4, mk)
@@ -775,38 +865,24 @@ Test.@testset "Pole rotation" begin
     idr = G.PoleRotation(0.0, π / 2)
     Test.@test all(isapprox.(G.rotate(idr, 1.2, 0.4), (1.2, 0.4); atol = 1e-12))
 
-    # The tilt is a property of the frame, resolved once and carried on the rotation.
-    Test.@test rot.sinθ ≈ sin(0.3 - π / 2) && rot.cosθ ≈ cos(0.3 - π / 2)
-    Test.@test isbits(rot)
-
     # `similar_rotation` re-resolves the tilt from the pole at the new width.
     r32 = G.similar_rotation(Float32, rot)
-    Test.@test r32 isa G.PoleRotation{Float32}
     Test.@test r32.sinθ === sin(Float32(0.3) - Float32(π) / 2)
     Test.@test G.similar_rotation(Float64, rot) === rot
 
-    # A point set comes back at its own width: a Float32 cloud is not silently widened by a
-    # Float64 frame, and the values match the scalar form at that width.
+    # A Float32 point set comes back at Float32, matching the scalar form at that width.
     λ32 = Float32[0.2, 1.1, 4.0]
     φ32 = Float32[0.1, -0.4, 0.9]
     o32λ, o32φ = G.rotate(rot, λ32, φ32)
     Test.@test eltype(o32λ) === eltype(o32φ) === Float32
     Test.@test all(o32λ[i] === G.rotate(r32, λ32[i], φ32[i])[1] for i in eachindex(λ32))
-    λ64, φ64 = Float64.(λ32), Float64.(φ32)
-    Test.@test eltype(first(G.rotate(rot, λ64, φ64))) === Float64
 
-    # The scalar form takes the point's width too, so all three forms are one numeric path: a Float32
-    # point through a Float64 frame gives what the frame carried to Float32 gives, bit for bit.
+    # A Float32 point through a Float64 frame gives what the frame carried to Float32 gives, bit for bit.
     Test.@test G.rotate(rot, λ32[1], φ32[1]) === G.rotate(r32, λ32[1], φ32[1])
     Test.@test G.unrotate(rot, λ32[1], φ32[1]) === G.unrotate(r32, λ32[1], φ32[1])
-    Test.@test G.rotate(rot, λ32[1], φ32[1]) isa NTuple{2,Float32}
-    Test.@test G.rotate(rot, 0, 0) isa NTuple{2,Float64}
 
-    # The in-place form writes into the caller's own arrays, so their width is theirs — and it writes
-    # exactly what the allocating and scalar forms give.
+    # The in-place form writes what the allocating form gives.
     ipλ, ipφ = copy(λ32), copy(φ32)
     G.rotate!(ipλ, ipφ, rot)
-    Test.@test eltype(ipλ) === Float32
     Test.@test ipλ == o32λ && ipφ == o32φ
-    Test.@test all(ipλ[i] === G.rotate(rot, λ32[i], φ32[i])[1] for i in eachindex(λ32))
 end

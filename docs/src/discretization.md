@@ -8,8 +8,11 @@ The geometric inputs a numerical method needs from a grid: where a point falls, 
 interpolate to it, where a cell's faces are, the metric factors of the coordinate system, and the
 finite-difference weights of any stencil.
 
-All of it is a function of coordinates alone. **Applying** weights to a field is not here: that needs a
-result location, a boundary-condition policy and a halo convention, all of them the caller's to choose.
+All of it is a function of coordinates alone. The operators that apply it to a field —
+[`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!),
+[`derivative!`](@ref FlowGeometries.Operators.derivative!), the least-squares gradient and
+[`interpolate`](@ref FlowGeometries.Operators.interpolate) — live in `Operators`, and this page shows them
+alongside the inputs they read.
 
 ## Centres and faces
 
@@ -156,9 +159,7 @@ idx1, idxm
 ```
 
 `FG.Geometry.nonuniform_first_derivative` is the three-node, first-derivative case of the same thing.
-Fed the gaps above it is a complete derivative at a point, which is the shape an operator assembled at
-the call site takes — a divergence, a curl, a staggered difference are each this plus the metric
-factors and whatever boundary policy the caller chose:
+Fed the gaps above it is a complete derivative at a point:
 
 ```@example disc
 g(x) = 3x^2 - 2x + 5                        # exact for a quadratic, on any spacing
@@ -178,10 +179,9 @@ maximum(abs(FG.Geometry.nonuniform_first_derivative(
 
 ## Applying a weight set
 
-[`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) is the one function here that touches a field, and only along a single
-direction with the result left where the input was. That case needs no convention the package has not
-already fixed: nothing to stagger, `fd_weights`' inward shift at a bounded end, wrapping on a periodic
-one — so no halo either.
+[`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) applies a weight set along a single
+direction, the result left where the input was. Every convention that needs is already fixed: nothing to
+stagger, `fd_weights`' inward shift at a bounded end, wrapping on a periodic one — so no halo either.
 
 ```@example disc
 x = collect(range(0.0, 2.0; length = 11))
@@ -283,7 +283,7 @@ R   = 6.371e6
 sph = FG.Geometry.SphericalGeometry(R)
 lon = collect(range(0, 2π * (1 - 1/48); length = 48))
 lat = collect(range(-π/2, π/2; length = 25))          # both poles are rows of this grid
-gs  = FG.Grids.StructuredGrid(sph, lon, lat)
+gs  = FG.Grids.StructuredGrid(sph, lon, lat; periodic = true)
 fs  = [sin(φ) for _ in lon, φ in lat]                 # ∂/∂north should be cos(φ)/R
 dn  = zeros(48, 25)
 O.derivative!(dn, fs, gs, 2; order = 1, nodes = 5, masked = NaN)
@@ -300,21 +300,79 @@ O.derivative!(de, [sin(λ) * cos(φ) for λ in lon, φ in lat], gs, 1;
 all(isnan, de[:, 1]), all(isnan, de[:, 25]), any(isnan, de[:, 2:24])
 ```
 
-The threshold is [`metric_floor`](@ref), `L·√eps(T)` — relative to the geometry's size *and* to the
-element type. An absolute constant cannot serve both: `1e-12` is below `eps(Float32)`, and in `Float32`
-`cos(Float32(π/2)) ≈ -4.4e-8`, so `h_λ` at the pole is around `0.28` metres and a fixed small threshold
-never fires.
+The threshold is [`metric_floor`](@ref), `√eps(T)` times the size of the direction's own scale factor —
+`R` for longitude and latitude, one for a radius — so it follows the geometry's size, the direction's
+units *and* the element type. An absolute constant serves none of these: `1e-12` is below `eps(Float32)`,
+and in `Float32` `cos(Float32(π/2)) ≈ -4.4e-8`, so `h_λ` at the pole is around `0.28` metres and a fixed
+small threshold never fires.
 
-A divergence or a curl remains the caller's to assemble, needing a result location and a
-boundary-condition policy this does not choose. When you do, note the **flux form** — on a sphere
+The factor `1/hᵈ` multiplies each value as it is written, so every cell written `masked` — inactive,
+blanked by the mask policy, or at a degenerate metric — holds exactly the `masked` you passed, `-1.0` as
+much as `NaN`.
+
+A divergence on a curved geometry is the **flux form**, on a sphere
 
 ```math
 \nabla\cdot\mathbf{u} = \frac{1}{R\cos\varphi}\left[\frac{\partial u_\lambda}{\partial\lambda}
                         + \frac{\partial (u_\varphi\cos\varphi)}{\partial\varphi}\right]
 ```
 
-so the second term differentiates `u_φ·cos φ`, not `u_φ`. Adding two physical derivatives is a
-different expression, and a wrong one.
+whose second term differentiates the product `u_φ·cos φ`. On staggered faces the divergence is that
+flux form through each cell's own faces; see below.
+
+## Staggered operators
+
+A scalar sits at cell centres, the velocity component along each direction on the faces normal to it,
+and each component of a rotation potential on the corners of its pair of directions, one array each,
+shaped by [`Grids.face_dims`](@ref FlowGeometries.Grids.face_dims) and
+[`Grids.corner_dims`](@ref FlowGeometries.Grids.corner_dims). One gradient defines the family:
+
+```math
+D = -G^*, \qquad L = D\,G,
+```
+
+the adjoint under the cell measure and the face weight `A·g`, area times the distance between the centres
+a face separates. `L` is then symmetric and negative semidefinite, and `curl ∘ G = 0` and `D ∘ rot = 0` hold
+on every grid. A [`FaceMetrics`](@ref FlowGeometries.Operators.FaceMetrics) holds every area, gap, edge
+length and corner area, built once:
+
+```@example disc
+sph = FG.Geometry.SphericalGeometry(6.371e6)
+gs  = FG.Grids.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 48), collect(range(-1.3, 1.3; length = 24)))
+fm  = O.face_metrics(gs, O.Dirichlet())
+χ   = [sin(2λ) * cos(φ)^2 for λ in FG.Grids.coordinates(gs, 1), φ in FG.Grids.coordinates(gs, 2)]
+gχ  = O.gradient!(O.allocate_faces(Float64, gs), χ, fm)
+W   = O.curl!(O.allocate_corners(Float64, gs), gχ, fm)
+maximum(abs, W[1]) / maximum(a -> maximum(abs, a), gχ)   # curl ∘ G, zero to round-off
+```
+
+A boundary condition is a face area: under [`Neumann`](@ref FlowGeometries.Operators.Neumann) the faces
+past the end of a bounded direction carry none in the operators, under
+[`Dirichlet`](@ref FlowGeometries.Operators.Dirichlet) they couple to a zero ghost, and a face against an
+inactive cell carries none under either.
+[`laplacian_coefficients`](@ref FlowGeometries.Operators.laplacian_coefficients) assembles `L` with its null
+space, one constant per closed component, for a solver; [`coarsen`](@ref FlowGeometries.Operators.coarsen)
+and [`galerkin_coefficients`](@ref FlowGeometries.Operators.galerkin_coefficients) build the next level of a
+multigrid hierarchy as `R L P`.
+
+On a rectilinear grid the gap and the corner area are read at the face and the corner, so the operators
+are exact for a linear field on a Cartesian grid and second order on a sphere, and a value along a
+direction is taken along increasing coordinate whichever way the axis is stored.
+
+## Strain rate, vorticity and divergence
+
+On a collocated grid [`strain_rate!`](@ref FlowGeometries.Operators.strain_rate!),
+[`curl!`](@ref FlowGeometries.Operators.curl!) and
+[`divergence!`](@ref FlowGeometries.Operators.divergence!) take a vector field along the local frame —
+east, north and up on a sphere — and add the frame's own turning to its derivatives, from
+[`Geometry.log_scale_gradients`](@ref FlowGeometries.Geometry.log_scale_gradients):
+
+```@example disc
+plans = O.stencil_plans(gs; nodes = 3)
+uλ = [cos(φ) for _ in FG.Grids.coordinates(gs, 1), φ in FG.Grids.coordinates(gs, 2)]   # solid-body rotation
+S  = O.strain_rate((uλ, zero(uλ)), gs, plans)
+maximum(abs, S.λφ) * 6.371e6                             # a rigid rotation strains by truncation alone
+```
 
 ## Off a rectilinear grid: the least-squares gradient
 
@@ -348,6 +406,10 @@ one dot product per cell, allocating nothing. Where `A` is rank deficient — ev
 line, at a boundary or beside a mask — that component is **zeroed**, under the rule `apply_stencil!`
 states for a mask.
 
+A node set built from positions and areas alone has no adjacency, and `gradient_plan` refuses it with an
+`ArgumentError`. Give the grid one (`k` or `radius` on the `UnstructuredGrid` constructor), or pass the
+neighbour set as `conn`.
+
 ## Evaluating a field at a coordinate
 
 Observational data arrives with a coordinate. [`interpolate`](@ref FlowGeometries.Operators.interpolate) evaluates a field there:
@@ -366,11 +428,6 @@ direction interpolates across its seam**, so a coordinate past the last sample w
 The mask policies mean here what they mean for a stencil: [`BlankMasked`](@ref FlowGeometries.Operators.BlankMasked) returns `masked` when a
 contributor is inactive, [`ReduceInRun`](@ref FlowGeometries.Operators.ReduceInRun) renormalizes over the active ones, and
 [`ShiftWithinRun`](@ref FlowGeometries.Operators.ShiftWithinRun) is refused, there being no window to shift.
-
-Anything that *does* need a convention the package has not chosen — a staggered difference, or a
-multi-direction operator like a divergence or a curl, which also need a result location and a
-boundary-condition policy — is assembled at the call site from these weights and the metric factors
-below.
 
 ## A batch of fields on one grid
 
@@ -418,8 +475,8 @@ G.scale_factors(sph, (0.0, π/3)), G.scale_factors(sph, (0.0, π/3, 5.0))
 
 `scale_factors` gives the physical length of a unit coordinate step in each direction — `(R cosφ, R)`
 on a sphere's surface, `(r cosφ, r, 1)` with a radius direction, and `1` throughout for a Cartesian
-metric. They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`, so a divergence
-or a curl is assembled from these plus `fd_weights` with its conventions stated at the call site.
+metric. They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`, and
+`derivative!` and the staggered operators are built from them.
 
 ```@example disc
 G.jacobian(sph, (0.0, 0.5)), 4cos(0.5)

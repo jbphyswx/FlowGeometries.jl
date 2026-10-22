@@ -38,7 +38,7 @@ the gnomonic-plane coordinates its area is the solid angle of.
 end
 
 """
-    cubed_sphere_points!(λ, φ, panel, n; backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
+    cubed_sphere_points!(λ, φ, panel, n; execution=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
 
 Gnomonic cubed-sphere cell centres into caller-owned buffers of length `6n²`, plus each point's panel
 index. Pass `panel = nothing` when the panel id is not wanted, and it is not computed.
@@ -47,7 +47,8 @@ See [`cubed_sphere_points`](@ref) for the allocating form.
 """
 function cubed_sphere_points!(
     λ::AbstractVector{T}, φ::AbstractVector{T},
-    panel::Union{Nothing,AbstractVector{<:Integer}}, n::Integer; backend = nothing,
+    panel::Union{Nothing,AbstractVector{<:Integer}}, n::Integer;
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
     n = Int(n)
     n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1, got $n"))
@@ -61,13 +62,13 @@ function cubed_sphere_points!(
     # panel's cells; points and connectivity then disagree and a grid built from them carries
     # coincident nodes. Cell centres give 6n² distinct points that match the connectivity, and n=1
     # (one cell per face, at the face centre) falls out of the same formula.
-    # Each output slot is a pure function of its own linear index, so chunks are independent.
-    Execution.run_chunks(N, backend) do rng
-        @inbounds for k in rng
-            f, i, j = _cubed_unlin(k, n)
-            λ[k], φ[k] = _cubed_cell_lonlat(T, n, f, i, j)
-            _put!(panel, k, f)
-        end
+    # Each output slot is a pure function of its own linear index, so each index is a work item.
+    outs = panel === nothing ? (Execution.Written(λ), Execution.Written(φ)) :
+                               (Execution.Written(λ), Execution.Written(φ), Execution.Written(panel))
+    Execution.run_indices(N, execution, outs...) do k
+        f, i, j = _cubed_unlin(k, n)
+        @inbounds λ[k], φ[k] = _cubed_cell_lonlat(T, n, f, i, j)
+        _put!(panel, k, f)
     end
     return (; λ, φ, panel)
 end
@@ -83,16 +84,20 @@ the sphere.
 ) where {T<:AbstractFloat}
     ξ, η = _cubed_cell_angles(T, n, i, j)
     p = _cubed_face_to_xyz(f, tan(ξ), tan(η), T)
-    r = sqrt(p.x * p.x + p.y * p.y + p.z * p.z)
-    x = p.x / r; y = p.y / r; z = p.z / r
-    θ = acos(clamp(z, -one(T), one(T)))
-    ϕ = atan(y, x)
-    ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, geographic_latitude(θ))
+    return _unit_lonlat(p.x, p.y, p.z)
 end
 
 """
-    cubed_sphere_points([T = Float64], n; backend=nothing) -> NamedTuple{(:λ,:φ,:panel)}
+    _unit_lonlat(x, y, z) -> (λ, φ)
+
+Longitude in `[0, 2π)` and geographic latitude of the direction `(x, y, z)`, which need not be
+normalized. `atan(z, hypot(x, y))` is accurate relative to the latitude's distance from a pole.
+"""
+@inline _unit_lonlat(x::T, y::T, z::T) where {T<:AbstractFloat} =
+    (Geometry.wrap_longitude(atan(y, x)), atan(z, hypot(x, y)))
+
+"""
+    cubed_sphere_points([T = Float64], n; execution=SerialBackend()) -> NamedTuple{(:λ,:φ,:panel)}
 
 Gnomonic cubed-sphere cell centres: `6n²` distinct points, plus each point's panel index.
 
@@ -101,17 +106,20 @@ Allocating wrapper around [`cubed_sphere_points!`](@ref). Use
 """
 cubed_sphere_points(n::Integer; kwargs...) = cubed_sphere_points(Float64, n; kwargs...)
 
-function cubed_sphere_points(::Type{T}, n::Integer; backend = nothing) where {T<:AbstractFloat}
+function cubed_sphere_points(
+    ::Type{T}, n::Integer; execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
+) where {T<:AbstractFloat}
     N = npoints(CubedSphereSampling(), n)
     return cubed_sphere_points!(
-        Vector{T}(undef, N), Vector{T}(undef, N), Vector{Int}(undef, N), n; backend = backend,
+        Vector{T}(undef, N), Vector{T}(undef, N), Vector{Int}(undef, N), n; execution = execution,
     )
 end
 
 function spherical_points!(
-    λ::AbstractVector{T}, φ::AbstractVector{T}, ::CubedSphereSampling, n::Integer; backend = nothing,
+    λ::AbstractVector{T}, φ::AbstractVector{T}, ::CubedSphereSampling, n::Integer;
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
-    cubed_sphere_points!(λ, φ, nothing, n; backend = backend)   # panel id is not part of this result
+    cubed_sphere_points!(λ, φ, nothing, n; execution = execution)   # panel id is not part of this result
     return (; λ, φ)
 end
 
@@ -119,11 +127,12 @@ spherical_points(s::CubedSphereSampling, n::Integer; kwargs...) =
     spherical_points(Float64, s, n; kwargs...)
 
 function spherical_points(
-    ::Type{T}, ::CubedSphereSampling, n::Integer; backend = nothing,
+    ::Type{T}, ::CubedSphereSampling, n::Integer;
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat}
     N = npoints(CubedSphereSampling(), n)
     return spherical_points!(
-        Vector{T}(undef, N), Vector{T}(undef, N), CubedSphereSampling(), n; backend = backend,
+        Vector{T}(undef, N), Vector{T}(undef, N), CubedSphereSampling(), n; execution = execution,
     )
 end
 
@@ -164,19 +173,17 @@ end
 """
     _yin_yang_rotate(λ, φ) -> (λ_global, φ_global)
 
-The Kageyama–Sato rotation carrying a panel-frame `(λ, φ)` onto yang's position on the sphere. Yang is
-yin rigidly rotated, so this is the whole difference between the two panels.
+The Kageyama–Sato map carrying a panel-frame `(λ, φ)` onto yang: `(x, y, z) ↦ (−x, z, y)` on the unit
+vector. The map is an involution, so it also carries yang back to the panel frame. Yang is yin rigidly
+rotated, so this is the whole difference between the two panels.
 """
 @inline function _yin_yang_rotate(λ::T, φ::T) where {T<:AbstractFloat}
     sinφ, cosφ = sincos(φ)
     sinλ, cosλ = sincos(λ)
-    X = -sinφ
-    Y = cosφ * cosλ
-    Z = -cosφ * sinλ
-    θ = acos(clamp(Z, -one(T), one(T)))
-    ϕ = atan(Y, X)
-    ϕ < 0 && (ϕ += T(2π))
-    return (ϕ, geographic_latitude(θ))
+    X = -cosφ * cosλ
+    Y = sinφ
+    Z = cosφ * sinλ
+    return (Geometry.wrap_longitude(atan(Y, X)), atan(Z, hypot(X, Y)))
 end
 
 """
@@ -239,7 +246,8 @@ function spherical_points!(Λ::AbstractVector{T}, Φ::AbstractVector{T}, ::YinYa
     n == 0 && return (; λ = Λ, φ = Φ)
     # Yang is written straight into the second half of the outputs — exactly an nlon×nlat block in the
     # order the panel fields use — and yin's axes into the leading elements of the first half. Nothing
-    # overlaps, so one call fills all four; yin is then expanded across its block in place.
+    # overlaps, so one call fills all four; yin is then expanded across its block in place, its
+    # panel-frame longitudes reduced to `[0, 2π)` as they are written.
     yang_λ = reshape(view(Λ, (np + 1):n), nlon, nlat)
     yang_φ = reshape(view(Φ, (np + 1):n), nlon, nlat)
     yin_yang_panels!(view(Λ, 1:nlon), view(Φ, 1:nlat), yang_λ, yang_φ, nlon, nlat)
@@ -247,7 +255,7 @@ function spherical_points!(Λ::AbstractVector{T}, Φ::AbstractVector{T}, ::YinYa
         φj = Φ[j]
         base = (j - 1) * nlon
         for i in nlon:-1:1
-            Λ[base + i] = Λ[i]
+            Λ[base + i] = Geometry.wrap_longitude(Λ[i])
             Φ[base + i] = φj
         end
     end
@@ -270,11 +278,7 @@ function _xyz_to_lonlat!(λ::AbstractVector{T}, φ::AbstractVector{T}, verts) wh
     length(λ) == n && length(φ) == n || throw(DimensionMismatch("buffers must match vertex count"))
     @inbounds for i in 1:n
         x, y, z = verts[i]
-        θ = acos(clamp(T(z), -one(T), one(T)))
-        ϕ = atan(T(y), T(x))
-        ϕ < 0 && (ϕ += T(2π))
-        λ[i] = ϕ
-        φ[i] = geographic_latitude(θ)
+        λ[i], φ[i] = _unit_lonlat(T(x), T(y), T(z))
     end
     return (; λ, φ)
 end
@@ -557,36 +561,32 @@ end
     (r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3]); (p[1] / r, p[2] / r, p[3] / r))
 
 """
-    _ico_fold_incident_triangles(f, acc, i, j, face, ν) -> acc
+    _ico_fold_incident_triangles(f, acc, i, j, ν) -> acc
 
-Thread `acc = f(acc, other1, other2)` over the triangles of one face that contain lattice node
-`(i, j)`, `other1` and `other2` being the other two vertices' ids.
+Thread `acc = f(acc, n1, n2)` over the triangles of one face that contain lattice node `(i, j)`, `n1`
+and `n2` being the other two vertices' lattice nodes `(a, b)` on that face.
 
 A triangle belongs to exactly one face, so folding over each of a vertex's occurrences visits each
 incident triangle once. The two lattice orientations give up to three triangles each.
 """
-@inline function _ico_fold_incident_triangles(
-    f::F, acc, fc::Int, i::Int, j::Int, ν::Int,
-) where {F}
-    idof(a, b) = _ico_lattice_id(fc, a, b, ν)
+@inline function _ico_fold_incident_triangles(f::F, acc, i::Int, j::Int, ν::Int) where {F}
+    self = (i, j)
     # Upward triangles {(a,b), (a+1,b), (a,b+1)} whose base is at, below or left of `(i, j)`.
     for (a, b) in ((i, j), (i - 1, j), (i, j - 1))
         (a ≥ 0 && b ≥ 0 && a + b < ν) || continue
-        v0 = idof(a, b); v1 = idof(a + 1, b); v2 = idof(a, b + 1)
-        o1, o2 = _ico_others(v0, v1, v2, idof(i, j))
-        acc = f(acc, o1, o2)
+        n1, n2 = _ico_others((a, b), (a + 1, b), (a, b + 1), self)
+        acc = f(acc, n1, n2)
     end
     # Downward triangles {(a+1,b), (a,b+1), (a+1,b+1)}.
     for (a, b) in ((i - 1, j), (i, j - 1), (i - 1, j - 1))
         (a ≥ 0 && b ≥ 0 && a + b < ν - 1) || continue
-        v0 = idof(a + 1, b); v1 = idof(a, b + 1); v2 = idof(a + 1, b + 1)
-        o1, o2 = _ico_others(v0, v1, v2, idof(i, j))
-        acc = f(acc, o1, o2)
+        n1, n2 = _ico_others((a + 1, b), (a, b + 1), (a + 1, b + 1), self)
+        acc = f(acc, n1, n2)
     end
     return acc
 end
 
-@inline _ico_others(v0::Int, v1::Int, v2::Int, self::Int) =
+@inline _ico_others(v0::NTuple{2,Int}, v1::NTuple{2,Int}, v2::NTuple{2,Int}, self::NTuple{2,Int}) =
     v0 == self ? (v1, v2) : (v1 == self ? (v0, v2) : (v0, v1))
 
 """
@@ -598,12 +598,7 @@ Normalize `p` and write vertex `v`'s longitude and latitude. Top-level, so it ca
     λ::AbstractVector{T}, φ::AbstractVector{T}, v::Int, p::NTuple{3,T}, ::Type{T},
 ) where {T<:AbstractFloat}
     r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
-    x = p[1] / r; y = p[2] / r; z = p[3] / r
-    θ = acos(clamp(z, -one(T), one(T)))
-    ϕ = atan(y, x)
-    ϕ < 0 && (ϕ += T(2π))
-    @inbounds λ[v] = ϕ
-    @inbounds φ[v] = geographic_latitude(θ)
+    @inbounds λ[v], φ[v] = _unit_lonlat(p[1] / r, p[2] / r, p[3] / r)
     return nothing
 end
 
