@@ -4,8 +4,8 @@ using DelaunayTriangulation: DelaunayTriangulation as DT
 using FlowGeometries.Geometry: Geometry
 using FlowGeometries.Grids: Grids
 
-# Exact per-node planar Voronoi-cell areas, clipped to the convex hull (overrides the throwing
-# fallback in `Grids._voronoi_areas`).
+# Exact per-node planar Voronoi-cell areas, clipped to the convex hull along a bounded direction and
+# repeating along a periodic one (overrides the throwing fallback in `Grids._voronoi_areas`).
 
 """
     _assert_not_collinear(x, y, N)
@@ -43,8 +43,13 @@ function _assert_not_collinear(x::AbstractVector{T}, y::AbstractVector{T}, N::In
     ))
 end
 
+Grids._voronoi_tessellation(
+    geo::Geometry.AbstractCartesianGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
+) where {T<:AbstractFloat} = Grids._voronoi_tessellation(geo, x, y, (zero(T), zero(T)))
+
 function Grids._voronoi_tessellation(
     ::Geometry.AbstractCartesianGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
+    period::NTuple{2,Real},
 ) where {T<:AbstractFloat}
     N = length(x)
     length(y) == N || throw(DimensionMismatch("x/y length mismatch"))
@@ -59,8 +64,81 @@ function Grids._voronoi_tessellation(
 
     # The tessellation runs in Float64 whatever `T` is: the orientation and incircle predicates are
     # exact-arithmetic and defined there. Only the resulting areas are converted back to `T`.
+    P = (Float64(period[1]), Float64(period[2]))
     pts = [(Float64(x[i]), Float64(y[i])) for i in 1:N]
-    tri = DT.triangulate(pts)
+    any(>(0), P) || return _cells(DT.triangulate(pts), collect(1:N), N, T)
+    return _periodic_cells(pts, P, N, T)
+end
+
+# Along a direction of period `P[d] > 0` each node is folded into the box `[lo_d, lo_d + P_d)` and the
+# images within a strip `w` past either face join it. A node's cell, and every triangle at it, is the
+# periodic one once each such triangle's circumdisk lies inside the strip, where the images are complete;
+# the strip doubles until it does, the whole neighbouring copies being the last resort. A bounded
+# direction is clipped to the hull of what is triangulated, which over the box is the hull of the
+# repeating set once the neighbouring copies are whole, so with one the strip starts there.
+function _periodic_cells(pts::Vector{NTuple{2,Float64}}, P::NTuple{2,Float64}, N::Int, ::Type{T}) where {T}
+    lo = ntuple(d -> P[d] > 0 ? minimum(p -> p[d], pts) : 0.0, Val(2))
+    fold(v, d) = P[d] > 0 ? lo[d] + mod(v - lo[d], P[d]) : v
+    base = [(fold(p[1], 1), fold(p[2], 2)) for p in pts]
+    band = ntuple(d -> extrema(p -> p[d], base), Val(2))
+    w = all(>(0), P) ? 4 * sqrt(P[1] * P[2] / N) : maximum(P)
+    shifts = [(a, b) for a in (P[1] > 0 ? (-1:1) : (0:0)), b in (P[2] > 0 ? (-1:1) : (0:0)) if (a, b) != (0, 0)]
+    while true
+        whole = all(d -> P[d] == 0 || w >= P[d], 1:2)
+        ext, src = copy(base), collect(1:N)
+        for (a, b) in shifts, i in 1:N
+            q = (base[i][1] + a * P[1], base[i][2] + b * P[2])
+            _in_strip(q, lo, P, w) || continue
+            push!(ext, q)
+            push!(src, i)
+        end
+        tri = DT.triangulate(ext)
+        _strip_holds(tri, ext, N, lo, P, w, band) && return _cells(tri, src, N, T)
+        whole && throw(ArgumentError(
+            "the node set is too sparse for its period: a Delaunay circle at a node reaches past the " *
+            "neighbouring copies of the domain; supply `areas` explicitly"))
+        w *= 2
+    end
+end
+
+@inline _in_strip(q, lo, P, w) =
+    all(d -> P[d] == 0 || (lo[d] - w <= q[d] < lo[d] + P[d] + w), 1:2)
+
+# Whether every solid triangle at an original node has its circumdisk inside the strip along each
+# periodic direction. Along a bounded direction the nodes span `band`, so only the part of a disk over
+# that span can hold one.
+function _strip_holds(tri, ext, N::Int, lo, P, w, band)
+    for τ in DT.each_solid_triangle(tri)
+        i, j, k = DT.triangle_vertices(τ)
+        (i <= N || j <= N || k <= N) || continue
+        a, b, c = ext[i], ext[j], ext[k]
+        # The circumcentre about vertex `a`, where the differences are formed exactly.
+        bx, by = b[1] - a[1], b[2] - a[2]
+        cx, cy = c[1] - a[1], c[2] - a[2]
+        d = 2 * (bx * cy - by * cx)
+        iszero(d) && return false
+        b2, c2 = bx^2 + by^2, cx^2 + cy^2
+        ux, uy = (cy * b2 - by * c2) / d, (bx * c2 - cx * b2) / d
+        R = hypot(ux, uy)
+        o = (a[1] + ux, a[2] + uy)
+        for e in 1:2
+            P[e] > 0 || continue
+            f = 3 - e
+            h = R
+            if P[f] == 0
+                gap = max(band[f][1] - o[f], o[f] - band[f][2], 0.0)
+                gap >= R && continue
+                h = sqrt(R^2 - gap^2)
+            end
+            (o[e] - h >= lo[e] - w && o[e] + h <= lo[e] + P[e] + w) || return false
+        end
+    end
+    return true
+end
+
+# The areas of the first `N` points' cells, and the triangles as cells over the nodes `src` maps each
+# point to: one copy of each, the one whose lowest-numbered node is that node's own point.
+function _cells(tri, src::Vector{Int}, N::Int, ::Type{T}) where {T}
     vorn = DT.voronoi(tri; clip = true)
 
     # `zeros`, never `undef`: the triangulation skips duplicate input points, which are then assigned
@@ -72,15 +150,16 @@ function Grids._voronoi_tessellation(
         areas[i] = T(DT.get_area(vorn, i))
     end
 
-    # The triangulation the areas came from, returned alongside them. Solid triangles only: a ghost
-    # triangle names the boundary, and has no node to be a cell of.
-    # The narrowest integer that indexes this node set, as the neighbour arrays use.
+    # Solid triangles only: a ghost triangle names the boundary, and has no node to be a cell of. The
+    # narrowest integer that indexes this node set, as the neighbour arrays use.
     I = N ≤ typemax(Int32) ? Int32 : Int
     cell_nodes = I[]
     sizehint!(cell_nodes, 3 * DT.num_solid_triangles(tri))
     for τ in DT.each_solid_triangle(tri)
         i, j, k = DT.triangle_vertices(τ)
-        push!(cell_nodes, I(i), I(j), I(k))
+        m = argmin(v -> src[v], (i, j, k))
+        m <= N || continue
+        push!(cell_nodes, I(src[i]), I(src[j]), I(src[k]))
     end
     nc = length(cell_nodes) ÷ 3
     cell_ptr = Vector{I}(undef, nc + 1)

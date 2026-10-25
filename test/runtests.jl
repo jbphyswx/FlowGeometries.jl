@@ -180,6 +180,7 @@ q_rg_points!(λ, φ, s, sc) = FG.SphericalSampling.spherical_points!(λ, φ, s; 
 q_deriv_held!(o, f, g, iw, d) = FG.Operators.derivative!(o, f, g, iw[1], iw[2], d; order = 1)
 q_interp!(o, f, g, p)    = FG.Operators.interpolate!(o, f, g, p)
 q_sinterp(f, g, p, t, s, nb) = FG.Operators.interpolate(f, g, p; topology = t, scratch = s, nearest = nb)
+q_minterp!(o, f, g, ps, t) = FG.Operators.interpolate!(o, f, g, ps; topology = t)
 q_plan!(o, f, pl, d)     = FG.Operators.apply_stencil!(o, f, pl, d)
 q_axst!(i, w, x, o, k, s) = FG.Discretization.axis_stencils!(i, w, x, o, k; scratch = s)
 q_faces!(o, x)           = FG.Discretization.faces!(o, x)

@@ -448,6 +448,42 @@ Test.@testset "Planar Voronoi areas are complete and degeneracy-safe" begin
     Test.@test sum(a32) ≈ Float32(sum(a)) rtol = 1e-5
 end
 
+# A periodic box repeats, so its cells tile it and equal the central copy's in the 3×3 tiling, and every
+# cell, gradient and interpolated value is that of the same nodes translated, whichever of them the face
+# now separates. The values round at `eps` of the box against a cell size `√(area/n)`.
+Test.@testset "Planar Voronoi cells and the scattered operators repeat across a periodic face" begin
+    cgeo = FG.Geometry.CartesianGeometry()
+    L = (2.0, 1.5)
+    n = 600
+    jitter(i) = mod(sin(12.9898 * i) * 43758.5453, 1.0)
+    x = [L[1] * jitter(i) for i in 1:n]
+    y = [L[2] * jitter(i + 7919) for i in 1:n]
+    s = (0.731, 0.412)
+    xs, ys = mod.(x .+ s[1], L[1]), mod.(y .+ s[2], L[2])
+    grid(x, y, periodic) = FG.Grids.UnstructuredGrid(cgeo, (x, y); k = 8, periodic, period = L)
+    area(g) = vec(FG.Grids.measure(g))
+    same(a, b) = maximum(abs, a .- b) ≤ 1e-12 * maximum(a)
+    g, gs = grid(x, y, (true, true)), grid(xs, ys, (true, true))
+    a = area(g)
+    Test.@test sum(a) ≈ L[1] * L[2] rtol = 1e-12
+    Test.@test same(a, area(gs))
+    tiles = [(p, q) for p in -1:1 for q in -1:1 if (p, q) != (0, 0)]
+    gt = FG.Grids.UnstructuredGrid(cgeo, (vcat(x, (x .+ p * L[1] for (p, _) in tiles)...),
+                                          vcat(y, (y .+ q * L[2] for (_, q) in tiles)...)); k = 8)
+    Test.@test same(a, area(gt)[1:n])
+    # Periodic along x alone: the cells at the bounded ends are clipped to the hull of the repeating set,
+    # which a translation along x carries into itself.
+    Test.@test same(area(grid(x, y, (true, false))), area(grid(xs, y, (true, false))))
+
+    f = [sin(2π * x[i] / L[1]) * cos(2π * y[i] / L[2]) for i in 1:n]
+    G, Gs = (FG.Operators.gradient!(zeros(n), zeros(n), f, FG.Operators.gradient_plan(h)) for h in (g, gs))
+    Test.@test all(d -> maximum(abs, G[d] .- Gs[d]) ≤ 1e-9 * maximum(abs, G[d]), 1:2)
+    for p in ((0.01, 0.7), (1.995, 0.02), (1.0, 1.49), (0.003, 1.497))
+        ps = (mod(p[1] + s[1], L[1]), mod(p[2] + s[2], L[2]))
+        Test.@test FG.Operators.interpolate(f, g, p) ≈ FG.Operators.interpolate(f, gs, ps) rtol = 1e-10
+    end
+end
+
 Test.@testset "Dense and sparse adjacency agree; sparse is the scalable one" begin
     using SparseArrays: SparseArrays
     cgeo = FG.Geometry.CartesianGeometry()
@@ -753,6 +789,18 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
                                   asin.(range(-1, 1; length = 9)); periodic = true)
     Test.@test agrees(g2s, (4, 8), 2.0e6)
     Test.@test agrees(g2s, (16, 2), 3.0e6)
+    # Longitude spacing varying eightfold round the ring, and the same spacing over a 300° box: a row's
+    # band is bracketed by search on the axis itself.
+    sp = [1 + 7 * (1 + sin(2π * (k - 0.5) / 24)) / 2 for k in 1:24]
+    λst = (cumsum(sp) .- sp[1]) .* (2π / sum(sp))
+    gst2 = FG.Grids.StructuredGrid(sph, λst, φ; topology = (true, false), period = (2π, 0.0))
+    for (I, r) in (((5, 7), 2.0e6), ((1, 13), 1.5e6), ((18, 3), 1.0e6), ((24, 6), 3.0e6), ((12, 7), 2.5e7))
+        Test.@test agrees(gst2, I, r)
+    end
+    gstb = FG.Grids.StructuredGrid(sph, λst .* (300 / 360), range(deg2rad(50.0), deg2rad(70.0); length = 5))
+    for (I, r) in (((1, 3), 2.5e6), ((24, 5), 2.0e6), ((10, 1), 6.0e6))
+        Test.@test agrees(gstb, I, r)
+    end
     # A box over 320° of longitude: across its 40° gap the columns at its two ends are neighbours, so a
     # ball wraps longitude whether or not the grid's cells close the ring.
     λr = range(0.0; step = deg2rad(10.0), length = 33)

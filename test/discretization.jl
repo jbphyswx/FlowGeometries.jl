@@ -611,6 +611,59 @@ Test.@testset "A field can be evaluated at a coordinate, on every architecture" 
     Test.@test_throws DimensionMismatch O.interpolate(zeros(3, 3), g, (0.5, 0.5))
 end
 
+# Many points in one call: each value is the single-point one, the neighbours coming from one cell list,
+# which names the same cells in the same order as a scan, so the fit agrees to the bit.
+Test.@testset "A field evaluated at many points in one call" begin
+    O = FG.Operators
+    GD = FG.Grids
+    CB = FG.Execution.CB
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    TH = CB.ThreadedBackend()
+
+    x = collect(range(0.0, 2.0; length = 11))
+    y = collect(range(-1.0, 3.0; length = 9))
+    g = GD.StructuredGrid(cart, x, y)
+    exact(px, py) = 2px - 3py + 0.5 * px * py + 7
+    f = [exact(xi, yj) for xi in x, yj in y]
+    pts = [(0.05 + 1.9 * rand(), -0.95 + 3.9 * rand()) for _ in 1:40]
+    Test.@test O.interpolate(f, g, pts) ≈ [exact(p...) for p in pts] atol = 1e-10
+    Test.@test O.interpolate(cat(f, 2f; dims = 3), g, pts) ≈ [exact(p...) * b for b in 1:2, p in pts] atol = 1e-10
+    Test.@test O.interpolate(f, g, pts; execution = TH) == O.interpolate(f, g, pts)
+
+    let npt = 400, xs = 10.0 .* rand(npt), ys = 6.0 .* rand(npt)
+        gu = GD.UnstructuredGrid(cart, (xs, ys), trues(npt); k = 8, areas = ones(npt))
+        fu = 2.0 .* xs .- 3.0 .* ys .+ 5.0
+        qs = [(1.0 + 8.0 * rand(), 1.0 + 4.0 * rand()) for _ in 1:60]
+        v = O.interpolate(fu, gu, qs; k = 8)
+        Test.@test v ≈ [2q[1] - 3q[2] + 5 for q in qs] atol = 1e-8
+        Test.@test v == [O.interpolate(fu, gu, q; k = 8) for q in qs]
+        Test.@test v == O.interpolate(fu, gu, qs; k = 8, execution = TH)
+        Test.@test O.interpolate(hcat(fu, -fu), gu, qs; k = 8) == vcat(v', -v')
+    end
+
+    # A masked node set on a sphere: a neighbourhood an inactive cell lies in gives `masked` at the
+    # points it does in the single-point form.
+    let gh = healpix_node_grid(8)
+        geo = GD.grid_geometry(gh)
+        nh = length(GD.mask(gh))
+        λv = [GD.coords(gh, j).λ for j in 1:nh]
+        φv = [GD.coords(gh, j).φ for j in 1:nh]
+        gm = GD.UnstructuredGrid(geo, (λv, φv), φv .< 0.9; k = 8, areas = ones(nh))
+        fm = sin.(λv) .* cos.(φv)
+        qs = [(λq, φq) for λq in (0.3, 2.0, 4.4) for φq in range(0.55, 1.2; length = 9)]
+        v = O.interpolate(fm, gm, qs; k = 8, masked = NaN)
+        Test.@test isequal(v, [O.interpolate(fm, gm, q; k = 8, masked = NaN) for q in qs])
+    end
+
+    let n = 14
+        xc = [t + 0.35u for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
+        yc = [u - 0.2t for t in range(0.0, 10.0; length = n), u in range(0.0, 6.0; length = n)]
+        cg = GD.CurvilinearGrid(cart, xc, yc, trues(n, n); measure = fill(1.0, n, n))
+        qs = [(2.0 + 5.0 * rand(), 3.0 * rand()) for _ in 1:30]
+        Test.@test O.interpolate(2.0 .* xc .- 3.0 .* yc .+ 5.0, cg, qs; k = 8) ≈ [2q[1] - 3q[2] + 5 for q in qs] atol = 1e-8
+    end
+end
+
 Test.@testset "A least-squares gradient where there is no separable axis" begin
     C = FG.Connectivity
     D = FG.Discretization
@@ -2234,6 +2287,106 @@ Test.@testset "A coarse level is the Galerkin product of the fine one" begin
     let g = GD.StructuredGrid(cart, collect(odd), collect(odd))
         Test.@test GD.coordinates(O.coarsen(g), 1) ≈ [(odd[2i - 1] + odd[min(2i, 9)]) / 2 for i in 1:5]
         Test.@test O.coarsen(GD.StructuredGrid(cart, 0.0:1.0:2.0, 0.0:1.0:2.0)) === nothing
+    end
+end
+
+# The operator rediscretized on the coarse grid. Along a uniformly halved direction the coarse gap is twice
+# every fine one, so the coefficient is half the Galerkin sum; on a stretched axis it is the summed coupling
+# area over the distance between the coarse centres, read here off the coarse grid's coordinates.
+Test.@testset "A coarse level is the operator rediscretized from the fine coupling areas" begin
+    GD = FG.Grids
+    O = FG.Operators
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    even = range(0.0, 1.0; length = 8)
+    hole = trues(8, 8)
+    hole[3:4, 3:5] .= false
+    for (grid, bc) in ((GD.StructuredGrid(cart, even, even, hole), O.Dirichlet()),
+                       (GD.StructuredGrid(cart, even, even), O.Neumann()))
+        c = O.laplacian_coefficients(O.face_metrics(grid, bc))
+        cg = O.coarsen(grid)
+        cc, gal = O.coarse_coefficients(c, cg, bc), O.galerkin_coefficients(c, cg)
+        for d in 1:2
+            Test.@test collect(cc.coef[d]) ≈ collect(gal.coef[d]) ./ 2 rtol = 8eps()
+        end
+        Test.@test collect(cc.measure) == collect(gal.measure)
+    end
+    let x = cumsum([0.0; [1.0 + 0.3i for i in 1:7]]), y = range(0.0, 1.0; length = 8)
+        grid = GD.StructuredGrid(cart, x, y)
+        c = O.laplacian_coefficients(O.face_metrics(grid, O.Neumann()))
+        cg = O.coarsen(grid)
+        cc = O.coarse_coefficients(c, cg, O.Neumann())
+        xc = GD.coordinates(cg, 1)
+        # A coarse face across `x` covers two fine faces, each of area `Δy`.
+        Test.@test all(cc.coef[1][i, j] ≈ 2step(y) / (xc[i] - xc[i - 1])
+                       for i in 2:length(xc), j in 1:GD.size_tuple(cg)[2])
+    end
+    # Coarse cell (2, 2) covers fine cells 3:4 × 3:4, one of them inactive.
+    let m = trues(8, 8)
+        m[3, 4] = false
+        g = GD.StructuredGrid(cart, even, even, m)
+        Test.@test GD.mask(O.coarsen(g))[2, 2]
+        gp = O.coarsen(g; pinned = true)
+        Test.@test !GD.mask(gp)[2, 2] && count(!, GD.mask(gp)) == 1
+        cp = O.coarse_coefficients(O.laplacian_coefficients(O.face_metrics(g, O.Dirichlet())), gp, O.Dirichlet())
+        Test.@test iszero(cp.measure[2, 2]) && all(>(0), cp.measure[GD.mask(gp)])
+    end
+end
+
+# Where a face couples a cell to a zero, the coarse level holds the zero where the fine operator does: a
+# field linear along `x` that vanishes there has zero flux balance in every active coarse cell that meets no
+# other zero. The zero sits past a Dirichlet end of a stretched axis, whose coarse grid ends elsewhere; at
+# an inactive fine cell the fine operator couples to; and at the `ghost` coordinates off the end faces. `y`
+# is periodic and the field constant along it. A balance is four coefficient-difference products, each a
+# few roundings, of size at most `|diag|·max|Φ|`.
+Test.@testset "A coarse level holds each zero where the fine operator does" begin
+    GD = FG.Grids
+    O = FG.Operators
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    ys = FG.Axes.PeriodicAxis(0.0, 1.0, 8)
+    balance(c, Φ) = O.apply_laplacian!(zeros(size(Φ)), Φ, c)
+    tol(c, Φ) = 32eps() * maximum(abs, c.diag) * maximum(abs, Φ)
+    along_x(v, ny) = [v[i] for i in eachindex(v), _ in 1:ny]
+    function check(c, cg, z)
+        X = GD.coordinates(cg, 1)
+        n, ny = length(X), GD.size_tuple(cg)[2]
+        for (Φ, cells) in ((along_x(X .- z[1], ny), 1:(n - 1)), (along_x(z[2] .- X, ny), 2:n))
+            Test.@test maximum(abs, balance(c, Φ)[cells, :]) ≤ tol(c, Φ)
+        end
+    end
+    # Nine stretched cells: the coarse grid's centres are the pairs' means, so its own end faces are not
+    # the fine ones.
+    let x = cumsum([0.5; [1.0 + 0.3i for i in 1:8]])
+        g = GD.StructuredGrid(cart, x, ys)
+        cg = O.coarsen(g)
+        f = GD.face_coordinates(g, 1)
+        check(O.coarse_coefficients(O.laplacian_coefficients(O.face_metrics(g, O.Dirichlet())), cg, O.Dirichlet()),
+              cg, (first(f), last(f)))
+    end
+    x = collect(range(1 / 16, 15 / 16; length = 8))
+    g0 = GD.StructuredGrid(cart, x, ys)
+    c0 = O.laplacian_coefficients(O.face_metrics(g0, O.Dirichlet()))
+    # Fine cell 5 inactive, its coefficients kept and the field zero there: the operator holds zero at
+    # `x[5]`. Coarse cell 3 covers fine cells 5 and 6 and is inactive; coarse cell 2 meets the zero through
+    # fine face 5.
+    let m = trues(8, 8)
+        m[5, :] .= false
+        g = GD.StructuredGrid(cart, x, ys, m)
+        c = O.LaplacianCoefficients(g, map(collect, c0.coef), collect(c0.measure) .* m)
+        cg = O.coarsen(g; pinned = true)
+        cc = O.coarse_coefficients(c, cg, O.Dirichlet())
+        Φc = along_x(GD.coordinates(cg, 1) .- x[5], 4) .* GD.mask(cg)
+        Test.@test maximum(abs, balance(cc, Φc)[2, :]) ≤ tol(cc, Φc)
+    end
+    # End coefficients holding the zeros at `zlo` and `zhi` off the end faces 0 and 1.
+    let (zlo, zhi) = (-0.3 / 8, 1 + 0.2 / 8)
+        cx = collect(c0.coef[1])
+        A = cx[2, 1] * (x[2] - x[1])
+        cx[1, :] .= A / (x[1] - zlo)
+        cx[end, :] .= A / (zhi - x[end])
+        c = O.LaplacianCoefficients(g0, (cx, collect(c0.coef[2])), collect(c0.measure))
+        check(c, g0, (zlo, zhi))
+        cg = O.coarsen(g0)
+        check(O.coarse_coefficients(c, cg, O.Dirichlet(); ghost = ((zlo, zhi), nothing)), cg, (zlo, zhi))
     end
 end
 

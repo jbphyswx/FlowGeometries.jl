@@ -49,6 +49,14 @@ end
 @inline _contract(p::NTuple{2,T}, δ::NTuple{2,T}) where {T} = p[1] * δ[1] + p[2] * δ[2]
 @inline _contract(p::NTuple{3,T}, δ::NTuple{3,T}) where {T} = p[1] * δ[1] + p[2] * δ[2] + p[3] * δ[3]
 
+# `nb`'s displacement on the frame `fr` at `c`, `nb` taken at its image nearest `c` along each direction
+# with a wrap length in `prd` (see `Grids._image_pair`). On the plane the offset is formed exactly and
+# resolved against the origin.
+@inline _image_displacement(geo::Geometry.AbstractCartesianGeometry, fr, c, nb, prd) =
+    Geometry._displacement_on(geo, map(zero, fr), Grids._offsets(c, nb, prd))
+@inline _image_displacement(geo, fr, c, nb, prd) =
+    Geometry._displacement_on(geo, fr, last(Grids._image_pair(geo, c, nb, prd)))
+
 # The largest row of a CSR offset array over its first `n` rows.
 @inline function _max_degree(ptr::AbstractVector{<:Integer}, n::Int)
     d = 0
@@ -95,15 +103,17 @@ function _gradient_plan(
     dcol = ntuple(_ -> Vector{T}(undef, maxdeg), Val(D))
     wk = Vector{T}(undef, maxdeg)
     w = 0                                              # write cursor into `nbr`/`coef`
+    prd = Grids._wrap_lengths(grid, Val(D))
     @inbounds ptr[1] = 1
     @inbounds for i in 1:n
         m = 0                                          # this cell's kept neighbours
         if !(active_only && !msk[i])
-            fr = Geometry._local_frame(geo, _grad_coords(grid, sz, i))
+            ci = _grad_coords(grid, sz, i)
+            fr = Geometry._local_frame(geo, ci)
             for t in c.ptr[i]:(c.ptr[i + 1] - 1)
                 j = Int(c.nbrs[t])
                 active_only && !msk[j] && continue
-                Δ = Geometry._displacement_on(geo, fr, _grad_coords(grid, sz, j))
+                Δ = _image_displacement(geo, fr, ci, _grad_coords(grid, sz, j), prd)
                 δ = ntuple(d -> T(Δ[d]), Val(D))
                 q = _contract(δ, δ)
                 q > 0 || continue                     # a coincident neighbour carries no direction
@@ -165,9 +175,10 @@ The weights are computed in the tangent plane at `p0`, where the three vertices 
     # query exactly on an edge lands in one of them.
     tol = -sqrt(eps(T))
     fr = Geometry._local_frame(geo, p0)
+    prd = Grids._wrap_lengths(grid, Val(2))
     start, least, held = 0, T(-Inf), false
     @inbounds for cc in Grids.node_cells(mesh, nearest)
-        tri = _cell_weights(grid, geo, fr, mesh, Int(cc), T)
+        tri = _cell_weights(grid, geo, fr, p0, prd, mesh, Int(cc), T)
         a, b, c, w = tri
         a == 0 && continue
         m = min(w[1], w[2], w[3])
@@ -180,7 +191,7 @@ The weights are computed in the tangent plane at `p0`, where the three vertices 
     end
     (held || start == 0) && return none
     t = start
-    tri = _cell_weights(grid, geo, fr, mesh, t, T)
+    tri = _cell_weights(grid, geo, fr, p0, prd, mesh, t, T)
     # Each step leaves through the edge `p0` lies beyond, so on a Delaunay mesh no cell repeats; the cap
     # ends a cycle on a mesh that is not one.
     @inbounds for _ in 1:Grids.ncells(mesh)
@@ -188,7 +199,7 @@ The weights are computed in the tangent plane at `p0`, where the three vertices 
         u, v = w[1] ≤ min(w[2], w[3]) ? (b, c) : w[2] ≤ w[3] ? (a, c) : (a, b)
         t = _cell_across(mesh, t, u, v)
         t == 0 && return none                          # off the mesh's edge
-        tri = _cell_weights(grid, geo, fr, mesh, t, T)
+        tri = _cell_weights(grid, geo, fr, p0, prd, mesh, t, T)
         a, b, c, w = tri
         a == 0 && return none
         if min(w[1], w[2], w[3]) ≥ tol
@@ -198,15 +209,16 @@ The weights are computed in the tangent plane at `p0`, where the three vertices 
     return none
 end
 
-# Cell `cc`'s vertices and the barycentric weights of the frame's origin in it, or `a == 0` where the
-# cell is no triangle or spans no area.
-@inline function _cell_weights(grid, geo, fr, mesh, cc::Int, ::Type{T}) where {T}
+# Cell `cc`'s vertices and the barycentric weights of the frame's origin `p0` in it, or `a == 0` where
+# the cell is no triangle or spans no area. Each vertex is taken at its image nearest `p0`, so a cell
+# joining nodes across a periodic face is whole.
+@inline function _cell_weights(grid, geo, fr, p0, prd, mesh, cc::Int, ::Type{T}) where {T}
     nds = Grids.cell_nodes(mesh, cc)
     length(nds) == 3 || return (0, 0, 0, (zero(T), zero(T), zero(T)))
     @inbounds a, b, c = Int(nds[1]), Int(nds[2]), Int(nds[3])
-    Δa = Geometry._displacement_on(geo, fr, Grids._raw_coords(grid, a))
-    Δb = Geometry._displacement_on(geo, fr, Grids._raw_coords(grid, b))
-    Δc = Geometry._displacement_on(geo, fr, Grids._raw_coords(grid, c))
+    Δa = _image_displacement(geo, fr, p0, Grids._raw_coords(grid, a), prd)
+    Δb = _image_displacement(geo, fr, p0, Grids._raw_coords(grid, b), prd)
+    Δc = _image_displacement(geo, fr, p0, Grids._raw_coords(grid, c), prd)
     a1, a2 = T(Δa[1]), T(Δa[2])
     b1, b2 = T(Δb[1]), T(Δb[2])
     c1, c2 = T(Δc[1]), T(Δc[2])
@@ -326,9 +338,10 @@ function _scattered_fit(
     sz = Connectivity._linear_shape(grid)
     fsum = zero(T); wsum = zero(T)
     fr = Geometry._local_frame(geo, p0)
+    prd = Grids._wrap_lengths(grid, Val(D))
     @inbounds for t in 1:m
         j = Int(idx[t])
-        Δ = Geometry._displacement_on(geo, fr, _grad_coords(grid, sz, j))
+        Δ = _image_displacement(geo, fr, p0, _grad_coords(grid, sz, j), prd)
         δ1, δ2 = T(Δ[1]), T(Δ[2])
         # Inverse-square distance, floored so a query exactly on a cell centre stays finite.
         q = δ1 * δ1 + δ2 * δ2
@@ -442,6 +455,34 @@ end
     out::AbstractVector, field::AbstractArray,
     grid::Union{Grids.CurvilinearGrid,Grids.UnstructuredGrid}, p::Geometry.PointLike; kwargs...,
 ) = interpolate!(out, field, grid, Geometry.as_ntuple(p); kwargs...)
+
+# Every point searches one cell list over the grid, binned at the radius a `k`-nearest search opens at,
+# and each chunk of points holds its own `nearest` buffers, so a point allocates nothing.
+function interpolate!(
+    out::AbstractArray, field::AbstractArray,
+    grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}}, points::AbstractVector{<:_PointElement};
+    k::Integer = 8, active_only::Bool = true, masked = T(NaN), policy::AbstractMaskPolicy = BlankMasked(),
+    topology = nothing, execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
+) where {T}
+    nb = _check_points_out(out, field, grid, length(points))
+    kk = Int(k)
+    tp = topology === nothing ? Connectivity.default_sweep_topology(
+        grid, Connectivity._knn_seed_radius_at(grid, nothing, max(kk, 1)), false) : topology
+    Execution.run_chunks(length(points), execution, Execution.Written(out, Execution.ByBlock(nb))) do rng
+        nearest = (Vector{Int}(undef, kk), Vector{T}(undef, kk))
+        @inbounds for i in rng
+            interpolate!(view(out, ((i - 1) * nb + 1):(i * nb)), field, grid, points[i];
+                         k = kk, active_only = active_only, masked = masked, policy = policy,
+                         topology = tp, nearest = nearest)
+        end
+    end
+    return out
+end
+
+interpolate(
+    field::AbstractArray, grid::Union{Grids.CurvilinearGrid{T},Grids.UnstructuredGrid{T}},
+    points::AbstractVector{<:_PointElement}; kwargs...,
+) where {T} = interpolate!(_points_out(T, field, grid, length(points)), field, grid, points; kwargs...)
 
 @inline _grad_coords(grid, ::Nothing, i::Int) = Grids._raw_coords(grid, i)
 @inline _grad_coords(grid, sz::Tuple, i::Int) =
