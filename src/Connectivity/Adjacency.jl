@@ -66,7 +66,7 @@ Dense `n × n` adjacency over the `n` nodes.
 
 **This allocates n² bytes**, which is quadratic in the node count and therefore quartic in the side
 of a 2-D grid: a 1000×1000 grid has 10⁶ nodes and so needs ~10¹² bytes. Dense adjacency is for small
-node counts and for testing. For anything else use [`sparse_adjacency_matrix`](@ref), which stores
+node counts. For anything else use [`sparse_adjacency_matrix`](@ref), which stores
 `nedges` entries, or [`neighbors!`](@ref), which answers neighbour queries from the index stencil with
 no graph storage at all.
 """

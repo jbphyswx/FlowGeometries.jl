@@ -22,8 +22,8 @@ end
     Execution.run_indices(f, n, backend::GPUBackend{<:KernelAbstractions.Backend}, outputs...)
 
 Launch `f` over `1:n` on `backend.backend` and wait. `f` has to be device-compatible: it may capture only
-isbits values and device arrays, and it may not allocate. Both hold for the bodies this package passes,
-and the test suite gates every one of them at zero bytes. The outputs are written in place.
+isbits values and device arrays, and it may not allocate. Both hold for the bodies this package passes.
+The outputs are written in place.
 """
 function Execution.run_indices(f::F, n::Integer, b::_KABackend, ::Execution.Written...) where {F}
     n = Int(n)

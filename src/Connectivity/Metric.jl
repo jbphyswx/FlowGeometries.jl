@@ -765,13 +765,14 @@ end
         Geometry._hav_distance(geo, hr, zero(T)) ≤ r || continue
         A, B = hr
         q = (ar - A) / B
-        k = if q < one(T)                              # `B = 0` at a pole gives `±Inf` or `NaN`: whole row
+        band = if q < one(T)                           # `B = 0` at a pole gives `±Inf` or `NaN`: whole row
             δq = 8 * eps(T) * (ar + A + B) / B
-            _steps(2 * asin(sqrt(min(one(T), max(q, zero(T)) + δq))), s1, sz[1]) + 1
+            _row_band(Axes.spacing_trait(λs), λs, I[1], 2 * asin(sqrt(min(one(T), max(q, zero(T)) + δq))),
+                      s1, sz[1], wrap[1], prd[1])
         else
-            sz[1]
+            _delta_range(sz[1], I[1], sz[1], wrap[1], images)
         end
-        for δ1 in _delta_range(k, I[1], sz[1], wrap[1], images)
+        for δ1 in band
             (δ1 == 0 && δ2 == 0) && continue
             i = wrap[1] ? mod1(I[1] + δ1, sz[1]) : I[1] + δ1
             active_only && !msk[i, j] && continue
@@ -781,6 +782,40 @@ end
         end
     end
     return acc
+end
+
+# The longitude offsets of a row's band of half-width `Δλ` about cell `i`. A uniform axis counts steps of
+# its spacing `s1`, one beyond for the rounding of `Δλ`. A stretched one brackets `λᵢ ± Δλ` by bisection
+# over the coordinates continued past the ends by whole periods `P`, one cell beyond on each side; a band
+# covering the ring takes every cell once.
+@inline _row_band(::Axes.UniformSpacing, λs, i::Int, Δλ::T, s1::T, n::Int, wrap::Bool, P::T) where {T} =
+    _delta_range(_steps(Δλ, s1, n) + 1, i, n, wrap, NearestImage())
+
+function _row_band(::Axes.NonuniformSpacing, λs::AbstractVector, i::Int, Δλ::T, s1::T, n::Int,
+                   wrap::Bool, P::T) where {T}
+    wrap || return _delta_range(_steps(Δλ, s1, n) + 1, i, n, wrap, NearestImage())
+    s = T(Axes.wrap_sign(λs))
+    λ0 = _continued_lon(λs, i, n, s, P)
+    tr = min(_band_steps(t -> s * (_continued_lon(λs, i + t, n, s, P) - λ0), Δλ, n) + 1, n - 1)
+    tl = min(_band_steps(t -> s * (λ0 - _continued_lon(λs, i - t, n, s, P)), Δλ, n) + 1, n - 1)
+    tl + tr + 1 ≥ n && return _delta_range(n, i, n, true, NearestImage())
+    return (-tl):tr
+end
+
+# The coordinate of index `m` on an axis of `n` cells continued past its ends by whole periods `P`, in the
+# axis's own direction `s`.
+@inline _continued_lon(λs, m::Int, n::Int, s::T, P::T) where {T} =
+    @inbounds T(λs[mod1(m, n)]) + s * P * T(fld(m - 1, n))
+
+# The largest `t` in `0:n-1` with `d(t) ≤ Δλ`, for `d` nondecreasing and `d(0) = 0`.
+@inline function _band_steps(d::F, Δλ, n::Int) where {F}
+    lo, hi = 0, n - 1
+    d(hi) ≤ Δλ && return hi
+    while hi - lo > 1
+        mid = (lo + hi) >>> 1
+        d(mid) ≤ Δλ ? (lo = mid) : (hi = mid)
+    end
+    return lo
 end
 
 # `f::F` forces a specialization: Julia does not specialize on a function-typed argument that is only

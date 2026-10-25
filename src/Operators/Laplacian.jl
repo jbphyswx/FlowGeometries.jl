@@ -201,7 +201,8 @@ end
     apply_laplacian!(f, out, Φ, c::LaplacianCoefficients; execution = SerialBackend()) -> out
 
 `out = L Φ` from the coefficients, zero on every inactive cell. A face past the end of a bounded direction
-contributes `c·(0 − Φ_I)`, the zero ghost of `Dirichlet`; under `Neumann` its coefficient is zero.
+contributes `c·(0 − Φ_I)`, the zero ghost of `Dirichlet`; under `Neumann` its coefficient is zero. A
+nonzero coefficient into an inactive cell reads `Φ` there, which holds zero for an operator that pins it.
 
 With `f`, `out[I] = f(I, (L Φ)_I)` on each active cell, `I` its `CartesianIndex`: the application and the
 cellwise step that reads it in one pass, as a relaxation sweep or a residual takes them. `out` is a
@@ -359,22 +360,24 @@ end
 # ---- the Galerkin hierarchy -----------------------------------------------------
 
 """
-    coarsen(grid) -> grid or nothing
+    coarsen(grid; pinned = false) -> grid or nothing
 
 The next grid down: along every direction of at least four cells, coarse cell `i` covers fine cells
 `2i − 1` and `2i` (cell `n` alone for the last of an odd count), its centre their mean; a shorter direction
-keeps its cells. A coarse cell is active where any fine cell it covers is. `nothing` once no direction has
-four cells.
+keeps its cells. A coarse cell is active where any fine cell it covers is, or with `pinned = true` where
+every one is: on an operator whose inactive cells hold zero through the coefficients that reach them, a
+coarse level then keeps that hold as a coefficient into an inactive coarse cell. `nothing` once no
+direction has four cells.
 
 On a [`Grids.CurvilinearGrid`](@ref) the coarse mesh keeps every other vertex line and the last one.
 """
-function coarsen(grid::Grids.StructuredGrid{T,G,N}) where {T,G,N}
+function coarsen(grid::Grids.StructuredGrid{T,G,N}; pinned::Bool = false) where {T,G,N}
     dims = Grids.size_tuple(grid)
     all(n -> n < 4, dims) && return nothing
     axes_c = ntuple(d -> _coarse_axis(Grids.coordinates(grid, d), dims[d]), Val(N))
     cdims = map(length, axes_c)
     return Grids.StructuredGrid(Grids.grid_geometry(grid), axes_c...;
-                                mask = _coarse_mask(Grids.mask(grid), cdims, dims),
+                                mask = _coarse_mask(Grids.mask(grid), cdims, dims, pinned),
                                 topology = Grids.topology(grid),
                                 period = ntuple(d -> Grids.period(grid, d), Val(N)))
 end
@@ -409,16 +412,17 @@ end
 # bounded axis the face above fine cell `n`.
 @inline _fine_face(i::Int, n::Int) = n < 4 ? i : min(2i - 1, n + 1)
 
-_coarse_mask(::Grids.AllActive, cdims::NTuple{N,Int}, ::NTuple{N,Int}) where {N} = Grids.AllActive(cdims)
-function _coarse_mask(fine, cdims::NTuple{N,Int}, dims::NTuple{N,Int}) where {N}
+_coarse_mask(::Grids.AllActive, cdims::NTuple{N,Int}, ::NTuple{N,Int}, ::Bool) where {N} = Grids.AllActive(cdims)
+function _coarse_mask(fine, cdims::NTuple{N,Int}, dims::NTuple{N,Int}, pinned::Bool) where {N}
     cmask = falses(cdims)
     @inbounds for I in CartesianIndices(cdims)
-        cmask[I] = any(J -> fine[J], CartesianIndices(ntuple(d -> _children(I[d], dims[d]), Val(N))))
+        kids = CartesianIndices(ntuple(d -> _children(I[d], dims[d]), Val(N)))
+        cmask[I] = pinned ? all(J -> fine[J], kids) : any(J -> fine[J], kids)
     end
     return cmask
 end
 
-function coarsen(grid::Grids.CurvilinearGrid{T,G,2}) where {T,G}
+function coarsen(grid::Grids.CurvilinearGrid{T,G,2}; pinned::Bool = false) where {T,G}
     dims = Grids.size_tuple(grid)
     all(n -> n < 4, dims) && return nothing
     Grids.has_corners(grid) || throw(ArgumentError(
@@ -434,7 +438,7 @@ function coarsen(grid::Grids.CurvilinearGrid{T,G,2}) where {T,G}
     end
     per = ntuple(d -> Grids.isperiodic(grid, d), Val(2))
     return Grids.CurvilinearGrid(
-        Grids.grid_geometry(grid), centres..., _coarse_mask(Grids.mask(grid), cdims, dims); corners = ck,
+        Grids.grid_geometry(grid), centres..., _coarse_mask(Grids.mask(grid), cdims, dims, pinned); corners = ck,
         topology = per, period = ntuple(d -> per[d] ? Grids.period(grid, d) : nothing, Val(2)),
     )
 end
@@ -464,6 +468,108 @@ function galerkin_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.Fa
             cd[Fc] = acc
         end
     end
+    return LaplacianCoefficients(cgrid, coef, _children_measure(fine, cdims, fdims))
+end
+
+"""
+    coarse_coefficients(fine::LaplacianCoefficients, cgrid, boundary; ghost = nothing) -> LaplacianCoefficients
+
+`L` rediscretized on `cgrid`, a [`coarsen`](@ref) of `fine.grid`: a coarse face's coefficient is the
+coupling area of the fine faces it covers over its own gap, `Σ c_f g_f / g_c` with the gaps of
+[`face_metrics`](@ref) under `boundary`, and an active coarse cell's measure the sum of its children's.
+The mask and the boundary condition reach the coarse level through the fine coefficients. Along a
+direction a uniform grid halves, this is half the [`galerkin_coefficients`](@ref) there, the factor by
+which the Galerkin operator of piecewise-constant transfers overstates the coarse one (Braess,
+*Computing* 55 (1995) 379–393).
+
+A fine face that couples a cell to a zero keeps the zero where it is: across it the ratio is the fine
+cell's distance to the zero over the coarse cell's, along the direction's coordinate. The zero is an
+inactive fine cell beyond an inactive coarse one, or past a bounded end the fine grid's end face, or the
+coordinates `ghost[d] = (below, above)` where a condition holds its zeros off the end faces.
+"""
+function coarse_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.FaceIndexedGrid,
+                             boundary::AbstractBoundaryCondition; ghost = nothing) where {N,T}
+    fgrid = fine.grid
+    fdims = Grids.size_tuple(fgrid)
+    cdims = Grids.size_tuple(cgrid)
+    fgap = face_metrics(fgrid, boundary).gap
+    cgap = face_metrics(cgrid, boundary).gap
+    fmask, cmask = Grids.mask(fgrid), Grids.mask(cgrid)
+    coef = ntuple(d -> zeros(T, Grids.face_dims(cgrid, d)), Val(N))
+    for d in 1:N
+        P = Grids.isperiodic(fgrid, d) ? T(Grids.period(fgrid, d)) : zero(T)
+        ends = _end_zeros(fgrid, d, ghost === nothing ? nothing : ghost[d], T)
+        _coarse_direction!(coef[d], fine.coef[d], fgap[d], cgap[d], _axis_or_nothing(fgrid, d),
+                           _axis_or_nothing(cgrid, d), P, ends, d, fgrid, cgrid, fmask, cmask, fdims, Val(N))
+    end
+    meas = _children_measure(fine, cdims, fdims)
+    @inbounds for Ic in CartesianIndices(cdims)
+        cmask[Ic] || (meas[Ic] = zero(T))
+    end
+    return LaplacianCoefficients(cgrid, coef, meas)
+end
+
+# The coefficients `cd` of the coarse faces normal to `d`.
+function _coarse_direction!(cd::AbstractArray{T}, fd, gf, gc, xf, xc, P::T, ends, d::Int, fgrid, cgrid, fmask,
+                            cmask, fdims, ::Val{N}) where {T,N}
+    @inbounds for Fc in CartesianIndices(cd)
+        f = _fine_face(Fc[d], fdims[d])
+        Clo, Chi = Grids.cell_below(cgrid, Fc, d), Grids.cell_above(cgrid, Fc, d)
+        alo = Clo !== nothing && cmask[Clo]
+        ahi = Chi !== nothing && cmask[Chi]
+        acc = zero(T)
+        for J in CartesianIndices(ntuple(e -> e == d ? (f:f) : _children(Fc[e], fdims[e]), Val(N)))
+            c = T(fd[J])
+            iszero(c) && continue
+            acc += c * _coarse_ratio(T(gf[J]), T(gc[Fc]), alo, ahi, Clo, Chi, J, d, fgrid, fmask, xf, xc, P, ends)
+        end
+        cd[Fc] = acc
+    end
+    return cd
+end
+
+# A rectilinear direction's centre coordinates, or `nothing` where the grid has none (a curvilinear mesh,
+# which takes the gap ratio throughout).
+_axis_or_nothing(grid::Grids.StructuredGrid, d::Int) = Grids.coordinates(grid, d)
+_axis_or_nothing(_, ::Int) = nothing
+
+# The coordinates `(below, above)` of the zeros past a bounded direction's two ends: `ghost` where given,
+# and otherwise the fine grid's end faces, which a coarse grid built from centres alone need not share.
+function _end_zeros(grid::Grids.StructuredGrid, d::Int, gd, ::Type{T}) where {T}
+    Grids.isperiodic(grid, d) && return nothing
+    gd === nothing || return (T(gd[1]), T(gd[2]))
+    f = Grids.face_coordinates(grid, d)
+    return (T(first(f)), T(last(f)))
+end
+_end_zeros(_, ::Int, _, ::Type) = nothing
+
+# `d_fine / d_coarse` for fine face `J` under a coarse face: between two active coarse cells the gap
+# ratio; where one side is a zero, the fine and the coarse cell's distances to that zero.
+@inline function _coarse_ratio(gf::T, gc::T, alo::Bool, ahi::Bool, Clo, Chi, J::CartesianIndex, d::Int,
+                               fgrid, fmask, xf, xc, P::T, ends) where {T}
+    (alo == ahi || xf === nothing) && return gf / gc
+    C, Ja = alo ? (Clo, Grids.cell_below(fgrid, J, d)) : (Chi, Grids.cell_above(fgrid, J, d))
+    Jz = alo ? Grids.cell_above(fgrid, J, d) : Grids.cell_below(fgrid, J, d)
+    (Ja === nothing || (Jz !== nothing && fmask[Jz])) && return gf / gc
+    z = if Jz === nothing
+        ends === nothing && return gf / gc
+        alo ? ends[2] : ends[1]
+    else
+        T(xf[Jz[d]])
+    end
+    df = _axis_distance(T(xf[Ja[d]]), z, P)
+    dc = _axis_distance(T(xc[C[d]]), z, P)
+    return iszero(dc) ? gf / gc : df / dc
+end
+
+@inline function _axis_distance(a::T, b::T, P::T) where {T}
+    Δ = a - b
+    iszero(P) || (Δ -= P * round(Δ / P))
+    return abs(Δ)
+end
+
+# Each coarse cell's measure, the sum of its children's.
+function _children_measure(fine::LaplacianCoefficients{N,T}, cdims::NTuple{N,Int}, fdims::NTuple{N,Int}) where {N,T}
     meas = zeros(T, cdims)
     @inbounds for Ic in CartesianIndices(cdims)
         m = zero(T)
@@ -472,7 +578,7 @@ function galerkin_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.Fa
         end
         meas[Ic] = m
     end
-    return LaplacianCoefficients(cgrid, coef, meas)
+    return meas
 end
 
 """

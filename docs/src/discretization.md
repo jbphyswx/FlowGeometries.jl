@@ -352,8 +352,10 @@ past the end of a bounded direction carry none in the operators, under
 inactive cell carries none under either.
 [`laplacian_coefficients`](@ref FlowGeometries.Operators.laplacian_coefficients) assembles `L` with its null
 space, one constant per closed component, for a solver; [`coarsen`](@ref FlowGeometries.Operators.coarsen)
-and [`galerkin_coefficients`](@ref FlowGeometries.Operators.galerkin_coefficients) build the next level of a
-multigrid hierarchy as `R L P`.
+builds the next grid of a multigrid hierarchy, and
+[`coarse_coefficients`](@ref FlowGeometries.Operators.coarse_coefficients) the operator rediscretized on it
+from the fine coupling areas, [`galerkin_coefficients`](@ref FlowGeometries.Operators.galerkin_coefficients)
+the product `R L P`.
 
 On a rectilinear grid the gap and the corner area are read at the face and the corner, so the operators
 are exact for a linear field on a Cartesian grid and second order on a sphere, and a value along a
@@ -428,6 +430,15 @@ direction interpolates across its seam**, so a coordinate past the last sample w
 The mask policies mean here what they mean for a stencil: [`BlankMasked`](@ref FlowGeometries.Operators.BlankMasked) returns `masked` when a
 contributor is inactive, [`ReduceInRun`](@ref FlowGeometries.Operators.ReduceInRun) renormalizes over the active ones, and
 [`ShiftWithinRun`](@ref FlowGeometries.Operators.ShiftWithinRun) is refused, there being no window to shift.
+
+A vector of coordinates is evaluated in one call, one value per point. Off a rectilinear grid every
+point's neighbour search runs on one cell list over the grid, built once for the call, and `execution`
+spreads the points over threads or processes:
+
+```@example disc
+pts = [(0.1 + 0.18t, -0.5 + 0.3t) for t in 0:10]
+O.interpolate(fa, ga, pts) ≈ [O.interpolate(fa, ga, p) for p in pts]
+```
 
 ## A batch of fields on one grid
 

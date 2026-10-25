@@ -1,16 +1,11 @@
-# Wall-clock measurements for FlowGeometries.jl.
-#
-# These live here rather than in `test/` deliberately. A benchmark repeats a call hundreds of times,
-# so it makes `Pkg.test` slow, and it is decided by a clock, so it makes it flaky — one of these
-# failed in the suite purely because a garbage collection landed in a measurement block. The suite
-# now asserts the same claims by COUNTING operations, which is deterministic and instant; what is
-# left here is the timing itself, run on demand:
+# Wall-clock measurements for FlowGeometries.jl, run on demand; the test suite asserts the same claims
+# by counting operations.
 #
 #     julia --project=benchmark benchmark/benchmarks.jl
 #     julia --project=benchmark benchmark/benchmarks.jl stencil     # one group
 #
-# No benchmarking package is used: the measurement is min-over-blocks, which rejects a GC pause
-# without needing more samples, and adding a dependency to run three loops is not worth it.
+# Each measurement is the minimum over blocks of repeated calls, which rejects a garbage-collection
+# pause.
 
 using FlowGeometries: FlowGeometries as FG
 using NearestNeighbors: NearestNeighbors
@@ -27,8 +22,7 @@ const CART = FG.Geometry.CartesianGeometry{Float64}()
 """
     best(f, reps; blocks = 3) -> seconds per call
 
-Minimum over `blocks` blocks of `reps` calls. The minimum is what rejects a collection landing in one
-block; more samples inside a block would only average one in rather than remove it.
+Minimum over `blocks` blocks of `reps` calls; a block a collection lands in is discarded by the minimum.
 """
 function best(f, reps::Int; blocks::Int = 3)
     f()
@@ -68,7 +62,7 @@ function bench_stencil()
             t = best(() -> O.apply_stencil!(out, f, g, dim; order = 1, nodes = 3), 5)
             row("N=$n dim=$dim  grid form (builds its table)", t)
         end
-        # With the table built once, which is what a caller applying many fields pays.
+        # The table built once, as by a caller applying many fields.
         for dim in 1:2
             idx, w = D.axis_stencils(x, 1, 3)
             t = best(() -> O.apply_stencil!(out, f, idx, w, dim), 5)
@@ -140,7 +134,7 @@ function bench_axis()
     ratio_row("growth over 10^6× n", ts, tl)
 end
 
-# Driscoll–Healy latitude weights go through an FFT when one is loaded: O(n log n), not O(n²).
+# Driscoll–Healy latitude weights go through an FFT when one is loaded, at O(n log n).
 function bench_weights()
     group("Driscoll–Healy latitude weights")
     t1 = best(() -> SS.latitude_weights(SS.DriscollHealySampling(), 1024), 3)
@@ -149,8 +143,28 @@ function bench_weights()
     ratio_row("growth over 4× n (quadratic would be 16×)", t1, t2)
 end
 
+# `derivative!` with its defaults on a 1440×720 lat–lon sphere, as a multiple of one copy of the field.
+# A stencil and a copy each read the field once and write the output once.
+function bench_derivative()
+    group("derivative! on a 1440×720 sphere, in field copies")
+    nλ, nφ = 1440, 720
+    h = π / nφ
+    g = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, nλ),
+                          collect(range(-π / 2 + h / 2, π / 2 - h / 2; length = nφ)))
+    f = [sin(3λ) * cos(φ) for λ in FG.Grids.coordinates(g, 1), φ in FG.Grids.coordinates(g, 2)]
+    out = similar(f)
+    tc = best(() -> copyto!(out, f), 5)
+    row("copy", tc)
+    for d in 1:2
+        t = best(() -> O.derivative!(out, f, g, d), 5)
+        row("along $d", t)
+        ratio_row("along $d, in copies", tc, t)
+    end
+end
+
 const GROUPS = ("stencil" => bench_stencil, "location" => bench_location,
-                "queries" => bench_queries, "axis" => bench_axis, "weights" => bench_weights)
+                "queries" => bench_queries, "axis" => bench_axis, "weights" => bench_weights,
+                "derivative" => bench_derivative)
 
 function main(args)
     want = isempty(args) ? first.(GROUPS) : args

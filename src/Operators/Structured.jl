@@ -148,6 +148,25 @@ function interpolate(
     return interpolate!(Vector{S}(undef, length(field) ÷ n), field, grid, p; kwargs...)
 end
 
+function interpolate!(
+    out::AbstractArray{S}, field::AbstractArray, grid::Grids.StructuredGrid,
+    points::AbstractVector{<:_PointElement}; active_only::Bool = true, masked = S(NaN),
+    policy::AbstractMaskPolicy = BlankMasked(), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
+) where {S}
+    nb = _check_points_out(out, field, grid, length(points))
+    Execution.run_chunks(length(points), execution, Execution.Written(out, Execution.ByBlock(nb))) do rng
+        @inbounds for i in rng
+            interpolate!(view(out, ((i - 1) * nb + 1):(i * nb)), field, grid, points[i];
+                         active_only = active_only, masked = masked, policy = policy)
+        end
+    end
+    return out
+end
+
+interpolate(
+    field::AbstractArray{S}, grid::Grids.StructuredGrid, points::AbstractVector{<:_PointElement}; kwargs...,
+) where {S} = interpolate!(_points_out(S, field, grid, length(points)), field, grid, points; kwargs...)
+
 function derivative!(
     out::AbstractArray{S,NA}, field::AbstractArray{<:Any,NA}, grid::Grids.StructuredGrid{T, G,N},
     dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,

@@ -30,19 +30,54 @@ there being no window to shift, and says so.
 A field carrying trailing batch axes beyond the grid's own — many tracers, or an ensemble, sharing one
 geometry — is evaluated for every element in one call: see [`interpolate!`](@ref) for the form that
 writes into a caller's buffer, which this one wraps.
+
+    interpolate(field, grid, points::AbstractVector; execution = SerialBackend(), …) -> values
+
+The value at every point of `points`, a vector of coordinates: a vector, or for a field carrying trailing
+batch axes a `(batch elements, points)` matrix. Off a rectilinear grid the neighbour search for all of
+them runs on one cell list over the grid, built once, unless `topology` is passed.
 """
 function interpolate end
 
 """
     interpolate!(out, field, grid, p; …) -> out
+    interpolate!(out, field, grid, points::AbstractVector; execution = SerialBackend(), …) -> out
 
 [`interpolate`](@ref) for a batched field, writing one value per batch element into `out`.
 
 The bracketing cell — or, off a rectilinear grid, the neighbour set and the least-squares fit — depends
 on the point and the geometry alone, so it is solved once and applied to every element. One call is
 therefore less work than `interpolate` per slice.
+
+At many points, `out[i]` (or `out[:, i]` for a batched field) receives `points[i]`'s values. The points
+run under `execution` on any host or process backend.
 """
 function interpolate! end
+
+# A point as the many-point forms take one: written any way a single point is, never a bare number, so a
+# vector of points and a single point written as a vector of numbers are told apart by element type.
+const _PointElement = Union{Tuple,NamedTuple,AbstractVector{<:Real}}
+
+# The batch length of `field` on `grid`, after checking `out` is shaped for `np` points: a vector for an
+# unbatched field, `(batch elements, points)` for a batched one.
+function _check_points_out(out::AbstractArray, field::AbstractArray, grid, np::Int)
+    msk = Grids.mask(grid)
+    n = length(msk)
+    (n > 0 && length(field) % n == 0) || throw(DimensionMismatch(
+        "grid has $n cells; a field of $(length(field)) is not a whole number of them",
+    ))
+    nb = length(field) ÷ n
+    want = ndims(field) > ndims(msk) ? (nb, np) : (np,)
+    size(out) == want || throw(DimensionMismatch(
+        "out is $(size(out)); $np points of a field carrying $nb batch elements take $want",
+    ))
+    return nb
+end
+
+# The output the allocating many-point form returns.
+_points_out(::Type{S}, field::AbstractArray, grid, np::Int) where {S} =
+    ndims(field) > ndims(Grids.mask(grid)) ?
+        Matrix{S}(undef, length(field) ÷ length(Grids.mask(grid)), np) : Vector{S}(undef, np)
 
 @inline function _interp_mask_error(policy)
     return throw(ArgumentError(

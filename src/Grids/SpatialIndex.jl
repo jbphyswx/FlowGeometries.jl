@@ -421,7 +421,7 @@ end
 index_within(index, grid, I, r) = index_within!(Int[], index, grid, I, r)
 
 """
-    _voronoi_tessellation(geometry, x, y) -> (areas, mesh::CellMesh)
+    _voronoi_tessellation(geometry, x, y[, period]) -> (areas, mesh::CellMesh)
 
 Extension hook: exact per-node Voronoi-cell area from a Delaunay/convex-hull tessellation of the node
 coordinates, together with the triangulation it came from. Dispatched on the geometry type (each needs
@@ -429,6 +429,11 @@ a different tessellation library): overridden for `CartesianGeometry` by a consu
 DelaunayTriangulation extension (load `using DelaunayTriangulation`, planar Voronoi clipped to the
 point set's convex hull) and for `SphericalGeometry` by a consumer Quickhull extension (load
 `using Quickhull`, spherical Voronoi from the dual of the 3D convex hull of the unit-sphere embedding).
+
+`period` holds each direction's wrap length, zero where it is bounded. Along a periodic Cartesian
+direction the domain repeats, so a cell at one face extends across it and the mesh holds the triangles
+that join nodes across it; the areas sum to the period's length there. A sphere's longitude wraps by
+construction and its tessellation reads no period.
 
 An [`Geometry.AbstractEllipsoidalGeometry`](@ref FlowGeometries.Geometry.AbstractEllipsoidalGeometry)
 has no such construction and says so: its cell areas are the caller's to supply.
@@ -439,6 +444,8 @@ function _voronoi_tessellation(::Geometry.AbstractCartesianGeometry, x::Abstract
         "(or supply `areas` explicitly to the `UnstructuredGrid` constructor).",
     ))
 end
+_voronoi_tessellation(geo::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector, period) =
+    _voronoi_tessellation(geo, x, y)
 function _voronoi_tessellation(::Geometry.AbstractSphericalGeometry, x::AbstractVector, y::AbstractVector)
     throw(ArgumentError(
         "Spherical Voronoi-cell areas for an arbitrary point set require Quickhull.jl — run " *
@@ -460,12 +467,14 @@ function _voronoi_tessellation(
 end
 
 """
-    _voronoi_areas(geometry, x, y) -> Vector{T}
+    _voronoi_areas(geometry, x, y[, period]) -> Vector{T}
 
 The areas alone, for a caller with no use for the cells — see [`_voronoi_tessellation`](@ref).
 """
 _voronoi_areas(geometry, x::AbstractVector, y::AbstractVector) =
     first(_voronoi_tessellation(geometry, x, y))
+_voronoi_areas(geometry, x::AbstractVector, y::AbstractVector, period) =
+    first(_voronoi_tessellation(geometry, x, y, period))
 
 """
     UnstructuredGrid(geometry, x, y, mask; k=6, radius=nothing, areas=nothing)
@@ -509,7 +518,8 @@ function UnstructuredGrid(
     areas_T, mesh = if areas !== nothing
         (_to_axis(T, areas), nothing)
     elseif N == 2
-        a, m = _voronoi_tessellation(geometry, c[1], c[2])
+        a, m = _voronoi_tessellation(geometry, c[1], c[2],
+                                     ntuple(d -> _is_periodic(per[d]) ? prd[d] : zero(T), Val(2)))
         (_to_axis(T, a), m)
     else
         throw(ArgumentError(

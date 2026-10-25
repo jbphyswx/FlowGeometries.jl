@@ -867,6 +867,11 @@ Test.@testset "Scattered interpolation with its buffers held allocates nothing" 
             Test.@test a == 0
         end
     end
+    # Many points with the topology held: one pair of `nearest` buffers per call, whatever the count.
+    let top = C.MetricTopology(gm; index = GD.cell_list(gm; ball = 0.3R)),
+        ps = [(6.0 * rand(), -1.2 + 2.4 * rand()) for _ in 1:200]
+        Test.@test _alloc(q_minterp!, zeros(20), f, gm, ps[1:20], top) == _alloc(q_minterp!, zeros(200), f, gm, ps, top)
+    end
 end
 
 Test.@testset "k-d-tree knn allocations do not scale with the node count" begin
