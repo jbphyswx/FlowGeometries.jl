@@ -40,7 +40,7 @@ Test.@testset "A periodic longitude axis wraps, a plain longitude axis is bounde
     # The same samples in a range are bounded unless asked.
     plain = range(0.0; step = dλ, length = nλ)
     Test.@test !FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat), 1)
-    Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat; periodic = true), 1)
+    Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(geom, plain, lat; topology = FG.Grids.Periodic()), 1)
     p = FG.Grids.coords(grid, 1, 1)
     Test.@test p.λ ≈ 0.0
     Test.@test p.φ ≈ -π / 4
@@ -106,7 +106,7 @@ Test.@testset "Cell measure is the exact integral of the metric over each cell" 
     # A spherical cell is `R²·Δλ·(sin φ₊ − sin φ₋)` between its faces, on a nonuniform grid.
     λ = collect(range(0.0; step = 2π / 12, length = 12))
     φ = cumsum([-1.0, 0.2, 0.5, 0.15, 0.4, 0.3])
-    g = FG.Grids.StructuredGrid(sgeo, λ, φ, trues(length(λ), length(φ)); periodic = true)
+    g = FG.Grids.StructuredGrid(sgeo, λ, φ, trues(length(λ), length(φ)); topology = FG.Grids.Periodic())
     λper = 2π
     fφ = bfaces(φ)
     ref = [Float64(big(R)^2 * cw(λ, i, λper) * band(fφ, j)) for i in eachindex(λ), j in eachindex(φ)]
@@ -114,14 +114,15 @@ Test.@testset "Cell measure is the exact integral of the metric over each cell" 
 
     # A shell cell is `Δλ·(sin φ₊ − sin φ₋)·(r₊³ − r₋³)/3`.
     r = collect(6.30e6:1.0e4:6.34e6)
-    g3 = FG.Grids.StructuredGrid(sgeo, λ, φ, r, trues(length(λ), length(φ), length(r)); periodic = true)
+    g3 = FG.Grids.StructuredGrid(sgeo, λ, φ, r, trues(length(λ), length(φ), length(r));
+                                 topology = FG.Grids.Periodic())
     fr = bfaces(r)
     ref3 = [Float64(cw(λ, i, λper) * band(fφ, j) * (fr[k + 1]^3 - fr[k]^3) / 3)
             for i in eachindex(λ), j in eachindex(φ), k in eachindex(r)]
     Test.@test FG.Grids.measure(g3) ≈ ref3 rtol = 1e-14
 
     # A degenerate angular axis contributes no differential, so the measure is the arc element.
-    zonal = FG.Grids.StructuredGrid(sgeo, λ, [0.4], trues(length(λ), 1); periodic = true)
+    zonal = FG.Grids.StructuredGrid(sgeo, λ, [0.4], trues(length(λ), 1); topology = FG.Grids.Periodic())
     Test.@test FG.Grids.measure(zonal) ≈ [sgeo.R * cos(0.4) * cw(λ, i, 2π) for i in eachindex(λ), _ in 1:1]
     merid = FG.Grids.StructuredGrid(sgeo, [0.3], φ, trues(1, length(φ)))
     Test.@test FG.Grids.measure(merid) ≈ [sgeo.R * cw(φ, j) for _ in 1:1, j in eachindex(φ)]
@@ -160,14 +161,14 @@ Test.@testset "Cell measure is the exact integral of the metric over each cell" 
     # gap undetermined, so the period is required at construction.
     xper = FG.Grids._cartesian_period(xnu)
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(
-        cgeo3, xnu, yy, zz, trues(length(xnu), length(yy), length(zz)); periodic = true)
+        cgeo3, xnu, yy, zz, trues(length(xnu), length(yy), length(zz)); topology = FG.Grids.Periodic())
     gp = FG.Grids.StructuredGrid(cgeo3, xnu, yy, zz, trues(length(xnu), length(yy), length(zz));
-                           periodic = true, period = xper)
+                           topology = FG.Grids.Periodic(), period = xper)
     Test.@test FG.Grids.measure(gp) ≈ [cw(xnu, i, xper) * cw(yy, j) * cw(zz, k)
                                  for i in eachindex(xnu), j in eachindex(yy), k in eachindex(zz)]
     # …and 2-D and 3-D agree on that wrapped width.
     g2p = FG.Grids.StructuredGrid(cgeo, xnu, yy, trues(length(xnu), length(yy));
-                            periodic = true, period = xper)
+                            topology = FG.Grids.Periodic(), period = xper)
     Test.@test FG.Grids.measure(g2p)[end, 1] / cw(yy, 1) ≈ FG.Grids.measure(gp)[end, 1, 1] / (cw(yy, 1) * cw(zz, 1))
 end
 
@@ -175,7 +176,7 @@ Test.@testset "A grid on a quadrature sampling is measured by its weights" begin
     SS = FG.SphericalSampling
     R = 6.371e6
     geo = FG.Geometry.SphericalGeometry(R)
-    for (s, n, degree) in ((SS.GaussLegendreSampling(), 24, 47), (SS.ClenshawCurtisSampling(), 24, 23),
+    for (s, n, degree) in ((SS.GaussLegendreSampling(), 24, 47), (SS.Fejer1Sampling(), 24, 23),
                            (SS.DriscollHealySampling(), 24, 23), (SS.DriscollHealyEqualSampling(), 24, 23))
         g = FG.Connectivity.structured_grid(s, n; geometry = geo)
         q = SS.spherical_quadrature(s, n)
@@ -363,14 +364,14 @@ Test.@testset "An all-active mask carries no per-cell storage" begin
     Test.@test count(m) == 35 && all(m) && any(m)
     Test.@test collect(m) == trues(7, 5)
     Test.@test_throws BoundsError m[8, 1]
-    g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 33)
+    g = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 33)
     Test.@test all(FG.Grids.isactive(g, i, j) for i in 1:size(g, 1), j in 1:size(g, 2))
     # It is smaller than a BitArray.
     Test.@test Base.summarysize(FG.Grids.AllActive((4000, 2000))) < Base.summarysize(trues(4000, 2000))
     # An explicit mask still overrides it and still masks.
-    mm = trues(FG.SphericalSampling.axes_lengths(FG.SphericalSampling.ClenshawCurtisSampling(), 9).nlon, 9)
+    mm = trues(FG.SphericalSampling.axes_lengths(FG.SphericalSampling.Fejer1Sampling(), 9).nlon, 9)
     mm[2, 3] = false
-    gm = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 9; mask = mm)
+    gm = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 9; mask = mm)
     Test.@test !FG.Grids.isactive(gm, 2, 3)
 end
 
@@ -390,7 +391,7 @@ Test.@testset "A periodic axis wraps whichever way it is stored, and states its 
     for x in (collect(asc), reverse(collect(asc)))
         Test.@test !FG.Grids.isperiodic(FG.Grids.StructuredGrid(sg, x, [0.0, 0.1], trues(n, 2)), 1)
         Test.@test FG.Grids.isperiodic(FG.Grids.StructuredGrid(sg, x, [0.0, 0.1], trues(n, 2);
-                                                               periodic = true), 1)
+                                                               topology = FG.Grids.Periodic()), 1)
     end
     # The measure follows the periodicity, so a descending circle tiles as an ascending one does,
     # seam cell included, and a vector declared periodic tiles it as the periodic axis does.
@@ -398,12 +399,12 @@ Test.@testset "A periodic axis wraps whichever way it is stored, and states its 
     ma = FG.Grids.measure(FG.Grids.StructuredGrid(sg, asc, φ, FG.Grids.AllActive((n, 5))))
     md = FG.Grids.measure(FG.Grids.StructuredGrid(sg, desc, φ, FG.Grids.AllActive((n, 5))))
     mv = FG.Grids.measure(FG.Grids.StructuredGrid(sg, reverse(collect(asc)), φ,
-                                                  FG.Grids.AllActive((n, 5)); periodic = true))
+                                                  FG.Grids.AllActive((n, 5)); topology = FG.Grids.Periodic()))
     Test.@test sum(ma) ≈ sum(md) rtol = 1e-14
     Test.@test sum(ma) ≈ sum(mv) rtol = 1e-14
     # A periodic axis declared bounded, a longitude axis of another period, or a periodic axis given
     # another period raises.
-    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; periodic = false)
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; topology = FG.Grids.Bounded())
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, FG.Axes.PeriodicAxis(0.0, π, n), φ)
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; period = π)
     # A Cartesian periodic axis wraps at its own period.
@@ -531,7 +532,7 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
 
     # Periodicity is per-direction in N-D too.
     gp = GR.CurvilinearGrid(geo, X3, Y3, Z3, vol, trues(4, 3, 2);
-                            periodic = (true, false, false), period = (4.0, 0.0, 0.0))
+                            topology = GR.Periodic(), period = (4.0, 0.0, 0.0))
     Test.@test GR.isperiodic(gp, 1) && !GR.isperiodic(gp, 2)
     Test.@test GR.period(gp, 1) == 4.0
     Test.@test C.nneighbors(gp, 1, 2, 1) == 5
@@ -557,26 +558,30 @@ Test.@testset "Curvilinear and node grids work in any number of dimensions" begi
     bruteknn(pts, i, kk) = sort([t[2] for t in sort(
         [(sqrt(sum((pts[q][i] - pts[q][j])^2 for q in eachindex(pts))), j)
          for j in 1:nn if j != i])[1:kk]])
-    nbrs3, ptr3 = GR._build_kdtree_neighbors(geo, (px, py, pz); k = 4)
+    nbrs3, ptr3 = GR._build_kdtree_neighbors(Int32, geo, (px, py, pz); k = 4)
+    Test.@test eltype(nbrs3) === Int32 && eltype(ptr3) === Int
     Test.@test all(sort(nbrs3[ptr3[i]:(ptr3[i + 1] - 1)]) == bruteknn((px, py, pz), i, 4)
                    for i in 1:nn)
-    nbrs4, ptr4 = GR._build_kdtree_neighbors(geo, (px, py, pz, pw); k = 3)
+    nbrs4, ptr4 = GR._build_kdtree_neighbors(Int, geo, (px, py, pz, pw); k = 3)
+    Test.@test eltype(nbrs4) === Int
     Test.@test all(sort(nbrs4[ptr4[i]:(ptr4[i + 1] - 1)]) == bruteknn((px, py, pz, pw), i, 3)
                    for i in 1:nn)
     # Periodic ghost images are placed per direction, so a face node finds the opposite face.
     fx, fy, fz = [0.02, 0.98, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
-    nbw, ptw = GR._build_kdtree_neighbors(geo, (fx, fy, fz); k = 1,
+    nbw, ptw = GR._build_kdtree_neighbors(Int32, geo, (fx, fy, fz); k = 1,
                                           periodic = (true, false, false),
                                           period = (1.0, 0.0, 0.0))
     Test.@test nbw[ptw[1]] == 2
-    nbb, ptb = GR._build_kdtree_neighbors(geo, (fx, fy, fz); k = 1)
+    nbb, ptb = GR._build_kdtree_neighbors(Int32, geo, (fx, fy, fz); k = 1)
     Test.@test nbb[ptb[1]] == 3
     # `(λ, φ, r)` embeds at its own radius, so a radius query there is a true chord.
     sph1 = FG.Geometry.SphericalGeometry(1.0)
     sλ, sφ, sr = [0.0, 0.0], [0.0, 0.0], [1.0, 1.5]
-    Test.@test GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr); k = 1, radius = 0.6)[2][2] == 2
-    Test.@test GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr); k = 1, radius = 0.4)[2][2] == 1
-    Test.@test_throws ArgumentError GR._build_kdtree_neighbors(sph1, (sλ, sφ, sr, sr); k = 1)
+    Test.@test GR._build_kdtree_neighbors(Int32, sph1, (sλ, sφ, sr); k = 1, radius = 0.6)[2][2] == 2
+    Test.@test GR._build_kdtree_neighbors(Int32, sph1, (sλ, sφ, sr); k = 1, radius = 0.4)[2][2] == 1
+    Test.@test_throws ArgumentError GR._build_kdtree_neighbors(Int32, sph1, (sλ, sφ, sr, sr); k = 1)
+    # Ids beyond the index type raise.
+    Test.@test_throws ArgumentError GR._build_kdtree_neighbors(Int8, geo, (rand(200), rand(200)); k = 2)
     Test.@test_throws ArgumentError GR.UnstructuredGrid(geo, (px, py, pz), trues(nn); k = 4)
 end
 
@@ -616,9 +621,18 @@ Test.@testset "Grids and connectivity work in any number of dimensions" begin
     Test.@test FG.Grids.periodic_flags(gp) == (true, false)
     Test.@test FG.Grids.period(gp, 1) ≈ 4.0            # uniform closure: n·|Δ|
     Test.@test FG.Grids.period(gp, 2) == 0.0           # bounded: no period
-    # `periodic = true` still means "direction 1 wraps".
-    gq = FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0; periodic = true)
-    Test.@test FG.Grids.isperiodic(gq, 1) && !FG.Grids.isperiodic(gq, 2)
+    # A lone tag is direction 1's, and a short tuple names the leading directions.
+    gq = FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0; topology = FG.Grids.Periodic())
+    Test.@test FG.Grids.topology(gq) === (FG.Grids.Periodic(), FG.Grids.Bounded())
+    g3q = FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0, 0.0:1.0:2.0;
+                                  topology = (FG.Grids.Bounded(), FG.Grids.Periodic()))
+    Test.@test FG.Grids.topology(g3q) === (FG.Grids.Bounded(), FG.Grids.Periodic(), FG.Grids.Bounded())
+    # Anything but tags, or more tags than directions, raises.
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0; topology = true)
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0;
+                                                            topology = (true, false))
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0;
+                                                            topology = ntuple(_ -> FG.Grids.Periodic(), 3))
     # A mask may be given positionally or by keyword, but not both.
     m = trues(4, 4); m[2, 2] = false
     Test.@test !FG.Grids.isactive(FG.Grids.StructuredGrid(geo, 0.0:1.0:3.0, 0.0:1.0:3.0, m), 2, 2)
@@ -661,7 +675,7 @@ Test.@testset "Mask topology: interior, boundary, components and holes" begin
 
     # Wrapping removes the edges, so a region that only touched one becomes enclosed.
     gp = FG.Grids.StructuredGrid(geo, 0.0:1.0:8.0, 0.0:1.0:8.0, m;
-                           periodic = (true, true), period = (9.0, 9.0))
+                           topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (9.0, 9.0))
     Test.@test C.count_holes(gp) == 2
     # Two separated blocks are two holes.
     m2 = trues(11, 11); m2[3:4, 3:4] .= false; m2[8:9, 8:9] .= false
@@ -1033,25 +1047,81 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
         end
     end
 
-    Test.@testset "A Yin–Yang cell's area is its row's, and the panels overlap" begin
-        for (nlon, nlat) in ((8, 6), (16, 12), (48, 32))
+    Test.@testset "A Yin–Yang cell's measure is its area less half its overlap" begin
+        # Whether a point given in one panel's frame lies in the other panel: the Kageyama–Sato map
+        # `(x, y, z) ↦ (−x, z, y)` to the other frame, and that panel's box there.
+        function in_other(λ, φ)
+            x, y, z = cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ)
+            return abs(atan(z, -x)) ≤ 3π / 4 && abs(asin(y)) ≤ π / 4
+        end
+        # The overlap of `[λa, λb] × [φa, φb]` on the unit sphere by brute force: the midpoint rule over
+        # longitude, and at each longitude the exact `∫cos φ dφ` over the stretches of latitude inside
+        # the other panel, their ends found by bisection.
+        function overlap_by_scan(λa, λb, φa, φb; nλ = 2000, nφ = 256)
+            edge(λ, lo, hi) = (for _ in 1:60
+                                   mid = (lo + hi) / 2
+                                   in_other(λ, mid) == in_other(λ, lo) ? (lo = mid) : (hi = mid)
+                               end; (lo + hi) / 2)
+            acc = 0.0
+            hλ = (λb - λa) / nλ
+            for a in 1:nλ
+                λ = λa + (a - 0.5) * hλ
+                for b in 1:nφ
+                    lo, hi = φa + (b - 1) * (φb - φa) / nφ, φa + b * (φb - φa) / nφ
+                    il, ih = in_other(λ, lo), in_other(λ, hi)
+                    il && ih && (acc += hλ * (sin(hi) - sin(lo)))
+                    il != ih && (c = edge(λ, lo, hi); acc += hλ * (il ? sin(c) - sin(lo) : sin(hi) - sin(c)))
+                end
+            end
+            return acc
+        end
+
+        for (nlon, nlat) in ((8, 6), (16, 12), (48, 32), (191, 127))
             g = G.YinYangGrid(geo, nlon, nlat)
             m = G.measure(g)
-            Δλ = (3π / 2) / nlon
-            Δφ = (π / 2) / nlat
-            # An independent statement: R²Δλ(sin(φ+Δφ/2) − sin(φ−Δφ/2)).
-            for j in (1, nlat ÷ 2, nlat), i in (1, nlon)
-                φ = -π / 4 + (j - 0.5) * Δφ
-                want = R^2 * Δλ * (sin(φ + Δφ / 2) - sin(φ - Δφ / 2))
-                Test.@test m[G.cell_id(g, 1, i, j)] ≈ want rtol = 1e-13
-                Test.@test m[G.cell_id(g, 2, i, j)] ≈ want rtol = 1e-13
-            end
-            # Independent of longitude.
-            for j in (1, nlat)
-                Test.@test allequal(m[G.cell_id(g, 1, i, j)] for i in 1:nlon)
-            end
-            Test.@test sum(m) ≈ sum(collect(m)) rtol = 1e-13
+            # The panels' union is the sphere, counted once, and the sum agrees with the cells added up.
+            Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-14
+            Test.@test sum(collect(m)) ≈ 4π * R^2 rtol = 1e-13
+            Δλ, Δφ = (3π / 2) / nlon, (π / 2) / nlat
+            area(j) = R^2 * Δλ * (sin(-π / 4 + j * Δφ) - sin(-π / 4 + (j - 1) * Δφ))
+            Test.@test all(m[G.cell_id(g, 1, i, j)] === m[G.cell_id(g, 2, i, j)] for i in 1:nlon, j in 1:nlat)
+            Test.@test all(0 < m[G.cell_id(g, 1, i, j)] ≤ area(j) * (1 + 1e-14) for i in 1:nlon, j in 1:nlat)
         end
+
+        # Cell by cell: a panel corner, the middle of an edge, two cells the overlap's edge crosses, one
+        # in the top row, and one in the middle the other panel does not reach. Against the scan, which
+        # resolves a sliver of overlap to about `1e-6` of the cell at this width; and the closed form at
+        # each width against itself at 256 bits on the same cell edges.
+        let g16 = G.YinYangGrid(geo, 16, 12), dλ = (3π / 2) / 16, dφ = (π / 2) / 12
+            for (i, j) in ((1, 1), (1, 6), (2, 1), (1, 3), (11, 12), (8, 6))
+                λa, φa = -3π / 4 + (i - 1) * dλ, -π / 4 + (j - 1) * dφ
+                cell = (λa, λa + dλ, φa, φa + dφ)
+                a = dλ * (sin(φa + dφ) - sin(φa))
+                got = G.measure(g16, G.cell_id(g16, 1, i, j)) / R^2
+                Test.@test abs(got - (a - overlap_by_scan(cell...; nλ = 4000) / 2)) < 1e-5 * a
+                for T in (Float64, Float32)
+                    Test.@test abs(G._yin_yang_overlap(T.(cell)...) - G._yin_yang_overlap(big.(T.(cell))...)) <
+                               8eps(T) * a
+                end
+            end
+            Test.@test G.measure(g16, G.cell_id(g16, 1, 8, 6)) ≈ R^2 * dλ * sin(dφ) rtol = 1e-14
+        end
+
+        # A Float32 grid's measures sum to the sphere too.
+        let g32 = G.YinYangGrid(GE.SphericalGeometry(Float32(R)), 48, 32)
+            Test.@test sum(collect(G.measure(g32))) ≈ 4π * Float32(R)^2 rtol = 64eps(Float32)
+        end
+
+        # `integrate` counts every point of the sphere once: exact for 1, and converging at second order
+        # on `∫ (1 + x + z² + xy) dA = 4πR²(1 + 1/3)` in the global frame.
+        f(λ, φ) = 1 + cos(φ) * cos(λ) + sin(φ)^2 + cos(φ)^2 * cos(λ) * sin(λ)
+        errs = map(((24, 16), (48, 32), (96, 64))) do (nl, nt)
+            gg = G.YinYangGrid(geo, nl, nt)
+            Test.@test G.integrate(ones(length(gg)), gg) ≈ 4π * R^2 rtol = 1e-13
+            fld = [f(G.coords(gg, k)...) for k in 1:length(gg)]
+            abs(G.integrate(fld, gg) / (4π * R^2 * 4 / 3) - 1)
+        end
+        Test.@test errs[1] / errs[2] > 3 && errs[2] / errs[3] > 3
     end
 
     Test.@testset "Yin–Yang panels are not cross-linked" begin
@@ -1319,7 +1389,7 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
     let sph = GE.SphericalGeometry(6.371e6),
         λ = collect(range(0, 2π; length = 13)[1:12]),
         φ = collect(range(-1.2, 1.2; length = 9))
-        sp = GD.StaggeredGrid(sph, λ, φ; periodic = true)
+        sp = GD.StaggeredGrid(sph, λ, φ; topology = GD.Periodic())
         Test.@test GD.size_tuple(GD.grid_at(sp, (F, C))) == (12, 9)   # wraps: 12 faces, not 13
         Test.@test GD.size_tuple(GD.grid_at(sp, (C, F))) == (12, 10)
         # The staggered grids keep the mesh's topology, so a query on one wraps as the mesh does.
@@ -1443,7 +1513,7 @@ Test.@testset "The domain length is what the cells cover" begin
     # cells: on a Cartesian grid its total is the product of the domain lengths.
     for a in (0.0:0.5:5.0, [0.0, 1.0, 3.0, 6.0, 10.0, 15.0], collect(range(6.0, 0.0; length = 9)))
         f = FG.Discretization.faces(collect(Float64, a))
-        g = GD.StructuredGrid(cart, a, 0.0:1.0:4.0; periodic = (false, true), period = (0.0, 7.5))
+        g = GD.StructuredGrid(cart, a, 0.0:1.0:4.0; topology = (GD.Bounded(), GD.Periodic()), period = (0.0, 7.5))
         Test.@test GD.domain_length(g, 1) ≈ abs(f[end] - f[1]) rtol = 1e-14
         Test.@test GD.domain_length(g, 2) == 7.5
         Test.@test sum(GD.measure(g)) ≈ GD.domain_length(g, 1) * GD.domain_length(g, 2) rtol = 1e-14
@@ -1487,7 +1557,7 @@ Test.@testset "The domain length is what the cells cover" begin
     Test.@test GD.node_counts(cl) == (round(Int, ex * ρ), round(Int, ey * ρ))
     Test.@test GD.domain_length(cl, 1) ≈ ex * GD.node_counts(cl)[1] / (GD.node_counts(cl)[1] - 1)
     # A wrapping direction takes its period, also in the density.
-    cp = GD.UnstructuredGrid(cart, (xr, yr), ones(200); periodic = (true, false), period = (5.0, 0.0))
+    cp = GD.UnstructuredGrid(cart, (xr, yr), ones(200); topology = GD.Periodic(), period = (5.0, 0.0))
     Test.@test GD.domain_length(cp, 1) == 5.0
     Test.@test GD.node_counts(cp)[2] == round(Int, ey * sqrt(200 / (5.0 * ey)))
 

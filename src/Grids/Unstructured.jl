@@ -3,6 +3,19 @@
 # ---------------------------------------------------------------------------
 
 """
+    _check_ids(I, n)
+
+Throw unless the integer type `I` holds every id up to `n`. A builder storing node or cell ids as `I`
+calls it before any pass, so an overflow raises here and never inside a kernel.
+"""
+@inline function _check_ids(::Type{I}, n::Integer) where {I<:Integer}
+    n ≤ typemax(I) || throw(ArgumentError(
+        "ids up to $n exceed `typemax($I)`; build with a wider index type, such as `Int`",
+    ))
+    return nothing
+end
+
+"""
     CellMesh(cell_ptr, cell_nodes, node_ptr, node_cells)
     CellMesh(cell_ptr, cell_nodes, nnodes)
 
@@ -35,11 +48,13 @@ function CellMesh(cell_ptr::AbstractVector{<:Integer}, cell_nodes::AbstractVecto
     nc ≥ 0 || throw(ArgumentError("cell_ptr must have length ncells+1; got $(length(cell_ptr))"))
     n = Int(nnodes)
     I = eltype(cell_nodes)
-    # Count, scan, place: the transpose of a CSR without materializing a pair per entry.
-    node_ptr = similar(cell_ptr, n + 1)
+    # Count, scan, place: the transpose of a CSR without materializing a pair per entry. The passes walk
+    # the cells on the host, and the transpose is held where the cells are.
+    cp, cn = Axes._host_array(cell_ptr), Axes._host_array(cell_nodes)
+    node_ptr = similar(cp, n + 1)
     fill!(node_ptr, 0)
-    @inbounds for k in eachindex(cell_nodes)
-        v = Int(cell_nodes[k])
+    @inbounds for k in eachindex(cn)
+        v = Int(cn[k])
         1 ≤ v ≤ n || throw(ArgumentError("cell_nodes holds node $v, outside 1:$n"))
         node_ptr[v + 1] += 1
     end
@@ -47,16 +62,16 @@ function CellMesh(cell_ptr::AbstractVector{<:Integer}, cell_nodes::AbstractVecto
     @inbounds for i in 1:n
         node_ptr[i + 1] += node_ptr[i]
     end
-    node_cells = similar(cell_nodes, Int(node_ptr[end]) - 1)
+    node_cells = similar(cn, Int(node_ptr[end]) - 1)
     cursor = copy(node_ptr)
     @inbounds for c in 1:nc
-        for k in cell_ptr[c]:(cell_ptr[c + 1] - 1)
-            v = Int(cell_nodes[k])
+        for k in cp[c]:(cp[c + 1] - 1)
+            v = Int(cn[k])
             node_cells[cursor[v]] = I(c)
             cursor[v] += 1
         end
     end
-    return CellMesh(cell_ptr, cell_nodes, node_ptr, node_cells)
+    return CellMesh(cell_ptr, cell_nodes, Axes._like(cell_ptr, node_ptr), Axes._like(cell_nodes, node_cells))
 end
 
 """
@@ -133,18 +148,20 @@ struct UnstructuredGrid{
     mesh::MH           # the cells, where a triangulation produced them; see `CellMesh`
     bounds::NTuple{N,Tuple{T,T}}   # (lo, hi) of each coordinate vector, taken at construction
     total_measure::T   # Σ measure, taken at construction
+    node_counts::NTuple{N,Int}     # see `node_counts`, taken at construction
 end
 
-# `bounds` and `total_measure` travel as values: a rebuild serves a storage change, which leaves every
-# coordinate and the measure unchanged.
+# `bounds`, `total_measure` and `node_counts` travel as values: a rebuild serves a storage change, which
+# leaves every coordinate and the measure unchanged.
 @inline _from_fields(
     ::Type{<:UnstructuredGrid},
     geometry::G, coordinates::C, measure::VA, mask::B, neighbor_nbrs::VN, neighbor_ptr::VP,
     topology::TP, period::NTuple{N,T}, mesh::MH, bounds::NTuple{N,Tuple{T,T}}, total_measure::T,
+    node_counts::NTuple{N,Int},
 ) where {T,G<:Geometry.AbstractGeometry{T},N,C,VA,B,TP,VN,VP,MH} =
     UnstructuredGrid{T,G,N,C,VA,B,TP,VN,VP,MH}(geometry, coordinates, measure, mask, neighbor_nbrs,
                                                neighbor_ptr, topology, period, mesh, bounds,
-                                               total_measure)
+                                               total_measure, node_counts)
 
 @inline bounds(grid::UnstructuredGrid, d::Integer) =
     @inbounds getfield(grid, :bounds)[_checked_direction(getfield(grid, :bounds), d)]
@@ -278,13 +295,13 @@ function reorder(grid::UnstructuredGrid{T,G,N}, perm::AbstractVector{<:Integer})
         CellMesh(mh.cell_ptr, map(v -> eltype(mh.cell_nodes)(inv[Int(v)]), mh.cell_nodes), n)
 
     return UnstructuredGrid(grid_geometry(grid), newc, newm, newmask, newnbrs, newptr;
-                            periodic = topology(grid),
+                            topology = topology(grid),
                             period = ntuple(d -> period(grid, d), Val(N)), mesh = newmesh)
 end
 
 """
-    UnstructuredGrid(geometry, coords::Tuple, measure, mask[, neighbor_nbrs, neighbor_ptr]; periodic, period)
-    UnstructuredGrid(geometry, x, y, measure, mask[, neighbor_nbrs, neighbor_ptr]; periodic, period)
+    UnstructuredGrid(geometry, coords::Tuple, measure, mask[, neighbor_nbrs, neighbor_ptr]; topology, period)
+    UnstructuredGrid(geometry, x, y, measure, mask[, neighbor_nbrs, neighbor_ptr]; topology, period)
 
 Build a node grid in **any** number of directions from one coordinate vector per direction and CSR
 adjacency. Coordinates come as a tuple; the two-direction case may pass `x, y` positionally.
@@ -294,17 +311,17 @@ a scattered-point spectral method that never queries it. A real-space neighbourh
 adjacency: build it (e.g. through the k-d-tree constructor below) and pass it in, or query by distance
 with `Connectivity.neighbors_within`, which reads coordinates.
 
-`periodic` declares that the enclosing domain wraps in a direction, and `period` gives the wrap
-length there. A scattered point set carries no axis to infer this from, so both are explicit —
-except on a sphere, where longitude wraps at 2π by construction and is the default. See
-[`isperiodic`](@ref) and [`period`](@ref).
+`topology` declares per direction whether the enclosing domain wraps, as for
+[`StructuredGrid`](@ref), and `period` gives the wrap length there. A scattered point set carries no
+axis to infer this from, so both are explicit — except on a sphere, where longitude wraps at 2π by
+construction and is the default. See [`isperiodic`](@ref) and [`period`](@ref).
 """
 function UnstructuredGrid(
     geometry::G, coords::NTuple{N,AbstractVector}, measure::AbstractVector,
     mask::AbstractVector{Bool} = AllActive((length(first(coords)),)), nbrs = nothing, ptr = nothing;
-    periodic = nothing, period = nothing, mesh::Union{Nothing,CellMesh} = nothing,
+    topology = nothing, period = nothing, mesh::Union{Nothing,CellMesh} = nothing,
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
-    c = ntuple(d -> _to_axis(T, coords[d]), N)
+    c = ntuple(d -> _to_axis(T, coords[d]), Val(N))
     n = length(c[1])
     all(v -> length(v) == n, c) || throw(ArgumentError(
         "coordinate vectors must have the same length; got $(map(length, c))",
@@ -315,18 +332,19 @@ function UnstructuredGrid(
     # constant vector in one number. `neighbors` reads it through the same `ptr[i]:ptr[i+1]-1` slice
     # and gets an empty range.
     p = ptr === nothing ? Axes.ConstantVector(1, n + 1) : ptr
-    nb = ptr === nothing ? Int[] : nbrs
+    nb = ptr === nothing ? Int32[] : nbrs
     length(p) == n + 1 || throw(ArgumentError(
         "neighbor_ptr must have length Nnodes+1 = $(n + 1); got $(length(p))",
     ))
-    per, prd = _node_periodicity(geometry, Val(N), periodic, period)
+    per, prd = _node_periodicity(geometry, Val(N), topology, period)
     m = _to_axis(T, measure)
     mesh === nothing || length(mesh.node_ptr) == n + 1 || throw(ArgumentError(
         "the mesh is over $(length(mesh.node_ptr) - 1) nodes and the grid has $n",
     ))
+    bnds = map(_lohi, c)
     return UnstructuredGrid{
         T, G, N, typeof(c), typeof(m), typeof(mask), typeof(per), typeof(nb), typeof(p), typeof(mesh),
-    }(geometry, c, m, mask, nb, p, per, prd, mesh, map(_lohi, c), T(sum(m)))
+    }(geometry, c, m, mask, nb, p, per, prd, mesh, bnds, T(sum(m)), _node_counts(c, per, prd, bnds))
 end
 
 # Two-direction convenience forms. Node coordinates are all `AbstractVector`s, so — unlike a
@@ -348,19 +366,18 @@ UnstructuredGrid(
 # intrinsic period, so wrapping there is opt-in and the length must be given.
 function _node_periodicity(
     ::Union{Geometry.AbstractSphericalGeometry{T},Geometry.AbstractEllipsoidalGeometry{T}},
-    ::Val{N}, periodic, period,
+    ::Val{N}, topo, period,
 ) where {N, T<:AbstractFloat}
-    per = _as_topology(Val(N), periodic === nothing ?
-        ntuple(d -> d == 1, Val(N)) : periodic)
+    per = _as_topology(Val(N), topo === nothing ? Periodic() : topo)
     prd = period === nothing ? ntuple(d -> d == 1 ? T(2π) : zero(T), Val(N)) :
         _node_period_tuple(Val(N), T, period, per)
     return per, prd
 end
 
 function _node_periodicity(
-    ::Geometry.AbstractCartesianGeometry{T}, ::Val{N}, periodic, period,
+    ::Geometry.AbstractCartesianGeometry{T}, ::Val{N}, topo, period,
 ) where {N, T<:AbstractFloat}
-    per = _as_topology(Val(N), periodic === nothing ? ntuple(_ -> false, Val(N)) : periodic)
+    per = _as_topology(Val(N), topo === nothing ? Bounded() : topo)
     any(_is_periodic, per) || return per, ntuple(_ -> zero(T), Val(N))
     period === nothing && throw(ArgumentError(
         "a periodic Cartesian node grid needs an explicit `period` (the wrap length per direction): " *
@@ -393,12 +410,16 @@ a lattice, and each count is that direction's number of distinct values. Otherwi
 a uniform density of the nodes gives over the direction's span, its [`period`](@ref) where it wraps and
 its [`extent`](@ref) where not; a direction of zero span holds one.
 """
-function node_counts(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
-    x = coordinates(grid)
-    n = length(first(x))
-    distinct = map(v -> length(unique(v)), x)
+@inline node_counts(grid::UnstructuredGrid) = getfield(grid, :node_counts)
+
+function _node_counts(
+    c::NTuple{N,AbstractVector{T}}, per::NTuple{N,AbstractTopology}, prd::NTuple{N,T},
+    bnds::NTuple{N,Tuple{T,T}},
+) where {N,T}
+    n = length(first(c))
+    distinct = map(v -> length(unique(v)), c)
     prod(distinct) == n && return distinct
-    spans = ntuple(d -> isperiodic(grid, d) ? period(grid, d) : extent(grid, d), Val(N))
+    spans = ntuple(d -> _is_periodic(per[d]) ? prd[d] : bnds[d][2] - bnds[d][1], Val(N))
     ρ = (n / prod(s -> s > 0 ? s : one(T), spans))^(1 / count(>(0), spans))
     return map(s -> s > 0 ? max(2, round(Int, s * ρ)) : 1, spans)
 end
@@ -420,16 +441,16 @@ end
 # dispatched on the geometry type since each needs a different tessellation library).
 
 """
-    _build_kdtree_neighbors(geometry, coords::Tuple; k=6, radius=nothing) -> (nbrs, ptr)
+    _build_kdtree_neighbors(I, geometry, coords::Tuple; k=6, radius=nothing) -> (nbrs, ptr)
 
-Extension hook: build CSR neighbor adjacency via a k-d tree. Overridden by
-a consumer NearestNeighbors extension (load `using NearestNeighbors`). `radius`, if given,
-switches to an all-neighbors-within-`radius` query (mutually exclusive with `k`); `radius` is in the
-grid's physical distance units — `Geometry.distance`, so meters for `SphericalGeometry` and the
-geometry's own units for `CartesianGeometry`.
+Extension hook: build CSR neighbor adjacency via a k-d tree, the ids of integer type `I` and the
+offsets `Int`. Overridden by a consumer NearestNeighbors extension (load `using NearestNeighbors`).
+`radius`, if given, switches to an all-neighbors-within-`radius` query (mutually exclusive with `k`);
+`radius` is in the grid's physical distance units — `Geometry.distance`, so meters for
+`SphericalGeometry` and the geometry's own units for `CartesianGeometry`.
 """
 function _build_kdtree_neighbors(
-    geometry::Geometry.AbstractGeometry, coords::NTuple{D,AbstractVector}; _...,
+    ::Type{<:Integer}, geometry::Geometry.AbstractGeometry, coords::NTuple{D,AbstractVector}; _...,
 ) where {D}
     throw(ArgumentError(
         "k-d-tree neighbor construction requires NearestNeighbors.jl — run `using NearestNeighbors` " *

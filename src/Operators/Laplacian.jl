@@ -17,9 +17,10 @@
 The constants `L` annihilates, one per closed component: a connected component of the graph of faces of
 nonzero coefficient on which `L·1 = 0`. Component `k`'s cells are the linear indices
 `perm[offsets[k]:offsets[k+1]-1]` and `totals[k]` its measure; `full` marks one closed component holding
-every active cell, which needs no `perm`.
+every active cell, which needs no `perm`. Kernels read `perm`, in the execution backend's memory;
+`offsets` and `totals` stay in host memory, read by the loop over components.
 """
-struct ComponentNullspace{P<:AbstractVector{<:Integer},O<:Tuple{Vararg{Int}},V<:Tuple{Vararg{AbstractFloat}}}
+struct ComponentNullspace{P<:AbstractVector{<:Integer},O<:AbstractVector{Int},V<:AbstractVector{<:AbstractFloat}}
     full::Bool
     perm::P
     offsets::O
@@ -76,9 +77,12 @@ function laplacian_coefficients(fm::FaceMetrics{N,T}) where {N,T}
     return LaplacianCoefficients(fm.grid, coef, _measure_array(fm.grid, Grids.mask(fm.grid), T))
 end
 
-@inline _quotient(a::AbstractArray, g::AbstractArray) = a ./ g
+# `A/g` per face, and zero on a face of no area, whose gap can be zero too: a cell centred on a pole
+# meets its face at the pole.
+@inline _conductance(a, g) = iszero(a) ? zero(a / one(g)) : a / g
+@inline _quotient(a::AbstractArray, g::AbstractArray) = _conductance.(a, g)
 @inline _quotient(a::Grids.SeparableMeasure, g::Grids.SeparableMeasure) =
-    Grids.SeparableMeasure(map((x, y) -> x ./ y, a.factors, g.factors))
+    Grids.SeparableMeasure(map((x, y) -> _conductance.(x, y), a.factors, g.factors))
 
 @inline _measure_array(grid, ::Grids.AllActive, ::Type{T}) where {T} = _measure_of(Grids.measure(grid), T)
 function _measure_array(grid, msk, ::Type{T}) where {T}
@@ -131,10 +135,13 @@ function _nullspace(grid, coef, diag, meas, v::Val{N}, ::Type{T}) where {N,T}
         worst[k] = max(worst[k], abs(Lone[I]))
         counts[k] += 1
     end
-    closed = [iszero(scale) || worst[k] ≤ sqrt(eps(T)) * scale for k in 1:ncomp]
+    closed = falses(ncomp)
+    @inbounds for k in 1:ncomp
+        closed[k] = iszero(scale) || worst[k] ≤ sqrt(eps(T)) * scale
+    end
     K = count(closed)
-    K == 0 && return ComponentNullspace(false, Int[], (1,), ())
-    ncomp == 1 && return ComponentNullspace(true, Int[], (1,), (T(sum(meas)),))
+    K == 0 && return ComponentNullspace(false, Int[], [1], T[])
+    ncomp == 1 && return ComponentNullspace(true, Int[], [1], [T(sum(meas))])
     slot = zeros(Int, ncomp)
     offsets = ones(Int, K + 1)
     s = 0
@@ -155,7 +162,7 @@ function _nullspace(grid, coef, diag, meas, v::Val{N}, ::Type{T}) where {N,T}
         next[s] += 1
         totals[s] += T(meas[I])
     end
-    return ComponentNullspace(false, perm, Tuple(offsets), Tuple(totals))
+    return ComponentNullspace(false, perm, offsets, totals)
 end
 
 # Each active cell's component of the coupling graph, joined across faces of nonzero coefficient.
@@ -360,39 +367,26 @@ end
 # ---- the Galerkin hierarchy -----------------------------------------------------
 
 """
-    coarsen(grid; pinned = false) -> grid or nothing
+    coarsen(grid; pinned = false) -> grid
 
 The next grid down: along every direction of at least four cells, coarse cell `i` covers fine cells
 `2i − 1` and `2i` (cell `n` alone for the last of an odd count), its centre their mean; a shorter direction
-keeps its cells. A coarse cell is active where any fine cell it covers is, or with `pinned = true` where
-every one is: on an operator whose inactive cells hold zero through the coefficients that reach them, a
-coarse level then keeps that hold as a coefficient into an inactive coarse cell. `nothing` once no
-direction has four cells.
+keeps its cells, so a grid with no direction of four cells comes back with the same cells. A coarse cell is
+active where any fine cell it covers is, or with `pinned = true` where every one is: on an operator whose
+inactive cells hold zero through the coefficients that reach them, a coarse level then keeps that hold as a
+coefficient into an inactive coarse cell. Every coarse axis is a `Vector`, whatever the fine axis, so the
+grids below a given grid share one type.
 
 On a [`Grids.CurvilinearGrid`](@ref) the coarse mesh keeps every other vertex line and the last one.
 """
 function coarsen(grid::Grids.StructuredGrid{T,G,N}; pinned::Bool = false) where {T,G,N}
     dims = Grids.size_tuple(grid)
-    all(n -> n < 4, dims) && return nothing
-    axes_c = ntuple(d -> _coarse_axis(Grids.coordinates(grid, d), dims[d]), Val(N))
+    axes_c = map((x, n) -> _coarse_axis(x, n), Grids.coordinates(grid), dims)
     cdims = map(length, axes_c)
     return Grids.StructuredGrid(Grids.grid_geometry(grid), axes_c...;
                                 mask = _coarse_mask(Grids.mask(grid), cdims, dims, pinned),
                                 topology = Grids.topology(grid),
                                 period = ntuple(d -> Grids.period(grid, d), Val(N)))
-end
-
-# Even uniform axis: uniform at twice the step, a periodic axis periodic. An odd axis's last coarse cell
-# covers one fine cell, so its centres are not uniform.
-function _coarse_axis(x::Axes.PeriodicAxis{T}, n::Int) where {T}
-    (n < 4 || isodd(n)) && return _coarse_axis(collect(x), n)
-    return Axes.PeriodicAxis{T}(first(x) + step(x) / 2, Axes.wrap_sign(x) * Axes.period(x), n ÷ 2)
-end
-
-function _coarse_axis(x::AbstractRange, n::Int)
-    (n < 4 || isodd(n)) && return _coarse_axis(collect(x), n)
-    h = step(x)
-    return Axes.UniformAxis(first(x) + h / 2, 2h, n ÷ 2)
 end
 
 function _coarse_axis(x::AbstractVector, n::Int)
@@ -424,7 +418,6 @@ end
 
 function coarsen(grid::Grids.CurvilinearGrid{T,G,2}; pinned::Bool = false) where {T,G}
     dims = Grids.size_tuple(grid)
-    all(n -> n < 4, dims) && return nothing
     Grids.has_corners(grid) || throw(ArgumentError(
         "coarsening a CurvilinearGrid reads its cell vertices, which this grid does not hold; build it " *
         "with `corners` given"))
@@ -436,14 +429,13 @@ function coarsen(grid::Grids.CurvilinearGrid{T,G,2}; pinned::Bool = false) where
         q = ck[e]
         return [(q[i, j] + q[i + 1, j] + q[i, j + 1] + q[i + 1, j + 1]) / 4 for i in 1:cdims[1], j in 1:cdims[2]]
     end
-    per = ntuple(d -> Grids.isperiodic(grid, d), Val(2))
     return Grids.CurvilinearGrid(
         Grids.grid_geometry(grid), centres..., _coarse_mask(Grids.mask(grid), cdims, dims, pinned); corners = ck,
-        topology = per, period = ntuple(d -> per[d] ? Grids.period(grid, d) : nothing, Val(2)),
+        topology = Grids.topology(grid), period = ntuple(d -> Grids.period(grid, d), Val(2)),
     )
 end
 
-_coarse_vertices(n::Int) = n < 4 ? (1:(n + 1)) : [min(2i - 1, n + 1) for i in 1:(cld(n, 2) + 1)]
+_coarse_vertices(n::Int) = [_fine_face(i, n) for i in 1:((n < 4 ? n : cld(n, 2)) + 1)]
 
 """
     galerkin_coefficients(fine::LaplacianCoefficients, cgrid) -> LaplacianCoefficients
@@ -472,12 +464,12 @@ function galerkin_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.Fa
 end
 
 """
-    coarse_coefficients(fine::LaplacianCoefficients, cgrid, boundary; ghost = nothing) -> LaplacianCoefficients
+    coarse_coefficients(fine::LaplacianCoefficients, cgrid; ghost = nothing) -> LaplacianCoefficients
 
 `L` rediscretized on `cgrid`, a [`coarsen`](@ref) of `fine.grid`: a coarse face's coefficient is the
 coupling area of the fine faces it covers over its own gap, `Σ c_f g_f / g_c` with the gaps of
-[`face_metrics`](@ref) under `boundary`, and an active coarse cell's measure the sum of its children's.
-The mask and the boundary condition reach the coarse level through the fine coefficients. Along a
+[`face_metrics`](@ref), and an active coarse cell's measure the sum of its children's. The mask and the
+boundary condition reach the coarse level through the fine coefficients. Along a
 direction a uniform grid halves, this is half the [`galerkin_coefficients`](@ref) there, the factor by
 which the Galerkin operator of piecewise-constant transfers overstates the coarse one (Braess,
 *Computing* 55 (1995) 379–393).
@@ -487,13 +479,13 @@ cell's distance to the zero over the coarse cell's, along the direction's coordi
 inactive fine cell beyond an inactive coarse one, or past a bounded end the fine grid's end face, or the
 coordinates `ghost[d] = (below, above)` where a condition holds its zeros off the end faces.
 """
-function coarse_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.FaceIndexedGrid,
-                             boundary::AbstractBoundaryCondition; ghost = nothing) where {N,T}
+function coarse_coefficients(fine::LaplacianCoefficients{N,T}, cgrid::Grids.FaceIndexedGrid;
+                             ghost = nothing) where {N,T}
     fgrid = fine.grid
     fdims = Grids.size_tuple(fgrid)
     cdims = Grids.size_tuple(cgrid)
-    fgap = face_metrics(fgrid, boundary).gap
-    cgap = face_metrics(cgrid, boundary).gap
+    fgap = _face_gaps(fgrid)
+    cgap = _face_gaps(cgrid)
     fmask, cmask = Grids.mask(fgrid), Grids.mask(cgrid)
     coef = ntuple(d -> zeros(T, Grids.face_dims(cgrid, d)), Val(N))
     for d in 1:N

@@ -133,14 +133,14 @@ function _ghost_points(
 end
 
 """
-    _grid_points(grid) -> (raw, D)
+    _grid_points(grid) -> Matrix
 
 Cell centres as a `D × n` matrix, in the grid's own coordinates.
 """
 function _grid_points(grid::AbstractGrid{G,T}) where {G,T}
     msk = mask(grid)
     lin = LinearIndices(size(msk))
-    D = length(_raw_coords(grid, Tuple(first(CartesianIndices(size(msk))))...))
+    D = ncoordinates(grid)
     raw = Matrix{T}(undef, D, length(msk))
     @inbounds for ci in CartesianIndices(size(msk))
         p = _raw_coords(grid, Tuple(ci)...)
@@ -148,7 +148,7 @@ function _grid_points(grid::AbstractGrid{G,T}) where {G,T}
             raw[d, lin[ci]] = p[d]
         end
     end
-    return raw, D
+    return raw
 end
 
 function _grid_points(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
@@ -160,7 +160,7 @@ function _grid_points(grid::UnstructuredGrid{T,G,N}) where {T,G,N}
             raw[d, k] = p[d]
         end
     end
-    return raw, N
+    return raw
 end
 
 """
@@ -177,7 +177,8 @@ function embedded_points end
 function embedded_points(
     grid::AbstractGrid{G,T}; ghosts::Bool = true,
 ) where {G<:Geometry.AbstractCartesianGeometry,T}
-    raw, D = _grid_points(grid)
+    raw = _grid_points(grid)
+    D = Val(ncoordinates(grid))
     per = ntuple(d -> isperiodic(grid, d), D)
     prd = ntuple(d -> T(period(grid, d)), D)
     # Images exist for an index that cannot wrap. One that wraps its own lattice asks for none, and so

@@ -61,6 +61,30 @@ directions each is staggered in.
     return Expr(:tuple, pairs...)
 end
 
+"""
+    map_rotation_pairs(f, Val(N)) -> Tuple
+
+`f(Val(a), Val(b))` for each of [`rotation_pairs`](@ref)`(Val(N))`, in that order, as a tuple. The pair's
+directions are type parameters, so a tuple indexed by `a` or `b` inside `f` reads one fixed slot.
+"""
+@generated function map_rotation_pairs(f::F, ::Val{N}) where {F,N}
+    calls = Expr[]
+    for a in 1:(N - 1), b in (a + 1):N
+        push!(calls, :(f(Val($a), Val($b))))
+    end
+    return Expr(:tuple, calls...)
+end
+
+"""
+    map_directions(f, Val(N)) -> Tuple
+
+`(f(Val(1)), …, f(Val(N)))`. The direction is a type parameter, so a tuple indexed by it inside `f` reads
+one fixed slot.
+"""
+@generated function map_directions(f::F, ::Val{N}) where {F,N}
+    return Expr(:tuple, (:(f(Val($d))) for d in 1:N)...)
+end
+
 # For each direction `c`, the `(e, p, s)` that assemble `(rot R)_c`: component `p` differenced along `e`,
 # with sign `s`. Each face then gathers its own terms.
 @generated function _rotation_terms(::Val{N}) where {N}
@@ -160,7 +184,7 @@ one per direction shaped by [`Grids.face_dims`](@ref):
 - `grid`, `boundary`: what it describes;
 - `area_op`: the area through which the operators couple across a face: its geometric area between two
   active cells, zero against an inactive one, and at the end of a bounded direction its geometric area
-  under `Dirichlet()` and zero under `Neumann()`;
+  under `Dirichlet()` and zero under `Neumann()`; zero across a face of zero gap;
 - `area_flux`: the area through which data crosses a face, `area_op` with every bounded end open; the
   same array under `Dirichlet()`;
 - `gap`: the physical distance between the two centres a face separates, and from its one centre to the
@@ -176,8 +200,10 @@ one per direction shaped by [`Grids.face_dims`](@ref):
   and a derivative along `d` are taken along increasing coordinate, whichever way an axis is stored; on a
   curvilinear grid, whose directions have no coordinate of their own, along increasing index.
 
-Every area, gap, edge length and corner area is positive. Under `Neumann()` the two areas differ at the
-ends of bounded directions only, where data crosses and the operators do not couple.
+Every area, gap, edge length and corner area is nonnegative. A gap is zero between two centres at one
+point, as along a row of cells on a pole, and the face there has no area: every field the grid samples has
+one value at that point. Under `Neumann()` the two areas differ at the ends of bounded directions only,
+where data crosses and the operators do not couple.
 
 An operator reads it in `execution`'s memory: one held on the host is moved there for the call, and one
 moved once with `Execution.on_backend` is read as it is.
@@ -213,15 +239,24 @@ distance and its gap the distance between the two centres it separates.
 """
 function face_metrics(grid::Grids.StructuredGrid{T,G,N}, bc::AbstractBoundaryCondition = Neumann()) where {T,G,N}
     layout = metric_layout(grid)
-    faces = ntuple(d -> Grids.face_coordinates(grid, d), Val(N))
-    area = ntuple(d -> _face_area_array(grid, faces[d], d, bc, layout), Val(N))
-    flux = bc isa Dirichlet ? area : ntuple(d -> _face_area_array(grid, faces[d], d, Dirichlet(), layout), Val(N))
-    gap = ntuple(d -> _face_gap_array(grid, faces[d], d, layout), Val(N))
-    corner = map(ab -> _corner_array(grid, faces[ab[1]], faces[ab[2]], ab[1], ab[2], layout),
-                 rotation_pairs(Val(N)))
+    faces = map_directions(vd -> Grids.face_coordinates(grid, vd), Val(N))
+    area = map_directions(vd -> _face_area_array(grid, faces[_val(vd)], _val(vd), bc, layout), Val(N))
+    flux = bc isa Dirichlet ? area :
+           map_directions(vd -> _face_area_array(grid, faces[_val(vd)], _val(vd), Dirichlet(), layout), Val(N))
+    corner = map_rotation_pairs(Val(N)) do va, vb
+        _corner_array(grid, faces[_val(va)], faces[_val(vb)], _val(va), _val(vb), layout)
+    end
     σ = ntuple(d -> T(Axes.wrap_sign(Grids.coordinates(grid, d))), Val(N))
-    return FaceMetrics(grid, bc, area, flux, gap, _edge_lengths(grid, faces, layout, Val(N)), corner, σ)
+    return FaceMetrics(grid, bc, area, flux, _face_gaps(grid), _edge_lengths(grid, faces, layout, Val(N)), corner, σ)
 end
+
+# The gaps of [`face_metrics`](@ref), which no boundary condition changes.
+function _face_gaps(grid::Grids.StructuredGrid{T,G,N}) where {T,G,N}
+    layout = metric_layout(grid)
+    return map_directions(vd -> _face_gap_array(grid, Grids.face_coordinates(grid, vd), _val(vd), layout), Val(N))
+end
+_face_gaps(grid::Grids.CurvilinearGrid{T,G,2}) where {T,G} =
+    ntuple(d -> _curvilinear_gap(grid, Grids.corners(grid), d, T), Val(2))
 
 face_metrics(sg::Grids.StaggeredGrid, bc::AbstractBoundaryCondition = Neumann()) =
     face_metrics(Grids.center_grid(sg), bc)
@@ -230,8 +265,8 @@ function _face_area_array(grid::Grids.StructuredGrid{T}, fd, d::Int, bc, layout)
     return metric_array(F -> _face_area(grid, fd, F, d, bc, T), Grids.face_dims(grid, d), layout, T)
 end
 
-# The coupling area of face `F` along `d`: zero against an inactive cell, and past a bounded end zero unless
-# the condition is `Dirichlet`.
+# The coupling area of face `F` along `d`: zero against an inactive cell, past a bounded end zero unless the
+# condition is `Dirichlet`, and zero where the face's gap is.
 @inline function _face_area(grid, fd, F::CartesianIndex, d::Int, bc, ::Type{T}) where {T}
     Cl = Grids.cell_below(grid, F, d)
     Cu = Grids.cell_above(grid, F, d)
@@ -239,9 +274,11 @@ end
         C = Cu === nothing ? Cl : Cu
         C === nothing && return zero(T)
         (bc isa Dirichlet && Grids.isactive(grid, Tuple(C)...)) || return zero(T)
+        iszero(_face_gap(grid, fd, F, d, T)) && return zero(T)
         return _geometric_area(grid, fd, F, d, C, T)
     end
     (Grids.isactive(grid, Tuple(Cl)...) && Grids.isactive(grid, Tuple(Cu)...)) || return zero(T)
+    iszero(_face_gap(grid, fd, F, d, T)) && return zero(T)
     return _geometric_area(grid, fd, F, d, Cu, T)
 end
 
@@ -249,34 +286,48 @@ end
 # coordinates of the cell `ref` it bounds along every other direction.
 @inline function _geometric_area(grid, fd, F::CartesianIndex{N}, d::Int, ref::CartesianIndex{N},
                                  ::Type{T}) where {N,T}
+    geo = Grids.grid_geometry(grid)
     c = Grids.coords(Tuple, grid, Tuple(ref)...)
-    x = T(@inbounds fd[F[d]])
-    h = Geometry.scale_factors(Grids.grid_geometry(grid), ntuple(e -> e == d ? x : T(c[e]), Val(N)))
+    x = _face_at(geo, d, T(@inbounds fd[F[d]]))
+    h = Geometry.scale_factors(geo, ntuple(e -> e == d ? x : T(c[e]), Val(N)))
     return prod(ntuple(e -> e == d ? one(T) : abs(T(h[e])) * T(Grids.cell_width(grid, e, ref[e])), Val(N)))
 end
+
+# A face's coordinate along `d` as the metric reads it. On a lon–lat geometry a latitude face past a pole
+# sits at the pole, as the cell measure's spans do (`Grids._polar_cell`), so a face there has no area.
+@inline _face_at(::Geometry.AbstractGeometry, ::Int, x) = x
+@inline _face_at(::Geometry.AbstractLonLatGeometry, d::Int, x::T) where {T} =
+    d == 2 ? clamp(x, -T(π) / 2, T(π) / 2) : x
 
 function _face_gap_array(grid::Grids.StructuredGrid{T}, fd, d::Int, layout) where {T}
     return metric_array(F -> _face_gap(grid, fd, F, d, T), Grids.face_dims(grid, d), layout, T)
 end
 
 # `|h_d|` at the face times the coordinate distance between the two centres it separates, or from its one
-# centre to the face.
+# centre to the face. Each branch holds its cell as a concrete index.
 @inline function _face_gap(grid, fd, F::CartesianIndex{N}, d::Int, ::Type{T}) where {N,T}
     Cl = Grids.cell_below(grid, F, d)
     Cu = Grids.cell_above(grid, F, d)
-    Cl === nothing && Cu === nothing && return one(T)
-    ref = Cu === nothing ? Cl : Cu
-    c = Grids.coords(Tuple, grid, Tuple(ref)...)
-    f = T(@inbounds fd[F[d]])
-    Δ = (Cl === nothing || Cu === nothing) ? T(c[d]) - f : T(first(Grids.local_spacing(grid, d, F[d])))
-    h = Geometry.scale_factors(Grids.grid_geometry(grid), ntuple(e -> e == d ? f : T(c[e]), Val(N)))
+    Cu === nothing || return _face_gap_from(grid, fd, F, d, Cu, Cl !== nothing, T)
+    Cl === nothing || return _face_gap_from(grid, fd, F, d, Cl, false, T)
+    return one(T)
+end
+
+@inline function _face_gap_from(grid, fd, F::CartesianIndex{N}, d::Int, ref::CartesianIndex{N}, between::Bool,
+                                ::Type{T}) where {N,T}
+    geo = Grids.grid_geometry(grid)
+    c = Grids._raw_coords(grid, Tuple(ref)...)
+    f = _face_at(geo, d, T(@inbounds fd[F[d]]))
+    Δ = between ? T(first(Grids.local_spacing(grid, d, F[d]))) : T(c[d]) - f
+    h = Geometry.scale_factors(geo, ntuple(e -> e == d ? f : T(c[e]), Val(N)))
     return abs(T(h[d]) * Δ)
 end
 
 _edge_lengths(_, _, _, ::Val{1}) = ()
 _edge_lengths(_, _, _, ::Val{2}) = (nothing,)
 _edge_lengths(grid, faces, layout, ::Val{N}) where {N} =
-    map(ab -> _edge_array(grid, faces[ab[1]], faces[ab[2]], ab[1], ab[2], layout), rotation_pairs(Val(N)))
+    map_rotation_pairs((va, vb) -> _edge_array(grid, faces[_val(va)], faces[_val(vb)], _val(va), _val(vb), layout),
+                       Val(N))
 
 function _edge_array(grid::Grids.StructuredGrid{T}, fa, fb, a::Int, b::Int, layout) where {T}
     return metric_array(Qc -> _edge_length(grid, fa, fb, Qc, a, b, T), Grids.corner_dims(grid, a, b), layout, T)
@@ -317,9 +368,9 @@ function face_metrics(grid::Grids.CurvilinearGrid{T,G,2}, bc::AbstractBoundaryCo
         "the face metric of a CurvilinearGrid is built from its cell vertices, which this grid does not " *
         "hold; build it with `corners` given"))
     k = Grids.corners(grid)
-    area = ntuple(d -> _curvilinear_area(grid, k, d, bc, T), Val(2))
-    flux = bc isa Dirichlet ? area : ntuple(d -> _curvilinear_area(grid, k, d, Dirichlet(), T), Val(2))
-    gap = ntuple(d -> _curvilinear_gap(grid, k, d, T), Val(2))
+    gap = _face_gaps(grid)
+    area = ntuple(d -> _curvilinear_area(grid, k, gap[d], d, bc, T), Val(2))
+    flux = bc isa Dirichlet ? area : ntuple(d -> _curvilinear_area(grid, k, gap[d], d, Dirichlet(), T), Val(2))
     return FaceMetrics(grid, bc, area, flux, gap, (nothing,), (_curvilinear_corner(grid, T),), (one(T), one(T)))
 end
 
@@ -350,21 +401,19 @@ end
 @inline function _face_open(grid, F::CartesianIndex, d::Int, bc)
     Cl = Grids.cell_below(grid, F, d)
     Cu = Grids.cell_above(grid, F, d)
-    Cl === nothing && Cu === nothing && return false
-    if Cl === nothing || Cu === nothing
-        C = Cu === nothing ? Cl : Cu
-        return bc isa Dirichlet && Grids.isactive(grid, Tuple(C)...)
-    end
+    Cu === nothing && return Cl !== nothing && bc isa Dirichlet && Grids.isactive(grid, Tuple(Cl)...)
+    Cl === nothing && return bc isa Dirichlet && Grids.isactive(grid, Tuple(Cu)...)
     return Grids.isactive(grid, Tuple(Cl)...) && Grids.isactive(grid, Tuple(Cu)...)
 end
 
-# Face `F` normal to `d` spans the vertices at `F` and at `F` stepped along the other direction.
-function _curvilinear_area(grid, k, d::Int, bc, ::Type{T}) where {T}
+# Face `F` normal to `d` spans the vertices at `F` and at `F` stepped along the other direction; a face of
+# zero gap has no area.
+function _curvilinear_area(grid, k, gap, d::Int, bc, ::Type{T}) where {T}
     e = d == 1 ? 2 : 1
     dims = Grids.face_dims(grid, d)
     a = zeros(T, dims)
     @inbounds for F in CartesianIndices(dims)
-        _face_open(grid, F, d, bc) || continue
+        (_face_open(grid, F, d, bc) && !iszero(gap[F])) || continue
         Q = F + Grids._unit_index(Val(2), e)
         a[F] = hypot(T(k[1][Q]) - T(k[1][F]), T(k[2][Q]) - T(k[2][F]))
     end
@@ -580,9 +629,17 @@ end
     corner_mask(fm::FaceMetrics, a, b) -> AbstractArray{Bool,N}
 
 The `(a, b)` corners in the complex: those whose four surrounding faces all couple, so a loop of active
-cells closes around them. [`Grids.AllActive`](@ref) where every one does.
+cells closes around them. On a Cartesian rectilinear grid with no inactive cell every corner does, every
+interior face having nonzero area, and the mask is [`Grids.AllActive`](@ref); on a sphere a row of cells on
+a pole has faces of no area.
 """
-function corner_mask(fm::FaceMetrics{N}, a::Integer, b::Integer) where {N}
+corner_mask(fm::FaceMetrics, a::Integer, b::Integer) = _corner_mask(Grids.mask(fm.grid), fm, a, b)
+
+_corner_mask(::Grids.AllActive,
+             fm::FaceMetrics{<:Any,<:Any,<:Grids.StructuredGrid{<:Any,<:Geometry.AbstractCartesianGeometry}},
+             a::Integer, b::Integer) = Grids.AllActive(Grids.corner_dims(fm.grid, a, b))
+
+function _corner_mask(::AbstractArray{Bool}, fm::FaceMetrics, a::Integer, b::Integer)
     grid = fm.grid
     dims = Grids.corner_dims(grid, a, b)
     aa, ab = fm.area_op[a], fm.area_op[b]
@@ -590,7 +647,7 @@ function corner_mask(fm::FaceMetrics{N}, a::Integer, b::Integer) where {N}
     @inbounds for Qc in CartesianIndices(dims)
         m[Qc] = _corner_closes(grid, aa, ab, Grids.corner_to_face(grid, Qc, a, b), Int(a), Int(b))
     end
-    return all(m) ? Grids.AllActive(dims) : m
+    return m
 end
 
 @inline function _corner_closes(grid, aa, ab, Q::CartesianIndex, a::Int, b::Int)

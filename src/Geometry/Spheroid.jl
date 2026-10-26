@@ -183,13 +183,13 @@ end
 
 @inline function scale_factors(g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real}) where {T}
     φ = convert(T, p[2])
-    return (prime_vertical_radius(g, φ) * cos(φ), meridional_radius(g, φ))
+    return (prime_vertical_radius(g, φ) * _cos_latitude(φ), meridional_radius(g, φ))
 end
 
 @inline function scale_factors(g::AbstractEllipsoidalGeometry{T}, p::Tuple{Real,Real,Real}) where {T}
     φ = convert(T, p[2])
     h = convert(T, p[3])
-    return ((prime_vertical_radius(g, φ) + h) * cos(φ), meridional_radius(g, φ) + h, one(T))
+    return ((prime_vertical_radius(g, φ) + h) * _cos_latitude(φ), meridional_radius(g, φ) + h, one(T))
 end
 
 # `∂(N cos φ)/∂φ = −M sin φ`, so `γ[1][2] = −tan φ/(N + h)`; `h` enters `h_λ` through `cos φ` and `h_φ`
@@ -259,11 +259,8 @@ end
 """
     distance(geo::AbstractEllipsoidalGeometry, p1, p2)
 
-2-D `(λ, φ)`: geodesic distance by Vincenty's inverse method, iterated to `1e-12` in the auxiliary
-longitude, which holds the result to well under a millimetre at Earth scale.
-
-Vincenty's iteration converges slowly for very nearly antipodal point pairs. It is capped, and on
-reaching the cap the result is the great-circle distance on a sphere of the mean radius.
+2-D `(λ, φ)`: the geodesic distance on the ellipsoid, by Karney's (2013) solution of the inverse
+problem, accurate to round-off at every separation, nearly antipodal points included.
 
 3-D `(λ, φ, h)`: the chord through Cartesian (ECEF), mirroring the spherical 3-D convention. A lone
 `(λ,)` is the shorter arc of the equator.
@@ -549,74 +546,4 @@ end
 
 @inline _spheroid_distance(
     g::AbstractEllipsoidalGeometry, p1::Tuple{Real,Real}, p2::Tuple{Real,Real},
-) = first(_vincenty_inverse(g, p1, p2))
-
-# `(s, sin α₁, cos α₁)`: the geodesic length from `p1` to `p2` by Vincenty's inverse method, and its
-# azimuth at `p1`, east of north.
-#
-# The reduced latitudes enter as `(sin U, cos U) = ((1 − f) sin φ, cos φ)/Q`, `Q = √(cos²φ + (1 − f)²sin²φ)`,
-# and their difference as `(sin ΔU, cos ΔU) = ((1 − f) sin Δφ, cos φ₁cos φ₂ + (1 − f)²sin φ₁sin φ₂)/(Q₁Q₂)`.
-# With `h = sin²(λ/2)`, `cos U₁ sin U₂ − sin U₁ cos U₂ cos λ = sin ΔU + 2 sin U₁ cos U₂ h` and
-# `cos σ = cos ΔU − 2 cos U₁ cos U₂ h`, so no term is a difference of nearly equal ones.
-function _vincenty_inverse(
-    g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real,Real}, p2::Tuple{Real,Real},
-) where {T}
-    λ1, φ1 = _at(T, p1)
-    λ2, φ2 = _at(T, p2)
-    a = semimajor_axis(g)
-    b = semiminor_axis(g)
-    f = flattening(g)
-    L = _lon_diff(λ1, λ2)
-    m = one(T) - f
-    sφ1, cφ1 = sincos(φ1)
-    sφ2, cφ2 = sincos(φ2)
-    Q1 = hypot(cφ1, m * sφ1)
-    Q2 = hypot(cφ2, m * sφ2)
-    sinU1, cosU1 = m * sφ1 / Q1, cφ1 / Q1
-    sinU2, cosU2 = m * sφ2 / Q2, cφ2 / Q2
-    sinΔU = m * sin(φ2 - φ1) / (Q1 * Q2)
-    cosΔU = (cφ1 * cφ2 + m * m * sφ1 * sφ2) / (Q1 * Q2)
-    λ = L
-    # Converged once the auxiliary longitude moves less than 1e-12 rad, Vincenty's own criterion, or
-    # less than its own resolution in `T` where that is coarser.
-    tol = T(1e-12)
-    sinσ = cosσ = σ = sinα² = cos2σm = zero(T)
-    converged = false
-    for _ in 1:200
-        sinλ = sin(λ)
-        h = sin(λ / T(2))^2
-        sinσ = hypot(cosU2 * sinλ, sinΔU + T(2) * sinU1 * cosU2 * h)
-        iszero(sinσ) && return (zero(T), zero(T), one(T))   # coincident points
-        cosσ = cosΔU - T(2) * cosU1 * cosU2 * h
-        σ = atan(sinσ, cosσ)
-        sinα = cosU1 * cosU2 * sinλ / sinσ
-        sinα² = sinα * sinα
-        cos²α = one(T) - sinα²
-        cos2σm = iszero(cos²α) ? zero(T) : cosσ - 2 * sinU1 * sinU2 / cos²α
-        C = f / 16 * cos²α * (4 + f * (4 - 3 * cos²α))
-        λprev = λ
-        λ = L + (one(T) - C) * f * sinα *
-            (σ + C * sinσ * (cos2σm + C * cosσ * (-one(T) + 2 * cos2σm^2)))
-        if abs(λ - λprev) <= max(tol, eps(T) * abs(λ))
-            converged = true
-            break
-        end
-    end
-    if !converged
-        # Near-antipodal: the great circle on a sphere of the mean radius.
-        R = (2 * a + b) / 3
-        pe, pn, hav = _unit_on_frame(T, p1, p2)
-        s = R * 2 * atan(sqrt(hav), sqrt(max(zero(T), one(T) - hav)))
-        n = hypot(pe, pn)
-        return iszero(n) ? (s, zero(T), one(T)) : (s, pe / n, pn / n)
-    end
-    u² = sinα² == one(T) ? zero(T) : (one(T) - sinα²) * (a * a - b * b) / (b * b)
-    A = one(T) + u² / 16384 * (4096 + u² * (-768 + u² * (320 - 175 * u²)))
-    B = u² / 1024 * (256 + u² * (-128 + u² * (74 - 47 * u²)))
-    Δσ = B * sinσ * (cos2σm + B / 4 * (cosσ * (-one(T) + 2 * cos2σm^2) -
-         B / 6 * cos2σm * (-3 + 4 * sinσ^2) * (-3 + 4 * cos2σm^2)))
-    Y = cosU2 * sin(λ)
-    X = sinΔU + T(2) * sinU1 * cosU2 * sin(λ / T(2))^2
-    n = hypot(Y, X)
-    return (b * A * (σ - Δσ), Y / n, X / n)
-end
+) = first(_geodesic_inverse(g, p1, p2))

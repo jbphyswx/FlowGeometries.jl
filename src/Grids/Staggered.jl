@@ -39,7 +39,7 @@ end
 
 function StaggeredGrid(center::StructuredGrid{T,G,N}) where {T,G,N}
     fs = ntuple(Val(N)) do d
-        _face_axis(coordinates(center, d), isperiodic(center, d), period(center, d))
+        _face_axis(coordinates(center, d), topology(center)[d], period(center, d))
     end
     return StaggeredGrid{T,N,typeof(center),typeof(fs)}(center, fs)
 end
@@ -50,12 +50,14 @@ StaggeredGrid(geometry::Geometry.AbstractGeometry, ax::Vararg{AbstractVector}; k
 # A wrapping direction's last face is its first one period on, so it carries `N` of them, its first face
 # midway across the seam; a bounded one carries the `N+1` `faces` produces. Slicing a uniform axis keeps
 # it uniform, so the guarantee survives either way.
-@inline _face_axis(x::AbstractVector, periodic::Bool, P) =
-    periodic ? (f = Discretization.faces(x, P); @inbounds f[firstindex(f):(firstindex(f) + length(x) - 1)]) :
-               Discretization.faces(x)
+@inline _face_axis(x::AbstractVector, ::Bounded, P) = Discretization.faces(x)
+@inline function _face_axis(x::AbstractVector, ::Periodic, P)
+    f = Discretization.faces(x, P)
+    return @inbounds f[firstindex(f):(firstindex(f) + length(x) - 1)]
+end
 
 # The faces of a periodic axis sit half a step before its centres, `n` of them around the same period.
-@inline _face_axis(x::Axes.PeriodicAxis{T}, ::Bool, P) where {T} = Axes.PeriodicAxis{T}(
+@inline _face_axis(x::Axes.PeriodicAxis{T}, ::Periodic, P) where {T} = Axes.PeriodicAxis{T}(
     first(x) - step(x) / 2, Axes.wrap_sign(x) * Axes.own_period(x, P), length(x))
 
 """

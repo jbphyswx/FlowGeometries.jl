@@ -21,11 +21,11 @@ const _ProcessBackend = Union{CB.AbstractDistributedBackend, CB.AbstractMPIBacke
 """
     resolve(backend) -> backend
 
-The backend a loop runs under: `backend` itself, and for an `AutoBackend` FlowGeometries' own policy —
-`ThreadedBackend()` when Julia runs more than one thread, else `SerialBackend()`.
+The backend a loop runs under: `backend` itself, and for an `AutoBackend` FlowGeometries' own policy,
+`ThreadedBackend()`, whose loops run as the serial ones when Julia runs one thread.
 """
 resolve(b::CB.AbstractExecutionBackend) = b
-resolve(::CB.AbstractAutoBackend) = Threads.nthreads() > 1 ? CB.ThreadedBackend() : CB.SerialBackend()
+resolve(::CB.AbstractAutoBackend) = CB.ThreadedBackend()
 
 """
     local_backend(backend) -> backend
@@ -172,12 +172,12 @@ run_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend, ::Written...) where {F}
 # One chunk per thread: the loops this drives are short-bodied, so per-index scheduling costs more than
 # the body it schedules. `BalancedThreads` cuts more chunks and hands them out as threads finish.
 function run_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend, ::Written...) where {F}
-    n = Int(n)
-    n > 0 || return nothing
+    m = Int(n)
+    m > 0 || return nothing
     nt = Threads.nthreads()
-    nt == 1 && return run_chunks(f, n, CB.SerialBackend())
-    k = _nchunks(b, n, nt)
-    _threads_over(c -> f(_chunk_range(n, k, c)), k, b)
+    nt == 1 && return run_chunks(f, m, CB.SerialBackend())
+    k = _nchunks(b, m, nt)
+    _threads_over(c -> f(_chunk_range(m, k, c)), k, b)
     return nothing
 end
 
@@ -206,6 +206,44 @@ run_chunks(f::F, n::Integer, b::CB.AbstractAutoBackend, outs::Written...) where 
 run_chunks(f, n::Integer, b::CB.AbstractExecutionBackend, ::Written...) = _unsupported(b)
 
 """
+    run_numbered_chunks(f, n, backend, outputs::Written...)
+
+[`run_chunks`](@ref) with each chunk's number, `f(c, range)`: on a serial or threaded backend `c` lies in
+`1:max_chunks(backend)` and is distinct across the chunks of one call, so it indexes per-chunk storage
+the caller holds. Where chunks run on other processes every chunk is numbered `0`, which indexes none.
+"""
+run_numbered_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend, ::Written...) where {F} =
+    (n > 0 && f(1, 1:Int(n)); nothing)
+
+function run_numbered_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend, ::Written...) where {F}
+    m = Int(n)
+    m > 0 || return nothing
+    nt = Threads.nthreads()
+    nt == 1 && return run_numbered_chunks(f, m, CB.SerialBackend())
+    k = _nchunks(b, m, nt)
+    _threads_over(c -> f(c, _chunk_range(m, k, c)), k, b)
+    return nothing
+end
+
+run_numbered_chunks(f::F, n::Integer, b::CB.AbstractAutoBackend, outs::Written...) where {F} =
+    run_numbered_chunks(f, n, resolve(b), outs...)
+run_numbered_chunks(f::F, n::Integer, b::CB.AbstractExecutionBackend, outs::Written...) where {F} =
+    run_chunks(rng -> f(0, rng), n, b, outs...)
+
+"""
+    max_chunks(backend) -> Int
+
+The most chunks one call of [`run_numbered_chunks`](@ref) numbers under `backend`, so storage of that
+many entries serves every call: one serially, one per Julia thread threaded, `chunks_per_thread` per
+thread under [`BalancedThreads`](@ref), and none where chunks run on other processes.
+"""
+max_chunks(::CB.AbstractSerialBackend) = 1
+max_chunks(::CB.AbstractThreadedBackend) = Threads.nthreads()
+max_chunks(b::BalancedThreads) = Threads.nthreads() * b.chunks_per_thread
+max_chunks(b::CB.AbstractAutoBackend) = max_chunks(resolve(b))
+max_chunks(::CB.AbstractExecutionBackend) = 0
+
+"""
     map_chunks(f, n, backend) -> Vector
 
 Apply `f(range)` over a partition of `1:n` and collect one result per chunk, for a bulk operation that
@@ -222,13 +260,13 @@ map_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend) where {F} = [f(1:Int(n)
 # Results stay in chunk order, so the caller's combine sees the sequence the serial path produces. The
 # output vector is typed from `f` on an empty range, which the contract already requires it to accept.
 function map_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend) where {F}
-    n = Int(n)
-    n > 0 || return map_chunks(f, 0, CB.SerialBackend())
+    m = Int(n)
+    m > 0 || return map_chunks(f, 0, CB.SerialBackend())
     nt = Threads.nthreads()
-    nt == 1 && return map_chunks(f, n, CB.SerialBackend())
-    k = _nchunks(b, n, nt)
+    nt == 1 && return map_chunks(f, m, CB.SerialBackend())
+    k = _nchunks(b, m, nt)
     out = Vector{typeof(f(1:0))}(undef, k)
-    _threads_over(c -> (@inbounds out[c] = f(_chunk_range(n, k, c)); nothing), k, b)
+    _threads_over(c -> (@inbounds out[c] = f(_chunk_range(m, k, c)); nothing), k, b)
     return out
 end
 
@@ -310,6 +348,7 @@ function reduce_indices(f::F, op::O, init, n::Integer, ::CB.AbstractSerialBacken
 end
 
 function reduce_indices(f::F, op::O, init, n::Integer, backend::CB.AbstractThreadedBackend) where {F,O}
+    Threads.nthreads() == 1 && return reduce_indices(f, op, init, n, CB.SerialBackend())
     n = Int(n)
     n > 0 && return _reduce_chunks(op, n, backend) do rng
         acc = init
@@ -395,26 +434,26 @@ function exclusive_scan!(
     T = eltype(out)
     nt = Threads.nthreads()
     (n == 0 || nt == 1) && return exclusive_scan!(out, counts, CB.SerialBackend(); init = init)
-    ranges = chunk_ranges(n, nt)
-    nc = length(ranges)
+    nc = min(n, nt)
     sums = Vector{T}(undef, nc)
     Threads.@threads for c in 1:nc
         s = zero(T)
-        @inbounds for i in ranges[c]
+        @inbounds for i in _chunk_range(n, nc, c)
             s += counts[i]
         end
         @inbounds sums[c] = s
     end
-    base = Vector{T}(undef, nc)
+    # Each chunk's sum becomes its base, the sum of every chunk before it.
     acc = convert(T, init)
     @inbounds for c in 1:nc
-        base[c] = acc
-        acc += sums[c]
+        s = sums[c]
+        sums[c] = acc
+        acc += s
     end
     @inbounds out[n + 1] = acc
     Threads.@threads for c in 1:nc
-        @inbounds a = base[c]
-        @inbounds for i in ranges[c]
+        @inbounds a = sums[c]
+        @inbounds for i in _chunk_range(n, nc, c)
             out[i] = a
             a += counts[i]
         end

@@ -354,7 +354,7 @@ frame at `center`. One component per coordinate, named as the coordinates are.
 | Cartesian | the coordinate difference |
 | sphere or spheroid, `(λ,)` | the signed arc of the equator, `Δλ` in `[-π, π]` |
 | sphere, `(λ, φ)` | `R·σ·(sin α, cos α)`, `σ` the central angle and `α` the azimuth east of north |
-| spheroid, `(λ, φ)` | `s·(sin α₁, cos α₁)`, from Vincenty's inverse |
+| spheroid, `(λ, φ)` | `s·(sin α₁, cos α₁)`, from Karney's (2013) inverse solution |
 | sphere or spheroid, three coordinates | the chord on `(ê_λ, ê_φ, ê_r)` at `center` |
 
 On the sphere every component is formed from half-angle differences, so its relative error is a few
@@ -427,7 +427,7 @@ end
 @inline function _normal_coordinates(
     geo::AbstractEllipsoidalGeometry{T}, c::Tuple{Real,Real}, p::Tuple{Real,Real},
 ) where {T}
-    s, sinα, cosα = _vincenty_inverse(geo, c, p)
+    s, sinα, cosα = _geodesic_inverse(geo, c, p)
     return NamedTuple{point_names(geo, Val(2))}((s * sinα, s * cosα))
 end
 
@@ -442,8 +442,8 @@ end
     scale_factors(geo, point) -> NTuple
     scale_factors(geo, point, Val(N)) -> NTuple{N}
 
-Physical length of a unit coordinate step in each direction at `point` — see
-[`FlowGeometries.Discretization.scale_factors`](@ref).
+Physical length of a unit coordinate step in each direction at `point`, which turns a coordinate
+derivative into a physical one: `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`.
 
 Cartesian: `1` in every direction, the metric being the identity. Spherical: `(R,)` for a lone `(λ,)`,
 a point on the equator as [`distance`](@ref) reads it; `(R·cosφ, R)` on the surface of radius `R`; and
@@ -462,14 +462,22 @@ The result is one factor per direction, so from a point whose length is a runtim
 @inline function scale_factors(geo::AbstractSphericalGeometry{T}, p::Tuple{Real,Real}) where {T}
     φ = convert(T, p[2])
     R = radius(geo)
-    return (R * cos(φ), R)
+    return (R * _cos_latitude(φ), R)
 end
 
 @inline function scale_factors(::AbstractSphericalGeometry{T}, p::Tuple{Real,Real,Real}) where {T}
     φ = convert(T, p[2])
     r = convert(T, p[3])
-    return (r * cos(φ), r, one(T))
+    return (r * _cos_latitude(φ), r, one(T))
 end
+
+"""
+    _cos_latitude(φ) -> T
+
+`cos φ`, and exactly zero at the poles as stored, `φ = ±T(π)/2`. A latitude reaches a pole as that
+value, so a scale factor there vanishes and every test for it is `iszero`.
+"""
+@inline _cos_latitude(φ::T) where {T<:AbstractFloat} = abs(φ) == T(π) / 2 ? zero(T) : cos(φ)
 
 @inline scale_factors(geo::AbstractGeometry, p) = scale_factors(geo, as_ntuple(p))
 @inline scale_factors(geo::AbstractGeometry, p, v::Val) = scale_factors(geo, as_ntuple(p, v))

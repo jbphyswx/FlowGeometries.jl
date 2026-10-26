@@ -13,8 +13,9 @@ using FlowGeometries.Grids: Grids
 # relative precision of `T` however small its cell.
 
 function Grids._voronoi_tessellation(
-    geo::Geometry.AbstractSphericalGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
-) where {T<:AbstractFloat}
+    ::Type{I}, geo::Geometry.AbstractSphericalGeometry{T}, x::AbstractVector{T}, y::AbstractVector{T},
+    _period,
+) where {I<:Integer, T<:AbstractFloat}
     N = length(x)
     length(y) == N || throw(DimensionMismatch("λ/φ length mismatch"))
     N ≥ 4 || throw(ArgumentError(
@@ -114,13 +115,8 @@ function Grids._voronoi_tessellation(
         areas[i] = Geometry.radius(geo)^2 * A
     end
     # The hull's facets are the mesh's cells and `ptr`/`adj` is already the node→cell transpose, both
-    # built above for the areas.
-    #
-    # The narrowest integer that indexes this node set types the ids — node numbers in `cell_nodes`,
-    # facet numbers in `adj`, both bounded by the counts they name. The two offset arrays run to the
-    # entry count, `3·nf ≈ 6N`, so they stay `Int`: there are `O(n)` of them against the ids' `O(n)`
-    # either way, and every traversal of the mesh reads the ids.
-    I = N ≤ typemax(Int32) ? Int32 : Int
+    # built above for the areas. The ids are node numbers in `cell_nodes` and facet numbers in `adj`.
+    Grids._check_ids(I, max(N, nf))
     cell_ptr = Vector{Int}(undef, nf + 1)
     cell_nodes = Vector{I}(undef, 3 * nf)
     @inbounds for fi in 1:nf

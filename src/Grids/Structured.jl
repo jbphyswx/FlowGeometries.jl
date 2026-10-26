@@ -168,6 +168,9 @@ end
 
 # CurvilinearGrid / UnstructuredGrid _raw_coords are defined after those types exist.
 
+# The index count is a type parameter on every point accessor: a `Vararg{Integer}` with no length is not
+# specialized on arity, and the point's length is then a runtime value.
+
 """
     coords(grid, I...) -> NamedTuple
 
@@ -177,7 +180,7 @@ Point at indices `I`, as a geometry-named `NamedTuple`:
 
 See also [`coords!`](@ref), [`coords(::Type, grid, I...)`](@ref).
 """
-@inline function coords(grid::AbstractGrid, I::Vararg{Integer})
+@inline function coords(grid::AbstractGrid, I::Vararg{Integer,K}) where {K}
     return Geometry.named_point(grid_geometry(grid), _raw_coords(grid, I...))
 end
 
@@ -188,7 +191,7 @@ Construct the point as type `S` — `Tuple`, `NTuple{N,T}`, `NamedTuple`, `Vecto
 `SVector{N,T}`/`MVector{N,T}` when StaticArrays is loaded. See
 [`Geometry.build_point`](@ref) for how `S` is assembled.
 """
-@inline function coords(::Type{S}, grid::AbstractGrid, I::Vararg{Integer}) where {S}
+@inline function coords(::Type{S}, grid::AbstractGrid, I::Vararg{Integer,K}) where {S,K}
     vals = _raw_coords(grid, I...)
     names = Geometry.point_names(grid_geometry(grid), Val(length(vals)))
     return Geometry.build_point(S, names, vals)
@@ -199,7 +202,7 @@ end
 
 Write positional coordinates into a preallocated `AbstractVector` (`length(out) ≥ N`).
 """
-@inline function coords!(out::AbstractVector, grid::AbstractGrid, I::Vararg{Integer})
+@inline function coords!(out::AbstractVector, grid::AbstractGrid, I::Vararg{Integer,K}) where {K}
     vals = _raw_coords(grid, I...)
     N = length(vals)
     length(out) ≥ N || throw(DimensionMismatch("out length $(length(out)) < point dimension $N"))
@@ -506,16 +509,11 @@ function _measure_factors(
 ) where {T<:AbstractFloat, G<:Geometry.AbstractSphericalGeometry{T}}
     λ, φ = axes
     R = Geometry.radius(geometry)
+    wλ = Discretization.cell_widths(λ, periods[1])
     Nλ, Nφ = length(λ), length(φ)
-    if Nλ == 1 && Nφ == 1
-        return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))  # a point has no extent
-    elseif Nφ == 1
-        return (Discretization.cell_widths(λ, periods[1]),
-                Axes.ConstantVector(R * cos(@inbounds φ[1]), 1))
-    elseif Nλ == 1
-        return (Axes.ConstantVector(one(T), 1), R .* _per_cell(_band_arc, φ, periods[2]))
-    end
-    return (Discretization.cell_widths(λ, periods[1]), (R^2) .* _per_cell(_band_sine, φ, periods[2]))
+    Nφ == 1 && return (wλ, fill!(similar(φ, T, 1), Nλ == 1 ? one(T) : R * cos(@inbounds φ[1])))
+    Nλ == 1 && return (wλ, R .* _per_cell(_band_arc, φ, periods[2]))
+    return (wλ, (R^2) .* _per_cell(_band_sine, φ, periods[2]))
 end
 
 # 3-D and above: `(Δλ)·(sin φ₊ - sin φ₋)·((r₊³ - r₋³)/3)`, further directions entering as plain widths.
@@ -543,13 +541,12 @@ function _measure_factors(
     geometry::G, axes::NTuple{2,AbstractVector{T}}, periods::NTuple{2,Union{Nothing,Real}},
 ) where {T<:AbstractFloat, G<:Geometry.AbstractEllipsoidalGeometry{T}}
     λ, φ = axes
+    wλ = Discretization.cell_widths(λ, periods[1])
     Nλ, Nφ = length(λ), length(φ)
-    if Nλ == 1 && Nφ == 1
-        return (Axes.ConstantVector(one(T), 1), Axes.ConstantVector(one(T), 1))
-    elseif Nφ == 1
+    if Nφ == 1
         φ1 = @inbounds φ[1]
-        return (Discretization.cell_widths(λ, periods[1]),
-                Axes.ConstantVector(Geometry.prime_vertical_radius(geometry, φ1) * cos(φ1), 1))
+        return (wλ, fill!(similar(φ, T, 1),
+                          Nλ == 1 ? one(T) : Geometry.prime_vertical_radius(geometry, φ1) * cos(φ1)))
     end
     nodes = _gl8_nodes(T)
     # Closures, so each broadcast runs over the axis alone — a geometry is not a broadcastable scalar.
@@ -557,8 +554,8 @@ function _measure_factors(
     band(p, b, a) = _gl8(p, b, a, nodes) do t, c
         Geometry.meridional_radius(geometry, t) * Geometry.prime_vertical_radius(geometry, t) * c
     end
-    Nλ == 1 && return (Axes.ConstantVector(one(T), 1), _per_cell(arc, φ, periods[2]))
-    return (Discretization.cell_widths(λ, periods[1]), _per_cell(band, φ, periods[2]))
+    Nλ == 1 && return (wλ, _per_cell(arc, φ, periods[2]))
+    return (wλ, _per_cell(band, φ, periods[2]))
 end
 
 """
@@ -572,7 +569,7 @@ _quadrature_weights(_, _, _) = nothing
 
 const _WeightedSampling = Union{
     SphericalSampling.AbstractGaussLegendreSampling, SphericalSampling.AbstractDriscollHealySampling,
-    SphericalSampling.AbstractClenshawCurtisSampling,
+    SphericalSampling.AbstractFejer1Sampling,
 }
 
 function _quadrature_weights(
@@ -635,8 +632,8 @@ function _cell_measure(
 end
 
 """
-    StructuredGrid(geometry, axes...; mask, topology, period, periodic, sampling)
-    StructuredGrid(geometry, axes..., mask; topology, period, periodic, sampling)
+    StructuredGrid(geometry, axes...; mask, topology, period, sampling)
+    StructuredGrid(geometry, axes..., mask; topology, period, sampling)
 
 Build a rectilinear grid in **any** number of dimensions from one coordinate vector per direction,
 pre-computing the separable cell measure from the geometry.
@@ -670,7 +667,6 @@ entering as plain widths. A `CartesianGeometry` measure is the product of the pe
   direction is its own. A `PeriodicAxis` has a seam one step wide, so its cell widths, faces and
   stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
   whatever seam gap its period leaves.
-- `periodic`: the `topology` keyword under another name, for a `Bool` or a tuple of them.
 - `sampling`: the [`SphericalSampling.AbstractSphericalSampling`](@ref) the axes came from, kept on
   the grid (see [`sampling`](@ref)). On a 2-D spherical grid a sampling with latitude quadrature
   weights sets the latitude factor of the measure to `R²·wⱼ`, so `sum(f .* measure(grid))` is its
@@ -682,15 +678,13 @@ function StructuredGrid(
     mask = nothing,
     topology = nothing,
     period = nothing,
-    periodic = nothing,
     sampling = nothing,
 ) where {T<:AbstractFloat}
     axes_in, mask_pos = _split_axes_mask(args)
     mask === nothing || mask_pos === nothing ||
         throw(ArgumentError("mask given both positionally and as a keyword"))
     return _structured_grid(
-        geometry, axes_in, mask_pos === nothing ? mask : mask_pos,
-        topology === nothing ? periodic : topology, period, sampling,
+        geometry, axes_in, mask_pos === nothing ? mask : mask_pos, topology, period, sampling,
     )
 end
 

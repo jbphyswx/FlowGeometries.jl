@@ -7,6 +7,7 @@ module Geometry
 # the `const` naming that union is evaluated at its definition, so both hierarchies must exist by then.
 include("Geometry/Metric.jl")
 include("Geometry/Spheroid.jl")
+include("Geometry/Geodesic.jl")
 include("Geometry/Frames.jl")
 include("Geometry/Rotation.jl")
 include("Geometry/Width.jl")

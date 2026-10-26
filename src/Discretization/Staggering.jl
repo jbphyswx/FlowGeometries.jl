@@ -64,19 +64,17 @@ function faces!(out::AbstractVector{T}, x::AbstractVector{T}) where {T<:Abstract
     return _faces!(out, x, n)
 end
 
+# Broadcasts over views, so an axis in device memory is staggered there.
 function _faces!(f::AbstractVector{T}, x::AbstractVector{T}, n::Int) where {T<:AbstractFloat}
     if n == 1
         # A single cell has no neighbour to halve the distance to; it is given unit width.
-        @inbounds f[1] = x[1] - one(T) / 2
-        @inbounds f[2] = x[1] + one(T) / 2
+        @views f[1:1] .= x[1:1] .- one(T) / 2
+        @views f[2:2] .= x[1:1] .+ one(T) / 2
         return f
     end
-
-    @inbounds for i in 2:n
-        f[i] = (x[i-1] + x[i]) / T(2)
-    end
-    @inbounds f[1] = x[1] - (x[2] - x[1]) / T(2)
-    @inbounds f[n+1] = x[n] + (x[n] - x[n-1]) / T(2)
+    @views f[2:n] .= (x[1:(n - 1)] .+ x[2:n]) ./ T(2)
+    @views f[1:1] .= x[1:1] .- (x[2:2] .- x[1:1]) ./ T(2)
+    @views f[(n + 1):(n + 1)] .= x[n:n] .+ (x[n:n] .- x[(n - 1):(n - 1)]) ./ T(2)
     return f
 end
 
@@ -119,11 +117,9 @@ function faces!(out::AbstractVector{T}, x::AbstractVector{T}, period::Real) wher
     ))
     n == 0 && return out
     P = T(period) * Axes.wrap_sign(x)
-    @inbounds for i in 2:n
-        out[i] = (x[i-1] + x[i]) / T(2)
-    end
-    @inbounds out[1] = ((x[n] - P) + x[1]) / T(2)
-    @inbounds out[n+1] = out[1] + P
+    @views out[2:n] .= (x[1:(n - 1)] .+ x[2:n]) ./ T(2)
+    @views out[1:1] .= ((x[n:n] .- P) .+ x[1:1]) ./ T(2)
+    @views out[(n + 1):(n + 1)] .= out[1:1] .+ P
     return out
 end
 
@@ -153,9 +149,7 @@ function centers!(out::AbstractVector{T}, f::AbstractVector{T}) where {T<:Abstra
     length(out) == n || throw(DimensionMismatch(
         "out holds $(length(out)) centres for $(length(f)) faces, which have $n",
     ))
-    @inbounds for i in 1:n
-        out[i] = (f[i] + f[i+1]) / T(2)
-    end
+    @views out .= (f[1:n] .+ f[2:(n + 1)]) ./ T(2)
     return out
 end
 

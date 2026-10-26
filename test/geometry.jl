@@ -312,7 +312,6 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     # `Val(N)` names the width: same values, every spelling.
     for pt in ([0.0, π / 3], (0.0, π / 3), (λ = 0.0, φ = π / 3))
         Test.@test G.scale_factors(sg, pt, Val(2)) == G.scale_factors(sg, (0.0, π / 3))
-        Test.@test FG.Discretization.scale_factors(sg, pt, Val(2)) == G.scale_factors(sg, (0.0, π / 3))
         Test.@test G.as_ntuple(pt, Val(2)) === (0.0, π / 3)
     end
     Test.@test G.scale_factors(sg, [0.0, π / 3, 5.0], Val(3)) == G.scale_factors(sg, (0.0, π / 3, 5.0))
@@ -369,7 +368,7 @@ Test.@testset "Oblate spheroid geometry" begin
     Test.@test G.distance(g, p1, p1) == 0.0
     d = G.distance(g, (0.0, 0.0), (π - 1e-9, 1e-9))
     Test.@test isfinite(d) && 1.9e7 < d < 2.1e7
-    # Zero flattening is the sphere: e'² = 0 gives A = 1, B = 0, so Vincenty's s = b·σ.
+    # Zero flattening is the sphere: `n = 0` empties every series, so `s = b·σ`.
     Test.@test G.distance(G.SpheroidGeometry(6371000.0, 0.0), (0.1, 0.2), (0.3, 0.4)) ≈
                G.distance(G.SphericalGeometry(6371000.0), (0.1, 0.2), (0.3, 0.4)) rtol = 1e-13
     # The area element integrates to the closed-form spheroid surface area.
@@ -397,6 +396,75 @@ Test.@testset "Oblate spheroid geometry" begin
     Test.@test G.volume_element(g, 0.4, 100.0, 1e-3, 1e-3, 2.0) ≈
                (G.prime_vertical_radius(g, 0.4) + 100.0) * cos(0.4) *
                (G.meridional_radius(g, 0.4) + 100.0) * 1e-3 * 1e-3 * 2.0
+end
+
+Test.@testset "A spheroid geodesic ends at the far point, to a few eps at any separation" begin
+    G = FG.Geometry
+    a, f = 6378137.0, 1 / 298.257223563
+    e2 = f * (2 - f)
+    spd = G.SpheroidGeometry(a, f)
+
+    # The geodesic equations per unit length, `M` and `N` the meridional and prime-vertical radii:
+    # `λ' = sin α/(N cos φ)`, `φ' = cos α/M`, `α' = sin α tan φ/N`, followed by fourth-order Runge–Kutta.
+    function rhs(y)
+        _, φ, α = y
+        w = 1 - e2 * sin(φ)^2
+        N, M = a / sqrt(w), a * (1 - e2) / w^1.5
+        return (sin(α) / (N * cos(φ)), cos(α) / M, sin(α) * tan(φ) / N)
+    end
+    function follow(p, α, s; n = 20_000)
+        y, h = (p[1], p[2], α), s / n
+        for _ in 1:n
+            k1 = rhs(y)
+            k2 = rhs(y .+ (h / 2) .* k1)
+            k3 = rhs(y .+ (h / 2) .* k2)
+            k4 = rhs(y .+ h .* k3)
+            y = y .+ (h / 6) .* (k1 .+ 2 .* k2 .+ 2 .* k3 .+ k4)
+        end
+        return y
+    end
+    # The far point placed by the sphere's forward problem, so the pairs span every separation.
+    function destination(λ1, φ1, α, σ)
+        φ2 = asin(sin(φ1) * cos(σ) + cos(φ1) * sin(σ) * cos(α))
+        return (λ1 + atan(sin(α) * sin(σ) * cos(φ1), cos(σ) - sin(φ1) * sin(φ2)), φ2)
+    end
+
+    # Short of the antipode a geodesic is the shortest path, so leaving at the returned azimuth for the
+    # returned length must arrive at the far point. The paths stay off the poles, where the equations
+    # are singular; the steps' rounding is under `n·eps·a ≈ 3e-5` m.
+    for (λ1, φ1) in ((0.0, 0.3), (1.0, -0.7), (-1.2, 0.05)), α in (0.4, 1.9, 4.0), σ in (1e-3, 0.1, 1.0, 2.5)
+        p = destination(λ1, φ1, α, σ)
+        nc = G.normal_coordinates(spd, (λ1, φ1), p)
+        e = follow((λ1, φ1), atan(nc.λ, nc.φ), hypot(nc...))
+        Test.@test sqrt(sum(abs2, G.embed(spd, (e[1], e[2])) .- G.embed(spd, p))) < 1e-4
+    end
+
+    # Rounding: Float64 and Float32 against the same solution at 256 bits on the same inputs, from a
+    # metre to the antipode, centres beside the equator and a pole included. The azimuth is checked
+    # short of the antipode, where it is ill-conditioned.
+    angdiff(x, y) = abs(mod(x - y + big(π), 2big(π)) - big(π))
+    centres = ((-2.9, -1.3), (0.4, 0.2), (1.7, 1.45), (3.0, -0.6), (0.3, 1e-5), (0.5, 1e-9), (2.2, -1.5707963))
+    for T in (Float64, Float32)
+        geo, ref = G.SpheroidGeometry(T(a), T(f)), G.SpheroidGeometry(big(T(a)), big(T(f)))
+        worst_s = worst_α = 0.0
+        for (λ1, φ1) in centres, α in (0.0, 0.3, π / 2, 1.9, 3.5, 5.6), σ in (1 / 6.4e6, 1e-4, 1e-2, 0.5, 2.5, 3.1)
+            c = (T(λ1), T(φ1))
+            p = T.(destination(big(λ1), big(φ1), big(α), big(σ)))
+            p == c && continue
+            nT, nB = G.normal_coordinates(geo, c, p), G.normal_coordinates(ref, big.(c), big.(p))
+            sB = hypot(nB...)
+            worst_s = max(worst_s, Float64(abs(G.distance(geo, c, p) - sB) / sB))
+            σ < 3 && (worst_α = max(worst_α, Float64(angdiff(atan(big(nT.λ), big(nT.φ)), atan(nB.λ, nB.φ)))))
+        end
+        Test.@test worst_s < 8eps(T)
+        Test.@test worst_α < 8eps(T)
+    end
+
+    # One pole under two longitudes, pole to pole, and the equator's antipode, which is reached over the
+    # poles: the meridian is shorter than half the equator.
+    Test.@test G.distance(spd, (0.3, π / 2), (2.1, π / 2)) == 0
+    Test.@test G.distance(spd, (0.0, -π / 2), (1.0, π / 2)) ≈ 2 * 10001965.729 atol = 2e-3
+    Test.@test G.distance(spd, (0.0, 0.0), (π, 0.0)) ≈ 2 * 10001965.729 atol = 2e-3
 end
 
 Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
@@ -598,7 +666,7 @@ Test.@testset "Normal coordinates: the geodesic's length along its initial direc
                    collect(Tuple(G.local_displacement(geo, c, p))) rtol = 1e-9
     end
 
-    # The spheroid: Vincenty's distance along Vincenty's azimuth.
+    # The spheroid: the geodesic's length along its azimuth at the centre.
     spd = G.SpheroidGeometry()
     for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8)
         c = (λ1, φ1)
@@ -768,7 +836,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
 
     # A ball query agrees with a brute-force geodesic scan cell for cell.
     let gb = FG.Grids.StructuredGrid(geo, collect(range(0, 2π; length = 25)[1:24]),
-                                     collect(range(-1.2, 1.2; length = 13)); periodic = true)
+                                     collect(range(-1.2, 1.2; length = 13)); topology = FG.Grids.Periodic())
         for (ci, r) in (((5, 6), 1.0e6), ((5, 6), 3.0e6), ((1, 1), 2.0e6), ((24, 13), 2.0e6))
             p0 = FG.Grids.coords(Tuple, gb, ci...)
             want = count(GE.distance(geo, p0, FG.Grids.coords(Tuple, gb, i, j)) ≤ r

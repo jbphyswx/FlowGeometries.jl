@@ -43,12 +43,13 @@ return the surviving count (left packed at the front of the slice).
 end
 
 """
-    _csr_from_candidates(emit!, n, maxdeg) -> CSRConnectivity
+    _csr_from_candidates(emit!, I, n, maxdeg, execution) -> CSRConnectivity
 
-Build CSR for `n` nodes whose degree is bounded by `maxdeg`. `emit!(buf, lo, i)` writes node `i`'s
-candidate neighbors into `buf[lo+1 : lo+maxdeg]` and returns how many it wrote; duplicates, self and
-out-of-range entries are removed here. `emit!` must touch only its own slice, and it is called twice per
-node — once to count the row, once to fill it — so it must be a pure function of `i`.
+Build CSR for `n` nodes whose degree is bounded by `maxdeg`, its ids of integer type `I`.
+`emit!(buf, lo, i)` writes node `i`'s candidate neighbors into `buf[lo+1 : lo+maxdeg]` and returns how
+many it wrote; duplicates, self and out-of-range entries are removed here. `emit!` must touch only its
+own slice, and it is called twice per node — once to count the row, once to fill it — so it must be a
+pure function of `i`.
 
 Count, scan, fill. The scratch is one `maxdeg` buffer per task, and both node passes write only slots
 their own node owns, so both parallelize under a threaded `execution`.
@@ -58,9 +59,9 @@ and a device backend raises here. The grid layouts reach the same graph through
 [`build_connectivity`](@ref) on [`Grids.FormulaNeighbors`](@ref), which is device-resident end to end.
 """
 function _csr_from_candidates(
-    emit!::F, n::Integer, maxdeg::Integer; execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-) where {F}
-    n = Int(n); maxdeg = Int(maxdeg)
+    emit!::F, ::Type{I}, n::Int, maxdeg::Int, execution::CB.AbstractExecutionBackend,
+) where {F,I<:Integer}
+    Grids._check_ids(I, n)
     deg = Vector{Int}(undef, n)
     Execution.run_chunks(n, execution, Execution.Written(deg)) do rng
         buf = Vector{Int}(undef, maxdeg)
@@ -68,23 +69,13 @@ function _csr_from_candidates(
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
         end
     end
-    # The width is a runtime value, so the filling pass is entered through a concrete one, from a
-    # branch that leaves each call site one method — see `_csr_total`.
-    return _index_type(max(n + 1, sum(deg))) === Int32 ?
-        _csr_fill(Int32, emit!, deg, n, maxdeg, execution) :
-        _csr_fill(Int, emit!, deg, n, maxdeg, execution)
-end
-
-function _csr_fill(
-    ::Type{I}, emit!::F, deg::Vector{Int}, n::Int, maxdeg::Int, backend,
-) where {I<:Integer,F}
-    ptr = Execution.exclusive_scan!(Vector{I}(undef, n + 1), deg, backend)
+    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, execution)
     nbrs = Vector{I}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do rng
+    Execution.run_chunks(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             d = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
-            slot = Int(ptr[i]) - 1
+            slot = ptr[i] - 1
             for k in 1:d
                 nbrs[slot + k] = buf[k]
             end
@@ -94,30 +85,24 @@ function _csr_fill(
 end
 
 """
-    _csr_from_undirected_edges(nnodes, edges) -> CSRConnectivity
+    _csr_from_undirected_edges(I, nnodes, edges) -> CSRConnectivity
 
-Build CSR from an undirected edge list, by counting degrees first and then filling each node's slot
-range directly — no intermediate per-node vectors, and no reallocation while filling.
+Build CSR from an undirected edge list, its ids of integer type `I`, by counting degrees first and then
+filling each node's slot range directly — no intermediate per-node vectors, and no reallocation while
+filling.
 """
-function _csr_from_undirected_edges(nnodes::Integer, edges)
+function _csr_from_undirected_edges(::Type{I}, nnodes::Integer, edges) where {I<:Integer}
     n = Int(nnodes)
-    # Counted at full width, since the total is what fixes the CSR's own — see `_index_type`.
-    cnt = zeros(Int, n + 1)
+    Grids._check_ids(I, n)
+    ptr = zeros(Int, n + 1)
     @inbounds for (a, b) in edges
         (1 ≤ a ≤ n && 1 ≤ b ≤ n && a != b) || continue
-        cnt[a + 1] += 1
-        cnt[b + 1] += 1
+        ptr[a + 1] += 1
+        ptr[b + 1] += 1
     end
-    return _index_type(max(n + 1, sum(cnt))) === Int32 ?
-        _edge_csr_fill(Int32, cnt, n, edges) :
-        _edge_csr_fill(Int, cnt, n, edges)
-end
-
-function _edge_csr_fill(::Type{I}, cnt::Vector{Int}, n::Int, edges) where {I<:Integer}
-    ptr = Vector{I}(undef, n + 1)
     @inbounds ptr[1] = 1
     @inbounds for i in 1:n
-        ptr[i + 1] = ptr[i] + cnt[i + 1]
+        ptr[i + 1] += ptr[i]
     end
     nbrs = Vector{I}(undef, ptr[end] - 1)
     cursor = copy(ptr)
@@ -126,12 +111,11 @@ function _edge_csr_fill(::Type{I}, cnt::Vector{Int}, n::Int, edges) where {I<:In
         nbrs[cursor[a]] = b; cursor[a] += 1
         nbrs[cursor[b]] = a; cursor[b] += 1
     end
-    # An edge list may repeat an edge; dedup each row in place and re-tighten the offsets. The row
-    # bounds come off `ptr`, which is stored at the CSR's own width; the filter counts in `Int`.
+    # An edge list may repeat an edge; dedup each row in place and re-tighten the offsets.
     write = 1
     @inbounds for i in 1:n
-        lo = Int(ptr[i]) - 1
-        m = Int(ptr[i + 1]) - Int(ptr[i])
+        lo = ptr[i] - 1
+        m = ptr[i + 1] - ptr[i]
         deg = _sort_unique_filter!(nbrs, lo, m, i, n)
         for k in 1:deg
             nbrs[write + k - 1] = nbrs[lo + k]
@@ -151,12 +135,12 @@ end
 """
     structured_grid([T], sampling, nlat; geometry, nlon, mask) -> StructuredGrid
 
-Build a spherical `StructuredGrid` from a tensor-product sampling (Clenshaw–Curtis,
+Build a spherical `StructuredGrid` from a tensor-product sampling (Fejér first rule,
 Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). The samplings space their longitudes
 evenly around the circle, so the longitude axis is an [`Axes.PeriodicAxis`](@ref) over `2π` and the grid
 wraps in longitude.
 
-A sampling with latitude quadrature weights (Gauss–Legendre, Driscoll–Healy, Clenshaw–Curtis) gives
+A sampling with latitude quadrature weights (Gauss–Legendre, Driscoll–Healy, Fejér first rule) gives
 cells of measure `R²·Δλ·wⱼ`, so `sum(f .* measure(grid))` is that quadrature; the nodes and the
 weights come from one solve. Any other sampling gives the exact cell areas.
 
@@ -189,28 +173,33 @@ _axes_and_weights(::Type{T}, s::Grids._WeightedSampling, nlat, nlon) where {T} =
 _axes_and_weights(::Type{T}, s, nlat, nlon) where {T} =
     (; SphericalSampling.spherical_axes(T, s, nlat; nlon = nlon)..., w = nothing)
 
-"""
-    build_connectivity(sampling, nlat; nlon, mask, periodic, stencil, active_only, execution)
+# A sampling's adjacency stores `Int32` ids unless the caller names an integer type first.
+build_connectivity(s::SphericalSampling.AbstractSphericalSampling, args...; kwargs...) =
+    build_connectivity(Int32, s, args...; kwargs...)
 
-Sampling topology straight to CSR. A tensor-product sampling's neighbor graph is fixed by its axis
-lengths and longitude wrapping alone, so the axes themselves are never evaluated — for
-Gauss–Legendre that is an O(n²) root solve.
+"""
+    build_connectivity([I], sampling, nlat; nlon, mask, topology, stencil, active_only, execution)
+
+Sampling topology straight to CSR, its ids of integer type `I`. A tensor-product sampling's neighbor
+graph is fixed by its axis lengths and longitude wrapping alone, so the axes themselves are never
+evaluated — for Gauss–Legendre that is an O(n²) root solve.
 """
 function build_connectivity(
+    ::Type{I},
     s::SphericalSampling.AbstractTensorProductSphericalSampling,
     nlat::Integer;
     nlon::Union{Nothing,Integer} = nothing,
     mask = nothing,
-    periodic::Union{Nothing,NTuple{2,Bool}} = nothing,
+    topology = nothing,
     stencil = Stencils.Axial(1),
     active_only::Bool = true,
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-)
+) where {I<:Integer}
     sz = SphericalSampling.axes_lengths(s, nlat; nlon = nlon)
     # These samplings tile the full circle in longitude and stop at the poles in latitude.
-    per = periodic === nothing ? (true, false) : periodic
+    per = topology === nothing ? (true, false) : map(Grids._is_periodic, Grids._as_topology(Val(2), topology))
     return build_connectivity(
-        IndexTopology((sz.nlon, sz.nlat), per, mask);
+        I, IndexTopology((sz.nlon, sz.nlat), per, mask);
         stencil = stencil, active_only = active_only, execution = execution,
     )
 end
@@ -277,25 +266,23 @@ function _cubed_neighbor(f::Int, i::Int, j::Int, di::Int, dj::Int, n::Int)
 end
 
 """
-    build_connectivity(::CubedSphereSampling, n; stencil=Axial(1)) -> CSRConnectivity
+    build_connectivity([I], ::CubedSphereSampling, n; stencil=Axial(1)) -> CSRConnectivity
 
-Six-panel gnomonic cubed sphere with cross-face seams. Indexing matches
+Six-panel gnomonic cubed sphere with cross-face seams, its ids of integer type `I`. Indexing matches
 [`SphericalSampling.cubed_sphere_points!`](@ref).
 
 A stencil reaches across a seam as it does inside a panel, so under `Moore(1)` with `n ≥ 2` every cell
 has eight neighbours except the 24 cells at a cube corner, which have seven.
 """
 function build_connectivity(
-    ::SphericalSampling.CubedSphereSampling, n::Integer;
+    ::Type{I}, ::SphericalSampling.CubedSphereSampling, n::Integer;
     stencil = Stencils.Axial(1), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-)
-    n = Int(n)
-    n ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1"))
+) where {I<:Integer}
+    nn = Int(n)
+    nn ≥ 1 || throw(ArgumentError("cubed-sphere n must be ≥ 1"))
     sv = _stencil_val(stencil)
     offs = _stencil_offsets(Val{2}(), sv)
-    N = 6 * n * n
-    nn = n
-    return _csr_from_candidates(N, length(offs); execution = execution) do buf, lo, lin
+    return _csr_from_candidates(I, 6 * nn * nn, length(offs), execution) do buf, lo, lin
         f, i, j = SphericalSampling._cubed_unlin(lin, nn)
         m = 0
         @inbounds for δ in offs
@@ -313,33 +300,32 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_connectivity(::YinYangSampling, nlon, nlat; stencil=Axial(1)) -> CSRConnectivity
+    build_connectivity([I], ::YinYangSampling, nlon, nlat; stencil=Axial(1)) -> CSRConnectivity
 
-Panel-local face/vertex stencils on yin then yang. Global ordering matches
+Panel-local face/vertex stencils on yin then yang, the ids of integer type `I`. Global ordering matches
 [`SphericalSampling.spherical_points!`](@ref) for Yin–Yang: yin (`nlon×nlat`, lon
 fastest), then yang with the same panel indexing. The overlap is *not* cross-linked: this is the
 standard Yin–Yang discrete topology, where the panels couple through interpolation.
 """
 function build_connectivity(
-    ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
+    ::Type{I}, ::SphericalSampling.YinYangSampling, nlon::Integer, nlat::Integer;
     stencil = Stencils.Axial(1), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-)
-    nlon = Int(nlon); nlat = Int(nlat)
-    nlon ≥ 1 && nlat ≥ 1 || throw(ArgumentError("Yin–Yang nlon/nlat must be ≥ 1"))
+) where {I<:Integer}
+    sz = (Int(nlon), Int(nlat))
+    nx, ny = sz
+    nx ≥ 1 && ny ≥ 1 || throw(ArgumentError("Yin–Yang nlon/nlat must be ≥ 1"))
     sv = _stencil_val(stencil)
     offs = _stencil_offsets(Val{2}(), sv)
-    npanel = nlon * nlat
-    N = 2 * npanel
-    sz = (nlon, nlat)
-    return _csr_from_candidates(N, length(offs); execution = execution) do buf, lo, lin
+    npanel = nx * ny
+    return _csr_from_candidates(I, 2 * npanel, length(offs), execution) do buf, lo, lin
         base = ((lin - 1) ÷ npanel) * npanel
         p = lin - base - 1
-        j, i = divrem(p, nlon)
+        j, i = divrem(p, nx)
         i += 1; j += 1
         m = 0
         @inbounds for δ in offs
-            ii = _wrap_or_clip(i, δ[1], nlon, false)
-            jj = _wrap_or_clip(j, δ[2], nlat, false)
+            ii = _wrap_or_clip(i, δ[1], nx, false)
+            jj = _wrap_or_clip(j, δ[2], ny, false)
             (ii == 0 || jj == 0) && continue
             m += 1
             buf[lo + m] = base + _linidx(sz, ii, jj)
@@ -471,17 +457,18 @@ function healpix_neighbors(nside::Integer, ipix0::Integer)
 end
 
 """
-    build_connectivity(s::HEALPixSampling) -> CSRConnectivity
+    build_connectivity([I], s::HEALPixSampling) -> CSRConnectivity
 
-HEALPix RING topological adjacency (usually 8 neighbors; 7 or 6 at singular pixels).
-Julia node indices are 1-based (`pixel 0` → node `1`).
+HEALPix RING topological adjacency (usually 8 neighbors; 7 or 6 at singular pixels), its ids of integer
+type `I`. Julia node indices are 1-based (`pixel 0` → node `1`).
 """
 function build_connectivity(
-    s::SphericalSampling.HEALPixSampling; execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
-)
+    ::Type{I}, s::SphericalSampling.HEALPixSampling;
+    execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
+) where {I<:Integer}
     nside = s.nside
     npix = SphericalSampling.healpix_npix(nside)
-    return _csr_from_candidates(npix, 8; execution = execution) do buf, lo, node
+    return _csr_from_candidates(I, npix, 8, execution) do buf, lo, node
         # Straight into this node's own slice — no scratch shared between calls, so the emit pass
         # parallelizes.
         slice = view(buf, (lo + 1):(lo + 8))
@@ -498,38 +485,33 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_connectivity(s::IcosahedralSampling) -> CSRConnectivity
+    build_connectivity([I], s::IcosahedralSampling) -> CSRConnectivity
 
 Undirected edges of the frequency-`ν` geodesic triangulation (same vertex set as
-[`SphericalSampling.icosahedral_vertices`](@ref)).
+[`SphericalSampling.icosahedral_vertices`](@ref)), its ids of integer type `I`.
 
 A vertex's neighbours are arithmetic in `(ν, id)` — see [`_ico_neighbor_ids`](@ref) — so this is the
 same count, scan, fill the layout's own builder makes, over `10ν² + 2` vertices. The triangulation's
 `20ν²` triangles and `30ν²` edges are never formed.
 """
 function build_connectivity(
-    s::SphericalSampling.IcosahedralSampling;
+    ::Type{I}, s::SphericalSampling.IcosahedralSampling;
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
-)
+) where {I<:Integer}
     ν = Int(s.frequency)
     n = SphericalSampling.icosahedral_nvertices(ν)
+    Grids._check_ids(I, n)
     deg = Execution.allocate(execution, Int, n)
     Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds deg[k] = _ico_neighbor_ids(k, ν)[2]
     end
     total = _csr_total(deg, n, execution)
-    return _index_type(max(n + 1, total)) === Int32 ?
-        _ico_fill(Int32, total, deg, n, ν, execution) :
-        _ico_fill(Int, total, deg, n, ν, execution)
-end
-
-function _ico_fill(::Type{I}, total::Int, deg, n::Int, ν::Int, backend) where {I<:Integer}
-    ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
-    nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
+    ptr = Execution.exclusive_scan!(Execution.allocate(execution, Int, n + 1), deg, execution)
+    nbrs = Execution.allocate(execution, I, total)
+    Execution.run_indices(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _ico_neighbor_ids(k, ν)
-            slot = Int(ptr[k])
+            slot = ptr[k]
             for t in 1:m
                 nbrs[slot] = ids[t]
                 slot += 1
@@ -544,13 +526,14 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    unstructured_grid([T], sampling, args...; geometry, areas, mask) -> UnstructuredGrid
+    unstructured_grid([T], [I], sampling, args...; geometry, areas, mask) -> UnstructuredGrid
 
 Points from `spherical_points`, exact sampling topology from `build_connectivity`, and exact cell areas
 from the sampling's own tessellation. Pass `areas` to supply them instead.
 
 `T` is the element type to build in, and defaults to the `geometry`'s own, as for
-[`structured_grid`](@ref).
+[`structured_grid`](@ref). `I` is the integer type of the node ids the adjacency stores, `Int32` by
+default.
 
 The spherical pixelizations have their own layouts — [`Grids.HEALPixGrid`](@ref),
 [`Grids.CubedSphereGrid`](@ref), [`Grids.YinYangGrid`](@ref), [`Grids.RingGrid`](@ref) — with
@@ -561,14 +544,20 @@ mesh: the icosahedral geodesic, and a caller's own points.
 function unstructured_grid end
 
 """
-    unstructured_grid(::AbstractScatteredSphericalSampling, λ, φ; geometry, k, radius, areas, mask)
+    unstructured_grid([I], ::AbstractScatteredSphericalSampling, λ, φ; geometry, k, radius, areas, mask)
 
 Build an `UnstructuredGrid` on an arbitrary `(λ, φ)` point set. The points are the caller's, so there
 is no resolution parameter. Adjacency comes from a k-d-tree query (`k` nearest, or everything within
 a physical `radius`) and cell areas default to the spherical Voronoi dual; see
 [`Grids.UnstructuredGrid`](@ref) for the extension each needs.
 """
+unstructured_grid(
+    s::SphericalSampling.AbstractScatteredSphericalSampling, λ::AbstractVector, φ::AbstractVector;
+    kwargs...,
+) = unstructured_grid(Int32, s, λ, φ; kwargs...)
+
 function unstructured_grid(
+    ::Type{I},
     ::SphericalSampling.AbstractScatteredSphericalSampling,
     λ::AbstractVector, φ::AbstractVector;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
@@ -576,15 +565,15 @@ function unstructured_grid(
     mask = nothing,
     k::Integer = 6,
     radius::Union{Nothing,Real} = nothing,
-    periodic = nothing,
+    topology = nothing,
     period = nothing,
-)
+) where {I<:Integer}
     n = length(λ)
     length(φ) == n || throw(DimensionMismatch("λ/φ length mismatch: $n vs $(length(φ))"))
     m = mask === nothing ? Grids.AllActive((n,)) : mask
     return Grids.UnstructuredGrid(
-        geometry, λ, φ, m;
-        k = k, radius = radius, areas = areas, periodic = periodic, period = period,
+        I, geometry, λ, φ, m;
+        k = k, radius = radius, areas = areas, topology = topology, period = period,
     )
 end
 
@@ -593,15 +582,24 @@ unstructured_grid(
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
 ) = unstructured_grid(Geometry.float_type(geometry), s; geometry = geometry, kwargs...)
 
+unstructured_grid(
+    ::Type{I}, s::SphericalSampling.IcosahedralSampling;
+    geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(), kwargs...,
+) where {I<:Integer} = unstructured_grid(Geometry.float_type(geometry), I, s; geometry = geometry, kwargs...)
+
+unstructured_grid(::Type{T}, s::SphericalSampling.IcosahedralSampling; kwargs...) where {T<:AbstractFloat} =
+    unstructured_grid(T, Int32, s; kwargs...)
+
 function unstructured_grid(
     ::Type{T},
+    ::Type{I},
     s::SphericalSampling.IcosahedralSampling;
     geometry::Geometry.AbstractGeometry = Geometry.SphericalGeometry(),
     areas = nothing,
     mask = nothing,
-) where {T<:AbstractFloat}
+) where {T<:AbstractFloat,I<:Integer}
     mesh = SphericalSampling.icosahedral_mesh(T, s.frequency)
-    conn = _csr_from_undirected_edges(length(mesh.λ), mesh.edges)
+    conn = _csr_from_undirected_edges(I, length(mesh.λ), mesh.edges)
     geo = Geometry.similar_geometry(T, geometry)
     a = areas === nothing ? _icosahedral_dual_areas(geo, s.frequency) : areas
     return _unstructured_from_points_conn(geo, mesh.λ, mesh.φ, conn, a; mask = mask)

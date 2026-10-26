@@ -14,14 +14,36 @@ function apply_stencil!(
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
-    _check_batched(out, field, grid, Val(N), Int(dim))
-    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    return apply_stencil!(
-        out, field, Grids.coordinates(grid, dim), dim;
-        order = order, nodes = nodes,
-        period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
-        mask = msk, masked = masked, execution = execution, policy = policy, scratch = scratch,
-    )
+    d = Int(dim)
+    _check_batched(out, field, grid, Val(N), d)
+    return _with_active_mask(grid, active_only) do msk
+        _grid_axis!(out, field, grid, d, Int(order), Int(nodes), msk, masked, execution, policy, scratch,
+                    nothing)
+    end
+end
+
+# `f` applied to the mask a grid form reads: the grid's where `active_only` asks for it and a cell is
+# inactive, `nothing` otherwise. Each arm calls `f` at its own mask type.
+@inline _with_active_mask(f::F, grid::Grids.StructuredGrid, active_only::Bool) where {F} =
+    active_only ? f(_inactive_mask(Grids.mask(grid))) : f(nothing)
+@inline _inactive_mask(::Grids.AllActive) = nothing
+@inline _inactive_mask(m::AbstractArray{Bool}) = m
+
+# The axis and table forms along direction `d` of `grid`, its axis and wrap period resolved once by type.
+function _grid_axis!(out, field, grid::Grids.StructuredGrid{T,G,N}, d::Int, ord::Int, k::Int, msk, masked,
+                     backend, policy, scratch, fac) where {T,G,N}
+    return _dispatch_dim(d, Val(N)) do vd
+        _apply_axis!(out, field, Grids.coordinates(grid)[_val(vd)], _val(vd), ord, k,
+                     Grids._wrap_period(grid, _val(vd)), msk, masked, backend, policy, scratch, fac)
+    end
+end
+
+function _grid_table!(out, field, grid::Grids.StructuredGrid{T,G,N}, indices, weights, d::Int, ord::Int, msk,
+                      masked, backend, policy, scratch, fac) where {T,G,N}
+    return _dispatch_dim(d, Val(N)) do vd
+        _apply_axis_table!(out, field, Grids.coordinates(grid)[_val(vd)], indices, weights, _val(vd), ord,
+                           Grids._wrap_period(grid, _val(vd)), msk, masked, backend, policy, scratch, fac)
+    end
 end
 
 # The two samples of direction `d` that bracket `v`, with their weights. A periodic direction wraps:
@@ -80,8 +102,14 @@ function _interp_at(
     active_only::Bool, masked, policy,
 ) where {S,G,T,N}
     prs = ntuple(d -> _interp_pair(grid, d, T(p[d])), Val(N))
-    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    sz = Grids.size_tuple(grid)
+    return _with_active_mask(grid, active_only) do msk
+        _interp_corners(field, Grids.size_tuple(grid), prs, msk, off, masked, policy, T)
+    end
+end
+
+function _interp_corners(
+    field::AbstractArray{S}, sz::NTuple{N,Int}, prs, msk, off::Int, masked, policy, ::Type{T},
+) where {S,N,T}
     acc = zero(S)
     wsum = zero(T)
     # The `2^N` corners of the bracketing cell, each weighted by the product of its per-axis weights.
@@ -177,12 +205,12 @@ function derivative!(
     d = Int(dim)
     ord = Int(order)
     _check_batched(out, field, grid, Val(N), d)
-    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    _along_arc(grid, d, ord) &&
-        return _arc_derivative!(out, field, grid, d, ord, Int(nodes), msk, masked, execution, policy)
-    return _apply_axis!(out, field, Grids.coordinates(grid, d), d, ord, Int(nodes),
-                        Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, msk, masked,
-                        execution, policy, scratch, _derivative_factors(grid, d, execution, ord))
+    return _with_active_mask(grid, active_only) do msk
+        _along_arc(grid, d, ord) ?
+            _arc_derivative!(out, field, grid, d, ord, Int(nodes), msk, masked, execution, policy) :
+            _grid_axis!(out, field, grid, d, ord, Int(nodes), msk, masked, execution, policy, scratch,
+                        _derivative_factors(grid, d, execution, ord))
+    end
 end
 
 """
@@ -203,12 +231,13 @@ function derivative!(
     d = Int(dim)
     ord = Discretization.derivative_order(plan)
     _check_batched(out, field, grid, Val(N), d)
-    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    _along_arc(grid, d, ord) && return _arc_derivative!(
-        out, field, grid, d, ord, Discretization.nnodes(plan), msk, masked, execution, BlankMasked(),
-    )
-    return _apply_plan_checked!(out, field, plan, d, msk, masked, execution,
-                                _derivative_factors(grid, d, execution, ord))
+    Discretization.nnodes(plan) == 0 && return fill!(out, masked)
+    return _with_active_mask(grid, active_only) do msk
+        _along_arc(grid, d, ord) ? _arc_derivative!(
+            out, field, grid, d, ord, Discretization.nnodes(plan), msk, masked, execution, BlankMasked(),
+        ) : _apply_plan_checked!(out, field, plan, d, msk, masked, execution,
+                                 _derivative_factors(grid, d, execution, ord))
+    end
 end
 
 """
@@ -236,8 +265,7 @@ function _derivative_factors(grid::Grids.StructuredGrid{T,G,N}, d::Int, backend,
         end
         return _RowFactors(_factors_on(b, buf, R), Grids.size_tuple(grid))
     end
-    return _CellFactors(geo, Execution.on_backend(b, Grids.coordinates(grid)), d,
-                        Discretization.metric_floor(geo, d), ord)
+    return _CellFactors(geo, Execution.on_backend(b, Grids.coordinates(grid)), d, ord)
 end
 
 # Distance along a direction whose own scale factor `h_d` varies along it is not a multiple of the
@@ -271,22 +299,21 @@ direction. Returns how many.
 Direction 1 is metric-invariant here, so one factor covers a whole run and any axis-1 coordinate serves
 as the point's first component. The other axes are read on the host.
 
-A degenerate factor — one at or below the geometry's [`Discretization.metric_floor`](@ref) — is stored
-as zero, and a kernel writes `masked` where its factor is zero.
+A scale factor of zero, as at a pole, is stored as zero, and a kernel writes `masked` where its factor
+is zero.
 """
 function _metric_row_factors!(
     buf::AbstractVector{T}, grid::Grids.StructuredGrid{T,G,N}, ::Val{dim}, ::Val{N}, ord::Int,
 ) where {G,T,N,dim}
     geo = Grids.grid_geometry(grid)
-    floor_ = Discretization.metric_floor(geo, dim)
     sz = Grids.size_tuple(grid)
     x1 = T(Grids.origin(grid, 1))
-    ax = map(_host_array, Base.tail(Grids.coordinates(grid)))
+    ax = map(Axes._host_array, Base.tail(Grids.coordinates(grid)))
     rows = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
     @inbounds for (r, Ir) in enumerate(rows)
         pt = (x1, ntuple(d -> T(ax[d][Ir[d]]), Val(N - 1))...)
         h = Geometry.scale_factors(geo, pt)[dim]
-        buf[r] = abs(h) ≤ floor_ ? zero(T) : inv(h)^ord
+        buf[r] = iszero(h) ? zero(T) : inv(h)^ord
     end
     return length(rows)
 end
@@ -347,10 +374,10 @@ function Discretization.axis_stencils(
     grid::Grids.StructuredGrid{T, G,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
-    return Discretization.axis_stencils(
-        _host_array(Grids.coordinates(grid, dim)), order, nodes;
-        period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
-    )
+    return _dispatch_dim(Int(dim), Val(N)) do vd
+        Discretization.axis_stencils(Axes._host_array(Grids.coordinates(grid)[_val(vd)]), order, nodes;
+                                     period = Grids._wrap_period(grid, _val(vd)))
+    end
 end
 
 """
@@ -367,10 +394,10 @@ function Discretization.stencil_plan(
     order::Integer = 1, nodes::Integer = Int(order) + 1,
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
-    return Discretization.stencil_plan(
-        _host_array(Grids.coordinates(grid, dim)), order, nodes;
-        period = Grids.isperiodic(grid, dim) ? Grids.period(grid, dim) : nothing,
-    )
+    return _dispatch_dim(Int(dim), Val(N)) do vd
+        Discretization._axis_plan(Axes._host_array(Grids.coordinates(grid)[_val(vd)]), Int(order), Int(nodes),
+                                  Grids._wrap_period(grid, _val(vd)))
+    end
 end
 
 """
@@ -393,30 +420,12 @@ function apply_stencil!(
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     policy::AbstractMaskPolicy = BlankMasked(), scratch = nothing,
 ) where {S,G,T,N,NA}
-    _check_batched(out, field, grid, Val(N), Int(dim))
-    # Resolved with a ternary the mask and the period are `Union{Nothing, …}`, and a small union
-    # crossing a keyword boundary boxes. Branching leaves every leaf concretely typed.
-    msk = Grids.mask(grid)
-    if active_only && !(msk isa Grids.AllActive)
-        return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), msk, masked,
-                           execution, policy, scratch)
+    d = Int(dim)
+    _check_batched(out, field, grid, Val(N), d)
+    return _with_active_mask(grid, active_only) do msk
+        _grid_table!(out, field, grid, indices, weights, d, Int(order), msk, masked, execution, policy,
+                     scratch, nothing)
     end
-    return _apply_tbl!(out, field, grid, indices, weights, Int(dim), Int(order), nothing, masked,
-                       execution, policy, scratch)
-end
-
-@inline function _apply_tbl!(
-    out, field, grid::Grids.StructuredGrid, indices, weights, dim::Int, order::Int, msk, masked, backend,
-    policy, scratch,
-)
-    x = Grids.coordinates(grid, dim)
-    return Grids.isperiodic(grid, dim) ?
-        apply_stencil!(out, field, x, indices, weights, dim; order = order,
-                                      period = Grids.period(grid, dim), mask = msk, masked = masked,
-                                      execution = backend, policy = policy, scratch = scratch) :
-        apply_stencil!(out, field, x, indices, weights, dim; order = order,
-                                      period = nothing, mask = msk, masked = masked,
-                                      execution = backend, policy = policy, scratch = scratch)
 end
 
 """
@@ -438,10 +447,10 @@ function derivative!(
     d = Int(dim)
     ord = Int(order)
     _check_batched(out, field, grid, Val(N), d)
-    msk = active_only && !(Grids.mask(grid) isa Grids.AllActive) ? Grids.mask(grid) : nothing
-    _along_arc(grid, d, ord) &&
-        return _arc_derivative!(out, field, grid, d, ord, size(indices, 2), msk, masked, execution, policy)
-    return _apply_axis_table!(out, field, Grids.coordinates(grid, d), indices, weights, d, ord,
-                              Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, msk,
-                              masked, execution, policy, scratch, _derivative_factors(grid, d, execution, ord))
+    return _with_active_mask(grid, active_only) do msk
+        _along_arc(grid, d, ord) ?
+            _arc_derivative!(out, field, grid, d, ord, size(indices, 2), msk, masked, execution, policy) :
+            _grid_table!(out, field, grid, indices, weights, d, ord, msk, masked, execution, policy, scratch,
+                         _derivative_factors(grid, d, execution, ord))
+    end
 end

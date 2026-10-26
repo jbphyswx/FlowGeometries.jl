@@ -76,16 +76,16 @@ function _check_integrand(field::AbstractArray, grid::AbstractGrid)
     return length(field) ÷ length(grid)
 end
 
-# One element, at linear offset `off` into the field.
-function _integrate_at(field, grid::AbstractGrid, off::Int, active_only::Bool, ::Type{S},
-                       ::CB.AbstractSerialBackend) where {S}
-    msk = active_only ? mask(grid) : AllActive(size(grid))
-    return _weighted_sum(i -> S(@inbounds field[off + i]), msk, measure(grid), zero(S))
-end
+# One element, at linear offset `off` into the field. Each arm calls at its own mask type.
+_integrate_at(field, grid::AbstractGrid, off::Int, active_only::Bool, ::Type{S}, backend) where {S} =
+    active_only ? _integrate_over(field, grid, mask(grid), off, S, backend) :
+                  _integrate_over(field, grid, AllActive(size(grid)), off, S, backend)
 
-function _integrate_at(field, grid::AbstractGrid, off::Int, active_only::Bool, ::Type{S},
-                       backend::CB.AbstractExecutionBackend) where {S}
-    msk = active_only ? mask(grid) : AllActive(size(grid))
+_integrate_over(field, grid::AbstractGrid, msk, off::Int, ::Type{S}, ::CB.AbstractSerialBackend) where {S} =
+    _weighted_sum(i -> S(@inbounds field[off + i]), msk, measure(grid), zero(S))
+
+function _integrate_over(field, grid::AbstractGrid, msk, off::Int, ::Type{S},
+                         backend::CB.AbstractExecutionBackend) where {S}
     m = measure(grid)
     return Execution.reduce_indices(+, zero(S), length(grid), backend) do i
         @inbounds _active(msk, i) ? S(field[off + i]) * S(m[i]) : zero(S)

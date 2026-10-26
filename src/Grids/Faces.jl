@@ -113,10 +113,12 @@ The coordinates of the faces normal to direction `d` of a rectilinear grid, [`nf
 midway between neighbouring centres, the first of a wrapping direction midway across its seam, the two
 outermost of a bounded one half a cell beyond its end centres. The face axis of an
 [`Axes.PeriodicAxis`](@ref) is another and that of a uniform axis is uniform; they are the face axes of
-[`StaggeredGrid`](@ref).
+[`StaggeredGrid`](@ref). With `d` a `Val`, the axis's type is known where it is called.
 """
 @inline face_coordinates(grid::StructuredGrid, d::Integer) =
-    _face_axis(coordinates(grid, d), isperiodic(grid, d), period(grid, d))
+    _face_axis(coordinates(grid, d), topology(grid)[d], period(grid, d))
+@inline face_coordinates(grid::StructuredGrid, ::Val{d}) where {d} =
+    _face_axis(coordinates(grid)[d], topology(grid)[d], period(grid, d))
 
 """
     corner_coordinates(grid, d) -> AbstractVector
@@ -124,7 +126,10 @@ outermost of a bounded one half a cell beyond its end centres. The face axis of 
 The coordinates along direction `d` of the corners of a pair staggered in `d`: the
 [`face_coordinates`](@ref) of a wrapping direction, and the interior ones of a bounded direction.
 """
-function corner_coordinates(grid::StructuredGrid, d::Integer)
-    f = face_coordinates(grid, d)
-    return isperiodic(grid, d) ? f : f[(firstindex(f) + 1):(lastindex(f) - 1)]
-end
+@inline corner_coordinates(grid::StructuredGrid, d::Integer) =
+    _corner_axis(face_coordinates(grid, d), topology(grid)[d])
+@inline corner_coordinates(grid::StructuredGrid, ::Val{d}) where {d} =
+    _corner_axis(face_coordinates(grid, Val(d)), topology(grid)[d])
+
+@inline _corner_axis(f::AbstractVector, ::Periodic) = f
+@inline _corner_axis(f::AbstractVector, ::Bounded) = f[(firstindex(f) + 1):(lastindex(f) - 1)]

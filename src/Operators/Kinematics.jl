@@ -41,19 +41,26 @@ function stencil_plans(
     grid::Grids.StructuredGrid{T,G,N}; order::Integer = 1, nodes::Integer = Int(order) + 1,
     policy::AbstractMaskPolicy = BlankMasked(),
 ) where {T,G,N}
-    plans = ntuple(d -> _direction_plan(grid, Grids.mask(grid), d, Int(order), Int(nodes), policy), Val(N))
+    ord, k = Int(order), Int(nodes)
+    k ≥ ord + 1 || throw(ArgumentError("an order-$ord derivative needs at least $(ord + 1) nodes, got $k"))
+    mask = Grids.mask(grid)
+    plans = map_directions(vd -> _direction_plan(grid, mask, vd, ord, k, policy), Val(N))
     return StencilPlans{N,typeof(plans)}(plans)
 end
 
-function _direction_plan(grid, ::Grids.AllActive, d::Int, ord::Int, k::Int, _policy)
-    n = Grids.size_tuple(grid)[d]
-    n < ord + 1 && return nothing
-    return Discretization.stencil_plan(grid, d; order = ord, nodes = min(k, n))
+# A direction of fewer than `ord + 1` samples takes the plan of no rows, which writes `masked`.
+function _direction_plan(grid::Grids.StructuredGrid, ::Grids.AllActive, ::Val{d}, ord::Int, k::Int, _policy) where {d}
+    x = Axes._host_array(Grids.coordinates(grid)[d])
+    n = length(x)
+    return Discretization._stencil_plan(Axes.spacing_trait(x), x, ord, n < ord + 1 ? 0 : min(k, n),
+                                        Grids._wrap_period(grid, d))
 end
 
-function _direction_plan(grid, ::AbstractArray{Bool}, d::Int, ord::Int, k::Int, policy)
+function _direction_plan(
+    grid::Grids.StructuredGrid{T}, mask::AbstractArray{Bool}, ::Val{d}, ord::Int, k::Int, policy,
+) where {T,d}
     n = Grids.size_tuple(grid)[d]
-    n < ord + 1 && return nothing
+    n < ord + 1 && return _empty_masked_plan(T, _host_mask(mask), d, ord, 0, _along_arc(grid, d, ord))
     return masked_stencil_plan(grid, d; order = ord, nodes = min(k, n), policy = policy)
 end
 
@@ -74,17 +81,13 @@ end
     derivative!(out, field, grid, p, d; masked = masked, execution = b)
 @inline _held_derivative!(out, field, grid, p::MaskedStencilPlan, ::Int, masked, b) =
     derivative!(out, field, grid, p; masked = masked, execution = b)
-@inline _held_derivative!(out, _field, _grid, ::Nothing, ::Int, masked, _b) = fill!(out, masked)
 
-# `out = d_d f`, with `scratch` the component buffers a least-squares plan writes all of at once.
+# `out = d_d f`.
 @inline _derivative_along!(out, f, grid::Grids.StructuredGrid, plans::StencilPlans, d::Int, _scratch, masked, b) =
     _held_derivative!(out, f, grid, @inbounds(plans.plans[d]), d, masked, b)
 
-@inline function _derivative_along!(out, f, _grid, plan::GradientPlan, d::Int, scratch, _masked, b)
-    gradient!(scratch, f, plan; execution = b)
-    copyto!(out, @inbounds scratch[d])
-    return out
-end
+@inline _derivative_along!(out, f, _grid, plan::GradientPlan, d::Int, _scratch, _masked, b) =
+    _gradient_component!(out, f, plan, d, b)
 
 # `g[k] = d_k f` for every direction `k`.
 @inline function _gradient_into!(
@@ -313,15 +316,14 @@ function _frame_pass!(kind, outs::Tuple, u::NTuple{N,Any}, grid::Grids.AbstractG
     geo = Grids.grid_geometry(grid)
     g = Execution.on_backend(b, grid)
     msk = Grids.mask(g)
-    floors = ntuple(d -> Discretization.metric_floor(geo, d), Val(N))
     ci = CartesianIndices(size(first(outs)))
     Execution.run_indices(length(ci), b, map(Execution.Written, outs)...) do lin
-        _frame_cell!(kind, outs, u, g, geo, msk, floors, masked, @inbounds(ci[lin]), Val(ndims(msk)))
+        _frame_cell!(kind, outs, u, g, geo, msk, masked, @inbounds(ci[lin]), Val(ndims(msk)))
     end
     return nothing
 end
 
-@inline function _frame_cell!(kind, outs, u, grid, geo, msk, floors, masked, I, ::Val{M}) where {M}
+@inline function _frame_cell!(kind, outs, u, grid, geo, msk, masked, I, ::Val{M}) where {M}
     @inbounds begin
         Is = ntuple(d -> I[d], Val(M))
         if !msk[Is...]
@@ -329,7 +331,7 @@ end
             return nothing
         end
         p = Tuple(Grids.coords(grid, Is...))
-        if any(map((h, f) -> abs(h) ≤ f, Geometry.scale_factors(geo, p), floors))
+        if any(iszero, Geometry.scale_factors(geo, p))
             _write_all!(outs, I, masked)
             return nothing
         end

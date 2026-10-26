@@ -29,11 +29,11 @@ function spherical_axes!(
 end
 
 function spherical_axes!(
-    λ::AbstractVector{T}, φ::AbstractVector{T}, ::AbstractClenshawCurtisSampling, nlat::Integer;
+    λ::AbstractVector{T}, φ::AbstractVector{T}, ::AbstractFejer1Sampling, nlat::Integer;
     nlon::Union{Nothing,Integer} = nothing,
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
-    sz = axes_lengths(ClenshawCurtisSampling(), nlat; nlon)
+    sz = axes_lengths(Fejer1Sampling(), nlat; nlon)
     length(λ) == sz.nlon && length(φ) == sz.nlat || throw(DimensionMismatch("λ/φ lengths must match axes_lengths"))
     nlon_eff = sz.nlon
     @inbounds for i in 1:nlat
@@ -123,6 +123,8 @@ function spherical_axes!(
     @inbounds for j in 1:nlat
         φ[j] = φ0 + T(j - 1) * dφ
     end
+    # The last latitude is `lat_range[2]` as given, so a range ending at a pole stores the pole exactly.
+    nlat > 1 && (@inbounds φ[nlat] = φ1)
     @inbounds for i in 1:nlon
         λ[i] = λ0 + T(i - 1) * dλ
     end
@@ -258,8 +260,8 @@ struct Transform <: AbstractEquiangularAlgorithm end
 """
     _equiangular_algorithm(T) -> AbstractEquiangularAlgorithm
 
-The default for element type `T`: [`Recurrence`](@ref) unless a loaded extension can plan a transform
-for it. The single place availability is consulted, so no method below branches on it.
+The default for element type `T`: [`Recurrence`](@ref), and [`Transform`](@ref) for the types FFTW
+plans once FFTW is loaded, whose extension adds that method.
 """
 _equiangular_algorithm(::Type) = Recurrence()
 
@@ -281,7 +283,7 @@ function latitude_weights!(
     algorithm === nothing || throw(ArgumentError(
         "Gauss–Legendre weights come from the Bogaert root solve, so there is no $(algorithm) to " *
         "select. `algorithm` picks the equiangular sine-series construction, and applies to " *
-        "DriscollHealySampling and ClenshawCurtisSampling.",
+        "DriscollHealySampling and Fejer1Sampling.",
     ))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
     _gauss_legendre!(T, nothing, w, nlat)
@@ -291,7 +293,7 @@ end
 """
     OpenNodes(), ClosedNodes()
 
-The two equiangular colatitude families: open `θᵢ = π(i−½)/N` (Clenshaw–Curtis) and closed
+The two equiangular colatitude families: open `θᵢ = π(i−½)/N` (Fejér's first rule) and closed
 `θᵢ = π(i−1)/N` (Driscoll–Healy). They are types, so the sum below dispatches on which one it has.
 """
 struct OpenNodes end
@@ -391,19 +393,19 @@ function latitude_weights!(
 end
 
 """
-    latitude_weights!(w, ::AbstractClenshawCurtisSampling, nlat)
+    latitude_weights!(w, ::AbstractFejer1Sampling, nlat)
 
 Weights for the open nodes `θᵢ = π(i−½)/N`: Fejér's first rule.
 
 These integrate a single `P_l` exactly for `l ≤ N−1`, which is weaker than
-[`bandlimit`](@ref)`(ClenshawCurtisSampling(), N) = N−1` suggests: spectral analysis integrates
+[`bandlimit`](@ref)`(Fejer1Sampling(), N) = N−1` suggests: spectral analysis integrates
 products of two degree-`lmax` functions, so a quadrature exact to `l ≤ N−1` supports quadrature-based
 analysis only up to `lmax ≈ (N−1)/2`. The reported band limit describes what the grid represents; this
 quadrature integrates to half of it. Use `GaussLegendreSampling` (exact to `2N−1`) where analysis must
 be exact at the stated band limit.
 """
 function latitude_weights!(
-    w::AbstractVector{T}, ::AbstractClenshawCurtisSampling, nlat::Integer;
+    w::AbstractVector{T}, ::AbstractFejer1Sampling, nlat::Integer;
     algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
@@ -415,7 +417,7 @@ latitude_weights!(::AbstractVector, ::AbstractMcEwenWiauxSampling, ::Integer; _.
     "McEwen–Wiaux latitude weights are not implemented: the MW quadrature is not the sine-series " *
     "rule the other equiangular samplings use (it is built on an extension of the sphere to a torus), " *
     "and applying that rule to MW nodes is not exact even for l = 0. Use `GaussLegendreSampling`, " *
-    "`DriscollHealySampling`, or `ClenshawCurtisSampling` if you need quadrature weights.",
+    "`DriscollHealySampling`, or `Fejer1Sampling` if you need quadrature weights.",
 ))
 latitude_weights!(::AbstractVector, ::AbstractLatLonSampling, ::Integer; _...) =
     throw(ArgumentError("LatLonSampling is an arbitrary lat–lon layout with no spectral quadrature weights"))
@@ -436,7 +438,7 @@ else; the longitude factor is the caller's, so a full-sphere integral is always
 regardless of which sampling produced the weights. Not every sampling has them — `LatLonSampling`
 has no spectral quadrature at all, and `McEwenWiauxSampling`'s is a different construction.
 
-The equiangular families — Driscoll–Healy and Clenshaw–Curtis — additionally take
+The equiangular families — Driscoll–Healy and Fejér's first rule — additionally take
 `algorithm::`[`AbstractEquiangularAlgorithm`](@ref), which pins the construction of their sine sums.
 The two constructions agree only to round-off, so naming one fixes the result across machines that
 differ in whether an FFT backend is installed. Gauss–Legendre's weights come from a root solve, so it

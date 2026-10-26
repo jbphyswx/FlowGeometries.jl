@@ -272,7 +272,7 @@ function check_shape(label, g, I)
 end
 
 const TOPICS = ["geometry", "axes", "grids", "sampling", "discretization", "connectivity",
-                "extensions", "allocations", "api", "distributed", "mpi"]
+                "extensions", "allocations", "jet", "api", "distributed", "mpi"]
 
 # No argument runs every topic. Naming some — `Pkg.test(test_args = ["axes"])` — runs only those.
 Test.@testset "FlowGeometries.jl" begin

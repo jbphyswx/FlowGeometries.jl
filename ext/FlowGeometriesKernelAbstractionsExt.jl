@@ -91,24 +91,25 @@ end
     Execution.reduce_indices(f, op, init, n, backend::GPUBackend{<:KernelAbstractions.Backend})
 
 Reduce `f(i)` over `1:n` on the device, in two launches: each group folds a contiguous block in index
-order, then one group folds the group results in order. Only the result crosses to the host.
+order, then one group folds the group results in order, into the first of them. Only the result crosses
+to the host.
 
 The grouping is fixed by `n` alone, so `op` need only be associative, and the result does not depend on
 scheduling. `op`'s results are stored as `typeof(init)`.
 """
 function Execution.reduce_indices(f::F, op::O, init, n::Integer, b::_KABackend) where {F,O}
-    n = Int(n)
-    n > 0 || return init
+    m = Int(n)
+    m > 0 || return init
     T = typeof(init)
-    ngroups = min(cld(n, _W), _MAX_GROUPS)
+    ngroups = min(cld(m, _W), _MAX_GROUPS)
     kernel = _fold_kernel(b.backend, _W)
     partials = KernelAbstractions.allocate(b.backend, T, ngroups)
-    kernel(partials, f, op, init, n, cld(n, ngroups * _W); ndrange = ngroups * _W)
+    kernel(partials, f, op, init, m, cld(m, ngroups * _W); ndrange = ngroups * _W)
+    # One group, whose last write follows its last read, so it folds the partials in place. Launches on
+    # one backend run in order, so only the host read below waits.
+    kernel(partials, _Read(partials), op, init, ngroups, cld(ngroups, _W); ndrange = _W)
     KernelAbstractions.synchronize(b.backend)
-    total = KernelAbstractions.allocate(b.backend, T, 1)
-    kernel(total, _Read(partials), op, init, ngroups, cld(ngroups, _W); ndrange = _W)
-    KernelAbstractions.synchronize(b.backend)
-    return Array(total)[1]
+    return copyto!(Vector{T}(undef, 1), 1, partials, 1, 1)[1]
 end
 
 # A buffer the launched passes can write, which is device memory.
@@ -205,8 +206,8 @@ function Execution.exclusive_scan!(
     ngroups = min(cld(n, _W), _SCAN_GROUPS)
     rounds = cld(n, ngroups * _W)
     sums = KernelAbstractions.allocate(b.backend, T, ngroups)
+    # Launches on one backend run in order, so the scan reads the sums with no wait between them.
     _fold_kernel(b.backend, _W)(sums, _Read(counts), +, zero(T), n, rounds; ndrange = ngroups * _W)
-    KernelAbstractions.synchronize(b.backend)
     _scan_kernel(b.backend, _W)(out, counts, sums, base, n, rounds, ngroups, cld(ngroups, _W);
                                 ndrange = ngroups * _W)
     KernelAbstractions.synchronize(b.backend)

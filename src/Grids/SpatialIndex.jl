@@ -421,13 +421,13 @@ end
 index_within(index, grid, I, r) = index_within!(Int[], index, grid, I, r)
 
 """
-    _voronoi_tessellation(geometry, x, y[, period]) -> (areas, mesh::CellMesh)
+    _voronoi_tessellation(I, geometry, x, y, period) -> (areas, mesh::CellMesh)
 
 Extension hook: exact per-node Voronoi-cell area from a Delaunay/convex-hull tessellation of the node
-coordinates, together with the triangulation it came from. Dispatched on the geometry type (each needs
-a different tessellation library): overridden for `CartesianGeometry` by a consumer
-DelaunayTriangulation extension (load `using DelaunayTriangulation`, planar Voronoi clipped to the
-point set's convex hull) and for `SphericalGeometry` by a consumer Quickhull extension (load
+coordinates, together with the triangulation it came from, its ids of integer type `I`. Dispatched on
+the geometry type (each needs a different tessellation library): overridden for `CartesianGeometry` by
+a consumer DelaunayTriangulation extension (load `using DelaunayTriangulation`, planar Voronoi clipped
+to the point set's convex hull) and for `SphericalGeometry` by a consumer Quickhull extension (load
 `using Quickhull`, spherical Voronoi from the dual of the 3D convex hull of the unit-sphere embedding).
 
 `period` holds each direction's wrap length, zero where it is bounded. Along a periodic Cartesian
@@ -438,15 +438,17 @@ construction and its tessellation reads no period.
 An [`Geometry.AbstractEllipsoidalGeometry`](@ref FlowGeometries.Geometry.AbstractEllipsoidalGeometry)
 has no such construction and says so: its cell areas are the caller's to supply.
 """
-function _voronoi_tessellation(::Geometry.AbstractCartesianGeometry, x::AbstractVector, y::AbstractVector)
+function _voronoi_tessellation(
+    ::Type{<:Integer}, ::Geometry.AbstractCartesianGeometry, x::AbstractVector, y::AbstractVector, period,
+)
     throw(ArgumentError(
         "Cartesian Voronoi-cell areas require DelaunayTriangulation.jl — run `using DelaunayTriangulation` " *
         "(or supply `areas` explicitly to the `UnstructuredGrid` constructor).",
     ))
 end
-_voronoi_tessellation(geo::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector, period) =
-    _voronoi_tessellation(geo, x, y)
-function _voronoi_tessellation(::Geometry.AbstractSphericalGeometry, x::AbstractVector, y::AbstractVector)
+function _voronoi_tessellation(
+    ::Type{<:Integer}, ::Geometry.AbstractSphericalGeometry, x::AbstractVector, y::AbstractVector, period,
+)
     throw(ArgumentError(
         "Spherical Voronoi-cell areas for an arbitrary point set require Quickhull.jl — run " *
         "`using Quickhull` (or supply `areas` explicitly to the `UnstructuredGrid` constructor).",
@@ -457,7 +459,8 @@ end
 # bisectors, which is not the spherical excess the hull dual gives. `SpheroidGeometry` states the rule
 # the whole package follows here: a sphere identity is not applied to an ellipsoid.
 function _voronoi_tessellation(
-    geo::Geometry.AbstractEllipsoidalGeometry, x::AbstractVector, y::AbstractVector,
+    ::Type{<:Integer}, geo::Geometry.AbstractEllipsoidalGeometry, x::AbstractVector, y::AbstractVector,
+    period,
 )
     throw(ArgumentError(
         "$(nameof(typeof(geo))) has no Voronoi-cell areas to derive: the tessellation behind them is " *
@@ -467,21 +470,21 @@ function _voronoi_tessellation(
 end
 
 """
-    _voronoi_areas(geometry, x, y[, period]) -> Vector{T}
+    _voronoi_areas(geometry, x, y, period = (0, 0)) -> Vector{T}
 
 The areas alone, for a caller with no use for the cells — see [`_voronoi_tessellation`](@ref).
 """
-_voronoi_areas(geometry, x::AbstractVector, y::AbstractVector) =
-    first(_voronoi_tessellation(geometry, x, y))
-_voronoi_areas(geometry, x::AbstractVector, y::AbstractVector, period) =
-    first(_voronoi_tessellation(geometry, x, y, period))
+_voronoi_areas(geometry, x::AbstractVector, y::AbstractVector, period = (0, 0)) =
+    first(_voronoi_tessellation(Int32, geometry, x, y, period))
 
 """
-    UnstructuredGrid(geometry, x, y, mask; k=6, radius=nothing, areas=nothing)
+    UnstructuredGrid([I], geometry, x, y, mask; k=6, radius=nothing, areas=nothing, topology, period)
 
 Build an `UnstructuredGrid` whose adjacency comes from a k-d-tree nearest-neighbour search over the
 nodes: either the `k` nearest per node (default `k = 6`), or every neighbour within a physical `radius`.
 The two are mutually exclusive. Requires `NearestNeighbors`.
+
+`I` is the integer type of the node ids the adjacency and any cell mesh store, `Int32` by default.
 
 For `SphericalGeometry` the tree is built on the 3-D Cartesian embedding of the nodes, where nearest by
 chord distance and nearest by great-circle distance give the same ordering.
@@ -490,25 +493,35 @@ chord distance and nearest by great-circle distance give the same ordering.
 Voronoi-cell areas from a Delaunay or convex-hull tessellation (`DelaunayTriangulation.jl` for
 Cartesian, `Quickhull.jl` for spherical — see [`_voronoi_areas`](@ref)).
 
-`periodic`/`period` declare a wrapping domain, and the neighbour search honours it: a node near one face
-finds the nodes across the opposite face. Spherical longitude wraps by default; a Cartesian box is
-opt-in and needs its `period`.
+`topology`/`period` declare a wrapping domain, as for [`StructuredGrid`](@ref), and the neighbour search
+honours it: a node near one face finds the nodes across the opposite face. Spherical longitude wraps by
+default; a Cartesian box is opt-in and needs its `period`.
 """
 UnstructuredGrid(
     geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
     mask::AbstractVector{Bool} = AllActive((length(x),)); kwargs...,
-) = UnstructuredGrid(geometry, (x, y), mask; kwargs...)
+) = UnstructuredGrid(Int32, geometry, (x, y), mask; kwargs...)
+
+UnstructuredGrid(
+    ::Type{I}, geometry::Geometry.AbstractGeometry, x::AbstractVector, y::AbstractVector,
+    mask::AbstractVector{Bool} = AllActive((length(x),)); kwargs...,
+) where {I<:Integer} = UnstructuredGrid(I, geometry, (x, y), mask; kwargs...)
+
+UnstructuredGrid(
+    geometry::Geometry.AbstractGeometry, coords::NTuple{N,AbstractVector},
+    mask::AbstractVector{Bool} = AllActive((length(first(coords)),)); kwargs...,
+) where {N} = UnstructuredGrid(Int32, geometry, coords, mask; kwargs...)
 
 function UnstructuredGrid(
-    geometry::Geometry.AbstractGeometry{T}, coords::NTuple{N,AbstractVector},
+    ::Type{I}, geometry::Geometry.AbstractGeometry{T}, coords::NTuple{N,AbstractVector},
     mask::AbstractVector{Bool} = AllActive((length(first(coords)),));
     k::Integer = 6, radius::Union{Nothing,Real} = nothing, areas::Union{Nothing,AbstractVector} = nothing,
-    periodic = nothing, period = nothing,
-) where {N, T<:AbstractFloat}
+    topology = nothing, period = nothing,
+) where {I<:Integer, N, T<:AbstractFloat}
     c = ntuple(d -> _to_axis(T, coords[d]), Val(N))
-    per, prd = _node_periodicity(geometry, Val(N), periodic, period)
+    per, prd = _node_periodicity(geometry, Val(N), topology, period)
     nbrs, ptr = _build_kdtree_neighbors(
-        geometry, c; k = k, radius = radius,
+        I, geometry, c; k = k, radius = radius,
         periodic = map(_is_periodic, per), period = prd,
     )
     # Voronoi tessellation is a 2-D algorithm (planar Delaunay / spherical convex hull), so past two
@@ -518,7 +531,7 @@ function UnstructuredGrid(
     areas_T, mesh = if areas !== nothing
         (_to_axis(T, areas), nothing)
     elseif N == 2
-        a, m = _voronoi_tessellation(geometry, c[1], c[2],
+        a, m = _voronoi_tessellation(I, geometry, c[1], c[2],
                                      ntuple(d -> _is_periodic(per[d]) ? prd[d] : zero(T), Val(2)))
         (_to_axis(T, a), m)
     else
@@ -528,7 +541,7 @@ function UnstructuredGrid(
         ))
     end
     return UnstructuredGrid(geometry, c, areas_T, mask, nbrs, ptr;
-                            periodic = per, period = prd, mesh = mesh)
+                            topology = per, period = prd, mesh = mesh)
 end
 
 """

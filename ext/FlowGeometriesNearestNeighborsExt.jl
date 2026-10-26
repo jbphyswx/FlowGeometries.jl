@@ -1,7 +1,7 @@
 module FlowGeometriesNearestNeighborsExt
 
 using NearestNeighbors: NearestNeighbors
-using FlowGeometries.Connectivity: Connectivity
+using StaticArrays: StaticArrays
 using FlowGeometries.Geometry: Geometry
 using FlowGeometries.Grids: Grids
 
@@ -43,20 +43,14 @@ this node, stopping at `kmax`.
     return m
 end
 
-# `Connectivity._index_type`, applied here to the neighbour ids alone: their values are node numbers,
-# so `N` bounds them. A CSR's offsets run to the edge count, which a radius query leaves unbounded by
-# `N`, so those stay `Int` — `N + 1` of them against the neighbour list's `nnz`, so the width there
-# costs almost nothing. `UnstructuredGrid` stores the two arrays under free `Integer` type parameters,
-# so they need not agree.
-@inline _index_type(N::Integer) = Connectivity._index_type(N)
+# A tree over the columns of `pts` as static points of dimension `D`. A tree built from the matrix reads
+# `D` off its size, and its type is then not inferred.
+_kdtree(pts::AbstractMatrix{T}, ::Val{D}) where {T,D} = NearestNeighbors.KDTree(
+    [StaticArrays.SVector{D,T}(ntuple(d -> @inbounds(pts[d, j]), Val(D))) for j in axes(pts, 2)],
+)
 
 # Queries go one point at a time through `knn!`/`inrange!` into reused buffers; the batch forms
 # return a `Vector{Vector{…}}`, i.e. two heap vectors per query point.
-#
-# The loops sit behind a function barrier: `KDTree(pts)` infers only to
-# `KDTree{V,Euclidean,Float64,V1} where {V<:SVector{_,Float64}, V1<:AbstractVector}`, so calling
-# `knn!` on it in the same function is a dynamic dispatch costing two allocations per query.
-# Passing the tree as an argument makes it concrete.
 #
 # Every query is made in the tree's own point type. NearestNeighbors converts anything else per call,
 # and that conversion is the whole per-query allocation: a column view or a plain `Vector` each pay
@@ -89,9 +83,11 @@ function _knn_loop!(nbrs::AbstractVector{<:Integer}, ptr::AbstractVector{<:Integ
     return nbrs, ptr
 end
 
-function _csr_from_knn(pts::AbstractMatrix, k::Integer, ng::Int = 1)
+function _csr_from_knn(
+    ::Type{I}, pts::AbstractMatrix, vD::Val, k::Integer, ng::Int = 1,
+) where {I<:Integer}
     N = size(pts, 2) ÷ ng
-    I = _index_type(N)
+    Grids._check_ids(I, N)
     if N < 2
         return I[], ones(Int, N + 1)
     end
@@ -100,8 +96,7 @@ function _csr_from_knn(pts::AbstractMatrix, k::Integer, ng::Int = 1)
     # same node sit closer than the next real neighbor.
     ask = min(kq * ng + 1, size(pts, 2))
     return _knn_loop!(
-        Vector{I}(undef, N * kq), Vector{Int}(undef, N + 1),
-        NearestNeighbors.KDTree(pts), pts, N, kq, ask,
+        Vector{I}(undef, N * kq), Vector{Int}(undef, N + 1), _kdtree(pts, vD), pts, N, kq, ask,
     )
 end
 
@@ -126,31 +121,33 @@ function _radius_loop!(
     return nbrs, ptr
 end
 
-function _csr_from_radius(pts::AbstractMatrix, r::Real, ng::Int = 1)
+function _csr_from_radius(
+    ::Type{I}, pts::AbstractMatrix, vD::Val, r::Real, ng::Int = 1,
+) where {I<:Integer}
     N = size(pts, 2) ÷ ng
-    I = _index_type(N)
+    Grids._check_ids(I, N)
     if N < 2
         return I[], ones(Int, N + 1)
     end
-    return _radius_loop!(Vector{Int}(undef, N + 1), I, NearestNeighbors.KDTree(pts), pts, N, r)
+    return _radius_loop!(Vector{Int}(undef, N + 1), I, _kdtree(pts, vD), pts, N, r)
 end
 
-# Points go to the tree as a contiguous `D × N` matrix: `KDTree` takes that form directly, and it
-# avoids one heap allocation per node.
+# The points as a `D × N` matrix, periodic images after the originals: the tree is built from its
+# columns and each query reads its own.
 function Grids._build_kdtree_neighbors(
-    ::Geometry.AbstractCartesianGeometry{T}, coords::NTuple{D,AbstractVector{T}};
+    ::Type{I}, ::Geometry.AbstractCartesianGeometry{T}, coords::NTuple{D,AbstractVector{T}};
     k::Integer = 6, radius::Union{Nothing,Real} = nothing,
     periodic::NTuple{D,Bool} = ntuple(_ -> false, Val(D)),
     period = ntuple(_ -> zero(T), Val(D)),
-) where {D, T<:AbstractFloat}
+) where {I<:Integer, D, T<:AbstractFloat}
     n = length(coords[1])
     pts = similar(coords[1], T, D, n)
     for d in 1:D
         @views pts[d, :] .= coords[d]
     end
     all_pts, ng = any(periodic) ? _ghost_points(pts, periodic, NTuple{D,T}(period)) : (pts, 1)
-    return radius === nothing ? _csr_from_knn(all_pts, k, ng) :
-                                _csr_from_radius(all_pts, T(radius), ng)
+    return radius === nothing ? _csr_from_knn(I, all_pts, Val(D), k, ng) :
+                                _csr_from_radius(I, all_pts, Val(D), T(radius), ng)
 end
 
 # A `(λ, φ, …)` node set goes through `Geometry.embed`, so this is the same space
@@ -159,11 +156,11 @@ end
 # query over-returns and the caller's distance gate trims it. Longitude wraps for free either way — λ
 # and λ+2π embed to the same point — so no ghost images are needed.
 function Grids._build_kdtree_neighbors(
-    geo::Geometry.AbstractLonLatGeometry{T}, coords::NTuple{D,AbstractVector{T}};
+    ::Type{I}, geo::Geometry.AbstractLonLatGeometry{T}, coords::NTuple{D,AbstractVector{T}};
     k::Integer = 6, radius::Union{Nothing,Real} = nothing,
     periodic::NTuple{D,Bool} = ntuple(d -> d == 1, Val(D)),
     period = ntuple(d -> d == 1 ? T(2π) : zero(T), Val(D)),
-) where {D, T<:AbstractFloat}
+) where {I<:Integer, D, T<:AbstractFloat}
     D == 2 || D == 3 || throw(ArgumentError(
         "a node set on this geometry is `(λ, φ)` or `(λ, φ, third)`; got $D coordinate vectors",
     ))
@@ -175,8 +172,8 @@ function Grids._build_kdtree_neighbors(
         pts[2, i] = p[2]
         pts[3, i] = p[3]
     end
-    radius === nothing && return _csr_from_knn(pts, k)
-    return _csr_from_radius(pts, Grids.embedded_radius(Grids._embedding_for(geo, D), T(radius)))
+    radius === nothing && return _csr_from_knn(I, pts, Val(3), k)
+    return _csr_from_radius(I, pts, Val(3), Grids.embedded_radius(Grids._embedding_for(geo, D), T(radius)))
 end
 
 # ---------------------------------------------------------------------------
@@ -221,7 +218,8 @@ function Grids.spatial_index(grid::_IndexableGrid)
     D = Grids.ncoordinates(grid)
     minper = ng == 1 ? T(Inf) :
         minimum(T(Grids.isperiodic(grid, d) ? Grids.period(grid, d) : Inf) for d in 1:D)
-    return BallIndex(NearestNeighbors.KDTree(pts), pts, size(pts, 2) ÷ ng, embedding, minper)
+    E = Val(length(Grids.embedded_at(grid, Grids.first_cell(grid))))
+    return BallIndex(_kdtree(pts, E), pts, size(pts, 2) ÷ ng, embedding, minper)
 end
 
 @inline _query_radius(ix::BallIndex, r::Real) = Grids.embedded_radius(ix.embedding, r)

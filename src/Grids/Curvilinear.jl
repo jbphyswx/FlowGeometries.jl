@@ -11,9 +11,9 @@ curvilinear mesh). `coordinates` holds one `N`-D cell-center array per direction
 At `N = 2` the cell `measure` is the exact quadrilateral area through the cell's four vertices. Those
 vertex arrays are what `corners` holds, one per direction and one larger in every direction. They are
 retained when the caller supplies them or asks for them with `keep_corners = true`, and are otherwise
-construction input to the area kernel alone — so `corners` is `nothing` on a grid built from centres,
-and [`has_corners`](@ref) reports which. In any dimension other than 2 the measure is the caller's to
-supply: the corner-area kernel is a 2-D algorithm with no N-D generalization here.
+construction input to the area kernel alone — so `corners` holds empty arrays on a grid built from
+centres, and [`has_corners`](@ref) reports which. In any dimension other than 2 the measure is the
+caller's to supply: the corner-area kernel is a 2-D algorithm with no N-D generalization here.
 
 # Type parameters
 - `T`: coordinate float type. `G<:AbstractGeometry{T}` is tied to it, so a mismatched-eltype geometry
@@ -21,7 +21,7 @@ supply: the corner-area kernel is a 2-D algorithm with no N-D generalization her
   `G<:AbstractGeometry{T}` requires `T` already bound.
 - `N`: number of coordinate directions.
 - `C`: tuple type of the center coordinate arrays.
-- `KC`: tuple type of the cell-vertex arrays, or `Nothing` where they were not retained.
+- `KC`: tuple type of the cell-vertex arrays, empty where they were not retained.
 - `MA`: array type of the derived `measure` field — independent of `C`, since it is a computed field
   with no reason to match the coordinate arrays' storage type.
 - `B`: array type of the active `mask`.
@@ -32,30 +32,31 @@ struct CurvilinearGrid{
     N,
     TP<:NTuple{N,AbstractTopology},
     C<:NTuple{N,AbstractArray{T,N}},
-    KC<:Union{Nothing,NTuple{N,AbstractArray{T,N}}},
+    KC<:NTuple{N,AbstractArray{T,N}},
     MA<:AbstractArray{T,N},
     B<:AbstractArray{Bool,N},
 } <: AbstractCurvilinearGrid{G, T}
     geometry::G
     coordinates::C            # cell-center coordinate array per direction
-    corners::KC               # cell-vertex arrays, one larger in each direction, or `nothing`
+    corners::KC               # cell-vertex arrays, one larger in each direction, or empty
     measure::MA               # cell measure
     mask::B                   # active mask (true = active/included)
     topology::TP              # per-direction closure (singletons: no storage)
     period::NTuple{N,T}       # wrap length per direction; meaningless where Bounded
     bounds::NTuple{N,Tuple{T,T}}   # (lo, hi) of each coordinate array, taken at construction
     total_measure::T          # Σ measure, taken at construction
+    spans::NTuple{N,T}        # each direction's vertex span (see `_vertex_span`), taken at construction
 end
 
-# `bounds` and `total_measure` travel as values: a rebuild serves a storage change, which leaves every
-# coordinate and the measure unchanged.
+# `bounds`, `total_measure` and `spans` travel as values: a rebuild serves a storage change, which leaves
+# every coordinate and the measure unchanged.
 @inline _from_fields(
     ::Type{<:CurvilinearGrid},
     geometry::G, coordinates::C, corners::KC, measure::MA, mask::B, topology::TP,
-    period::NTuple{N,T}, bounds::NTuple{N,Tuple{T,T}}, total_measure::T,
+    period::NTuple{N,T}, bounds::NTuple{N,Tuple{T,T}}, total_measure::T, spans::NTuple{N,T},
 ) where {T,G<:Geometry.AbstractGeometry{T},N,TP,C,KC,MA,B} =
     CurvilinearGrid{T,G,N,TP,C,KC,MA,B}(geometry, coordinates, corners, measure, mask, topology,
-                                        period, bounds, total_measure)
+                                        period, bounds, total_measure, spans)
 
 @inline topology(grid::CurvilinearGrid) = getfield(grid, :topology)
 @inline period(grid::CurvilinearGrid, d::Integer) =
@@ -82,11 +83,13 @@ the same direction order.
 Available on a grid that was given them or built with `keep_corners = true`; see
 [`has_corners`](@ref).
 """
-@inline corners(grid::CurvilinearGrid) = _held_corners(getfield(grid, :corners))
+@inline function corners(grid::CurvilinearGrid)
+    has_corners(grid) || _no_corners_error()
+    return getfield(grid, :corners)
+end
 @inline corners(grid::CurvilinearGrid, d::Integer) = @inbounds corners(grid)[d]
 
-@inline _held_corners(kc::Tuple) = kc
-_held_corners(::Nothing) = throw(ArgumentError(
+@noinline _no_corners_error() = throw(ArgumentError(
     "this CurvilinearGrid holds no cell-vertex arrays: they were construction input to the cell-area " *
     "kernel. Rebuild it with `keep_corners = true`, or pass `corners` explicitly.",
 ))
@@ -97,7 +100,7 @@ _held_corners(::Nothing) = throw(ArgumentError(
 Whether `grid` retained its cell-vertex arrays, and so can answer [`corners`](@ref) and
 [`corner_coords`](@ref).
 """
-@inline has_corners(grid::CurvilinearGrid) = getfield(grid, :corners) !== nothing
+@inline has_corners(grid::CurvilinearGrid) = !isempty(@inbounds getfield(grid, :corners)[1])
 @inline has_corners(::AbstractGrid) = false
 
 """
@@ -128,8 +131,33 @@ end
 end
 
 function _bounded_domain_length(grid::CurvilinearGrid, d::Integer)
-    k = has_corners(grid) ? corners(grid, d) : _centers_to_corners(coordinates(grid, d))
-    lo, hi = extrema(k)
+    L = @inbounds getfield(grid, :spans)[_checked_direction(getfield(grid, :spans), d)]
+    isnan(L) && throw(ArgumentError(
+        "this CurvilinearGrid has fewer than 2 centers across some direction, so no cell vertices to " *
+        "span; build it with explicit `corners`",
+    ))
+    return L
+end
+
+"""
+    _vertex_span(C, K) -> T
+
+`maximum - minimum` over a direction's cell vertices: the corner array `K` where it is held, and otherwise
+the vertices [`_centers_to_corners`](@ref) reconstructs from the centres `C`, reduced as each is formed.
+`NaN` where `K` is empty and `C` has fewer than 2 centers across some direction.
+"""
+function _vertex_span(C::AbstractArray{T,N}, K::AbstractArray{T,N}) where {T<:AbstractFloat,N}
+    if !isempty(K)
+        lo, hi = extrema(K)
+        return hi - lo
+    end
+    all(≥(2), size(C)) || return T(NaN)
+    lo, hi = T(Inf), T(-Inf)
+    @inbounds for ci in CartesianIndices(size(C) .+ 1)
+        v = _corner_value(C, Tuple(ci))
+        lo = min(lo, v)
+        hi = max(hi, v)
+    end
     return hi - lo
 end
 
@@ -161,17 +189,19 @@ function _centers_to_corners(C::AbstractArray{T,N}) where {T<:AbstractFloat, N}
     # `_ghosted` returns the value a padded copy holds at an index, so the ghost ring stays implicit:
     # the vertex pass reads straight from `C` in one pass and allocates only the result.
     K = similar(C, T, (size(C) .+ 1)...)
-    shifts = CartesianIndices(ntuple(_ -> 0:1, Val(N)))
-    scale = one(T) / T(2^N)
     @inbounds for ci in CartesianIndices(K)
-        I = Tuple(ci)
-        acc = zero(T)
-        for s in shifts
-            acc += _ghosted(C, ntuple(d -> I[d] - 1 + s[d], Val(N)))
-        end
-        K[ci] = acc * scale
+        K[ci] = _corner_value(C, Tuple(ci))
     end
     return K
+end
+
+# Vertex `I` of the reconstruction: the mean of the `2^N` ghosted centers around it.
+@inline function _corner_value(C::AbstractArray{T,N}, I::NTuple{N,Int}) where {T,N}
+    acc = zero(T)
+    @inbounds for s in CartesianIndices(ntuple(_ -> 0:1, Val(N)))
+        acc += _ghosted(C, ntuple(d -> I[d] - 1 + s[d], Val(N)))
+    end
+    return acc * (one(T) / T(2^N))
 end
 
 # Value of the one-cell linearly-extrapolated ghost ring around `C` at the (possibly out-of-range)
@@ -288,8 +318,9 @@ Corners supplied this way are kept on the grid, and reconstructed ones are input
 pass `keep_corners = true` to keep those too, at one array per direction. Reconstruction happens only
 where something needs it, so a grid given its own `measure` derives none.
 
-`periodic` is a `Bool` (applied to direction 1) or an `NTuple{N,Bool}`. When omitted, every direction
-is bounded.
+`topology` is per-direction closure, as for [`StructuredGrid`](@ref): [`Periodic`](@ref)/[`Bounded`](@ref)
+instances, a tuple of them, a `Bool`, or a tuple of `Bool`s, a single value or a short tuple applying to
+the leading directions. When omitted, every direction is bounded.
 """
 function CurvilinearGrid(geometry::Geometry.AbstractGeometry, args...; kwargs...)
     coords, measure, mask = _split_curvilinear_args(args)
@@ -326,7 +357,7 @@ _curvilinear_grid(
 function _curvilinear_grid(
     geometry::G, coords::NTuple{N,AbstractArray}, measure_pos, mask::AbstractArray{Bool,N};
     corners = nothing, measure = nothing, keep_corners::Bool = false,
-    topology = nothing, period = nothing, periodic = nothing,
+    topology = nothing, period = nothing,
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {N, T<:AbstractFloat, G<:Geometry.AbstractGeometry{T}}
     N == ndims(mask) || throw(ArgumentError(
@@ -339,28 +370,15 @@ function _curvilinear_grid(
         "coordinate arrays and mask must have the same size; got $(map(size, coords)) and $(size(mask))",
     ))
     centers = ntuple(d -> _to_arr(T, coords[d]), Val(N))
+    # The vertex, area and period builders walk the centres element by element, so they read host
+    # copies; what they derive is held in the centres' own storage.
+    hc = map(Axes._host_array, centers)
 
     m = measure_pos === nothing ? measure : measure_pos
     # Vertex arrays are derived only where something asks for them: the area kernel, or the caller.
-    want_kc = corners !== nothing || keep_corners || (m === nothing && N == 2)
-    kc = if !want_kc
-        nothing
-    elseif corners === nothing
-        ntuple(d -> _centers_to_corners(centers[d]), Val(N))
-    else
-        length(corners) == N || throw(ArgumentError(
-            "expected $N corner arrays, got $(length(corners))",
-        ))
-        want = size(mask) .+ 1
-        ntuple(Val(N)) do d
-            k = _to_arr(T, corners[d])
-            size(k) == want || throw(ArgumentError(
-                "corner array $d must be $(want) (one larger than the centers in every direction); " *
-                "got $(size(k))",
-            ))
-            k
-        end
-    end
+    kc = corners === nothing ? nothing : _given_corners(T, corners, size(mask))
+    kh = kc === nothing ? _derived_corners(hc, keep_corners || (m === nothing && N == 2)) :
+                          map(Axes._host_array, kc)
 
     meas = if m !== nothing
         size(m) == size(mask) || throw(ArgumentError(
@@ -368,7 +386,8 @@ function _curvilinear_grid(
         ))
         _to_arr(T, m)
     elseif N == 2
-        _corner_areas(geometry, kc[1], kc[2], size(mask, 1), size(mask, 2); execution = execution)
+        Axes._like(centers[1], _corner_areas(geometry, kh[1], kh[2], size(mask, 1), size(mask, 2);
+                                             execution = execution))
     else
         throw(ArgumentError(
             "a $N-dimensional CurvilinearGrid has no measure to derive: the corner-area kernel is a " *
@@ -377,16 +396,32 @@ function _curvilinear_grid(
         ))
     end
 
-    topo = topology === nothing ? periodic : topology
-    tp = topo === nothing ? ntuple(_ -> Bounded(), Val(N)) : _as_topology(Val(N), topo)
-    prd = _curvilinear_periods(geometry, centers, tp, period)
+    tp = topology === nothing ? ntuple(_ -> Bounded(), Val(N)) : _as_topology(Val(N), topology)
+    prd = _curvilinear_periods(geometry, hc, tp, period)
     # The caller's own vertex arrays are theirs to keep; ones derived here are the area kernel's input,
     # and are retained on request.
-    held = (corners !== nothing || keep_corners) ? kc : nothing
+    held = kc !== nothing ? kc : keep_corners ? map(Axes._like, centers, kh) : _no_corners(centers)
     return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(held), typeof(meas),
                            typeof(mask)}(
-        geometry, centers, held, meas, mask, tp, prd, map(_lohi, centers), T(sum(meas)),
+        geometry, centers, held, meas, mask, tp, prd, map(_lohi, hc), T(sum(meas)),
+        map(_vertex_span, hc, kh),
     )
+end
+
+# Vertex arrays reconstructed from the centres, or empty arrays of the same type.
+_derived_corners(centers::Tuple, derive::Bool) = derive ? map(_centers_to_corners, centers) : _no_corners(centers)
+_no_corners(centers::Tuple) = map(c -> similar(c, eltype(c), map(_ -> 0, size(c))), centers)
+
+function _given_corners(::Type{T}, corners, sz::NTuple{N,Int}) where {T,N}
+    length(corners) == N || throw(ArgumentError("expected $N corner arrays, got $(length(corners))"))
+    want = sz .+ 1
+    return ntuple(Val(N)) do d
+        k = _to_arr(T, corners[d])
+        size(k) == want || throw(ArgumentError(
+            "corner array $d must be $(want) (one larger than the centers in every direction); got $(size(k))",
+        ))
+        k
+    end
 end
 
 @inline _lohi(x::AbstractArray{T}) where {T} = isempty(x) ? (T(Inf), T(-Inf)) : extrema(x)
