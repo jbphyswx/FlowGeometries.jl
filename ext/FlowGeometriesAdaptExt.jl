@@ -48,12 +48,21 @@ Adapt.adapt_structure(to, ix::Grids.CellListIndex) = Grids.CellListIndex(
     Adapt.adapt(to, ix.bins), ix.embedding, ix.active_only,
 )
 
-# An unindexed `MetricTopology` is isbits and travels as-is, and one carrying a cell list takes the list
-# with it, so a query there visits the same candidates in the same order. Any other index raises: a k-d
-# tree is a host structure, and dropping it leaves the device with a topology that silently scans.
+# A binned index is its bin offsets, its cells' ids, boxes, coordinates and activity in bin order.
+Adapt.adapt_structure(to, ix::Grids.BinnedIndex) = Grids.BinnedIndex(
+    ix.lo, ix.h, ix.nb, ix.wrap, ix.period, ix.layout, Adapt.adapt(to, ix.order), Adapt.adapt(to, ix.ptr),
+    Adapt.adapt(to, ix.bins), _adapt_tuple(to, ix.x), Adapt.adapt(to, ix.active), ix.slack,
+    ix.active_only,
+)
+
+# An unindexed `MetricTopology` is isbits and travels as-is, and one carrying a cell list or a binned
+# index takes it along, so a query there visits the same candidates in the same order. Any other index
+# raises: a k-d tree is a host structure, and dropping it leaves the device with a topology that silently
+# scans.
 Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology{N,T,Nothing}) where {N,T} = mt
-Adapt.adapt_structure(to, mt::Connectivity.MetricTopology{N,T,<:Grids.CellListIndex}) where {N,T} =
-    Connectivity.MetricTopology(mt.steps, mt.min3, mt.span, Adapt.adapt(to, mt.index))
+Adapt.adapt_structure(
+    to, mt::Connectivity.MetricTopology{N,T,<:Union{Grids.CellListIndex,Grids.BinnedIndex}},
+) where {N,T} = Connectivity.MetricTopology(mt.steps, mt.min3, mt.span, Adapt.adapt(to, mt.index))
 Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology) = throw(ArgumentError(
     "a MetricTopology carrying a $(nameof(typeof(mt.index))) cannot be moved to another backend; index " *
     "it with a `cell_list`, which moves, or use `MetricTopology(grid)` without an index",
@@ -69,20 +78,33 @@ Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 # One method for every layout: the array-backed fields are adapted and handed to `Grids.rebuild`, which
 # re-derives the grid's type parameters from what they became.
 #
-# Which fields those are is decided structurally: an array, a tuple of them, a cell mesh, or a grid (a
-# rotated grid's base). Geometry, topology, period, the sampling tag, a resolution parameter and the
-# per-axis reductions are immutable scalars or tuples of them, and travel unchanged. So a layout is
-# adapted by what it holds, whether that is a coordinate tuple, four ring vectors or a single integer.
-@inline _is_adaptable(v) = v isa AbstractArray || v isa Grids.CellMesh || v isa Grids.AbstractGrid
-@inline _is_adaptable(v::Tuple) = !isempty(v) && all(x -> x isa AbstractArray, v)
-
-function Adapt.adapt_structure(to, grid::Grids.AbstractGrid)
-    changed = NamedTuple(
-        n => (v = getfield(grid, n); v isa Tuple ? _adapt_tuple(to, v) : _move(to, v))
-        for n in fieldnames(typeof(grid)) if _is_adaptable(getfield(grid, n))
-    )
-    return Grids.rebuild(grid, changed)
+# Which fields those are is decided by their types: an array, a non-empty tuple of arrays, a cell mesh,
+# or a grid (a rotated grid's base). Geometry, topology, period, the sampling tag, a resolution parameter
+# and the per-axis reductions are immutable scalars or tuples of them, and travel unchanged. So a layout
+# is adapted by what it holds, whether that is a coordinate tuple, four ring vectors or a single integer.
+@generated function _adapted_fields(to, grid::G) where {G<:Grids.AbstractGrid}
+    names = Symbol[]
+    vals = Expr[]
+    for (n, FT) in zip(fieldnames(G), fieldtypes(G))
+        v = :(getfield(grid, $(QuoteNode(n))))
+        if FT <: Union{AbstractArray,Grids.CellMesh,Grids.AbstractGrid}
+            push!(names, n)
+            push!(vals, :(_move(to, $v)))
+        elseif FT <: Tuple && fieldcount(FT) > 0
+            arrays = true
+            for t in fieldtypes(FT)
+                arrays &= t <: AbstractArray
+            end
+            if arrays
+                push!(names, n)
+                push!(vals, :(_adapt_tuple(to, $v)))
+            end
+        end
+    end
+    return :(NamedTuple{$(Tuple(names))}($(Expr(:tuple, vals...))))
 end
+
+Adapt.adapt_structure(to, grid::Grids.AbstractGrid) = Grids.rebuild(grid, _adapted_fields(to, grid))
 
 Adapt.adapt_structure(to, conn::Connectivity.CSRConnectivity) =
     Connectivity.CSRConnectivity(Adapt.adapt(to, conn.nbrs), Adapt.adapt(to, conn.ptr))
@@ -92,12 +114,13 @@ Adapt.adapt_structure(to, p::Operators.MaskedStencilPlan) = Operators.MaskedSten
     p.distance, _move(to, p.mask),
 )
 
-# A uniform plan's arrays are its `O(K²)` shifted end rows; the centred row is a tuple and travels.
-function Adapt.adapt_structure(to, p::Discretization.UniformStencilPlan{T,K}) where {T,K}
+# A uniform plan's arrays are its centred row and its `O(K²)` shifted end rows.
+function Adapt.adapt_structure(to, p::Discretization.UniformStencilPlan{T}) where {T}
+    w = Adapt.adapt(to, p.weights)
     ei = Adapt.adapt(to, p.edge_idx)
     ew = Adapt.adapt(to, p.edge_wts)
-    return Discretization.UniformStencilPlan{T,K,typeof(ei),typeof(ew)}(
-        p.weights, p.left, p.right, p.n, p.order, p.wrap, ei, ew,
+    return Discretization.UniformStencilPlan{T,typeof(w),typeof(ei),typeof(ew)}(
+        w, p.left, p.right, p.n, p.order, p.wrap, ei, ew,
     )
 end
 
@@ -108,7 +131,7 @@ Adapt.adapt_structure(to, p::Operators.GradientPlan) = Operators.GradientPlan(
     Adapt.adapt(to, p.ptr), Adapt.adapt(to, p.nbr), _adapt_tuple(to, p.coeffs), p.names,
 )
 
-# One plan per direction, `nothing` where a direction carries no derivative.
+# One plan per direction.
 function Adapt.adapt_structure(to, p::Operators.StencilPlans{N}) where {N}
     plans = _adapt_tuple(to, p.plans)
     return Operators.StencilPlans{N,typeof(plans)}(plans)
@@ -119,7 +142,7 @@ end
 Adapt.adapt_structure(to, f::Operators._RowFactors) =
     Operators._RowFactors(Adapt.adapt(to, f.inv_h), f.size, f.R)
 Adapt.adapt_structure(to, f::Operators._CellFactors) =
-    Operators._CellFactors(f.geometry, _adapt_tuple(to, f.coordinates), f.dim, f.floor, f.order)
+    Operators._CellFactors(f.geometry, _adapt_tuple(to, f.coordinates), f.dim, f.order)
 
 # A staggered grid is its centre grid and one face axis per direction.
 function Adapt.adapt_structure(to, s::Grids.StaggeredGrid{T,N}) where {T,N}

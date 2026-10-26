@@ -1,6 +1,7 @@
 Test.@testset "Connectivity CSR / structured neighbors" begin
     geom = FG.Geometry.CartesianGeometry()
-    grid = FG.Grids.StructuredGrid(geom, 0.0:1.0:2.0, 0.0:1.0:2.0, trues(3, 3); periodic = (false, false))
+    grid = FG.Grids.StructuredGrid(geom, 0.0:1.0:2.0, 0.0:1.0:2.0, trues(3, 3);
+                                   topology = (FG.Grids.Bounded(), FG.Grids.Bounded()))
     nbr = FG.Grids.neighbors(grid, 2, 2)
     Test.@test Set(nbr) == Set([
         FG.Connectivity.linear_index(grid, 1, 2),
@@ -53,6 +54,37 @@ Test.@testset "Connectivity CSR / structured neighbors" begin
     end
 end
 
+Test.@testset "A graph's ids take the type asked for, Int32 by default, and its offsets are Int" begin
+    C = FG.Connectivity
+    GD = FG.Grids
+    SS = FG.SphericalSampling
+    cart = FG.Geometry.CartesianGeometry()
+    sg = GD.StructuredGrid(cart, 0.0:1.0:19.0, 0.0:1.0:9.0)
+    for g in (sg, GD.HEALPixGrid(4), GD.CubedSphereGrid(3))
+        c, c64 = C.build_connectivity(g), C.build_connectivity(Int, g)
+        Test.@test eltype(c.nbrs) === Int32 && eltype(c.ptr) === Int && eltype(c64.nbrs) === Int
+        Test.@test c64.nbrs == c.nbrs && c64.ptr == c.ptr
+    end
+    for (s, args) in ((SS.HEALPixSampling(4), ()), (SS.IcosahedralSampling(3), ()),
+                      (SS.CubedSphereSampling(), (3,)), (SS.GaussLegendreSampling(), (8,)))
+        c, c16 = C.build_connectivity(s, args...), C.build_connectivity(Int16, s, args...)
+        Test.@test eltype(c.nbrs) === Int32 && eltype(c16.nbrs) === Int16 && c16.nbrs == c.nbrs
+    end
+    b, b64 = C.build_connectivity_within(sg; ball = 1.5), C.build_connectivity_within(Int, sg; ball = 1.5)
+    Test.@test eltype(b.nbrs) === Int32 && eltype(b64.nbrs) === Int && b64.nbrs == b.nbrs
+    # A stored graph keeps its own id type, and a k-d-tree or sampling node set takes the one named.
+    un = GD.UnstructuredGrid(cart, [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], ones(3), trues(3), Int16[2, 3, 1, 1], [1, 3, 4, 5])
+    Test.@test eltype(C.build_connectivity(un).nbrs) === Int16
+    xs, ys = rand(40), rand(40)
+    Test.@test eltype(GD.neighbor_nbrs(GD.UnstructuredGrid(cart, (xs, ys), trues(40); k = 4, areas = ones(40)))) === Int32
+    Test.@test eltype(GD.neighbor_nbrs(GD.UnstructuredGrid(Int, cart, (xs, ys), trues(40); k = 4, areas = ones(40)))) === Int
+    Test.@test eltype(GD.neighbor_nbrs(C.unstructured_grid(Int, SS.IcosahedralSampling(2)))) === Int
+    # Ids past the type's range raise.
+    Test.@test_throws ArgumentError C.build_connectivity(Int8, sg)
+    Test.@test_throws ArgumentError C.build_connectivity_within(Int8, sg; ball = 1.5)
+    Test.@test_throws ArgumentError C.build_connectivity(Int8, SS.HEALPixSampling(4))
+end
+
 Test.@testset "A ball is gated in the grid's own precision on every layout" begin
     cart = FG.Geometry.CartesianGeometry{Float32}()
     xs, ys = Float32.(0:4), Float32.(0:3)
@@ -72,7 +104,7 @@ Test.@testset "Curvilinear periodicity" begin
     geom = FG.Geometry.CartesianGeometry()
     x = [Float64(i) for i in 1:3, j in 1:2]
     y = [Float64(j) for i in 1:3, j in 1:2]
-    g = FG.Grids.CurvilinearGrid(geom, x, y, trues(3, 2); periodic = (true, false))
+    g = FG.Grids.CurvilinearGrid(geom, x, y, trues(3, 2); topology = FG.Grids.Periodic())
     Test.@test FG.Grids.isperiodic(g, 1)
     Test.@test !FG.Grids.isperiodic(g, 2)
     Test.@test FG.Connectivity.nneighbors(g, 1, 1) == 3  # wrap in x, open in y
@@ -91,10 +123,10 @@ Test.@testset "Spherical sampling connectivity" begin
     end
 
     # Tensor-product → structured lon-periodic
-    sg = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 8)
+    sg = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 8)
     Test.@test FG.Grids.isperiodic(sg, 1)
     Test.@test !FG.Grids.isperiodic(sg, 2)
-    cc = FG.Connectivity.build_connectivity(FG.SphericalSampling.ClenshawCurtisSampling(), 8)
+    cc = FG.Connectivity.build_connectivity(FG.SphericalSampling.Fejer1Sampling(), 8)
     Test.@test FG.Connectivity.nnodes(cc) == length(sg.mask)
     Test.@test _symmetric(cc)
 
@@ -163,7 +195,7 @@ Test.@testset "Spherical sampling connectivity" begin
     for ν in (1, 2, 3, 5, 8)
         a = FG.Connectivity.build_connectivity(FG.SphericalSampling.IcosahedralSampling(ν))
         mesh = FG.SphericalSampling.icosahedral_mesh(ν)
-        b = FG.Connectivity._csr_from_undirected_edges(length(mesh.λ), mesh.edges)
+        b = FG.Connectivity._csr_from_undirected_edges(Int32, length(mesh.λ), mesh.edges)
         g = FG.Grids.IcosahedralGrid(ν)
         nv = FG.SphericalSampling.icosahedral_nvertices(ν)
         Test.@test FG.Connectivity.nnodes(a) == nv
@@ -292,7 +324,7 @@ Test.@testset "k-d-tree adjacency, open and wrapping" begin
     Test.@test !FG.Grids.isperiodic(g_open, 1)
 
     g_per = FG.Grids.UnstructuredGrid(cgeo, xs, ys, trues(N); k = 4, areas = areas,
-                                periodic = (true, true), period = (L, L))
+                                topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (L, L))
     Test.@test FG.Grids.isperiodic(g_per, 1) && FG.Grids.isperiodic(g_per, 2)
     Test.@test FG.Grids.period(g_per, 1) == L
     # On a wrapped lattice every node is interior: exactly four neighbours, each one cell away.
@@ -304,12 +336,12 @@ Test.@testset "k-d-tree adjacency, open and wrapping" begin
     Test.@test all(i in FG.Grids.neighbors(g_per, j) for i in 1:N for j in FG.Grids.neighbors(g_per, i))
     # Radius queries honor it too.
     g_rad = FG.Grids.UnstructuredGrid(cgeo, xs, ys, trues(N); radius = 1.01, areas = areas,
-                                periodic = (true, true), period = (L, L))
+                                topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (L, L))
     Test.@test all(length(FG.Grids.neighbors(g_rad, i)) == 4 for i in 1:N)
 
     # A Cartesian box has no period to infer, so wrapping without one is an error.
-    Test.@test_throws ArgumentError FG.Grids.UnstructuredGrid(cgeo, xs, ys, trues(N);
-                                                        k = 4, areas = areas, periodic = true)
+    Test.@test_throws ArgumentError FG.Grids.UnstructuredGrid(cgeo, xs, ys, trues(N); k = 4, areas = areas,
+                                                              topology = FG.Grids.Periodic())
 
     # Spherical longitude wraps with no ghosting: the embedding identifies λ with λ+2π.
     sgeo = FG.Geometry.SphericalGeometry(1.0)
@@ -321,11 +353,11 @@ end
 
 Test.@testset "A symmetric adjacency is read as CSC without transposing a second copy" begin
     using SparseArrays: SparseArrays
-    for (g, lbl) in ((FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 17), "structured"),
+    for (g, lbl) in ((FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 17), "structured"),
                      (FG.Grids.CurvilinearGrid(FG.Geometry.SphericalGeometry(),
                                          [2π * (i - 1) / 12 for i in 1:12, j in 1:9],
                                          [asin(2 * (j - 0.5) / 9 - 1) for i in 1:12, j in 1:9],
-                                         trues(12, 9); periodic = (true, false)), "curvilinear"))
+                                         trues(12, 9); topology = FG.Grids.Periodic()), "curvilinear"))
         conn = FG.Connectivity.build_connectivity(g)
         n = FG.Connectivity.nnodes(conn)
         Test.@test FG.Connectivity.is_symmetric_adjacency(conn)          # what licenses the shortcut
@@ -336,9 +368,14 @@ Test.@testset "A symmetric adjacency is read as CSC without transposing a second
         Test.@test SparseArrays.nnz(A) == FG.Connectivity.nedges(conn)
         Test.@test all(issorted(@view SparseArrays.rowvals(A)[SparseArrays.nzrange(A, j)])
                        for j in 1:n)
-        # A non-default index type gives the same matrix.
-        Test.@test FG.Connectivity.sparse_adjacency_matrix(g; Ti = Int32) == A
-        Test.@test eltype(FG.Connectivity.sparse_adjacency_matrix(g; Ti = Int32).colptr) === Int32
+        # The index type follows the graph's ids by default, and another gives the same matrix.
+        Test.@test eltype(A.rowval) === eltype(conn.nbrs) && eltype(A.colptr) === eltype(conn.nbrs)
+        Test.@test FG.Connectivity.sparse_adjacency_matrix(Bool, Int, g) == A
+        Test.@test eltype(FG.Connectivity.sparse_adjacency_matrix(Bool, Int, g).colptr) === Int
+        Test.@test FG.Connectivity.sparse_adjacency_matrix(Float32, g) == A
+        Test.@test eltype(FG.Connectivity.sparse_adjacency_matrix(Float32, g)) === Float32
+        # Indices past the type's range raise.
+        Test.@test_throws ArgumentError FG.Connectivity.sparse_adjacency_matrix(Bool, Int8, g)
     end
     # `sort_neighbors!` orders each block in place and changes nothing else.
     c = FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(4))
@@ -359,7 +396,7 @@ Test.@testset "Sampling connectivity is built from index topology, not a discard
     # Identical CSR to routing through `structured_grid`.
     for (s, nlat, kw) in (
         (FG.SphericalSampling.GaussLegendreSampling(), 12, (;)),
-        (FG.SphericalSampling.ClenshawCurtisSampling(), 9, (;)),
+        (FG.SphericalSampling.Fejer1Sampling(), 9, (;)),
         (FG.SphericalSampling.DriscollHealySampling(), 8, (;)),
         (FG.SphericalSampling.LatLonSampling(), 7, (; nlon = 10)),
     )
@@ -371,10 +408,10 @@ Test.@testset "Sampling connectivity is built from index topology, not a discard
         end
     end
     # A mask still applies.
-    sz = FG.SphericalSampling.axes_lengths(FG.SphericalSampling.ClenshawCurtisSampling(), 9)
+    sz = FG.SphericalSampling.axes_lengths(FG.SphericalSampling.Fejer1Sampling(), 9)
     m = trues(sz.nlon, sz.nlat)
     m[2, 2] = false
-    masked = FG.Connectivity.build_connectivity(FG.SphericalSampling.ClenshawCurtisSampling(), 9; mask = m)
+    masked = FG.Connectivity.build_connectivity(FG.SphericalSampling.Fejer1Sampling(), 9; mask = m)
     Test.@test FG.Connectivity.nnodes(masked) == sz.nlon * sz.nlat
     Test.@test length(FG.Grids.neighbors(masked, sz.nlon + 2)) == 0   # (i,j) = (2,2), i fastest
 
@@ -386,7 +423,7 @@ Test.@testset "k-d-tree knn adjacency is the k nearest by great-circle distance"
     n = 200
     λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
     φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
-    nbrs, ptr = FG.Grids._build_kdtree_neighbors(geo, (λ, φ); k = 5)
+    nbrs, ptr = FG.Grids._build_kdtree_neighbors(Int32, geo, (λ, φ); k = 5)
     v = [(cos(φ[i]) * cos(λ[i]), cos(φ[i]) * sin(λ[i]), sin(φ[i])) for i in 1:n]
     for i in 1:n
         d = [j == i ? Inf : sum(abs2, v[i] .- v[j]) for j in 1:n]
@@ -441,6 +478,10 @@ Test.@testset "Planar Voronoi areas are complete and degeneracy-safe" begin
     Test.@test_throws ArgumentError FG.Grids._voronoi_areas(cgeo, [0.1, 0.2, 0.3, 0.4],
                                                                   [0.1, 0.2, 0.3, 0.4])
     Test.@test_throws ArgumentError FG.Grids._voronoi_areas(cgeo, fill(0.5, 4), fill(0.5, 4))
+    # The orientation test is exact, so a point a hair off the line through the others makes a triangle.
+    let a4 = FG.Grids._voronoi_areas(cgeo, [0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0 + 1e-12, 3.0])
+        Test.@test length(a4) == 4 && all(isfinite, a4) && all(≥(0), a4)
+    end
 
     # Float32 in, Float32 out (the tessellation itself runs in Float64 for predicate robustness).
     a32 = FG.Grids._voronoi_areas(FG.Geometry.CartesianGeometry(Float32), Float32.(xs), Float32.(ys))
@@ -460,10 +501,11 @@ Test.@testset "Planar Voronoi cells and the scattered operators repeat across a 
     y = [L[2] * jitter(i + 7919) for i in 1:n]
     s = (0.731, 0.412)
     xs, ys = mod.(x .+ s[1], L[1]), mod.(y .+ s[2], L[2])
-    grid(x, y, periodic) = FG.Grids.UnstructuredGrid(cgeo, (x, y); k = 8, periodic, period = L)
+    P, B = FG.Grids.Periodic(), FG.Grids.Bounded()
+    grid(x, y, topology) = FG.Grids.UnstructuredGrid(cgeo, (x, y); k = 8, topology, period = L)
     area(g) = vec(FG.Grids.measure(g))
     same(a, b) = maximum(abs, a .- b) ≤ 1e-12 * maximum(a)
-    g, gs = grid(x, y, (true, true)), grid(xs, ys, (true, true))
+    g, gs = grid(x, y, (P, P)), grid(xs, ys, (P, P))
     a = area(g)
     Test.@test sum(a) ≈ L[1] * L[2] rtol = 1e-12
     Test.@test same(a, area(gs))
@@ -473,7 +515,7 @@ Test.@testset "Planar Voronoi cells and the scattered operators repeat across a 
     Test.@test same(a, area(gt)[1:n])
     # Periodic along x alone: the cells at the bounded ends are clipped to the hull of the repeating set,
     # which a translation along x carries into itself.
-    Test.@test same(area(grid(x, y, (true, false))), area(grid(xs, y, (true, false))))
+    Test.@test same(area(grid(x, y, (P, B))), area(grid(xs, y, (P, B))))
 
     f = [sin(2π * x[i] / L[1]) * cos(2π * y[i] / L[2]) for i in 1:n]
     G, Gs = (FG.Operators.gradient!(zeros(n), zeros(n), f, FG.Operators.gradient_plan(h)) for h in (g, gs))
@@ -531,7 +573,7 @@ Test.@testset "Distance and displacement between cells honour the topology" begi
     n, Δ = 10, 1.0
     L = n * Δ
     gp = GR.StructuredGrid(geo, range(0.0; step = Δ, length = n),
-                           range(0.0; step = Δ, length = 6); periodic = true, period = L)
+                           range(0.0; step = Δ, length = 6); topology = GR.Periodic(), period = L)
     gb = GR.StructuredGrid(geo, range(0.0; step = Δ, length = n),
                            range(0.0; step = Δ, length = 6))
 
@@ -555,7 +597,7 @@ Test.@testset "Distance and displacement between cells honour the topology" begi
     sph = FG.Geometry.SphericalGeometry(6.371e6)
     λ = collect(range(0, 2π; length = 25)[1:24])
     φ = collect(range(-1.0, 1.0; length = 9))
-    gs = GR.StructuredGrid(sph, λ, φ; periodic = true)
+    gs = GR.StructuredGrid(sph, λ, φ; topology = GR.Periodic())
     Test.@test GR.isperiodic(gs, 1)
     Test.@test all(GE.distance(gs, (i, j), (k, l)) ≈ GE.distance(sph, (λ[i], φ[j]), (λ[k], φ[l]))
                    for i in (1, 5, 24), j in (1, 5, 9), k in (1, 12, 24), l in (1, 5, 9))
@@ -566,7 +608,7 @@ Test.@testset "Distance and displacement between cells honour the topology" begi
     Test.@test GE.distance(gc, (2, 2), (4, 4)) ≈
                GE.distance(sph, (Λ[2, 2], Φ[2, 2]), (Λ[4, 4], Φ[4, 4]))
     gu = GR.UnstructuredGrid(geo, ([0.5, 2.0, 9.5],), ones(3), trues(3);
-                             periodic = (true,), period = (10.0,))
+                             topology = (GR.Periodic(),), period = (10.0,))
     Test.@test GE.distance(gu, 1, 3) ≈ 1.0
     Test.@test GR.displacement(gu, 1, 3)[1] ≈ -1.0
 
@@ -579,7 +621,7 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
     L = Nx * Δx
     ax = range(0.0; step = Δx, length = Nx)
     g = GR.StructuredGrid(FG.Geometry.CartesianGeometry(), ax, ax;
-                          periodic = (true, true), period = (L, L))
+                          topology = (GR.Periodic(), GR.Periodic()), period = (L, L))
     # ℓ = L, so the kernel still carries 0.22 of its peak at L/2 — the regime where the images the
     # nearest-image convention discards actually matter.
     ℓ, α = 2000.0, 6.0
@@ -643,7 +685,7 @@ Test.@testset "A ball query can sum periodic images, which a convolution needs" 
     # Summing images is a statement about a translation, so an angular periodic direction refuses it.
     gs = GR.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
                            collect(range(0, 2π; length = 25)[1:24]),
-                           collect(range(-1.0, 1.0; length = 9)); periodic = true)
+                           collect(range(-1.0, 1.0; length = 9)); topology = GR.Periodic())
     Test.@test GR.isperiodic(gs, 1)
     Test.@test_throws ArgumentError C.fold_within((a, J, d) -> a, 0, gs, 3, 4;
                                                   ball = 2.0e6, images = C.AllImages())
@@ -665,7 +707,7 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
     nλ, nφ = 72, 37
     λ = collect(range(0.0, 2π * (1 - 1 / nλ); length = nλ))
     φ = collect(range(-π / 2, π / 2; length = nφ))          # poles are rows
-    g = GD.StructuredGrid(sph, λ, φ; periodic = true)
+    g = GD.StructuredGrid(sph, λ, φ; topology = GD.Periodic())
 
     # `metric_band` is the exact extent, so it is checked in both directions: it covers every cell
     # of the row genuinely in range, and no cell beyond it is in range. A mere bound satisfies the
@@ -714,7 +756,7 @@ Test.@testset "A window for the whole grid, and an exact extent for one row" beg
     end
     # It reads the cached extremes, so it touches no coordinate of the latitude axis.
     let cx = CountingAxis(collect(range(-1.4, 1.4; length = 200))),
-        gcount = GD.StructuredGrid(sph, λ, cx; periodic = true)
+        gcount = GD.StructuredGrid(sph, λ, cx; topology = GD.Periodic())
         C.metric_window(gcount, 0.2R)
         Test.@test reads(() -> C.metric_window(gcount, 0.2R), cx) == 0
     end
@@ -767,7 +809,7 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
     # count any cell twice.
     gp = FG.Grids.StructuredGrid(geo, range(0.0; step = 1.0, length = 10),
                                  range(0.0; step = 1.0, length = 6);
-                                 periodic = true, period = 10.0)
+                                 topology = FG.Grids.Periodic(), period = 10.0)
     for (I, r) in (((1, 3), 2.2), ((10, 1), 1.5), ((5, 3), 4.9), ((5, 3), 50.0))
         Test.@test agrees(gp, I, r)
     end
@@ -786,14 +828,14 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
         Test.@test agrees(g2, I, r)
     end
     g2s = FG.Grids.StructuredGrid(sph, collect(range(2π; step = -2π / 16, length = 16)),
-                                  asin.(range(-1, 1; length = 9)); periodic = true)
+                                  asin.(range(-1, 1; length = 9)); topology = FG.Grids.Periodic())
     Test.@test agrees(g2s, (4, 8), 2.0e6)
     Test.@test agrees(g2s, (16, 2), 3.0e6)
     # Longitude spacing varying eightfold round the ring, and the same spacing over a 300° box: a row's
     # band is bracketed by search on the axis itself.
     sp = [1 + 7 * (1 + sin(2π * (k - 0.5) / 24)) / 2 for k in 1:24]
     λst = (cumsum(sp) .- sp[1]) .* (2π / sum(sp))
-    gst2 = FG.Grids.StructuredGrid(sph, λst, φ; topology = (true, false), period = (2π, 0.0))
+    gst2 = FG.Grids.StructuredGrid(sph, λst, φ; topology = FG.Grids.Periodic(), period = (2π, 0.0))
     for (I, r) in (((5, 7), 2.0e6), ((1, 13), 1.5e6), ((18, 3), 1.0e6), ((24, 6), 3.0e6), ((12, 7), 2.5e7))
         Test.@test agrees(gst2, I, r)
     end
@@ -963,17 +1005,16 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
     GD = FG.Grids
     geo = FG.Geometry.CartesianGeometry{Float64}()
     sgeo = FG.Geometry.SphericalGeometry(6.371e6)
-    function curv(n; periodic = false, mask = trues(n, n))
+    function curv(n; topology = GD.Bounded(), mask = trues(n, n))
         x = [t for t in range(0.0, 10.0; length = n), _ in 1:n]
         y = [t for _ in 1:n, t in range(0.0, 10.0; length = n)]
-        return GD.CurvilinearGrid(geo, x, y, mask; measure = fill(1.0, n, n),
-                                  periodic = (periodic, false),
-                                  period = (periodic ? 10.0 : 0.0, 0.0))
+        return GD.CurvilinearGrid(geo, x, y, mask; measure = fill(1.0, n, n), topology,
+                                  period = (topology isa GD.Periodic ? 10.0 : 0.0, 0.0))
     end
     function curv_sph(nλ, nφ)
         λ = [l for l in range(0.0, 2π * (1 - 1 / nλ); length = nλ), _ in 1:nφ]
         φ = [f for _ in 1:nλ, f in range(-1.2, 1.2; length = nφ)]
-        return GD.CurvilinearGrid(sgeo, λ, φ, trues(nλ, nφ); periodic = (true, false))
+        return GD.CurvilinearGrid(sgeo, λ, φ, trues(nλ, nφ); topology = GD.Periodic())
     end
     Test.@test GD.has_spatial_index(curv(8))                # the extension is loaded
 
@@ -986,22 +1027,22 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
         [l for l in range(0.0, 2π * (1 - 1 / nλ); length = nλ), _ in 1:nφ, _ in 1:nr],
         [f for _ in 1:nλ, f in range(-1.0, 1.0; length = nφ), _ in 1:nr],
         [q for _ in 1:nλ, _ in 1:nφ, q in range(6.371e6, 1.02 * 6.371e6; length = nr)],
-        fill(1.0, nλ, nφ, nr), trues(nλ, nφ, nr); periodic = (true, false, false),
+        fill(1.0, nλ, nφ, nr), trues(nλ, nφ, nr); topology = GD.Periodic(),
     )
-    # A spheroid, where the ECEF chord the index searches is a lower bound on the Vincenty geodesic
-    # the gate applies. The index over-returns, as its contract allows, and the answer still matches
-    # the scan's cell for cell.
+    # A spheroid, where the ECEF chord the index searches is a lower bound on the geodesic the gate
+    # applies. The index over-returns, as its contract allows, and the answer still matches the scan's
+    # cell for cell.
     spd = FG.Geometry.SpheroidGeometry(6.378137e6, 1 / 298.257223563)
     λ2 = [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11]
     φ2 = [f for _ in 1:20, f in range(-1.2, 1.2; length = 11)]
-    spd2 = GD.CurvilinearGrid(spd, λ2, φ2, fill(1.0, 20, 11), trues(20, 11); periodic = (true, false))
+    spd2 = GD.CurvilinearGrid(spd, λ2, φ2, fill(1.0, 20, 11), trues(20, 11); topology = GD.Periodic())
     nh = 3
     spd3 = GD.CurvilinearGrid(
         spd,
         [l for l in range(0.0, 2π * (1 - 1 / 20); length = 20), _ in 1:11, _ in 1:nh],
         [f for _ in 1:20, f in range(-1.2, 1.2; length = 11), _ in 1:nh],
         [h for _ in 1:20, _ in 1:11, h in range(0.0, 2.0e5; length = nh)],
-        fill(1.0, 20, 11, nh), trues(20, 11, nh); periodic = (true, false, false),
+        fill(1.0, 20, 11, nh), trues(20, 11, nh); topology = GD.Periodic(),
     )
     # A box wrapping in two of three directions, so the tree needs ghost images in both.
     nb = 8
@@ -1012,11 +1053,11 @@ Test.@testset "An index changes a ball query's cost, never its answer" begin
         [y for _ in 1:nb, y in axb, _ in 1:nb],
         [z for _ in 1:nb, _ in 1:nb, z in axb],
         fill(1.0, nb, nb, nb), trues(nb, nb, nb);
-        periodic = (true, true, false), period = (8.0, 8.0, 0.0),
+        topology = (GD.Periodic(), GD.Periodic()), period = (8.0, 8.0, 0.0),
     )
     cases = (
         (curv(16), ((1, 1), (8, 8), (16, 16), (1, 16)), 2.0),
-        (curv(16; periodic = true), ((1, 1), (8, 8), (16, 8), (1, 16)), 2.0),
+        (curv(16; topology = GD.Periodic()), ((1, 1), (8, 8), (16, 8), (1, 16)), 2.0),
         (curv(16; mask = wall), ((8, 5), (1, 1), (14, 14)), 3.0),
         (curv_sph(24, 12), ((1, 1), (12, 6), (24, 12)), 0.2R),
         (curv_sph(24, 12), ((12, 6),), 3.0R),               # reaches past the antipode
@@ -1228,7 +1269,7 @@ Test.@testset "Connected follows a periodic seam" begin
     C = FG.Connectivity
     geo = FG.Geometry.CartesianGeometry{Float64}()
     ring(mask) = FG.Grids.StructuredGrid(geo, collect(0.0:7.0), mask;
-                                         periodic = true, period = 8.0)
+                                         topology = FG.Grids.Periodic(), period = 8.0)
 
     # A ring of 8 at unit spacing: a ball of 2.5 reaches ±2, and the wrap makes it contiguous, so
     # the component is the whole ball.
@@ -1317,9 +1358,9 @@ Test.@testset "k nearest is exact under the geometry's own metric" begin
     cases = (
         (GD.StructuredGrid(cart, rg, v), (8, 8)),
         (GD.StructuredGrid(cart, v), (8,)),
-        (GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0)), (1, 8)),
+        (GD.StructuredGrid(cart, v, v; topology = GD.Periodic(), period = (16.0, 0.0)), (1, 8)),
         (GD.StructuredGrid(sph, collect(range(0, 2π * (1 - 1 / n); length = n)),
-                           collect(range(-1.2, 1.2; length = n)); periodic = true), (4, 8)),
+                           collect(range(-1.2, 1.2; length = n)); topology = GD.Periodic()), (4, 8)),
         (GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)), (8, 8)),
     )
     for (g, I) in cases, k in (1, 5, 12)
@@ -1399,11 +1440,11 @@ Test.@testset "Queries can be seeded by a point, not just a cell" begin
     R = 6.371e6
     cases = (
         (GD.StructuredGrid(cart, v, v), ((7.3, 4.2), (0.0, 0.0), (15.0, 15.0)), 3.0),
-        (GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0)),
+        (GD.StructuredGrid(cart, v, v; topology = GD.Periodic(), period = (16.0, 0.0)),
          ((0.3, 4.2), (15.7, 8.0)), 3.0),
         (GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n)),
          ((7.3, 4.2), (1.5, 13.5)), 3.0),
-        (GD.CurvilinearGrid(sph, λ, φ, trues(n, n); periodic = (true, false)), ((0.4, 0.1), (6.0, -1.0)), 0.25R),
+        (GD.CurvilinearGrid(sph, λ, φ, trues(n, n); topology = GD.Periodic()), ((0.4, 0.1), (6.0, -1.0)), 0.25R),
     )
     for (g, pts, r) in cases, p in pts
         want = brute(g, p, r)
@@ -1435,7 +1476,7 @@ Test.@testset "Queries can be seeded by a point, not just a cell" begin
     end
 
     gs = GD.StructuredGrid(cart, v, v)
-    gp = GD.StructuredGrid(cart, v, v; periodic = (true, false), period = (16.0, 0.0))
+    gp = GD.StructuredGrid(cart, v, v; topology = GD.Periodic(), period = (16.0, 0.0))
     Test.@test GD.locate(gs, (7.3, 4.2)) == (8, 5)
     Test.@test GD.locate(gs, (0.0, 0.0)) == (1, 1)
     Test.@test GD.locate(gp, (16.4, 3.0)) == GD.locate(gp, (0.4, 3.0))   # wraps
@@ -1536,7 +1577,7 @@ Test.@testset "A wide ball on a wrapping domain reports each cell once" begin
     cx = [x for x in range(0.0, 11.0; length = n), _ in 1:n]
     cy = [y for _ in 1:n, y in range(0.0, 11.0; length = n)]
     g = GD.CurvilinearGrid(cart, cx, cy, trues(n, n); measure = fill(1.0, n, n),
-                           periodic = (true, true), period = (L, L))
+                           topology = (GD.Periodic(), GD.Periodic()), period = (L, L))
     for r in (2.0, 5.9, 6.0, 8.0, 15.0)          # 2r crosses the period at r = 6
         scan = sort(C.neighbors_within(g, 6, 6; ball = r))
         for top in (C.indexed(g), C.MetricTopology(g; index = GD.cell_list(g; ball = r)))
@@ -1546,6 +1587,58 @@ Test.@testset "A wide ball on a wrapping domain reports each cell once" begin
             Test.@test C.nneighbors_within(g, 6, 6; ball = r, topology = top) == length(scan)
         end
     end
+end
+
+Test.@testset "A binned index answers as the scan does, in either layout" begin
+    C = FG.Connectivity
+    GD = FG.Grids
+    cart = FG.Geometry.CartesianGeometry{Float64}()
+    jitter(i) = mod(sin(12.9898 * i) * 43758.5453, 1.0)
+    n = 400
+    xs, ys = [8 * jitter(i) for i in 1:n], [5 * jitter(i + 7919) for i in 1:n]
+    # Two tight clusters far apart in a wide box, whose lattice is nearly all empty.
+    cx = vcat(0.01 .* xs[1:200], 1000 .+ 0.01 .* xs[201:400])
+    cy = vcat(0.01 .* ys[1:200], 1000 .+ 0.01 .* ys[201:400])
+    mk = trues(12, 10); mk[4:6, 3:5] .= false
+    PP = (GD.Periodic(), GD.Periodic())
+    grids = (
+        (GD.StructuredGrid(cart, collect(0.0:11.0), collect(0.0:0.5:4.5), mk), (8, 7)),
+        (GD.StructuredGrid(cart, 0.0:1.0:11.0, 0.0:1.0:9.0; topology = PP), (1, 10)),
+        (GD.UnstructuredGrid(cart, (xs, ys), ones(n)), (17,)),
+        (GD.UnstructuredGrid(cart, (xs, ys), ones(n); topology = PP, period = (8.0, 5.0)), (17,)),
+        (GD.UnstructuredGrid(cart, (cx, cy), ones(n)), (17,)),
+        (GD.StructuredGrid(cart, 0.0:1.0:5.0, 0.0:1.0:4.0, 0.0:1.0:3.0), (3, 3, 2)),
+    )
+    for (g, I) in grids, layout in (GD.DenseBins(), GD.HashedBins(), GD.OccupancyBins()), r in (0.6, 1.7, 4.0)
+        top = C.MetricTopology(g; index = GD.binned_index(g; layout))
+        Test.@test sort(C.neighbors_within(g, I...; ball = r, topology = top)) == sort(C.neighbors_within(g, I...; ball = r))
+        Test.@test C.nneighbors_within(g, I...; ball = r, topology = top) == C.nneighbors_within(g, I...; ball = r)
+    end
+    # Cells filling their box take the dense layout under the occupancy rule, and the clusters the hashed.
+    Test.@test GD.binned_index(grids[3][1]).layout isa GD.DenseBins
+    Test.@test GD.binned_index(grids[5][1]).layout isa GD.HashedBins
+
+    # An index of the active cells serves that policy alone.
+    let g = grids[1][1], top = C.MetricTopology(grids[1][1]; index = GD.binned_index(grids[1][1]; active_only = true))
+        Test.@test C.nneighbors_within(g, 8, 7; ball = 1.7, topology = top) == C.nneighbors_within(g, 8, 7; ball = 1.7)
+        Test.@test_throws ArgumentError C.nneighbors_within(g, 8, 7; ball = 1.7, active_only = false, topology = top)
+    end
+
+    # Every image of every cell within a ball wider than both periods, against the sum over shifted copies.
+    let g = grids[2][1], q = (0.3, 9.6), r = 13.0
+        want = sort([(i + 12(j - 1), round((i - 1 + 12kx - q[1])^2 + (j - 1 + 10ky - q[2])^2; digits = 9))
+                     for i in 1:12, j in 1:10, kx in -3:3, ky in -3:3
+                     if (i - 1 + 12kx - q[1])^2 + (j - 1 + 10ky - q[2])^2 ≤ r^2])
+        for layout in (GD.DenseBins(), GD.HashedBins())
+            ix = GD.binned_index(g; layout)
+            got = GD.fold_images(Tuple{Int,Float64}[], ix, q, r) do a, s, d2, _
+                push!(a, (ix.order[s], round(d2; digits = 9)))
+                return a
+            end
+            Test.@test sort(got) == want
+        end
+    end
+    Test.@test_throws ArgumentError GD.binned_index(GD.HEALPixGrid(2))
 end
 
 Test.@testset "Per-query cost does not grow with the grid" begin

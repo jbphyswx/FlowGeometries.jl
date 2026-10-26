@@ -46,24 +46,10 @@ to a device.
 The grid form solves the weights over distance where [`derivative!`](@ref) needs them so: at
 `order ≥ 2` along a direction outside [`Geometry.scale_invariant_directions`](@ref).
 """
-function masked_stencil_plan(
-    x::AbstractVector{T}, mask::AbstractArray{Bool,M}, dim::Integer, order::Integer, nodes::Integer;
+masked_stencil_plan(
+    x::AbstractVector{<:AbstractFloat}, mask::AbstractArray{Bool}, dim::Integer, order::Integer, nodes::Integer;
     period::Union{Nothing,Real} = nothing, policy::AbstractMaskPolicy = ReduceInRun(),
-) where {T<:AbstractFloat,M}
-    d = Int(dim)
-    ord = Int(order)
-    1 ≤ d ≤ M || throw(ArgumentError("direction $d is outside the mask's 1:$M"))
-    size(mask, d) == length(x) || throw(DimensionMismatch(
-        "axis has $(length(x)) samples but direction $d of the mask has $(size(mask, d))",
-    ))
-    n = length(x)
-    k = policy isa ReduceInRun ? min(Int(nodes), n) : Int(nodes)
-    if policy isa ReduceInRun && n < ord + 1
-        return _empty_masked_plan(T, mask, d, ord, k, false)
-    end
-    idx, wts = Discretization.axis_stencils(x, ord, k; period = period)
-    return _masked_stencil_plan(x, mask, d, ord, k, period, policy, idx, wts)
-end
+) = _masked_axis_plan(x, mask, Int(dim), Int(order), Int(nodes), period, policy)
 
 function masked_stencil_plan(
     grid::Grids.StructuredGrid{T,G,N}, dim::Integer; order::Integer = 1, nodes::Integer = Int(order) + 1,
@@ -71,12 +57,28 @@ function masked_stencil_plan(
 ) where {T,G,N}
     d = Int(dim)
     1 ≤ d ≤ N || throw(ArgumentError("direction $d is outside 1:$N"))
-    _along_arc(grid, d, Int(order)) &&
-        return _distance_stencil_plan(grid, _host_mask(Grids.mask(grid)), d, Int(order), Int(nodes), policy)
-    return masked_stencil_plan(
-        _host_array(Grids.coordinates(grid, d)), _host_mask(Grids.mask(grid)), d, order, nodes;
-        period = Grids.isperiodic(grid, d) ? Grids.period(grid, d) : nothing, policy = policy,
-    )
+    msk = _host_mask(Grids.mask(grid))
+    _along_arc(grid, d, Int(order)) && return _distance_stencil_plan(grid, msk, d, Int(order), Int(nodes), policy)
+    return _dispatch_dim(d, Val(N)) do vd
+        _masked_axis_plan(Axes._host_array(Grids.coordinates(grid)[_val(vd)]), msk, _val(vd), Int(order), Int(nodes),
+                          Grids._wrap_period(grid, _val(vd)), policy)
+    end
+end
+
+function _masked_axis_plan(
+    x::AbstractVector{T}, mask::AbstractArray{Bool,M}, d::Int, ord::Int, nodes::Int, period, policy,
+) where {T<:AbstractFloat,M}
+    1 ≤ d ≤ M || throw(ArgumentError("direction $d is outside the mask's 1:$M"))
+    size(mask, d) == length(x) || throw(DimensionMismatch(
+        "axis has $(length(x)) samples but direction $d of the mask has $(size(mask, d))",
+    ))
+    n = length(x)
+    k = policy isa ReduceInRun ? min(nodes, n) : nodes
+    if policy isa ReduceInRun && n < ord + 1
+        return _empty_masked_plan(T, mask, d, ord, k, false)
+    end
+    idx, wts = Discretization.axis_stencils(x, ord, k; period = period)
+    return _masked_stencil_plan(x, mask, d, ord, k, period, policy, idx, wts)
 end
 
 # No derivative of this order exists anywhere on an axis this short.
@@ -84,17 +86,9 @@ _empty_masked_plan(::Type{T}, mask, d::Int, ord::Int, k::Int, distance::Bool) wh
     MaskedStencilPlan(zeros(Int32, size(mask)), Matrix{Int}(undef, 0, k), Matrix{T}(undef, 0, k), d, ord, distance,
                       mask)
 
-# An array as host data, which the build walks element by element: a device array is copied over, and
-# an analytic axis is its formula, evaluated where it is read.
-@inline _host_array(a::Array) = a
-@inline _host_array(a::BitArray) = a
-@inline _host_array(a::AbstractRange) = a
-@inline _host_array(a::Axes.AbstractAnalyticAxis) = a
-@inline _host_array(a::AbstractArray) = Array(a)
-
 # A grid with no inactive cell holds its mask as a size alone, readable anywhere.
 @inline _host_mask(m::Grids.AllActive) = m
-@inline _host_mask(m::AbstractArray{Bool}) = _host_array(m)
+@inline _host_mask(m::AbstractArray{Bool}) = Axes._host_array(m)
 
 # Each active cell takes the table's row where every node of it is active. Elsewhere the window is the
 # largest the policy allows inside the cell's active run, shifted to fit, and its weights are solved
@@ -152,19 +146,24 @@ end
 # the derivative with respect to distance itself. The window is the axis table's where it holds only
 # active cells and the policy's degraded one elsewhere. A line's distances depend on the coordinates its
 # scale factor reads, so cells sharing a window and every coordinate outside the metric-invariant
-# directions share a row. A cell whose own scale factor is at the geometry's floor is written `masked`,
-# as in the factor form.
-function _distance_stencil_plan(
+# directions share a row. A cell whose own scale factor is zero, as at a pole, is written `masked`, as in
+# the factor form.
+_distance_stencil_plan(
     grid::Grids.StructuredGrid{T,G,N}, mask::AbstractArray{Bool,N}, d::Int, ord::Int, nodes::Int, policy,
-) where {T,G,N}
-    x = _host_array(Grids.coordinates(grid, d))
+) where {T,G,N} = _dispatch_dim(d, Val(N)) do vd
+    _distance_stencil_plan(grid, mask, vd, ord, nodes, policy)
+end
+
+function _distance_stencil_plan(
+    grid::Grids.StructuredGrid{T,G,N}, mask::AbstractArray{Bool,N}, ::Val{d}, ord::Int, nodes::Int, policy,
+) where {T,G,N,d}
+    x = Axes._host_array(Grids.coordinates(grid)[d])
     n = length(x)
     k = policy isa ReduceInRun ? min(nodes, n) : nodes
     policy isa ReduceInRun && n < ord + 1 && return _empty_masked_plan(T, mask, d, ord, k, true)
     Discretization._check_stencil_shape(n, k, ord)
     geo = Grids.grid_geometry(grid)
-    axes = map(_host_array, Grids.coordinates(grid))
-    floor_ = Discretization.metric_floor(geo, d)
+    axes = map(Axes._host_array, Grids.coordinates(grid))
     invariant = Geometry.metric_invariant_directions(geo)
     wrap = Grids.isperiodic(grid, d)
     P = wrap ? T(Grids.period(grid, d)) * Axes.wrap_sign(x) : zero(T)
@@ -182,13 +181,13 @@ function _distance_stencil_plan(
         i = I[d]
         start = wrap ? i - half : Discretization._window_start(i, k, 1, n)
         kk = k
-        if !all(q -> mask[_at_dim(I, d, mod1(start + q - 1, n))...], 1:k)
+        if !_window_active(mask, I, d, start, k, n)
             policy isa BlankMasked && continue
             kk, start = _degraded_window(mask, I, d, i, n, k, ord, wrap, policy)
             iszero(kk) && continue
         end
         pt = map((a, j) -> T(a[j]), axes, I)
-        abs(Geometry.scale_factors(geo, pt)[d]) ≤ floor_ && continue
+        iszero(Geometry.scale_factors(geo, pt)[d]) && continue
         key = (start, kk, ntuple(e -> e in invariant ? 0 : I[e], Val(N))...)
         r = get(seen, key, Int32(0))
         if iszero(r)
@@ -210,6 +209,14 @@ function _distance_stencil_plan(
     return MaskedStencilPlan(
         row, permutedims(reshape(out_idx, k, ne)), permutedims(reshape(out_w, k, ne)), d, ord, true, mask,
     )
+end
+
+# Whether every node of the `k`-node window from `start` along `d` through cell `I` is active.
+@inline function _window_active(mask, I::NTuple{N,Int}, d::Int, start::Int, k::Int, n::Int) where {N}
+    @inbounds for q in 1:k
+        mask[_at_dim(I, d, mod1(start + q - 1, n))...] || return false
+    end
+    return true
 end
 
 """
@@ -238,33 +245,39 @@ function derivative!(
     plan::MaskedStencilPlan; masked = zero(S), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S,G,T,N,NA}
     _check_batched(out, field, grid, Val(N), plan.dim)
-    _same_mask(Grids.mask(grid), plan.mask) || throw(ArgumentError(
+    b = Execution.resolve(execution)
+    p = Execution.on_backend(b, plan)
+    _same_mask(Grids.mask(grid), p.mask) || throw(ArgumentError(
         "this plan's rows were resolved for another mask than the grid's; build it on the grid it differences",
     ))
-    plan.distance && return _apply_masked_plan!(out, field, plan, masked, execution, nothing)
-    _along_arc(grid, plan.dim, plan.order) && throw(ArgumentError(
-        "an order-$(plan.order) derivative along direction $(plan.dim) of this grid needs weights over " *
+    p.distance && return _apply_held_plan!(out, field, p, masked, b, nothing)
+    _along_arc(grid, p.dim, p.order) && throw(ArgumentError(
+        "an order-$(p.order) derivative along direction $(p.dim) of this grid needs weights over " *
         "distance, and this plan holds them over the coordinate; build it with " *
-        "`masked_stencil_plan(grid, $(plan.dim); order = $(plan.order), …)`",
+        "`masked_stencil_plan(grid, $(p.dim); order = $(p.order), …)`",
     ))
-    return _apply_masked_plan!(out, field, plan, masked, execution,
-                               _derivative_factors(grid, plan.dim, execution, plan.order))
+    return _apply_held_plan!(out, field, p, masked, b, _derivative_factors(grid, p.dim, b, p.order))
 end
 
-# Two masks of one array type are in one memory, where `==` runs; masks of two types are compared on the
-# host.
+# The plan's own mask object costs nothing to check. Two masks of one array type are in one memory, the
+# plan having been moved to the backend first, and `==` runs there; masks of two types are compared on
+# the host.
 @inline _same_mask(a::A, b::A) where {A<:AbstractArray{Bool}} = a === b || a == b
 @inline _same_mask(a::AbstractArray{Bool}, b::AbstractArray{Bool}) = _host_mask(a) == _host_mask(b)
 
-function _apply_masked_plan!(
-    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, plan::MaskedStencilPlan, masked, backend, fac,
+function _apply_masked_plan!(out, field, plan::MaskedStencilPlan, masked, backend, fac)
+    b = Execution.resolve(backend)
+    return _apply_held_plan!(out, field, Execution.on_backend(b, plan), masked, b, fac)
+end
+
+# `p` is already in the memory `b`'s loops read.
+function _apply_held_plan!(
+    out::AbstractArray{S,N}, field::AbstractArray{<:Any,N}, p::MaskedStencilPlan, masked, b, fac,
 ) where {S,N}
     size(out) == size(field) || throw(DimensionMismatch(
         "out $(size(out)) and field $(size(field)) must have the same size",
     ))
-    vm = _plan_extent(plan.row, field)
-    b = Execution.resolve(backend)
-    p = Execution.on_backend(b, plan)
+    vm = _plan_extent(p.row, field)
     return _dispatch_dim(p.dim, vm) do vdim
         _dispatch_nodes(size(p.weights, 2)) do vk
             _masked_plan_sweep!(out, field, p.row, p.indices, p.weights, vdim, masked, vk, vm, b, fac)

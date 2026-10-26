@@ -579,12 +579,55 @@ the wrapped neighbour's offset in index order. A descending axis is routine in s
 wrapped neighbour lies at `x[1] - period`, not `x[1] + period`.
 """
 @inline function wrap_sign(x::AbstractVector{T}) where {T<:AbstractFloat}
-    n = length(x)
-    n < 2 && return one(T)
-    return @inbounds(x[n] ≥ x[1]) ? one(T) : -one(T)
+    length(x) < 2 && return one(T)
+    x1, xn = _endpoints(x)
+    return xn ≥ x1 ? one(T) : -one(T)
 end
 
 @inline wrap_sign(x::AbstractRange{T}) where {T<:AbstractFloat} =
     step(x) ≥ 0 ? one(T) : -one(T)
+
+# ----------------------------------------------------------------------------------
+# Host data (TODO :: These dont seem to be Axes related, move to where they belong)
+# ----------------------------------------------------------------------------------
+
+"""
+    _on_host(a) -> Bool
+
+Whether a host loop can read `a` element by element as it is: an `Array`, a range, an analytic axis,
+which is its formula, or a constant vector. From the type alone.
+"""
+@inline _on_host(::Union{Array,BitArray,AbstractRange,AbstractAnalyticAxis,ConstantVector}) = true
+@inline _on_host(::AbstractArray) = false
+
+"""
+    _host_array(a) -> AbstractArray
+
+`a` as data a builder walks element by element: itself where [`_on_host`](@ref), and a copy in an
+`Array` otherwise, as a device array needs.
+"""
+@inline _host_array(a::AbstractArray) = _on_host(a) ? a : Array(a)
+
+"""
+    _like(x, y) -> AbstractArray
+
+The host array `y` in the storage `x` is held in: `y` itself where `x` is host data, a copy into
+`similar(x, …)` otherwise. A builder that read `x` through [`_host_array`](@ref) returns its result
+through this.
+"""
+@inline _like(x::AbstractArray, y::AbstractArray) =
+    _on_host(x) ? y : copyto!(similar(x, eltype(y), size(y)), y)
+
+"""
+    _endpoints(x) -> (first, last)
+
+The first and last entries of a vector, read as two one-element copies where `x` is not host data, so
+a device array serves them without a scalar read.
+"""
+@inline function _endpoints(x::AbstractVector{T}) where {T}
+    _on_host(x) && return (first(x), last(x))
+    return (copyto!(Vector{T}(undef, 1), 1, x, firstindex(x), 1)[1],
+            copyto!(Vector{T}(undef, 1), 1, x, lastindex(x), 1)[1])
+end
 
 end # module Axes

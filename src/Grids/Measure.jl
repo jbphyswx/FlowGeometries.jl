@@ -118,23 +118,15 @@ Base.argmin(m::SeparableMeasure) = findmin(m)[2]
 # operations that keep the measure a product of per-axis factors stay a measure; everything else falls
 # through to Base and materializes, correct and dense.
 #
-# Non-negative factors are an invariant of this type — widths are `abs`-ed at construction — and
-# `findmax`/`findmin` above rely on it, since "largest cell at the per-axis argmax" is a statement
-# about non-negative factors only. Scaling by a negative constant therefore materializes.
+# Scaling the product scales its first factor, by a constant of either sign. `findmax`/`findmin` above
+# read the per-axis argmax only where every factor is non-negative, as a constructed measure's are.
 
 @inline _scaled_factor(w::Axes.ConstantVector, c) = Axes.ConstantVector(w.value * c, length(w))
 @inline _scaled_factor(w::AbstractVector, c) = w .* c
 
-# Scaling the product means scaling exactly one factor.
-_scale_separable(m::SeparableMeasure{T,N}, c::T) where {T,N} = SeparableMeasure(
-    ntuple(d -> d == 1 ? _scaled_factor(m.factors[d], c) : m.factors[d], Val(N)),
+_broadcast_scale(m::SeparableMeasure{T,N}, c::Real) where {T,N} = SeparableMeasure(
+    ntuple(d -> d == 1 ? _scaled_factor(m.factors[d], convert(T, c)) : m.factors[d], Val(N)),
 )
-
-function _broadcast_scale(m::SeparableMeasure{T,N}, c::Real) where {T,N}
-    cT = convert(T, c)
-    cT ≥ zero(T) && return _scale_separable(m, cT)
-    return collect(m) .* cT
-end
 
 Base.broadcasted(::typeof(*), c::Real, m::SeparableMeasure) = _broadcast_scale(m, c)
 Base.broadcasted(::typeof(*), m::SeparableMeasure, c::Real) = _broadcast_scale(m, c)
@@ -342,7 +334,7 @@ size on an unstructured grid. [`area`](@ref) is the 2-D spelling of the same qua
 
 # `@boundscheck` + `@inbounds` body: the check is elided at an `@inbounds` call site, so a hot loop pays
 # nothing, and an ordinary call raises on an out-of-range index.
-@inline function measure(grid::AbstractGrid, I::Vararg{Integer})
+@inline function measure(grid::AbstractGrid, I::Vararg{Integer,K}) where {K}
     m = measure(grid)
     @boundscheck checkbounds(m, I...)
     return @inbounds m[I...]
@@ -353,7 +345,7 @@ end
 
 [`measure`](@ref) under its 2-D name.
 """
-@inline area(grid::AbstractGrid, I::Vararg{Integer}) = measure(grid, I...)
+@inline area(grid::AbstractGrid, I::Vararg{Integer,K}) where {K} = measure(grid, I...)
 
 """
     mask(grid) -> AbstractArray{Bool}
@@ -368,7 +360,7 @@ Which cells/nodes participate, as an array over the grid's own shape. Ask
 
 Whether cell/node `I` participates (`false` = masked out).
 """
-@inline function isactive(grid::AbstractGrid, I::Vararg{Integer})
+@inline function isactive(grid::AbstractGrid, I::Vararg{Integer,K}) where {K}
     m = mask(grid)
     @boundscheck checkbounds(m, I...)
     return @inbounds m[I...]

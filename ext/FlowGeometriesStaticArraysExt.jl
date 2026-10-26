@@ -13,10 +13,10 @@ using FlowGeometries.Grids: Grids
     S(vals)
 
 # An unparameterized `SVector`/`MVector` request still infers a concrete `SVector{N,T}`.
-@inline Grids.coords(::Type{SA.SVector}, grid::Grids.AbstractGrid, I::Vararg{Integer}) =
+@inline Grids.coords(::Type{SA.SVector}, grid::Grids.AbstractGrid, I::Vararg{Integer,K}) where {K} =
     SA.SVector(Grids._raw_coords(grid, I...))
 
-@inline Grids.coords(::Type{SA.MVector}, grid::Grids.AbstractGrid, I::Vararg{Integer}) =
+@inline Grids.coords(::Type{SA.MVector}, grid::Grids.AbstractGrid, I::Vararg{Integer,K}) where {K} =
     SA.MVector(Grids._raw_coords(grid, I...))
 
 end # module

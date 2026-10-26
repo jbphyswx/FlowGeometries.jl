@@ -7,7 +7,7 @@ each neighbour's *difference* from it, once per coordinate direction. Built by
 [`gradient_plan`](@ref), applied by [`gradient!`](@ref).
 
 The two index buffers are typed independently and hold any `Integer`, so a plan built off a CSR keeps
-that CSR's own width — see `Connectivity._index_type`.
+that CSR's own types.
 
 `D` is the number of directions the fit resolves, which is the grid's coordinate count: two on a
 surface — a `(λ, φ)` or `(x, y)` mesh — and three in a volume, where the neighbourhood spans a solid
@@ -147,6 +147,49 @@ end
     g1::AbstractArray, g2::AbstractArray, g3::AbstractArray, field::AbstractArray,
     plan::GradientPlan{3}; kwargs...,
 ) = gradient!((g1, g2, g3), field, plan; kwargs...)
+
+# Component `d` of the gradient alone, from the plan's coefficients along `d`: the value `gradient!`
+# writes into its `d`-th output, summed in the same order.
+function _gradient_component!(
+    out::AbstractArray{S}, field::AbstractArray, plan::GradientPlan{D}, d::Int, execution,
+) where {D,S}
+    1 ≤ d ≤ D || throw(ArgumentError("direction $d is outside 1:$D"))
+    n = length(plan)
+    length(out) == length(field) || throw(DimensionMismatch(
+        "field $(length(field)) and output $(length(out)) must have the same length",
+    ))
+    (length(field) % n == 0) || throw(DimensionMismatch(
+        "plan is for $n cells; a field of $(length(field)) is not a whole number of them",
+    ))
+    nb = length(field) ÷ n
+    bk = Execution.resolve(execution)
+    if bk isa CB.AbstractSerialBackend
+        c = @inbounds plan.coeffs[d]
+        @inbounds for b in 0:(nb - 1), i in 1:n
+            _gradient_component_at!(out, field, plan.ptr, plan.nbr, c, b * n, i, S)
+        end
+        return out
+    end
+    p = Execution.on_backend(bk, plan)
+    ptr, nbr, c = p.ptr, p.nbr, @inbounds(p.coeffs[d])
+    Execution.run_indices(n * nb, bk, Execution.Written(out)) do k
+        off = ((k - 1) ÷ n) * n
+        _gradient_component_at!(out, field, ptr, nbr, c, off, k - off, S)
+    end
+    return out
+end
+
+@inline function _gradient_component_at!(out, field, ptr, nbr, c, off::Int, i::Int, ::Type{S}) where {S}
+    @inbounds begin
+        f0 = field[off + i]
+        s = zero(S)
+        for t in ptr[i]:(ptr[i + 1] - 1)
+            s = s + S(c[t]) * S(field[off + nbr[t]] - f0)
+        end
+        out[off + i] = s
+    end
+    return nothing
+end
 
 """
     _sympinv2(a, b, c, tol) -> (p11, p12, p22)

@@ -76,7 +76,7 @@ Test.@testset "Every stencil traversal allocates nothing, at any shape or dimens
     # A masked, wrapping grid exercises both extra branches of the neighbour kernel.
     mm = trues(10, 10); mm[4:6, 4:6] .= false
     gmask = FG.Grids.StructuredGrid(geo, 0.0:1.0:9.0, 0.0:1.0:9.0, mm;
-                                    periodic = true, period = 10.0)
+                                    topology = FG.Grids.Periodic(), period = 10.0)
     # Each is called by name. Iterating over a tuple of functions dispatches the call dynamically,
     # which allocates in the harness.
     sweep_ax1(g, 2); sweep_ax3(g, 2); sweep_vn2(g, 2); sweep_mo1(g, 2)
@@ -173,7 +173,7 @@ Test.@testset "Distance and displacement across a periodic seam allocate nothing
     geo = FG.Geometry.CartesianGeometry()
     n, Δ = 10, 1.0
     gp = GR.StructuredGrid(geo, range(0.0; step = Δ, length = n),
-                           range(0.0; step = Δ, length = 6); periodic = true, period = n * Δ)
+                           range(0.0; step = Δ, length = 6); topology = GR.Periodic(), period = n * Δ)
     dd() = FG.Geometry.distance(gp, (3, 2), (9, 5))
     pp() = FG.Grids.displacement(gp, (3, 2), (9, 5))
     dd(); pp()
@@ -186,7 +186,7 @@ Test.@testset "A whole-grid ball sweep allocates nothing" begin
     Nx, Δx = 32, 62.5
     ax = range(0.0; step = Δx, length = Nx)
     g = GR.StructuredGrid(FG.Geometry.CartesianGeometry(), ax, ax;
-                          periodic = (true, true), period = (Nx * Δx, Nx * Δx))
+                          topology = (GR.Periodic(), GR.Periodic()), period = (Nx * Δx, Nx * Δx))
     # Both entry points stay allocation-free over a whole sweep. Called through the const `FG` path,
     # since a captured non-const module local blocks const folding and charges dispatch to the sweep.
     cnt(gr, m) = (t = 0; for j in 1:m, i in 1:m
@@ -334,7 +334,7 @@ end
 
 Test.@testset "sparse_adjacency_matrix! reuses the caller's arrays" begin
     conn = FG.Connectivity.build_connectivity(
-        FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 8))
+        FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 8))
     n = FG.Connectivity.nnodes(conn)
     ne = FG.Connectivity.nedges(conn)
     colptr = Vector{Int}(undef, n + 1)
@@ -494,8 +494,8 @@ Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begi
             ("locate/vector",        _alloc(FG.Discretization.locate, ax, 0.37)),
             ("locate/range",         _alloc(FG.Discretization.locate, rg, 0.37)),
             ("interpolation_weights", _alloc(FG.Discretization.interpolation_weights, ax, 0.37)),
-            ("scale_factors",        _alloc(FG.Discretization.scale_factors, sph, (0.3, 0.4))),
-            ("jacobian",             _alloc(FG.Discretization.jacobian, sph, (0.3, 0.4))),
+            ("scale_factors",        _alloc(FG.Geometry.scale_factors, sph, (0.3, 0.4))),
+            ("jacobian",             _alloc(FG.Geometry.jacobian, sph, (0.3, 0.4))),
             ("local_spacing/vector", _alloc(FG.Discretization.local_spacing, ax, 3)),
             ("local_spacing/range",  _alloc(FG.Discretization.local_spacing, rg, 3)),
             ("cell_width/vector",    _alloc(FG.Discretization.cell_width, ax, 3)),
@@ -616,6 +616,9 @@ Test.@testset "The per-point kernels outside Grids allocate nothing either" begi
         ("metric_invariant_directions", _alloc(GE.metric_invariant_directions, sph)),
         ("scale_invariant_directions", _alloc(GE.scale_invariant_directions, sph)),
         ("meridian_distance",        _alloc(GE.meridian_distance, GE.SpheroidGeometry(), 0.7)),
+        ("distance (spheroid, short)", _alloc(GE.distance, spd, P2, (0.3001, 0.4002))),
+        ("distance (spheroid)",      _alloc(GE.distance, spd, P2, (2.5, -0.6))),
+        ("distance (spheroid, antipodal)", _alloc(GE.distance, spd, (0.0, 0.1), (π - 1e-3, -0.1))),
         ("line_distance",            _alloc(GE.line_distance, GE.SpheroidGeometry(), (0.1, 0.3, 50.0), 2, 0.2, 0.9)),
         ("float_type",               _alloc(GE.float_type, sph)),
         ("Axes.spacing_trait",       _alloc(A.spacing_trait, u)),
@@ -741,15 +744,16 @@ end
 
 Test.@testset "A stencil plan's accessors allocate nothing" begin
     D = FG.Discretization
-    # A plan is read per cell on the paths that do not specialize on its form; `plan_row` returns two
-    # stack tuples.
+    # A plan is read per cell; `plan_row` returns two stack tuples for a `Val` node count and two
+    # vectors over the plan for an `Int`.
     for (x, per) in ((range(0.0, 1.0; length = 64), nothing),
                      (FG.Axes.PeriodicAxis(0.0, 2π, 64), 2π),
                      (collect(cumsum(fill(0.5, 64))), nothing))
-        for k in (3, 4, 5)
+        for k in (3, 4, 5, 11)
             pl = D.stencil_plan(x, 1, k; period = per)
             for j in (1, 2, 32, 63, 64)
-                Test.@test _alloc(D.plan_row, pl, j) == 0
+                Test.@test _alloc(D.plan_row, pl, j, Val(k)) == 0
+                Test.@test _alloc(D.plan_row, pl, j, k) == 0
             end
         end
     end
@@ -780,7 +784,7 @@ Test.@testset "Holding a stencil table removes the per-call allocation" begin
     x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n))))
     y = collect(range(0.0, 2π * (1 - 1 / n); length = n))
     mk = trues(n, n); mk[7, 9] = false; mk[8, 9] = false; mk[13, 4] = false
-    g = GD.StructuredGrid(cart, x, y, mk; periodic = (false, true), period = (0.0, 2π))
+    g = GD.StructuredGrid(cart, x, y, mk; topology = (GD.Bounded(), GD.Periodic()), period = (0.0, 2π))
     f = [sin(3xi) * cos(yj) for xi in x, yj in y]
 
     for dim in 1:2
@@ -881,7 +885,7 @@ Test.@testset "k-d-tree knn allocations do not scale with the node count" begin
     build(n) = begin
         λ = [2π * (i * 0.6180339887498949 % 1) for i in 1:n]
         φ = [asin(2 * (i / (n + 1)) - 1) for i in 1:n]
-        () -> FG.Grids._build_kdtree_neighbors(geo, (λ, φ); k = 6)
+        () -> FG.Grids._build_kdtree_neighbors(Int32, geo, (λ, φ); k = 6)
     end
     # The query loop is measured with the tree passed in: `KDTree` construction spawns a task per
     # subtree where threads are available, so its own allocation count scales with N and with the
@@ -938,7 +942,7 @@ Test.@testset "A per-index gap or width lookup allocates nothing on every axis m
         GD.StructuredGrid(cart, vec1, rng1),
         GD.StructuredGrid(cart, vec1, vec1),
         GD.StructuredGrid(cart, rng1, vec1, collect(0.0:2.0)),
-        GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9)); periodic = true),
+        GD.StructuredGrid(sph, λ, collect(range(-1.0, 1.0; length = 9)); topology = GD.Periodic()),
         GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 9))),
     )
     # A runtime `d` indexes a tuple whose entries have different types on the mixed grids, so the
@@ -1006,7 +1010,7 @@ Test.@testset "A batch axis costs no allocation, and none that grows with it" be
     g = GD.StructuredGrid(cart, x, collect(1.0:ny), mk)
     sph = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
                             collect(range(0.0, 2π * (1 - 1 / nx); length = nx)),
-                            collect(range(-1.1, 1.1; length = ny)); periodic = true)
+                            collect(range(-1.1, 1.1; length = ny)); topology = GD.Periodic())
     idx, w = D.axis_stencils(g, 1; order = 1, nodes = 3)
     plan = O.gradient_plan(GD.CurvilinearGrid(cart,
         [0.7i + 0.05j for i in 1:nx, j in 1:ny], [0.9j - 0.03i for i in 1:nx, j in 1:ny],

@@ -105,7 +105,7 @@ end
 # device included. A tree needs a buffer per task, which only the chunked form can give it.
 function _sweep_cells_with(
     f::F, grid, cells, ball, images, active_only, self,
-    topology::MetricTopology{N,T,<:Union{Nothing,Grids.CellListIndex}}, reach, backend,
+    topology::MetricTopology{N,T,<:Union{Nothing,Grids.CellListIndex,Grids.BinnedIndex}}, reach, backend,
     outs::Execution.Written...,
 ) where {F,N,T}
     Execution.run_indices(length(cells), backend, outs...) do t

@@ -112,12 +112,13 @@ task one.
 """
 @inline _buffered_candidates(::Nothing) = false
 @inline _buffered_candidates(::Grids.CellListIndex) = false
+@inline _buffered_candidates(::Grids.BinnedIndex) = false
 @inline _buffered_candidates(_index) = true
 
 # An index built over the active region alone is a superset of the active ball only. A query for
 # masked cells needs one built over every cell, and raises where it has the wrong one.
 @inline _check_index_covers(_index, _active_only::Bool) = nothing
-@inline function _check_index_covers(ix::Grids.CellListIndex, active_only::Bool)
+@inline function _check_index_covers(ix::Union{Grids.CellListIndex,Grids.BinnedIndex}, active_only::Bool)
     (active_only || !ix.active_only) || throw(ArgumentError(
         "this index was built with `active_only = true`, so it holds no masked cell and cannot answer " *
         "a query for one. Build it with `cell_list(grid; ball, active_only = false)`.",
@@ -163,7 +164,8 @@ indexed(grid::Grids.AbstractGrid) = MetricTopology(grid; index = Grids.spatial_i
     return acc
 end
 
-@inline _fold_over_index(f::F, acc, ix::Grids.CellListIndex, grid, I, r, _scratch) where {F} =
+@inline _fold_over_index(f::F, acc, ix::Union{Grids.CellListIndex,Grids.BinnedIndex}, grid, I, r,
+                          _scratch) where {F} =
     Grids.fold_candidates(f, acc, ix, grid, I, r)
 
 # Anything else hands back a list, which then has to exist somewhere.
@@ -347,13 +349,11 @@ function metric_band(
     rad = T(_ball_radius(ball)) / R               # the ball as a central angle
     rad ≥ T(π) && return T(π)                     # reaches the antipode: the whole circle
     φt, φn = T(coord_t), T(coord_n)
-    sφt, cφt = sincos(φt)
-    sφn, cφn = sincos(φn)
-    den = cφt * cφn
-    num = cos(rad) - sφt * sφn
+    den = Geometry._cos_latitude(φt) * Geometry._cos_latitude(φn)
+    num = cos(rad) - sin(φt) * sin(φn)
     # A pole at either end: the separation is `|φt - φn|` whatever the longitudes are, so the row is
     # either wholly in or wholly out. The generic expression divides by zero here.
-    if abs(den) ≤ eps(T)
+    if iszero(den)
         return abs(φt - φn) ≤ rad ? T(π) : -one(T)
     end
     c = num / den
@@ -395,7 +395,7 @@ function metric_window(
     return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
 end
 
-# Geodetic `(λ, φ, h, …)`, distance Vincenty's geodesic (2-D) or the ECEF chord (3-D).
+# Geodetic `(λ, φ, h, …)`, distance the ellipsoid's geodesic (2-D) or the ECEF chord (3-D).
 # The bounds, each provable without knowing the path:
 #   h — geodetic height is the distance to the ellipsoid surface, and distance-to-a-set is 1-Lipschitz,
 #       so chord ≥ |Δh|.
@@ -617,7 +617,7 @@ end
 Write the linear indices of every cell whose centre lies within `ball` of cell `I`. `ball` is a
 [`Stencils.MetricBall`](@ref) or a bare radius in the geometry's length units.
 
-Distance is the geometry's own — great-circle on a sphere, Vincenty on a spheroid, the chord where a
+Distance is the geometry's own — great-circle on a sphere, the geodesic on a spheroid, the chord where a
 third direction is present — so the neighbourhood is a metric ball in that distance. The cell itself is
 excluded, matching stencil semantics where the zero offset is no neighbour. A periodic direction
 wraps, each cell appears at most once, and its coordinate is taken by minimum image, so the seam

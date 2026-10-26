@@ -85,9 +85,10 @@ end
 function build_connectivity end
 
 """
-    build_connectivity(grid; active_only = true) -> CSRConnectivity
+    build_connectivity([I], grid; active_only = true) -> CSRConnectivity
 
-The adjacency of a layout whose neighbours are arithmetic, materialized.
+The adjacency of a layout whose neighbours are arithmetic, materialized, its ids of integer type `I`
+(`Int32` by default).
 
 Count, scan, fill — the same three passes the index-stencil builder makes, and for the same reason: both
 cell passes write only slots their own cell owns, so they carry no running offset and need no
@@ -98,10 +99,11 @@ A formula fixes the neighbour set, so `stencil` selects nothing here. The generi
 one absorbs the keywords that shape the others, as [`Grids.StoredMeshNeighbors`](@ref) does.
 """
 function build_connectivity(
-    grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true,
+    ::Type{I}, grid::Grids.AbstractGrid, ::Grids.FormulaNeighbors; active_only::Bool = true,
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(), _...,
-)
+) where {I<:Integer}
     n = length(Grids.mask(grid))
+    Grids._check_ids(I, n)
     # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill
     # them run, and the build is device-resident end to end under a backend that launches kernels.
     deg = Execution.allocate(execution, Int, n)
@@ -109,20 +111,12 @@ function build_connectivity(
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
     total = _csr_total(deg, n, execution)
-    return _index_type(max(n + 1, total)) === Int32 ?
-        _formula_fill(Int32, total, grid, deg, n, active_only, execution) :
-        _formula_fill(Int, total, grid, deg, n, active_only, execution)
-end
-
-function _formula_fill(
-    ::Type{I}, total::Int, grid, deg, n::Int, active_only::Bool, backend,
-) where {I<:Integer}
-    ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
-    nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
+    ptr = Execution.exclusive_scan!(Execution.allocate(execution, Int, n + 1), deg, execution)
+    nbrs = Execution.allocate(execution, I, total)
+    Execution.run_indices(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _formula_ids(grid, k, active_only)
-            slot = Int(ptr[k])
+            slot = ptr[k]
             for t in 1:m
                 j = ids[t]
                 active_only && !Grids.isactive(grid, j) && continue

@@ -81,9 +81,9 @@ Test.@testset "Threading is opt-in and changes no result" begin
     Test.@test FG.Execution.map_chunks(r -> length(r), 0, CB.SerialBackend()) == [0]
     Test.@test FG.Execution.map_chunks(r -> length(r), 0, CB.ThreadedBackend()) == [0]
 
-    # AutoBackend is FlowGeometries' own policy: threads where Julia has them, serial otherwise.
-    Test.@test FG.Execution.resolve(CB.AutoBackend()) ===
-               (Threads.nthreads() > 1 ? CB.ThreadedBackend() : CB.SerialBackend())
+    # AutoBackend is FlowGeometries' own policy: the threaded backend, whose loops run serially on one
+    # thread.
+    Test.@test FG.Execution.resolve(CB.AutoBackend()) === CB.ThreadedBackend()
     Test.@test FG.Execution.resolve(CB.SerialBackend()) === CB.SerialBackend()
     # A device tag that wraps no KernelAbstractions backend has nothing to launch on.
     Test.@test_throws ArgumentError FG.Execution.run_indices(i -> nothing, 4, CB.GPUBackend(:nodevice))
@@ -174,7 +174,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
             Test.@test a.nbrs == b.nbrs
         end
     end
-    g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 33)
+    g = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 33)
     Test.@test FG.Connectivity.build_connectivity(g).nbrs ==
                FG.Connectivity.build_connectivity(g; execution = thr).nbrs
     # A tensor-product sampling builds the same graph from its axis lengths alone, on any backend.
@@ -228,7 +228,7 @@ Test.@testset "Grids can be moved to another storage backend" begin
     Adapt.adapt_storage(::FakeDev, x::Array) = DevArr(x)
 
     geo = FG.Geometry.SphericalGeometry()
-    g = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 9)
+    g = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 9)
     d = adapt(FakeDev(), g)
     # The latitude moves, and the latitude weights of the separable measure with it.
     Test.@test FG.Grids.coordinates(d, 2) isa DevArr
@@ -255,12 +255,11 @@ Test.@testset "Grids can be moved to another storage backend" begin
     c = adapt(FakeDev(), FG.Connectivity.build_connectivity(FG.SphericalSampling.HEALPixSampling(2)))
     Test.@test c.nbrs isa DevArr && c.ptr isa DevArr
 
-    # Held plans move by their arrays: a uniform plan's end rows, a tabulated plan's table, a gradient
-    # plan's CSR and coefficients. A staggered grid moves its centre grid and face axes, a rotated grid
-    # its base.
+    # Held plans move by their arrays: a uniform plan's rows, a tabulated plan's table, a gradient plan's
+    # CSR and coefficients. A staggered grid moves its centre grid and face axes, a rotated grid its base.
     D = FG.Discretization
     up = adapt(FakeDev(), D.stencil_plan(range(0.0, 1.0; length = 12), 1, 5))
-    Test.@test up.edge_idx isa DevArr && up.edge_wts isa DevArr
+    Test.@test up.weights isa DevArr && up.edge_idx isa DevArr && up.edge_wts isa DevArr
     tp = adapt(FakeDev(), D.stencil_plan(collect(cumsum(1.0 .+ 0.2 .* sin.(1:12))), 1, 3))
     Test.@test tp.indices isa DevArr && tp.weights isa DevArr
     gp = adapt(FakeDev(), FG.Operators.gradient_plan(cg0))
@@ -268,9 +267,13 @@ Test.@testset "Grids can be moved to another storage backend" begin
     st = adapt(FakeDev(), FG.Grids.StaggeredGrid(FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
                                                                           collect(0.0:1.0:5.0), collect(0.0:1.0:3.0))))
     Test.@test FG.Grids.coordinates(st.center, 1) isa DevArr && all(f -> f isa DevArr, st.faces)
-    rg = adapt(FakeDev(), FG.Grids.rotate(FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 9),
+    rg = adapt(FakeDev(), FG.Grids.rotate(FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 9),
                                           FG.Geometry.PoleRotation(1.0, 0.7)))
     Test.@test FG.Grids.coordinates(FG.Grids.base_grid(rg), 2) isa DevArr
+    # The moved grid's type follows from the grid's field types, so the move infers.
+    for gg in (g, cg0, ug0, FG.Grids.YinYangGrid(8, 6))
+        Test.@inferred adapt(FakeDev(), gg)
+    end
 
     # A face metric moves its grid and every array; the Laplacian's coefficients move with their
     # null space.
@@ -290,8 +293,13 @@ Test.@testset "Grids can be moved to another storage backend" begin
 end
 
 Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with the definition" begin
-    using FFTW: FFTW          # loads AbstractFFTs, which fires the extension
+    using FFTW: FFTW          # loads AbstractFFTs, which fires the extensions
     Test.@test Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt) !== nothing
+    Test.@test Base.get_extension(FG, :FlowGeometriesFFTWExt) !== nothing
+    # With FFTW the element types it plans default to the transform, and every other to the recurrence.
+    Test.@test FG.SphericalSampling._equiangular_algorithm(Float64) === FG.SphericalSampling.Transform()
+    Test.@test FG.SphericalSampling._equiangular_algorithm(Float32) === FG.SphericalSampling.Transform()
+    Test.@test FG.SphericalSampling._equiangular_algorithm(BigFloat) === FG.SphericalSampling.Recurrence()
 
     # Literal evaluation of each rule — no recurrence, no transform: Fejér's first rule (a cosine
     # series) on the open nodes, Driscoll–Healy's sine series on the closed ones.
@@ -312,15 +320,15 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
         Test.@test sum(dh) ≈ 2 atol = 1e-13
     end
     for nlat in open_counts
-        cc = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.ClenshawCurtisSampling(), nlat)
-        Test.@test maximum(abs.(cc .- direct(:open, nlat))) < 1e-13
-        Test.@test sum(cc) ≈ 2 atol = 1e-13
+        fw = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.Fejer1Sampling(), nlat)
+        Test.@test maximum(abs.(fw .- direct(:open, nlat))) < 1e-13
+        Test.@test sum(fw) ≈ 2 atol = 1e-13
     end
     SS = FG.SphericalSampling
     # Both algorithms, asked for by name, agree on the weights. The sine sums behind them are O(1)
     # while the weights carry a `4/nlat·sinθ` factor, and the recurrence accumulates round-off across
     # its `nterm` steps.
-    for (s, fam, counts) in ((SS.ClenshawCurtisSampling(), :open, open_counts),
+    for (s, fam, counts) in ((SS.Fejer1Sampling(), :open, open_counts),
                              (SS.DriscollHealySampling(), :closed, (8, 64, 512))),
         nlat in counts
         wt = SS.latitude_weights(s, nlat; algorithm = SS.Transform())
@@ -477,7 +485,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     cart = FG.Geometry.CartesianGeometry{Float64}()
     for g in (GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0)),
               GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0);
-                                periodic = (true, false), period = (32.0, 0.0)))
+                                topology = GD.Periodic(), period = (32.0, 0.0)))
         for sten in (FG.Stencils.Axial(1), FG.Stencils.Moore(2))
             a = C.build_connectivity(g; stencil = sten)
             b = C.build_connectivity(g; stencil = sten, execution = cpu)

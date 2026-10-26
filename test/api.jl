@@ -65,7 +65,8 @@ Test.@testset "Public names the suite had not been calling" begin
     e = C.empty_csr(5)
     Test.@test C.nnodes(e) == 5 && C.nedges(e) == 0
     Test.@test all(isempty(e.nbrs[e.ptr[i]:(e.ptr[i + 1] - 1)]) for i in 1:5)
-    Test.@test eltype(C.empty_csr(4, Int32).ptr) === Int32
+    Test.@test eltype(C.empty_csr(4).nbrs) === Int32 && eltype(C.empty_csr(4).ptr) === Int
+    Test.@test eltype(C.empty_csr(4, Int16).nbrs) === Int16 && eltype(C.empty_csr(4, Int16).ptr) === Int
     csr = C.csr_connectivity([2, 1, 3, 2], [1, 2, 4, 5])
     Test.@test C.nnodes(csr) == 3 && C.nedges(csr) == 4
     Test.@test collect(csr.nbrs[csr.ptr[2]:(csr.ptr[3] - 1)]) == [1, 3]

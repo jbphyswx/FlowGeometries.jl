@@ -1,16 +1,25 @@
 Test.@testset "Spherical sampling hierarchy" begin
-    Test.@test FG.SphericalSampling.is_tensor_product(FG.SphericalSampling.ClenshawCurtisSampling())
+    Test.@test FG.SphericalSampling.is_tensor_product(FG.SphericalSampling.Fejer1Sampling())
     Test.@test FG.SphericalSampling.is_iso_latitude(FG.SphericalSampling.HEALPixSampling(2))
     Test.@test FG.SphericalSampling.is_equal_area(FG.SphericalSampling.HEALPixSampling(2))
     Test.@test !FG.SphericalSampling.is_tensor_product(FG.SphericalSampling.HEALPixSampling(1))
+    # A band-limit relation is stated by the spectral-quadrature and reduced Gaussian samplings alone.
+    SS = FG.SphericalSampling
+    for s in (SS.GaussLegendreSampling(), SS.Fejer1Sampling(), SS.DriscollHealySampling(),
+              SS.DriscollHealyEqualSampling(), SS.OctahedralGaussianSampling(4))
+        Test.@test SS.has_bandlimit(s)
+    end
+    for s in (SS.LatLonSampling(), SS.HEALPixSampling(2), SS.FibonacciSampling(10), SS.YinYangSampling())
+        Test.@test !SS.has_bandlimit(s)
+    end
 end
 
-Test.@testset "Clenshaw–Curtis = FastSphericalHarmonics sph_points" begin
+Test.@testset "Fejér first-rule nodes are the open equiangular colatitudes" begin
     nθ = 8
-    (; λ, φ) = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.ClenshawCurtisSampling(), nθ)
+    (; λ, φ) = FG.SphericalSampling.spherical_axes(FG.SphericalSampling.Fejer1Sampling(), nθ)
     Test.@test length(φ) == nθ
     Test.@test length(λ) == 2nθ - 1
-    Test.@test FG.SphericalSampling.bandlimit(FG.SphericalSampling.ClenshawCurtisSampling(), nθ) == nθ - 1
+    Test.@test FG.SphericalSampling.bandlimit(FG.SphericalSampling.Fejer1Sampling(), nθ) == nθ - 1
     # θ = π(i−1/2)/N ; φ_geo = π/2 − θ
     θ = [π * (i - 0.5) / nθ for i in 1:nθ]
     Test.@test φ ≈ (π / 2 .- θ)
@@ -172,7 +181,7 @@ Test.@testset "Sampling → StructuredGrid" begin
     SS = FG.SphericalSampling
     geom = FG.Geometry.SphericalGeometry(1.0)
     # A sampling's grid wraps in longitude and holds the sampling's own longitudes to the bit.
-    for (s, n, kw) in ((SS.GaussLegendreSampling(), 12, (;)), (SS.ClenshawCurtisSampling(), 12, (;)),
+    for (s, n, kw) in ((SS.GaussLegendreSampling(), 12, (;)), (SS.Fejer1Sampling(), 12, (;)),
                        (SS.DriscollHealySampling(), 12, (;)), (SS.DriscollHealyEqualSampling(), 12, (;)),
                        (SS.McEwenWiauxSampling(), 12, (;)), (SS.LatLonSampling(), 7, (; nlon = 10)),
                        (SS.DriscollHealySampling(), 12, (; nlon = 12)))
@@ -182,8 +191,8 @@ Test.@testset "Sampling → StructuredGrid" begin
         Test.@test collect(FG.Grids.axis(sg, 1)) == SS.spherical_axes(s, n; kw...).λ
     end
     # From the plain vectors the direction wraps when asked.
-    (; λ, φ) = SS.spherical_axes(SS.ClenshawCurtisSampling(), 6)
-    grid = FG.Grids.StructuredGrid(geom, λ, φ, trues(length(λ), length(φ)); periodic = true)
+    (; λ, φ) = SS.spherical_axes(SS.Fejer1Sampling(), 6)
+    grid = FG.Grids.StructuredGrid(geom, λ, φ, trues(length(λ), length(φ)); topology = FG.Grids.Periodic())
     Test.@test FG.Grids.isperiodic(grid, 1)
 end
 
@@ -199,7 +208,7 @@ Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
         return p1
     end
     for s in (FG.SphericalSampling.GaussLegendreSampling(), FG.SphericalSampling.DriscollHealySampling(),
-              FG.SphericalSampling.DriscollHealyEqualSampling(), FG.SphericalSampling.ClenshawCurtisSampling())
+              FG.SphericalSampling.DriscollHealyEqualSampling(), FG.SphericalSampling.Fejer1Sampling())
         for nlat in (8, 16, 24)
             ax = FG.SphericalSampling.spherical_axes(s, nlat)
             w = FG.SphericalSampling.latitude_weights(s, nlat)
@@ -222,7 +231,7 @@ Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
     end
 
     # Fejér's rule on the open nodes holds at every node count, odd included.
-    let s = FG.SphericalSampling.ClenshawCurtisSampling()
+    let s = FG.SphericalSampling.Fejer1Sampling()
         for nlat in (1, 3, 5, 9, 15)
             ax = FG.SphericalSampling.spherical_axes(s, nlat)
             w = FG.SphericalSampling.latitude_weights(s, nlat)
@@ -235,7 +244,7 @@ Test.@testset "Spectral samplings integrate band-limited fields exactly" begin
     end
 
     # Float32 all the way through.
-    w32 = FG.SphericalSampling.latitude_weights(Float32, FG.SphericalSampling.ClenshawCurtisSampling(), 12)
+    w32 = FG.SphericalSampling.latitude_weights(Float32, FG.SphericalSampling.Fejer1Sampling(), 12)
     Test.@test eltype(w32) === Float32
     Test.@test sum(w32) ≈ 2 rtol = 1e-5
 
@@ -246,7 +255,7 @@ Test.@testset "Sampling axes are well formed" begin
     for (s, nlat, kw) in (
         (FG.SphericalSampling.GaussLegendreSampling(), 33, (;)),
         (FG.SphericalSampling.DriscollHealySampling(), 32, (;)),
-        (FG.SphericalSampling.ClenshawCurtisSampling(), 33, (;)),
+        (FG.SphericalSampling.Fejer1Sampling(), 33, (;)),
         (FG.SphericalSampling.McEwenWiauxSampling(), 33, (;)),
         (FG.SphericalSampling.LatLonSampling(), 33, (; nlon = 66)),
     )
@@ -273,30 +282,23 @@ Test.@testset "Cubed-sphere points are cell centres, so panels do not share node
     end
 end
 
-Test.@testset "Yin–Yang cells tile each panel exactly; the overlap is resolution-independent" begin
+Test.@testset "Yin–Yang panels cover the sphere once between them" begin
     geo = FG.Geometry.SphericalGeometry()
     R2 = geo.R^2
-    box = sqrt(2.0) * (3π / 2) * R2   # one panel's exact [-3π/4,3π/4] × [-π/4,π/4] area
     for (nlon, nlat) in ((8, 6), (16, 12), (48, 32))
         g = FG.Grids.YinYangGrid(geo, nlon, nlat)
         a = FG.Grids.measure(g)
         np = nlon * nlat
-        # The nlon×nlat cell centres tile the panel box exactly.
-        Test.@test sum(@view a[1:np]) ≈ box rtol = 1e-14
-        # Yang is a rigid rotation of yin, so the two blocks are elementwise identical.
+        # Yang is a rigid rotation of yin, so the two blocks are elementwise identical, and each panel's
+        # measures, its area less half the band both panels cover, hold half the sphere.
         Test.@test @view(a[1:np]) == @view(a[(np + 1):(2np)])
-        # The excess of the two panels over the sphere is 3√2/4 at every resolution.
-        Test.@test sum(a) / (4π * R2) ≈ 3 * sqrt(2) / 4 rtol = 1e-14
+        Test.@test sum(@view a[1:np]) ≈ 2π * R2 rtol = 1e-14
+        Test.@test sum(a) ≈ 4π * R2 rtol = 1e-14
         # The layout's points are the sampling's, cell for cell.
         λ, φ = FG.Grids.materialize(g)
         ref = FG.SphericalSampling.spherical_points(FG.SphericalSampling.YinYangSampling(), nlon, nlat)
         Test.@test λ ≈ ref.λ atol = 1e-13
         Test.@test φ ≈ ref.φ atol = 1e-13
-    end
-    # A row's area is `R²Δλ·2cos φ·sin(Δφ/2)`, so the extreme rows are the one at the panel's edge,
-    # `φ = π/4 − Δφ/2`, and the one nearest the equator, `φ = Δφ/2`.
-    let a = FG.Grids.measure(FG.Grids.YinYangGrid(192, 128)), Δφ = (π / 2) / 128
-        Test.@test minimum(a) / maximum(a) ≈ cos(π / 4 - Δφ / 2) / cos(Δφ / 2) rtol = 1e-12
     end
 
     dir(λ, φ) = (cos(φ) * cos(λ), cos(φ) * sin(λ), sin(φ))
@@ -440,15 +442,15 @@ end
 
 Test.@testset "Quadrature-exactness trait matches measured exactness" begin
     # The trait asks about integrating the products of two degree-lmax functions, the quantity
-    # spectral analysis forms. Clenshaw–Curtis's grid represents to N-1 but its quadrature only
-    # integrates a single P_l to N-1, so it cannot claim exactness at its own band limit.
+    # spectral analysis forms. Fejér's first rule represents to N-1 but its quadrature only integrates a
+    # single P_l to N-1, so it cannot claim exactness at its own band limit.
     Test.@test FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.GaussLegendreSampling())
     Test.@test FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.DriscollHealySampling())
-    Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.ClenshawCurtisSampling())
+    Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.Fejer1Sampling())
     Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.McEwenWiauxSampling())
     Test.@test !FG.SphericalSampling.admits_exact_bandlimited_quadrature(FG.SphericalSampling.LatLonSampling())
 
-    # Numerically: GL integrates degree 2·lmax exactly; CC does not.
+    # Numerically: Gauss–Legendre integrates degree 2·lmax exactly; Fejér's first rule does not.
     function legendre(l, x)
         l == 0 && return one(x)
         p0, p1 = one(x), x
@@ -458,7 +460,7 @@ Test.@testset "Quadrature-exactness trait matches measured exactness" begin
         p1
     end
     n = 16
-    for s in (FG.SphericalSampling.GaussLegendreSampling(), FG.SphericalSampling.ClenshawCurtisSampling())
+    for s in (FG.SphericalSampling.GaussLegendreSampling(), FG.SphericalSampling.Fejer1Sampling())
         ax = FG.SphericalSampling.spherical_axes(s, n)
         w = FG.SphericalSampling.latitude_weights(s, n)
         lmax = FG.SphericalSampling.bandlimit(s, n)
@@ -477,7 +479,7 @@ Test.@testset "Every ring-laid-out sampling answers the ring API" begin
              ("Octahedral", S.OctahedralGaussianSampling(8), ()),
              ("Reduced", S.ReducedGaussianSampling([8, 12, 16, 12, 8]), ()),
              ("GaussLegendre", S.GaussLegendreSampling(), (16,)),
-             ("ClenshawCurtis", S.ClenshawCurtisSampling(), (16,)),
+             ("Fejer1", S.Fejer1Sampling(), (16,)),
              ("DriscollHealy", S.DriscollHealySampling(), (16,)))
     for (_, s, args) in cases
         r = S.nrings(s, args...)
@@ -678,6 +680,24 @@ Test.@testset "Float32 angles are accurate at the poles" begin
     end
 end
 
+Test.@testset "A HEALPix pixel finds its ring in integer arithmetic, at every width" begin
+    SS = FG.SphericalSampling
+    # The first and last pixel of every ring, the two nearest a neighbouring ring's, against the ring
+    # table's closed form in the ring number.
+    for ns in (256, 1024)
+        ok = true
+        for r in 1:(4ns - 1)
+            info = SS.ring_info(ns, r)
+            for p in (info.startpix, info.startpix + info.ringpix - 1), T in (Float32, Float64)
+                ok &= SS._healpix_ring_phi(ns, p, T)[1] == r
+            end
+        end
+        Test.@test ok
+    end
+    # Every pixel centre of nside 256, read back at Float32, is that pixel.
+    Test.@test all(p -> SS.ang2pix(256, SS.pix2ang(Float32, 256, p)...) == p, 0:(SS.healpix_npix(256) - 1))
+end
+
 Test.@testset "A ring can be reached one at a time, in O(1), without building the table" begin
     SS = FG.SphericalSampling
     samplings = (
@@ -687,7 +707,7 @@ Test.@testset "A ring can be reached one at a time, in O(1), without building th
         ("healpix",        SS.HEALPixSampling(4),                   ()),
         ("healpix ns=1",   SS.HEALPixSampling(1),                   ()),
         ("gauss-legendre", SS.GaussLegendreSampling(),              (8,)),
-        ("clenshaw",       SS.ClenshawCurtisSampling(),             (5,)),
+        ("fejer1",         SS.Fejer1Sampling(),                     (5,)),
     )
     for (name, s, args) in samplings
         table = SS.nlon_per_ring(s, args...)
@@ -731,7 +751,7 @@ Test.@testset "A ring can be reached one at a time, in O(1), without building th
 
     # For a tensor product the range also fixes an ordering — longitude fastest within a ring —
     # which the tiling check above cannot see, since a longitude-major layout tiles just as well.
-    for (s, nlat) in ((SS.GaussLegendreSampling(), 8), (SS.ClenshawCurtisSampling(), 5),
+    for (s, nlat) in ((SS.GaussLegendreSampling(), 8), (SS.Fejer1Sampling(), 5),
                       (SS.DriscollHealySampling(), 6), (SS.DriscollHealyEqualSampling(), 6))
         pts = SS.spherical_points(s, nlat)
         ax = SS.spherical_axes(s, nlat)

@@ -531,6 +531,11 @@ topology tuple it stays type-stable under a runtime direction.
 @inline _is_periodic(::Periodic) = true
 @inline _is_periodic(::Bounded) = false
 
+# Direction `d`'s wrap length where it wraps and `nothing` where it ends, chosen by its topology's type.
+@inline _wrap_period(grid::AbstractGrid, d::Integer) = _wrap_period(topology(grid, d), period(grid, d))
+@inline _wrap_period(::Periodic, P) = P
+@inline _wrap_period(::Bounded, _) = nothing
+
 """
     isperiodic(grid, d) -> Bool
 
@@ -549,16 +554,15 @@ Whether coordinate direction `d` wraps. See [`topology`](@ref) for the type-leve
     return d
 end
 
-# Normalize a caller's `topology` to `NTuple{N,AbstractTopology}`. `Bool`s are accepted, and a scalar
-# or short tuple applies to the leading directions with the rest `Bounded`.
+# Normalize a caller's `topology` to `NTuple{N,AbstractTopology}`: a lone tag is direction 1's, and a
+# short tuple names the leading directions, the rest `Bounded`.
 _as_topology(::Val{N}, t::AbstractTopology) where {N} = ntuple(d -> d == 1 ? t : Bounded(), Val(N))
-_as_topology(::Val{N}, b::Bool) where {N} = _as_topology(Val(N), b ? Periodic() : Bounded())
-_as_topology(::Val{N}, t::NTuple{N,AbstractTopology}) where {N} = t
-_as_topology(::Val{N}, t::Union{Tuple,AbstractVector}) where {N} =
-    ntuple(d -> d ≤ length(t) ? _topology_of(t[d]) : Bounded(), Val(N))
-
-@inline _topology_of(t::AbstractTopology) = t
-@inline _topology_of(b::Bool) = b ? Periodic() : Bounded()
+function _as_topology(::Val{N}, t::Tuple{Vararg{AbstractTopology,M}}) where {N,M}
+    M ≤ N || throw(ArgumentError("$M topologies for a grid of $N directions"))
+    return ntuple(d -> d ≤ M ? t[d] : Bounded(), Val(N))
+end
+_as_topology(::Val, t) = throw(ArgumentError(
+    "topology takes `Periodic()`, `Bounded()` or a tuple of them, one per leading direction; got $t"))
 
 """
     SeparableMeasure(factors)

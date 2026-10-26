@@ -7,8 +7,9 @@
     CSRConnectivity{VN,VP}
 
 Sparse neighbor list: node `i` owns `nbrs[ptr[i]:ptr[i+1]-1]`. The two buffers are typed
-independently, and their element type is any `Integer`, so a large mesh can hold `Int32` indices
-(half the memory and bandwidth of `Int64`, and the width GPU kernels want).
+independently. The builders take the ids' integer type as their first argument, `Int32` by default
+(half the memory and bandwidth of `Int64`, and the width GPU kernels want), and store the offsets as
+`Int`, since they run to the edge count.
 """
 struct CSRConnectivity{VN<:AbstractVector{<:Integer}, VP<:AbstractVector{<:Integer}}
     nbrs::VN
@@ -16,29 +17,11 @@ struct CSRConnectivity{VN<:AbstractVector{<:Integer}, VP<:AbstractVector{<:Integ
 end
 
 """
-    _index_type(m) -> Type{<:Integer}
-
-The narrowest integer that holds values up to `m`: `Int32` for anything under two billion.
-
-A builder passes the larger of the node count and the edge count, so a single width serves both
-buffers — `nbrs` holds node ids, `ptr` holds offsets into `nbrs`. At one width the two arrays go
-straight to a `SparseMatrixCSC`, which declares one index type for both.
-
-Halves the CSR's memory and the bandwidth every traversal of it costs, and is the width a device
-kernel wants.
-"""
-@inline _index_type(m::Integer) = m ≤ typemax(Int32) ? Int32 : Int
-
-"""
     _csr_total(deg, n, backend) -> Int
 
 The CSR's edge count, `sum(deg)`, reduced where `deg` is held: under `backend`'s
 [`Execution.local_backend`](@ref), since the counting pass leaves `deg` whole on every process that
 reads it.
-
-A builder takes `_index_type(max(n + 1, total))` from it and calls its filling pass through a branch
-that fixes the type at each call site. `Vector{I}` for an `I` the compiler cannot see is a dynamic
-call whose buffers are typed abstractly for the whole of that pass.
 """
 @inline function _csr_total(deg::AbstractVector, n::Int, backend::CB.AbstractExecutionBackend)
     return Execution.reduce_indices(+, 0, n, Execution.local_backend(backend)) do k
@@ -73,12 +56,12 @@ function csr_connectivity(
 end
 
 """
-    empty_csr(nnodes, [I=Int]) -> CSRConnectivity
+    empty_csr(nnodes, [I=Int32]) -> CSRConnectivity
 
-Adjacency in which every node has no neighbors, with `I`-typed indices.
+Adjacency in which every node has no neighbors, with `I`-typed ids and `Int` offsets.
 """
-empty_csr(nnodes::Integer, ::Type{I} = Int) where {I<:Integer} =
-    csr_connectivity(I[], ones(I, Int(nnodes) + 1); validate = false)
+empty_csr(nnodes::Integer, ::Type{I} = Int32) where {I<:Integer} =
+    csr_connectivity(I[], ones(Int, Int(nnodes) + 1); validate = false)
 
 @inline nnodes(conn::CSRConnectivity) = length(conn.ptr) - 1
 @inline nedges(conn::CSRConnectivity) = length(conn.nbrs)
@@ -116,10 +99,10 @@ end
     return lin
 end
 
-@inline linear_index(grid::Grids.AbstractStructuredGrid, I::Vararg{Integer}) =
+@inline linear_index(grid::Grids.AbstractStructuredGrid, I::Vararg{Integer,K}) where {K} =
     _linidx(Grids.size_tuple(grid), map(Int, I)...)
 
-@inline linear_index(grid::Grids.AbstractCurvilinearGrid, I::Vararg{Integer}) =
+@inline linear_index(grid::Grids.AbstractCurvilinearGrid, I::Vararg{Integer,K}) where {K} =
     _linidx(Grids.size_tuple(grid), map(Int, I)...)
 
 @inline cartesian_index(grid::Union{Grids.AbstractStructuredGrid,Grids.AbstractCurvilinearGrid}, lin::Integer) =

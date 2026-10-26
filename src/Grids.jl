@@ -26,6 +26,7 @@ include("Grids/Rings.jl")
 include("Grids/Coverage.jl")
 include("Grids/Embedding.jl")
 include("Grids/SpatialIndex.jl")
+include("Grids/BinnedIndex.jl")
 include("Grids/Distance.jl")
 
 end # module

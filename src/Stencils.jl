@@ -145,10 +145,6 @@ function offsets end
 # The shapes defined here, whose offsets `_offset_list` can build at generation time from the type.
 const _BuiltinStencil = Union{Axial,VonNeumann,Moore,Diagonal,Anisotropic,Custom}
 
-@generated function offsets(s::_BuiltinStencil, ::Val{N}) where {N}
-    return :($(Tuple(_offset_list(s, N))))
-end
-
 """
     is_symmetric(stencil, Val(N)) -> Bool
 
@@ -232,6 +228,11 @@ function _offset_list(::Type{Custom{O}}, N::Int) where {O}
     length(first(O)) == N || throw(DimensionMismatch(
         "Custom offsets are $(length(first(O)))-dimensional but the grid has $N directions"))
     return collect(O)
+end
+
+# Defined after `_offset_list`, which a generator reads in the world it was defined in.
+@generated function offsets(s::_BuiltinStencil, ::Val{N}) where {N}
+    return :($(Tuple(_offset_list(s, N))))
 end
 
 """

@@ -3,9 +3,10 @@
 # ---------------------------------------------------------------------------
 
 """
-    build_connectivity(grid; stencil=Axial(1), active_only=true) -> CSRConnectivity
+    build_connectivity([I], grid; stencil=Axial(1), active_only=true) -> CSRConnectivity
 
-Materialize CSR adjacency.
+Materialize CSR adjacency, its node ids of integer type `I` and its offsets `Int`. `I` defaults to the
+type a stored mesh holds, and to `Int32` elsewhere.
 
 Which builder runs is [`Grids.adjacency_source`](@ref), the trait the per-cell neighbour queries resolve
 through, so a layout gets this by declaring how its adjacency is defined and nothing else:
@@ -18,18 +19,35 @@ For adjacency by physical distance, see [`build_connectivity_within`](@ref).
 """
 function build_connectivity end
 
+# Which builder runs is `Grids.adjacency_source`, the same trait the per-cell queries resolve through.
+build_connectivity(grid::Grids.AbstractGrid; kwargs...) =
+    build_connectivity(_default_index_type(grid), grid; kwargs...)
+
+build_connectivity(::Type{I}, grid::Grids.AbstractGrid; kwargs...) where {I<:Integer} =
+    build_connectivity(I, grid, Grids.adjacency_source(grid); kwargs...)
+
+# A stored mesh's own id type, so its buffers are wrapped; every graph built here takes `Int32`.
+@inline _default_index_type(grid::Grids.AbstractGrid) =
+    _default_index_type(grid, Grids.adjacency_source(grid))
+@inline _default_index_type(grid, ::Grids.StoredMeshNeighbors) = eltype(Grids.neighbor_nbrs(grid))
+@inline _default_index_type(_grid, ::Grids.AbstractAdjacency) = Int32
+
+@inline _ids_as(::Type{I}, v::AbstractVector{I}) where {I<:Integer} = v
+@inline _ids_as(::Type{I}, v::AbstractVector{<:Integer}) where {I<:Integer} = I.(v)
+
 # A fully active mesh's stored buffers already are the answer, and are wrapped in place. A mask makes
 # them a superset, and `active_only` means what it means everywhere else here.
 function build_connectivity(
-    grid::Grids.AbstractGrid, ::Grids.StoredMeshNeighbors; active_only::Bool = true, _...,
-)
+    ::Type{I}, grid::Grids.AbstractGrid, ::Grids.StoredMeshNeighbors; active_only::Bool = true, _...,
+) where {I<:Integer}
     msk = Grids.mask(grid)
-    (!active_only || msk isa Grids.AllActive) &&
-        return csr_connectivity(Grids.neighbor_nbrs(grid), Grids.neighbor_ptr(grid); validate = false)
     n = length(msk)
-    # A subset of the stored graph, so the widths that held it hold this.
-    ptr = similar(Grids.neighbor_ptr(grid), n + 1)
-    nbrs = similar(Grids.neighbor_nbrs(grid), 0)
+    Grids._check_ids(I, n)
+    (!active_only || msk isa Grids.AllActive) && return csr_connectivity(
+        _ids_as(I, Grids.neighbor_nbrs(grid)), Grids.neighbor_ptr(grid); validate = false,
+    )
+    ptr = Vector{Int}(undef, n + 1)
+    nbrs = I[]
     sizehint!(nbrs, length(Grids.neighbor_nbrs(grid)))
     @inbounds ptr[1] = 1
     @inbounds for i in 1:n
@@ -41,26 +59,21 @@ function build_connectivity(
     return csr_connectivity(nbrs, ptr; validate = false)
 end
 
-# Which builder runs is `Grids.adjacency_source`, the same trait the per-cell queries resolve through.
-function build_connectivity(grid::Grids.AbstractGrid; kwargs...)
-    return build_connectivity(grid, Grids.adjacency_source(grid); kwargs...)
-end
-
 function build_connectivity(
-    grid::Grids.AbstractGrid, ::Grids.IndexStencilNeighbors;
+    ::Type{I}, grid::Grids.AbstractGrid, ::Grids.IndexStencilNeighbors;
     stencil = Stencils.Axial(1), active_only::Bool = true,
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-)
-    return _build_connectivity_topology(
-        IndexTopology(grid), _stencil_val(stencil), active_only; execution = execution,
-    )
+) where {I<:Integer}
+    return _build_connectivity_topology(I, IndexTopology(grid), _stencil_val(stencil), active_only,
+                                        execution)
 end
 
 """
-    build_connectivity_within(grid; ball, active_only=true) -> CSRConnectivity
+    build_connectivity_within([I], grid; ball, active_only=true) -> CSRConnectivity
 
 Materialize the CSR adjacency of every pair of cells within `ball` of each other — the bulk form of
-[`neighbors_within`](@ref), row `k` holding exactly what the per-cell query returns for cell `k`.
+[`neighbors_within`](@ref), row `k` holding exactly what the per-cell query returns for cell `k`. The
+cell ids are of integer type `I`, `Int32` by default, and the offsets `Int`.
 
 Symmetric by construction, since the metric is.
 
@@ -85,21 +98,24 @@ through the same index and visit the same cells, one row at a time, and never ho
 """
 function build_connectivity_within end
 
+build_connectivity(t::IndexTopology; kwargs...) = build_connectivity(Int32, t; kwargs...)
+
 function build_connectivity(
-    t::IndexTopology;
+    ::Type{I}, t::IndexTopology;
     stencil = Stencils.Axial(1), active_only::Bool = true,
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-)
-    return _build_connectivity_topology(t, _stencil_val(stencil), active_only; execution = execution)
+) where {I<:Integer}
+    return _build_connectivity_topology(I, t, _stencil_val(stencil), active_only, execution)
 end
 
 function _build_connectivity_topology(
-    t::IndexTopology{N,M}, sten::Stencils.AbstractStencil, active_only::Bool;
-    execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
-) where {N,M}
+    ::Type{I}, t::IndexTopology{N,M}, sten::Stencils.AbstractStencil, active_only::Bool,
+    execution::CB.AbstractExecutionBackend,
+) where {I<:Integer,N,M}
     sz = t.size
     per = t.periodic
     n = prod(sz)
+    Grids._check_ids(I, n)
     ci = CartesianIndices(sz)
     offs = _stencil_offsets(Val{N}(), sten)
     # Column-major linear order, so the k-th Cartesian index IS linear index k — no `_linidx` needed
@@ -114,11 +130,11 @@ function _build_connectivity_topology(
     # device backend. Every cell writes its own degree, so the buffer needs no zeroing pass.
     Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds begin
-            I = Tuple(ci[k])
+            Ik = Tuple(ci[k])
             c = 0
-            if !(active_only && !_active(t, I...))
+            if !(active_only && !_active(t, Ik...))
                 for δ in offs
-                    J = ntuple(d -> _wrap_or_clip(I[d], δ[d], sz[d], per[d]), Val(N))
+                    J = ntuple(d -> _wrap_or_clip(Ik[d], δ[d], sz[d], per[d]), Val(N))
                     any(==(0), J) && continue
                     active_only && !_active(t, J...) && continue
                     c += 1
@@ -128,23 +144,13 @@ function _build_connectivity_topology(
         end
     end
     total = _csr_total(deg, n, execution)
-    return _index_type(max(n + 1, total)) === Int32 ?
-        _topology_fill(Int32, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), execution) :
-        _topology_fill(Int, total, t, deg, n, ci, offs, sz, per, active_only, Val(N), execution)
-end
-
-# The filling pass, entered with the CSR's width as a type parameter, so both buffers and every read
-# of them are concrete here — see `_csr_total`.
-function _topology_fill(
-    ::Type{I}, total::Int, t, deg, n::Int, ci, offs, sz, per, active_only::Bool, ::Val{N}, backend,
-) where {I<:Integer,N}
-    ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
-    nbrs = Execution.allocate(backend, I, total)
-    Execution.run_indices(n, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
+    ptr = Execution.exclusive_scan!(Execution.allocate(execution, Int, n + 1), deg, execution)
+    nbrs = Execution.allocate(execution, I, total)
+    Execution.run_indices(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             Ik = Tuple(ci[k])
             if !(active_only && !_active(t, Ik...))
-                slot = Int(ptr[k])
+                slot = ptr[k]
                 for δ in offs
                     J = ntuple(d -> _wrap_or_clip(Ik[d], δ[d], sz[d], per[d]), Val(N))
                     any(==(0), J) && continue
@@ -200,29 +206,33 @@ default_sweep_topology(grid, ball, active_only::Bool, ::Grids.IndexedCandidates)
     return nothing
 end
 
+build_connectivity_within(grid::Grids.AbstractGrid; kwargs...) =
+    build_connectivity_within(Int32, grid; kwargs...)
+
 # One body for every layout. How a cell is named is `Grids.cell_address`, what bounds the candidates is
 # the topology, and `_within_scan` takes the same arguments on every layout — `scratch` reaches a
 # separable window too, which enumerates without a buffer and leaves it unused.
 function build_connectivity_within(
-    grid::Grids.AbstractGrid; ball, active_only::Bool = true,
+    ::Type{I}, grid::Grids.AbstractGrid; ball, active_only::Bool = true,
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
     topology = default_sweep_topology(grid, ball, active_only),
-)
+) where {I<:Integer}
     cs = Grids.cells(grid)
-    return _within_build(grid, cs, length(cs), ball, active_only, topology, Execution.resolve(execution))
+    n = length(cs)
+    Grids._check_ids(I, n)
+    return _within_build(I, grid, cs, n, ball, active_only, topology, Execution.resolve(execution))
 end
 
 # On the host each row's ball is queried once: every chunk appends its rows to a buffer of its own, and
 # the chunks, being contiguous and in order, concatenate into the CSR. A serial build is one chunk, whose
 # buffer is the CSR's.
 function _within_build(
-    grid, cs, n::Int, ball, active_only::Bool, topology,
+    ::Type{I}, grid, cs, n::Int, ball, active_only::Bool, topology,
     backend::Union{CB.AbstractSerialBackend,CB.AbstractThreadedBackend},
-)
+) where {I<:Integer}
     deg = Vector{Int}(undef, n)
-    W = _index_type(n + 1)                             # every entry is a cell id, at most `n`
     bufs = Execution.map_chunks(n, backend) do rng
-        buf = W[]
+        buf = I[]
         s = ball_scratch(topology)
         @inbounds for k in rng
             m = length(buf)
@@ -231,15 +241,9 @@ function _within_build(
         end
         return buf
     end
-    total = sum(length, bufs; init = 0)
-    return _index_type(max(n + 1, total)) === Int32 ?
-        _within_join(Int32, bufs, deg, n, total) : _within_join(Int, bufs, deg, n, total)
-end
-
-function _within_join(::Type{I}, bufs::Vector{V}, deg, n::Int, total::Int) where {I<:Integer,V}
-    ptr = Execution.exclusive_scan!(Vector{I}(undef, n + 1), deg)
-    length(bufs) == 1 && eltype(V) === I && return csr_connectivity(only(bufs), ptr; validate = false)
-    nbrs = Vector{I}(undef, total)
+    ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg)
+    length(bufs) == 1 && return csr_connectivity(only(bufs), ptr; validate = false)
+    nbrs = Vector{I}(undef, sum(length, bufs; init = 0))
     pos = 1
     @inbounds for c in eachindex(bufs)
         b = bufs[c]
@@ -259,7 +263,9 @@ end
 
 # A device, or a set of processes, counts every row and then fills it: the count → prefix-scan → fill
 # shape of the stencil builder, both passes writing only slots their own cell owns.
-function _within_build(grid, cs, n::Int, ball, active_only::Bool, topology, backend)
+function _within_build(
+    ::Type{I}, grid, cs, n::Int, ball, active_only::Bool, topology, backend,
+) where {I<:Integer}
     # Every cell writes its own degree, so the buffer needs no zeroing pass before the count.
     deg = Execution.allocate(backend, Int, n)
     _within_pass(n, topology, backend, Execution.Written(deg)) do k, s
@@ -267,20 +273,11 @@ function _within_build(grid, cs, n::Int, ball, active_only::Bool, topology, back
                                         active_only, topology, s)
         return nothing
     end
-    total = _csr_total(deg, n, backend)
-    return _index_type(max(n + 1, total)) === Int32 ?
-        _within_fill(Int32, total, grid, deg, n, cs, ball, active_only, topology, backend) :
-        _within_fill(Int, total, grid, deg, n, cs, ball, active_only, topology, backend)
-end
-
-function _within_fill(
-    ::Type{I}, total::Int, grid, deg, n::Int, cs, ball, active_only::Bool, topology, backend,
-) where {I<:Integer}
-    ptr = Execution.exclusive_scan!(Execution.allocate(backend, I, n + 1), deg, backend)
-    nbrs = Execution.allocate(backend, I, total)
+    ptr = Execution.exclusive_scan!(Execution.allocate(backend, Int, n + 1), deg, backend)
+    nbrs = Execution.allocate(backend, I, _csr_total(deg, n, backend))
     _within_pass(n, topology, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k, s
         @inbounds if deg[k] != 0
-            _within_scan(view(nbrs, Int(ptr[k]):(Int(ptr[k + 1]) - 1)), grid,
+            _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid,
                          Grids.cell_at(grid, cs[k]), ball, active_only, topology, s)
         end
         return nothing

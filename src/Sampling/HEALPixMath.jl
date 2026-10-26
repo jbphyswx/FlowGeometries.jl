@@ -105,9 +105,9 @@ function _healpix_ring_phi(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractF
     # 2·nside·(nside-1). Getting this wrong routes equatorial pixels through the cap branch.
     ncap = 2 * nside * (nside - 1)
     if ipix < ncap
-        hip = (ipix + 1) / T(2)
-        fihip = floor(hip)
-        iring = Int(floor(sqrt(hip - sqrt(fihip))) + 1)
+        # Ring `r` holds pixels `2r(r−1) … 2r(r+1)−1`, over which `1 + 2·ipix` runs from `(2r−1)²` to
+        # below `(2r+1)²`.
+        iring = (1 + isqrt(1 + 2 * ipix)) >> 1
         iphi = ipix + 1 - 2 * iring * (iring - 1)
         ring = iring
         ϕ = (T(iphi) - T(0.5)) * T(π) / (T(2) * T(iring))
@@ -122,9 +122,7 @@ function _healpix_ring_phi(nside::Int, ipix::Int, ::Type{T}) where {T<:AbstractF
         ϕ = (T(iphi) - fodd) * T(π) / (T(2) * fn)
     else
         ip = npix - ipix
-        hip = ip / T(2)
-        fihip = floor(hip)
-        iring = Int(floor(sqrt(hip - sqrt(fihip))) + 1)
+        iring = (1 + isqrt(2 * ip - 1)) >> 1
         iphi = 4 * iring + 1 - (ip - 2 * iring * (iring - 1))
         ring = nl4 - iring
         ϕ = (T(iphi) - T(0.5)) * T(π) / (T(2) * T(iring))

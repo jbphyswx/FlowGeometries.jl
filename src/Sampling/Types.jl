@@ -26,7 +26,7 @@ abstract type AbstractSpectralQuadratureSampling <: AbstractTensorProductSpheric
 
 abstract type AbstractGaussLegendreSampling <: AbstractSpectralQuadratureSampling end
 abstract type AbstractDriscollHealySampling <: AbstractSpectralQuadratureSampling end
-abstract type AbstractClenshawCurtisSampling <: AbstractSpectralQuadratureSampling end
+abstract type AbstractFejer1Sampling <: AbstractSpectralQuadratureSampling end
 abstract type AbstractMcEwenWiauxSampling <: AbstractSpectralQuadratureSampling end
 
 """
@@ -92,15 +92,15 @@ Driscoll–Healy **DH1** layout: ``N_θ × N_θ`` with ``N_θ = 2(l_{\\max}+1)``
 struct DriscollHealyEqualSampling <: AbstractDriscollHealySampling end
 
 """
-    ClenshawCurtisSampling <: AbstractClenshawCurtisSampling
+    Fejer1Sampling <: AbstractFejer1Sampling
 
-Open equiangular Clenshaw–Curtis grid: ``θ_i = π(i−1/2)/N_θ`` (no poles),
-``N_λ = 2N_θ − 1``, ``l_{\\max} = N_θ − 1``.
+Open equiangular grid on the nodes of Fejér's first rule: ``θ_i = π(i−1/2)/N_θ`` (no poles),
+``N_λ = 2N_θ − 1``, ``l_{\\max} = N_θ − 1``, with Fejér's first-rule latitude weights.
 
-This is *not* the same as Driscoll–Healy: different ``N_θ(l_{\\max})``, open vs polar-cap
-nodes, and a different quadrature.
+This is *not* Driscoll–Healy: a different ``N_θ(l_{\\max})``, open nodes where Driscoll–Healy has a
+polar one, and a different quadrature.
 """
-struct ClenshawCurtisSampling <: AbstractClenshawCurtisSampling end
+struct Fejer1Sampling <: AbstractFejer1Sampling end
 
 """
     McEwenWiauxSampling <: AbstractMcEwenWiauxSampling
@@ -267,15 +267,15 @@ distinction decides the answer here. Measured exactness of the weights in this p
 |---|---|---|---|---|
 | Gauss–Legendre | `2N−1` | `N−1` | `2N−2` | yes |
 | Driscoll–Healy | `N−1` | `N/2−1` | `N−2` | yes |
-| Clenshaw–Curtis | `N−1` | `N−1` | `2N−2` | **no** |
+| Fejér first rule | `N−1` | `N−1` | `2N−2` | **no** |
 
-Clenshaw–Curtis's band limit describes what its grid can *represent*; its quadrature supports
+The Fejér grid's band limit describes what it can *represent*; its quadrature supports
 quadrature-based analysis only to `lmax ≈ (N−1)/2`. Use `GaussLegendreSampling` when analysis must
 be exact at the stated band limit.
 """
 admits_exact_bandlimited_quadrature(::AbstractSphericalSampling) = false
 admits_exact_bandlimited_quadrature(::AbstractSpectralQuadratureSampling) = true
-admits_exact_bandlimited_quadrature(::AbstractClenshawCurtisSampling) = false
+admits_exact_bandlimited_quadrature(::AbstractFejer1Sampling) = false
 admits_exact_bandlimited_quadrature(::AbstractMcEwenWiauxSampling) = false
 
 # ---------------------------------------------------------------------------
@@ -298,7 +298,7 @@ admits_exact_bandlimited_quadrature(::AbstractMcEwenWiauxSampling) = false
 Maximum spherical-harmonic degree supported by `nlat` latitude samples under `sampling`.
 """
 bandlimit(::AbstractGaussLegendreSampling, nlat::Integer) = Int(nlat) - 1
-bandlimit(::AbstractClenshawCurtisSampling, nlat::Integer) = Int(nlat) - 1
+bandlimit(::AbstractFejer1Sampling, nlat::Integer) = Int(nlat) - 1
 bandlimit(::AbstractMcEwenWiauxSampling, nlat::Integer) = Int(nlat) - 1
 function bandlimit(::AbstractDriscollHealySampling, nlat::Integer)
     nlat ≥ 2 && iseven(Int(nlat)) || throw(ArgumentError("DH nlat must be even and ≥ 2"))
@@ -308,10 +308,20 @@ bandlimit(::AbstractLatLonSampling, ::Integer) =
     throw(ArgumentError("LatLonSampling has no exact band-limit relation"))
 
 """
+    has_bandlimit(sampling) -> Bool
+
+Whether [`bandlimit`](@ref)`(sampling, nlat)` exists: a spectral-quadrature sampling and a reduced
+Gaussian one tie the latitude count to a degree, and every other layout leaves the degree to the
+caller. From the sampling's type alone.
+"""
+has_bandlimit(::AbstractSphericalSampling) = false
+has_bandlimit(::AbstractSpectralQuadratureSampling) = true
+
+"""
     nlat_for_bandlimit(sampling, lmax) -> nlat
 """
 nlat_for_bandlimit(::AbstractGaussLegendreSampling, lmax::Integer) = Int(lmax) + 1
-nlat_for_bandlimit(::AbstractClenshawCurtisSampling, lmax::Integer) = Int(lmax) + 1
+nlat_for_bandlimit(::AbstractFejer1Sampling, lmax::Integer) = Int(lmax) + 1
 nlat_for_bandlimit(::AbstractMcEwenWiauxSampling, lmax::Integer) = Int(lmax) + 1
 nlat_for_bandlimit(::AbstractDriscollHealySampling, lmax::Integer) = 2 * (Int(lmax) + 1)
 
@@ -319,7 +329,7 @@ nlat_for_bandlimit(::AbstractDriscollHealySampling, lmax::Integer) = 2 * (Int(lm
     nlon_for_nlat(sampling, nlat) -> nlon
 """
 nlon_for_nlat(::AbstractGaussLegendreSampling, nlat::Integer) = 2 * Int(nlat) - 1
-nlon_for_nlat(::AbstractClenshawCurtisSampling, nlat::Integer) = 2 * Int(nlat) - 1
+nlon_for_nlat(::AbstractFejer1Sampling, nlat::Integer) = 2 * Int(nlat) - 1
 nlon_for_nlat(::AbstractMcEwenWiauxSampling, nlat::Integer) = 2 * Int(nlat) - 1
 nlon_for_nlat(::DriscollHealySampling, nlat::Integer) = 2 * Int(nlat)
 nlon_for_nlat(::DriscollHealyEqualSampling, nlat::Integer) = Int(nlat)
@@ -488,5 +498,6 @@ npoints(s::ReducedGaussianSampling) = @inbounds s.ring_offset[end]
 npoints(s::FibonacciSampling) = s.n
 
 bandlimit(::AbstractReducedGaussianSampling, nlat::Integer) = Int(nlat) - 1
+has_bandlimit(::AbstractReducedGaussianSampling) = true
 nlat_for_bandlimit(::AbstractReducedGaussianSampling, lmax::Integer) = Int(lmax) + 1
 npoints(s::IcosahedralSampling) = icosahedral_nvertices(s.frequency)

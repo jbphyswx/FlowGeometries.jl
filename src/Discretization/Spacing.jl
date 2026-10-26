@@ -154,7 +154,8 @@ function _cell_widths_dense(x::AbstractVector{T}, period::Union{Nothing,Real} = 
     else
         # Both ends additionally see the seam gap, written from magnitudes so it is the same seam in
         # either storage order.
-        g = abs(T(period) - abs(@inbounds(x[n]) - @inbounds(x[1])))
+        x1, xn = Axes._endpoints(x)
+        g = abs(T(period) - abs(xn - x1))
         @views w[1:1] .= (g .+ d[1:1]) ./ T(2)
         @views w[n:n] .= (d[(n - 1):(n - 1)] .+ g) ./ T(2)
     end

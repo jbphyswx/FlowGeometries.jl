@@ -19,17 +19,6 @@ using FlowGeometries.SphericalSampling: SphericalSampling, OpenNodes, ClosedNode
 @inline _twiddle(::OpenNodes, k::Int, nlat::Int, ::Type{T}) where {T} =
     cis(T(π) * T(k) / T(nlat))
 
-# `AbstractFFTs` is an interface, so it can be loaded with nothing able to plan a transform. This tests
-# the two-argument `plan_bfft!(x, dims)` that `bfft!` dispatches to; the one-argument form is defined
-# generically and answers yes with no backend present.
-@inline _has_fft(::Type{T}) where {T} =
-    hasmethod(AbstractFFTs.plan_bfft!, Tuple{Vector{Complex{T}},UnitRange{Int}})
-
-# The only place availability is consulted; the methods below implement one algorithm each.
-
-SphericalSampling._equiangular_algorithm(::Type{T}) where {T<:AbstractFloat} =
-    _has_fft(T) ? SphericalSampling.Transform() : SphericalSampling.Recurrence()
-
 """
     _sum_plan(T, nlat) -> (plan, buffer)
 

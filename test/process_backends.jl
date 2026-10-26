@@ -13,7 +13,7 @@ function check_process_backend(backend)
     # Count, scan and fill, the degrees varying from cell to cell so a share boundary landing mid-row
     # shows up as a wrong offset.
     mk = [isodd(i * 7 + j * 3) for i in 1:31, j in 1:29]
-    for g in (GD.StructuredGrid(cart, 0.0:30.0, 0.0:28.0, mk; periodic = (true, false)),
+    for g in (GD.StructuredGrid(cart, 0.0:30.0, 0.0:28.0, mk; topology = GD.Periodic()),
               GD.HEALPixGrid(sph, 4), GD.IcosahedralGrid(sph, 3), GD.CubedSphereGrid(sph, 4),
               GD.RingGrid(sph, SS.OctahedralGaussianSampling(8)))
         a = C.build_connectivity(g)
@@ -43,7 +43,7 @@ function check_process_backend(backend)
     x = collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = 24))))
     y = range(0.0, 2π * (1 - 1 / 20); length = 20)
     msk = trues(24, 20); msk[7, 9] = false; msk[13, 4] = false
-    gs = GD.StructuredGrid(cart, x, y, msk; periodic = (false, true))
+    gs = GD.StructuredGrid(cart, x, y, msk; topology = (GD.Bounded(), GD.Periodic()))
     f = [sin(3a) * cos(b) * c for a in x, b in y, c in 1:3]
     for dim in 1:2, pol in (O.BlankMasked(), O.ShiftWithinRun(), O.ReduceInRun())
         a = fill(NaN, size(f)); b = fill(NaN, size(f))
@@ -54,7 +54,7 @@ function check_process_backend(backend)
     end
     λ = collect(range(0, 2π * (1 - 1 / 16); length = 16))
     φ = collect(range(-π / 2, π / 2; length = 13))
-    gsph = GD.StructuredGrid(sph, λ, φ; periodic = true)
+    gsph = GD.StructuredGrid(sph, λ, φ; topology = GD.Periodic())
     fs = [sin(l) * cos(p) for l in λ, p in φ]
     for dim in 1:2
         a = fill(NaN, size(fs)); b = fill(NaN, size(fs))

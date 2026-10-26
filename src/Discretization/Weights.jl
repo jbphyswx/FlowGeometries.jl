@@ -114,47 +114,16 @@ function fd_weights(
     return (idx, fd_weights(@view(x[idx]), @inbounds(x[i]), order))
 end
 
-# ---------------------------------------------------------------------------
-# Metric factors
-# ---------------------------------------------------------------------------
-
-"""
-    scale_factors(geometry, point) -> NTuple
-    scale_factors(geometry, point, Val(N)) -> NTuple{N}
-
-The metric scale factors `hᵈ` at `point`: the physical length of a unit step in each coordinate
-direction. Cartesian gives `1` in every direction; spherical gives `(R cosφ, R)` on the surface and
-`(r cosφ, r, 1)` with a radius direction.
-
-They turn a coordinate derivative into a physical one, `∂/∂sᵈ = (1/hᵈ)·∂/∂ξᵈ`.
-
-`Val(N)` names how many components `point` has, giving a concrete `NTuple{N}` from a point whose
-length is a runtime value.
-"""
-@inline scale_factors(geometry::Geometry.AbstractGeometry, point) =
-    Geometry.scale_factors(geometry, point)
-
-@inline scale_factors(geometry::Geometry.AbstractGeometry, point, v::Val) =
-    Geometry.scale_factors(geometry, point, v)
-
-"""
-    jacobian(geometry, point) -> Real
-
-`∏ hᵈ` from [`scale_factors`](@ref): the volume element per unit coordinate volume at `point`.
-"""
-@inline jacobian(geometry::Geometry.AbstractGeometry, point) =
-    Geometry.jacobian(geometry, point)
-
-
 """
     StencilScratch{T}
 
 The working buffers a degrading [`apply_stencil!`](@ref FlowGeometries.Operators.apply_stencil!) needs to rebuild a window at a mask edge:
 the Fornberg table and the node list. Build one with [`stencil_scratch`](@ref).
 
-**One per task**, exactly as `Connectivity.ball_scratch` is — the buffers are written per cell,
-so chunks cannot share them. A threaded `execution` therefore allocates its own set per chunk and ignores
-one passed here.
+**One per chunk**, exactly as `Connectivity.ball_scratch` is one per task — the buffers are written
+per cell, so chunks cannot share them. A threaded `execution` takes a vector of them, one per chunk it
+cuts, from `stencil_scratch(order, nodes, execution)`; given a single set it uses it for its first chunk
+and allocates for the others.
 """
 struct StencilScratch{T<:AbstractFloat,VT<:AbstractVector{T},MT<:AbstractMatrix{T}}
     w::VT             # the weights of one rebuilt row
@@ -183,6 +152,20 @@ function stencil_scratch(::Type{T}, order::Integer, nodes::Integer) where {T<:Ab
     c = Matrix{T}(undef, k, m + 1)
     return StencilScratch{T,typeof(w),typeof(c)}(w, c, Vector{T}(undef, k))
 end
+
+"""
+    stencil_scratch([T = Float64], order, nodes, execution) -> Vector{StencilScratch}
+
+One [`StencilScratch`](@ref) per chunk `execution` cuts, [`Execution.max_chunks`](@ref) of them, so a
+threaded degrading call writes chunk `c`'s windows into set `c` and allocates none. Build it for the
+thread count the calls run under.
+"""
+stencil_scratch(order::Integer, nodes::Integer, execution::Execution.CB.AbstractExecutionBackend) =
+    stencil_scratch(Float64, order, nodes, execution)
+
+stencil_scratch(
+    ::Type{T}, order::Integer, nodes::Integer, execution::Execution.CB.AbstractExecutionBackend,
+) where {T<:AbstractFloat} = [stencil_scratch(T, order, nodes) for _ in 1:Execution.max_chunks(execution)]
 
 """
     _window_start(i, k, lo, hi) -> Int
@@ -286,24 +269,3 @@ end
         ))
     return (s.n, s.w, s.c)
 end
-
-
-"""
-    metric_floor(geometry, dim) -> T
-
-The magnitude at or below which the scale factor along `dim` is degenerate: `√eps(T)` times the size of
-that factor where it does not degenerate — the radius for a sphere's longitude and latitude, the
-semi-major axis for a spheroid's, and one for a radius or a height, whose factor is one. `0` on a
-Cartesian geometry, whose metric never degenerates.
-
-It scales with the geometry's size, the direction's units and the element type. At `Float32` on Earth's
-radius, `cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole around 0.28 m, above any fixed small
-constant, while `h_r = 1` stays far above its own floor.
-"""
-function metric_floor end
-
-@inline metric_floor(::Geometry.AbstractCartesianGeometry{T}, ::Integer) where {T} = zero(T)
-@inline metric_floor(g::Geometry.AbstractSphericalGeometry{T}, d::Integer) where {T} =
-    (d ≤ 2 ? Geometry.radius(g) : one(T)) * sqrt(eps(T))
-@inline metric_floor(g::Geometry.AbstractEllipsoidalGeometry{T}, d::Integer) where {T} =
-    (d ≤ 2 ? Geometry.semimajor_axis(g) : one(T)) * sqrt(eps(T))

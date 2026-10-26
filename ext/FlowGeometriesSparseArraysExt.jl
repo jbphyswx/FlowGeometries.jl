@@ -10,14 +10,19 @@ using FlowGeometries.Stencils: Stencils
 # permutation vector. The only allocations are the three arrays the matrix takes ownership of, and
 # `sparse_adjacency_matrix!` lets the caller supply even those.
 
-# `Ti` defaults to the width the connectivity already carries, so a narrowed CSR gives a narrowed
-# matrix and the two hold the same number of bytes.
+# `Tv` defaults to `Bool` and `Ti` to the connectivity's id type, the argument order of `spzeros`.
+Connectivity.sparse_adjacency_matrix(conn::Connectivity.CSRConnectivity) =
+    Connectivity.sparse_adjacency_matrix(Bool, conn)
+
+Connectivity.sparse_adjacency_matrix(::Type{Tv}, conn::Connectivity.CSRConnectivity) where {Tv} =
+    Connectivity.sparse_adjacency_matrix(Tv, eltype(conn.nbrs), conn)
+
 function Connectivity.sparse_adjacency_matrix(
-    conn::Connectivity.CSRConnectivity; Ti::Union{Nothing,Type{<:Integer}} = nothing, Tv::Type = Bool,
-)
-    Ti === nothing && (Ti = promote_type(eltype(conn.ptr), eltype(conn.nbrs)))
+    ::Type{Tv}, ::Type{Ti}, conn::Connectivity.CSRConnectivity,
+) where {Tv, Ti<:Integer}
     n = Connectivity.nnodes(conn)
     ne = Connectivity.nedges(conn)
+    Grids._check_ids(Ti, max(n, ne + 1))
     return Connectivity.sparse_adjacency_matrix!(
         Vector{Ti}(undef, n + 1), Vector{Ti}(undef, ne), Vector{Tv}(undef, ne), conn,
     )
@@ -44,24 +49,32 @@ end
 @inline _wraps_as_csc(grid::Grids.AbstractGrid, _st, ::Grids.AbstractAdjacency) =
     Grids.has_symmetric_adjacency(grid)
 
-# `Ti` defaults to the width the builder chose, so the wrap below is reachable: a builder narrows its
-# ids to `Int32` wherever the node and edge counts allow
+Connectivity.sparse_adjacency_matrix(grid::Grids.AbstractGrid; kwargs...) =
+    Connectivity.sparse_adjacency_matrix(Bool, grid; kwargs...)
+
+Connectivity.sparse_adjacency_matrix(::Type{Tv}, grid::Grids.AbstractGrid; kwargs...) where {Tv} =
+    Connectivity.sparse_adjacency_matrix(Tv, Connectivity._default_index_type(grid), grid; kwargs...)
+
+# The connectivity is built with `Ti` ids, so a wrapped matrix holds the neighbour list itself and copies
+# only the `n + 1` offsets where their type differs.
 function Connectivity.sparse_adjacency_matrix(
-    grid::Grids.AbstractGrid; Ti::Union{Nothing,Type{<:Integer}} = nothing, Tv::Type = Bool,
-    kwargs...,
-)
-    conn = Connectivity.build_connectivity(grid; kwargs...)
-    Ti === nothing && (Ti = promote_type(eltype(conn.ptr), eltype(conn.nbrs)))
+    ::Type{Tv}, ::Type{Ti}, grid::Grids.AbstractGrid; kwargs...,
+) where {Tv, Ti<:Integer}
+    conn = Connectivity.build_connectivity(Ti, grid; kwargs...)
     # The stencil is read for the guard, never forwarded
     st = get(values(kwargs), :stencil, Stencils.Axial(1))
-    if _wraps_as_csc(grid, st, Grids.adjacency_source(grid)) &&
-       conn.ptr isa Vector{Ti} && conn.nbrs isa Vector{Ti}
+    if _wraps_as_csc(grid, st, Grids.adjacency_source(grid)) && conn.nbrs isa Vector{Ti}
         Connectivity.sort_neighbors!(conn)
         n, ne = Connectivity.nnodes(conn), Connectivity.nedges(conn)
-        return SparseArrays.SparseMatrixCSC{Tv,Ti}(n, n, conn.ptr, conn.nbrs, fill(one(Tv), ne))
+        Grids._check_ids(Ti, ne + 1)
+        return SparseArrays.SparseMatrixCSC{Tv,Ti}(n, n, _colptr(Ti, conn.ptr), conn.nbrs,
+                                                   fill(one(Tv), ne))
     end
-    return Connectivity.sparse_adjacency_matrix(conn; Ti = Ti, Tv = Tv)
+    return Connectivity.sparse_adjacency_matrix(Tv, Ti, conn)
 end
+
+@inline _colptr(::Type{Ti}, ptr::Vector{Ti}) where {Ti<:Integer} = ptr
+@inline _colptr(::Type{Ti}, ptr::AbstractVector{<:Integer}) where {Ti<:Integer} = Vector{Ti}(ptr)
 
 # The concrete `Vector` is forced by `SparseMatrixCSC`, which declares its own fields as `Vector`; those
 # are the only buffers it wraps without a copy, and `resize!` below needs them too.

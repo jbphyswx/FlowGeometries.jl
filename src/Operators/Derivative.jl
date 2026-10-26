@@ -20,10 +20,8 @@ At `order = p` it is the `p`-th derivative with respect to distance. Along a dir
 the nodes' distances from the cell, [`Geometry.line_distance`](@ref).
 
 **Where the metric degenerates the derivative does not exist**, and `masked` is written. Longitude at a
-pole is the case: `h_λ = R cos φ → 0`, so `1/h_λ` diverges. The test scales with the geometry's own size
-and with the precision, `|h| ≤ L·√eps(T)`. A fixed threshold serves neither: `1e-12` is below
-`eps(Float32)`, and at `Float32` on Earth's radius `cos(Float32(π/2)) ≈ -4.4e-8` puts `h_λ` at the pole
-around 0.28 m.
+pole is the case: `h_λ = R cos φ` is zero at a latitude of `±T(π)/2`, the pole as stored, so `1/h_λ`
+does not exist there.
 
 Each value is multiplied by `(1/hᵈ)ᵖ` as it is written, so a cell written `masked` holds exactly `masked`.
 No scale factor in this package depends on **longitude**, so `hᵈ` is constant along the first axis

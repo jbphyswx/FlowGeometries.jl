@@ -46,6 +46,7 @@ function _apply_plan_checked!(
         "of the field has $(size(field, d))",
     ))
     _check_mask_extent(mask, size(field), d)
+    Discretization.nnodes(plan) == 0 && return fill!(out, masked)
     return _apply_plan!(out, field, plan, d, mask, masked, backend, fac)
 end
 
@@ -60,9 +61,9 @@ function _apply_plan!(
 end
 
 function _apply_plan!(
-    out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K}, d::Int,
+    out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan, d::Int,
     mask, masked, backend, fac,
-) where {S,N,T,K}
+) where {S,N}
     vm = _mask_rank(mask, Val(N))
     b = Execution.resolve(backend)
     # On a device each work item reads its own row from the plan: the centred row and the `O(K²)` end
@@ -71,40 +72,45 @@ function _apply_plan!(
         p = Execution.on_backend(b, plan)
         m = Execution.on_backend(b, mask)
         return _dispatch_dim(d, vm) do vdim
-            _launch_plan!(out, field, p, m, masked, vdim, Val(N), vm, b, fac)
+            _dispatch_nodes(Discretization.nnodes(plan)) do vk
+                _launch_plan!(out, field, p, m, masked, vdim, Val(N), vm, b, fac, vk)
+            end
         end
     end
     return _dispatch_dim(d, vm) do vdim
-        _plan_sweep_host!(out, field, plan, mask, masked, vdim, Val(N), vm, fac, b)
+        _dispatch_nodes(Discretization.nnodes(plan)) do vk
+            _plan_sweep_host!(out, field, plan, mask, masked, vdim, Val(N), vm, fac, b, vk)
+        end
     end
 end
 
 function _launch_plan!(
-    out::AbstractArray{S,N}, field, plan, mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, backend, fac,
+    out::AbstractArray{S,N}, field, plan, mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, backend, fac, vk,
 ) where {S,N,dim,M}
     ci = CartesianIndices(size(field))
     Execution.run_indices(length(ci), backend, Execution.Written(out)) do lin
         c = @inbounds ci[lin]
         I = Tuple(c)
-        nodes, wts = Discretization.plan_row(plan, I[dim])
+        nodes, wts = Discretization.plan_row(plan, I[dim], vk)
         _plan_cell!(out, field, nodes, wts, mask, masked, I, c, Val(dim), Val(N), Val(M), fac)
     end
     return out
 end
 
 # One cell from its row, written from its own inputs alone — `_stencil_cell!` with the row in hand.
+# `nodes` and `wts` are tuples for a node count in the type, vectors over the plan otherwise.
 @inline function _plan_cell!(
-    out::AbstractArray{S,N}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real}, mask, masked,
+    out::AbstractArray{S,N}, field, nodes, wts, mask, masked,
     I::NTuple{N,Int}, ci, ::Val{dim}, ::Val{N}, ::Val{M}, fac,
-) where {S,N,K,dim,M}
+) where {S,N,dim,M}
     @inbounds begin
         if mask !== nothing && !mask[_spatial(I, Val(M))...]
             out[ci] = masked
             return nothing
         end
         acc = zero(S)
-        for q in 1:K
-            J = ntuple(d -> d == dim ? nodes[q] : I[d], Val(N))
+        for q in eachindex(nodes)
+            J = ntuple(d -> d == dim ? Int(nodes[q]) : I[d], Val(N))
             if mask !== nothing && !mask[_spatial(J, Val(M))...]
                 out[ci] = masked
                 return nothing
@@ -117,19 +123,20 @@ end
 end
 
 """
-    _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M), fac) -> out
+    _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M), fac, backend, nodes) -> out
 
 The host sweep for a plan. Same nest as [`_stencil_sweep_host!`](@ref) — Cartesian range walked
-directly, nest split at `dim`, node count in the type — with a uniform plan's interior row a tuple in
-registers and the shifted end rows read from its own `O(K²)` table.
+directly, nest split at `dim`, `nodes` the node count as `_dispatch_nodes` gives it — with a
+uniform plan's interior row a tuple in registers and the shifted end rows read from its own `O(K²)`
+table.
 
 `fac` is the metric factor each value is written with — see [`_RowFactors`](@ref) — or `nothing` for
 the plain sweep. Under `backend` a chunk is a contiguous range of cells, as for the table sweep.
 """
 function _plan_sweep_host!(
-    out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan{T,K},
-    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, fac = nothing, backend = CB.SerialBackend(),
-) where {S,N,T,K,dim,M}
+    out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan,
+    mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, fac, backend, vk,
+) where {S,N,dim,M}
     sz = size(field)
     n = sz[dim]
     if _run_addressable(out, field, mask, fac)
@@ -142,7 +149,7 @@ function _plan_sweep_host!(
         runlen = fac === nothing ? stride : sz[1]
         Execution.run_chunks(npost * stride * n, backend, Execution.Written(out)) do rng
             _plan_span_linear!(out, field, plan, mask, masked, Val(dim), first(rng) - 1, last(rng), n,
-                               stride, mpost, nruns, runlen, fac)
+                               stride, mpost, nruns, runlen, fac, vk)
         end
         return out
     end
@@ -152,8 +159,8 @@ function _plan_sweep_host!(
     Execution.run_chunks(length(post) * n, backend) do rng
         @inbounds for u in rng
             q, jm1 = divrem(u - 1, n)
-            nodes, wts = Discretization.plan_row(plan, jm1 + 1)
-            _plan_row!(out, field, nodes, wts, mask, masked, jm1 + 1, Tuple(post[q + 1]), pre, Val(K),
+            nodes, wts = Discretization.plan_row(plan, jm1 + 1, vk)
+            _plan_row!(out, field, nodes, wts, mask, masked, jm1 + 1, Tuple(post[q + 1]), pre,
                        Val(dim), Val(N), Val(M), fac)
         end
     end
@@ -164,9 +171,9 @@ end
 # `_stencil_span_linear!` walks them. A slab is one direction-1 run, and `p` counts the batch axes too —
 # the batch is the slowest, so slab `p` takes mask slab `p % mpost` and its factor from run `p`.
 @inline function _plan_span_linear!(
-    out, field, plan::Discretization.UniformStencilPlan{T,K}, mask, masked, ::Val{dim}, c0::Int,
-    c1::Int, n::Int, stride::Int, mpost::Int, nruns::Int, runlen::Int, fac,
-) where {T,K,dim}
+    out, field, plan::Discretization.UniformStencilPlan, mask, masked, ::Val{dim}, c0::Int,
+    c1::Int, n::Int, stride::Int, mpost::Int, nruns::Int, runlen::Int, fac, vk,
+) where {dim}
     outer = stride * n
     c = c0
     while c < c1
@@ -175,16 +182,16 @@ end
             off = p * outer
             jhi = min(outer, c1 - off)
             _plan_first_linear!(out, field, plan, mask, masked, off, (p % mpost) * outer, n, c - off + 1,
-                                jhi, Val(K), _slab_factor(fac, p))
+                                jhi, vk, _slab_factor(fac, p))
             c = off + jhi
         else
             u = c ÷ stride
             p, jm1 = divrem(u, n)
             base = u * stride
             thi = min(stride, c1 - base)
-            nodes, wts = Discretization.plan_row(plan, jm1 + 1)
+            nodes, wts = Discretization.plan_row(plan, jm1 + 1, vk)
             _plan_row_linear!(out, field, nodes, wts, mask, masked, jm1 + 1, p * outer,
-                              (p % mpost) * outer, stride, Val(K), fac, nruns * (jm1 + n * p), runlen,
+                              (p % mpost) * outer, stride, fac, nruns * (jm1 + n * p), runlen,
                               c - base + 1, thi)
             c = base + thi
         end
@@ -192,31 +199,23 @@ end
     return nothing
 end
 
-# A tabulated plan holds the two matrices the table sweep takes, and that sweep has the same nest and
-# the same span boundaries. `K` is in the plan's type, so the node count needs no runtime switch.
-@inline _plan_sweep_host!(
-    out::AbstractArray{S,N}, field, plan::Discretization.TabulatedStencilPlan{T,K},
-    mask, masked, vdim::Val, ::Val{N}, vm::Val, fac = nothing, backend = CB.SerialBackend(),
-) where {S,N,T,K} =
-    _stencil_sweep_host!(out, field, plan.indices, plan.weights, mask, masked, vdim, Val(K),
-                         Val(N), vm, fac, backend)
-
 # `dim == 1`: the differenced direction is the contiguous one. The interior span carries the weights in
 # registers and reads `field` at a fixed offset per node. Cells `jlo:jhi` of the slab are written; `h` is
 # the run's metric factor.
 @inline function _plan_first_linear!(
-    out::AbstractArray{S}, field, plan::Discretization.UniformStencilPlan{T,K},
-    mask, masked, off::Int, moff::Int, n::Int, jlo::Int, jhi::Int, ::Val{K}, h,
-) where {S,T,K}
+    out::AbstractArray{S}, field, plan::Discretization.UniformStencilPlan,
+    mask, masked, off::Int, moff::Int, n::Int, jlo::Int, jhi::Int, vk, h,
+) where {S}
     left = plan.left
     right = plan.right
-    w = plan.weights
+    w = Discretization._centred_row(plan, vk)
+    K = length(w)
     # The two ends, whichever way the axis closes: `plan_row` gives a shifted window on a bounded axis
     # and a wrapped one on a periodic axis. Only these rows differ between the two — a wrapping axis's
     # interior does not wrap either, so it takes the same constant-coefficient span below.
     @inbounds for j in jlo:min(left, jhi)
-        _plan_cell_linear!(out, field, Discretization.plan_row(plan, j)..., mask, masked,
-                           off, moff, j, Val(K), h)
+        _plan_cell_linear!(out, field, Discretization.plan_row(plan, j, vk)..., mask, masked,
+                           off, moff, j, h)
     end
     # The interior: constant coefficients, nodes at a fixed offset. This is the span the plan exists for.
     @inbounds for j in max(left + 1, jlo):min(n - right, jhi)
@@ -241,24 +240,23 @@ end
         out[off + j] = _scaled(acc, h, masked)
     end
     @inbounds for j in max(n - right + 1, jlo):jhi
-        _plan_cell_linear!(out, field, Discretization.plan_row(plan, j)..., mask, masked,
-                           off, moff, j, Val(K), h)
+        _plan_cell_linear!(out, field, Discretization.plan_row(plan, j, vk)..., mask, masked,
+                           off, moff, j, h)
     end
     return nothing
 end
 
 # One cell from an explicit row, linearly addressed. The end rows and the wrapping case use it.
 @inline function _plan_cell_linear!(
-    out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
-    mask, masked, off::Int, moff::Int, j::Int, ::Val{K}, h,
-) where {S,K}
+    out::AbstractArray{S}, field, nodes, wts, mask, masked, off::Int, moff::Int, j::Int, h,
+) where {S}
     @inbounds begin
         if mask !== nothing && !mask[moff + j]
             out[off + j] = masked
             return nothing
         end
         acc = zero(S)
-        for q in 1:K
+        for q in eachindex(nodes)
             ix = nodes[q]
             if mask !== nothing && !mask[moff + ix]
                 out[off + j] = masked
@@ -275,10 +273,10 @@ end
 # shapes, and this one runs level with the table form. Cells `tlo:thi` of the span are written, through
 # the runs of `runlen` cells they meet, run `r` with factor `_run_factor(fac, rbase, r)`.
 @inline function _plan_row_linear!(
-    out::AbstractArray{S}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
-    mask, masked, j::Int, off::Int, moff::Int, stride::Int, ::Val{K}, fac, rbase::Int, runlen::Int,
-    tlo::Int, thi::Int,
-) where {S,K}
+    out::AbstractArray{S}, field, nodes, wts, mask, masked, j::Int, off::Int, moff::Int, stride::Int,
+    fac, rbase::Int, runlen::Int, tlo::Int, thi::Int,
+) where {S}
+    K = length(nodes)
     base = off + (j - 1) * stride
     mbase = moff + (j - 1) * stride
     @inbounds for r in ((tlo - 1) ÷ runlen):((thi - 1) ÷ runlen)
@@ -308,9 +306,10 @@ end
 # The Cartesian fallback: correct for an offset array or a strided view, where the address arithmetic
 # above does not apply.
 @inline function _plan_row!(
-    out::AbstractArray{S,N}, field, nodes::NTuple{K,Int}, wts::NTuple{K,Real},
-    mask, masked, j::Int, tpost::Tuple, pre, ::Val{K}, ::Val{dim}, ::Val{N}, ::Val{M}, fac,
-) where {S,N,K,dim,M}
+    out::AbstractArray{S,N}, field, nodes, wts, mask, masked, j::Int, tpost::Tuple, pre, ::Val{dim},
+    ::Val{N}, ::Val{M}, fac,
+) where {S,N,dim,M}
+    K = length(nodes)
     @inbounds for Ipre in pre
         tpre = Tuple(Ipre)
         I = (tpre..., j, tpost...)

@@ -235,10 +235,11 @@ function sparse_adjacency_csc!(
 end
 
 """
-    sparse_adjacency_matrix(grid_or_conn; kwargs...) -> SparseMatrixCSC
+    sparse_adjacency_matrix([Tv, [Ti]], grid_or_conn; kwargs...) -> SparseMatrixCSC{Tv,Ti}
 
-Requires `using SparseArrays` (extension). Prefer [`sparse_adjacency_coo!`](@ref)
-when reusing COO buffers.
+The adjacency as a sparse matrix of values `Tv` (`Bool` by default) and indices `Ti` (by default the
+connectivity's id type). Requires `using SparseArrays` (extension). Prefer
+[`sparse_adjacency_coo!`](@ref) when reusing COO buffers.
 """
 function sparse_adjacency_matrix end
 
