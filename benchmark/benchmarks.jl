@@ -184,41 +184,49 @@ function bench_plan()
     end
 end
 
-# A binned index's two layouts against the cell list, per query, and the dense layout's offsets in bytes,
-# over boxes per point: `OccupancyBins` takes the dense layout while bins ≤ 8 points.
+# A binned index's two layouts per query, and the dense layout's bytes, over boxes per point: the bin side
+# is the mean cell size times `s`, so a uniform set of `n` points spans `n/s²` boxes. `OccupancyBins`
+# takes the dense layout up to 8 boxes per point. The cell list, binned at the query radius, is the
+# reference. The points carry their true areas, which the default bin side is read from.
 function bench_binned()
-    group("binned index: dense, hashed, cell list (ball of ~10 points)")
+    group("binned index: boxes per point against query time (ball of ~10 points)")
     jitter(i) = mod(sin(12.9898 * i) * 43758.5453, 1.0)
     n = 20_000
-    for (nm, spread) in (("uniform", 1.0), ("clustered", 0.01))
-        xs = [spread * jitter(i) + (i ≤ n ÷ 2 ? 0.0 : 1.0) for i in 1:n]
-        ys = [spread * jitter(i + 7919) + (i ≤ n ÷ 2 ? 0.0 : 1.0) for i in 1:n]
-        g = GD.UnstructuredGrid(CART, (xs, ys), ones(n))
-        r = sqrt(10 / (n * π)) * spread
-        qs = [(xs[i], ys[i]) for i in 1:97:n]
-        for (lnm, ix) in (("dense", GD.binned_index(g; layout = GD.DenseBins())),
-                          ("hashed", GD.binned_index(g; layout = GD.HashedBins())),
-                          ("cell list", GD.cell_list(g; ball = r)))
-            top = C.MetricTopology(g; index = ix)
-            t = best(() -> sum(q -> C.nneighbors_within(g, q; ball = r, topology = top), qs), 3) / length(qs)
-            row("$nm  $lnm  per query", t)
-            lnm == "dense" && Printf.@printf("  %-46s %10d B\n", "$nm  dense offsets", Base.summarysize(ix))
+    xs, ys = [jitter(i) for i in 1:n], [jitter(i + 7919) for i in 1:n]
+    g = GD.UnstructuredGrid(CART, (xs, ys), fill(1.0 / n, n))
+    r = sqrt(10 / (n * π))
+    qs = [(xs[i], ys[i]) for i in 1:97:n]
+    query(top) = best(() -> sum(q -> C.nneighbors_within(g, q; ball = r, topology = top), qs), 5) / length(qs)
+    row("cell list at the radius, per query", query(C.MetricTopology(g; index = GD.cell_list(g; ball = r))))
+    h0 = sqrt(1.0 / n)
+    for s in (0.25, 0.5, 1.0, 2.0)
+        for (lnm, layout) in (("dense", GD.DenseBins()), ("hashed", GD.HashedBins()))
+            ix = GD.binned_index(g; layout, width = s * h0)
+            per = prod(ix.nb) / n
+            row("$(round(per; digits = 2)) boxes/point  $lnm  per query", query(C.MetricTopology(g; index = ix)))
+            Printf.@printf("  %-46s %10d B\n", "$(round(per; digits = 2)) boxes/point  $lnm  bytes",
+                           Base.summarysize(ix))
         end
     end
 end
 
-# The spheroid geodesic per distance, at the separations a ball query sees and across the sphere.
+# The spheroid geodesic per distance, at the separations a ball query sees and across the sphere, and the
+# ellipsoid's constants every call derives. Each result feeds a sink, so no call is optimised away.
 function bench_geodesic()
     group("spheroid geodesic distance")
     spd = FG.Geometry.SpheroidGeometry()
+    sink = Ref(0.0)
     for (nm, q) in (("10 km", (0.3016, 0.4012)), ("1000 km", (0.45, 0.5)), ("near-antipodal", (π - 0.02, -0.35)))
-        t = best(() -> FG.Geometry.distance(spd, (0.3, 0.4), q), 10_000)
+        t = best(() -> (sink[] += FG.Geometry.distance(spd, (0.3, 0.4), q)), 10_000)
         row(nm, t)
     end
+    af = Ref((Float64(FG.Geometry.semimajor_axis(spd)), Float64(FG.Geometry.flattening(spd))))
+    row("the constants alone", best(() -> (sink[] += FG.Geometry._GeodesicConstants(af[]...).c3x[15]), 10_000))
 end
 
 # A ball query's latitude band bracketed by search on a longitude axis whose spacing varies eightfold,
-# against the uniform axis's closed form.
+# against the uniform axis's closed form. The two balls hold different numbers of cells, so each is
+# reported per cell found.
 function bench_rowbracket()
     group("ball query: stretched against uniform longitude, 720×361")
     sph = FG.Geometry.SphericalGeometry(6.371e6)
@@ -229,8 +237,10 @@ function bench_rowbracket()
     for (nm, g) in (("uniform", GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, nλ), φ)),
                     ("stretched", GD.StructuredGrid(sph, λs, φ; topology = GD.Periodic())))
         for r in (2.0e5, 2.0e6)
+            k = C.nneighbors_within(g, 200, 250; ball = r)
             t = best(() -> C.nneighbors_within(g, 200, 250; ball = r), 200)
-            row("$nm  r=$(Int(r ÷ 1000)) km", t)
+            row("$nm  r=$(Int(r ÷ 1000)) km, $k cells, per query", t)
+            row("$nm  r=$(Int(r ÷ 1000)) km, per cell found", t / k)
         end
     end
 end

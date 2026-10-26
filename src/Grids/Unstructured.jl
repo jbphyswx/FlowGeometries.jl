@@ -50,7 +50,7 @@ function CellMesh(cell_ptr::AbstractVector{<:Integer}, cell_nodes::AbstractVecto
     I = eltype(cell_nodes)
     # Count, scan, place: the transpose of a CSR without materializing a pair per entry. The passes walk
     # the cells on the host, and the transpose is held where the cells are.
-    cp, cn = Axes._host_array(cell_ptr), Axes._host_array(cell_nodes)
+    cp, cn = Execution._host_array(cell_ptr), Execution._host_array(cell_nodes)
     node_ptr = similar(cp, n + 1)
     fill!(node_ptr, 0)
     @inbounds for k in eachindex(cn)
@@ -71,7 +71,8 @@ function CellMesh(cell_ptr::AbstractVector{<:Integer}, cell_nodes::AbstractVecto
             cursor[v] += 1
         end
     end
-    return CellMesh(cell_ptr, cell_nodes, Axes._like(cell_ptr, node_ptr), Axes._like(cell_nodes, node_cells))
+    return CellMesh(cell_ptr, cell_nodes, Execution._like(cell_ptr, node_ptr),
+                    Execution._like(cell_nodes, node_cells))
 end
 
 """
@@ -412,14 +413,15 @@ its [`extent`](@ref) where not; a direction of zero span holds one.
 """
 @inline node_counts(grid::UnstructuredGrid) = getfield(grid, :node_counts)
 
+# At least one direction, so `T` is bound by the first.
 function _node_counts(
-    c::NTuple{N,AbstractVector{T}}, per::NTuple{N,AbstractTopology}, prd::NTuple{N,T},
-    bnds::NTuple{N,Tuple{T,T}},
-) where {N,T}
+    c::Tuple{AbstractVector{T},Vararg{AbstractVector{T},M}}, per::Tuple{AbstractTopology,Vararg{AbstractTopology,M}},
+    prd::Tuple{T,Vararg{T,M}}, bnds::Tuple{Tuple{T,T},Vararg{Tuple{T,T},M}},
+) where {T,M}
     n = length(first(c))
     distinct = map(v -> length(unique(v)), c)
     prod(distinct) == n && return distinct
-    spans = ntuple(d -> _is_periodic(per[d]) ? prd[d] : bnds[d][2] - bnds[d][1], Val(N))
+    spans = ntuple(d -> _is_periodic(per[d]) ? prd[d] : bnds[d][2] - bnds[d][1], Val(M + 1))
     ρ = (n / prod(s -> s > 0 ? s : one(T), spans))^(1 / count(>(0), spans))
     return map(s -> s > 0 ? max(2, round(Int, s * ρ)) : 1, spans)
 end

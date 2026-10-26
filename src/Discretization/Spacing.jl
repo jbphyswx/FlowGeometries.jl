@@ -35,8 +35,9 @@ a boundary gap is zero and the caller falls back to a one-sided stencil.
         h_p = i < n ? @inbounds(x[i+1] - x[i]) : zero(T)
     else
         # The wrapped neighbour is one period away along the index direction, which runs opposite the
-        # coordinate direction on a descending axis, so the offset carries the orientation.
-        p = Axes.wrap_sign(x) * T(period)
+        # coordinate direction on a descending axis, so the offset carries the orientation, read from the
+        # two end samples as the gaps are read.
+        p = (n < 2 || @inbounds(x[n] ≥ x[1]) ? one(T) : -one(T)) * T(period)
         h_m = i > 1 ? @inbounds(x[i] - x[i-1]) : @inbounds(x[1] - (x[n] - p))
         h_p = i < n ? @inbounds(x[i+1] - x[i]) : @inbounds((x[1] + p) - x[n])
     end
@@ -154,7 +155,7 @@ function _cell_widths_dense(x::AbstractVector{T}, period::Union{Nothing,Real} = 
     else
         # Both ends additionally see the seam gap, written from magnitudes so it is the same seam in
         # either storage order.
-        x1, xn = Axes._endpoints(x)
+        x1, xn = Execution._endpoints(x)
         g = abs(T(period) - abs(xn - x1))
         @views w[1:1] .= (g .+ d[1:1]) ./ T(2)
         @views w[n:n] .= (d[(n - 1):(n - 1)] .+ g) ./ T(2)

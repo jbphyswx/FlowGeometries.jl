@@ -2,10 +2,10 @@
 # Applying a held stencil plan
 # ---------------------------------------------------------------------------
 #
-# A uniform axis's interior weights are the same `K` numbers at every sample, so they reach the sweep as
-# a tuple and the innermost loop has constant coefficients. That shape pays where the differenced
-# direction is the contiguous one; where it is a slower-varying one the row is hoisted out of the inner
-# loop either way.
+# A plan's interior rows read their samples at fixed offsets: a uniform axis's with the same `K` weights at
+# every sample, which reach the sweep as a tuple in registers, and a stretched axis's with a row of
+# weights each. Along the contiguous direction the interior loop then reads consecutive samples and
+# vectorizes; along a slower-varying one the row is hoisted out of the inner loop either way.
 #
 # A plan reads the same samples as the table — the node indices are identical — and its weights are the
 # exact translation-invariant ones, where the table recomputes each row from its own window's coordinates
@@ -50,24 +50,14 @@ function _apply_plan_checked!(
     return _apply_plan!(out, field, plan, d, mask, masked, backend, fac)
 end
 
-# A tabulated plan holds exactly the two matrices the table form takes, so it goes straight there and
-# shares that path's specializations; its matrices go where the backend reads.
 function _apply_plan!(
-    out, field, plan::Discretization.TabulatedStencilPlan, d::Int, mask, masked, backend, fac,
-)
-    b = Execution.resolve(backend)
-    p = Execution.on_backend(b, plan)
-    return _apply_table!(out, field, p.indices, p.weights, d, mask, masked, b, fac)
-end
-
-function _apply_plan!(
-    out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan, d::Int,
+    out::AbstractArray{S,N}, field, plan::Discretization.AbstractStencilPlan, d::Int,
     mask, masked, backend, fac,
 ) where {S,N}
     vm = _mask_rank(mask, Val(N))
     b = Execution.resolve(backend)
-    # On a device each work item reads its own row from the plan: the centred row and the `O(K²)` end
-    # rows, held where the backend reads them, as the mask is.
+    # On a device each work item reads its own row from the plan, held where the backend reads it, as
+    # the mask is.
     if !_sweeps_on_host(b, out, field, mask, fac)
         p = Execution.on_backend(b, plan)
         m = Execution.on_backend(b, mask)
@@ -88,7 +78,7 @@ function _launch_plan!(
     out::AbstractArray{S,N}, field, plan, mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, backend, fac, vk,
 ) where {S,N,dim,M}
     ci = CartesianIndices(size(field))
-    Execution.run_indices(length(ci), backend) do lin
+    Execution.run_indices(length(ci), backend, Execution.Written(out)) do lin
         c = @inbounds ci[lin]
         I = Tuple(c)
         nodes, wts = Discretization.plan_row(plan, I[dim], vk)
@@ -126,15 +116,14 @@ end
     _plan_sweep_host!(out, field, plan, mask, masked, Val(dim), Val(N), Val(M), fac, backend, nodes) -> out
 
 The host sweep for a plan. Same nest as [`_stencil_sweep_host!`](@ref) — Cartesian range walked
-directly, nest split at `dim`, `nodes` the node count as `_dispatch_nodes` gives it — with a
-uniform plan's interior row a tuple in registers and the shifted end rows read from its own `O(K²)`
-table.
+directly, nest split at `dim`, `nodes` the node count as `_dispatch_nodes` gives it — with the interior
+rows read at fixed offsets and the end rows from the plan's own rows.
 
 `fac` is the metric factor each value is written with — see [`_RowFactors`](@ref) — or `nothing` for
 the plain sweep. Under `backend` a chunk is a contiguous range of cells, as for the table sweep.
 """
 function _plan_sweep_host!(
-    out::AbstractArray{S,N}, field, plan::Discretization.UniformStencilPlan,
+    out::AbstractArray{S,N}, field, plan::Discretization.AbstractStencilPlan,
     mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, fac, backend, vk,
 ) where {S,N,dim,M}
     sz = size(field)
@@ -147,7 +136,7 @@ function _plan_sweep_host!(
         # counted over directions `2:N` in column-major order, is `nruns · ((j−1) + n·p)`.
         nruns = stride ÷ sz[1]
         runlen = fac === nothing ? stride : sz[1]
-        Execution.run_chunks(npost * stride * n, backend) do rng
+        Execution.run_chunks(npost * stride * n, backend, Execution.Written(out)) do rng
             _plan_span_linear!(out, field, plan, mask, masked, Val(dim), first(rng) - 1, last(rng), n,
                                stride, mpost, nruns, runlen, fac, vk)
         end
@@ -171,7 +160,7 @@ end
 # `_stencil_span_linear!` walks them. A slab is one direction-1 run, and `p` counts the batch axes too —
 # the batch is the slowest, so slab `p` takes mask slab `p % mpost` and its factor from run `p`.
 @inline function _plan_span_linear!(
-    out, field, plan::Discretization.UniformStencilPlan, mask, masked, ::Val{dim}, c0::Int,
+    out, field, plan::Discretization.AbstractStencilPlan, mask, masked, ::Val{dim}, c0::Int,
     c1::Int, n::Int, stride::Int, mpost::Int, nruns::Int, runlen::Int, fac, vk,
 ) where {dim}
     outer = stride * n
@@ -199,17 +188,17 @@ end
     return nothing
 end
 
-# `dim == 1`: the differenced direction is the contiguous one. The interior span carries the weights in
-# registers and reads `field` at a fixed offset per node. Cells `jlo:jhi` of the slab are written; `h` is
-# the run's metric factor.
+# `dim == 1`: the differenced direction is the contiguous one. The interior span reads `field` at a fixed
+# offset per node, with a uniform plan's weights in registers and a tabulated plan's row by row. Cells
+# `jlo:jhi` of the slab are written; `h` is the run's metric factor.
 @inline function _plan_first_linear!(
-    out::AbstractArray{S}, field, plan::Discretization.UniformStencilPlan,
+    out::AbstractArray{S}, field, plan::Discretization.AbstractStencilPlan,
     mask, masked, off::Int, moff::Int, n::Int, jlo::Int, jhi::Int, vk, h,
 ) where {S}
     left = plan.left
     right = plan.right
-    w = Discretization._centred_row(plan, vk)
-    K = length(w)
+    w = _interior_weights(plan, vk)
+    K = _nodecount(vk)
     # The two ends, whichever way the axis closes: `plan_row` gives a shifted window on a bounded axis
     # and a wrapped one on a periodic axis. Only these rows differ between the two — a wrapping axis's
     # interior does not wrap either, so it takes the same constant-coefficient span below.
@@ -235,7 +224,7 @@ end
         end
         acc = zero(S)
         for q in 1:K
-            acc += S(w[q]) * S(field[off + j - left + q - 1])
+            acc += S(_interior_weight(w, j, q)) * S(field[off + j - left + q - 1])
         end
         out[off + j] = _scaled(acc, h, masked)
     end
@@ -245,6 +234,13 @@ end
     end
     return nothing
 end
+
+# The interior rows' weights: a uniform plan's one row, the same at every sample, and a tabulated plan's
+# table, row `j` for sample `j`.
+@inline _interior_weights(p::Discretization.UniformStencilPlan, vk) = Discretization._centred_row(p, vk)
+@inline _interior_weights(p::Discretization.TabulatedStencilPlan, _) = p.weights
+@inline _interior_weight(w::Union{Tuple,AbstractVector}, ::Int, q::Int) = @inbounds w[q]
+@inline _interior_weight(w::AbstractMatrix, j::Int, q::Int) = @inbounds w[j, q]
 
 # One cell from an explicit row, linearly addressed. The end rows and the wrapping case use it.
 @inline function _plan_cell_linear!(

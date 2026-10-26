@@ -710,7 +710,7 @@ function fold_within end
     w = _ball_window(grid, I, ball, mt, images)
     wrap = _query_flags(grid, per, images)
     prd = _query_lengths(grid, Val(N), images)
-    sgn = map(x -> T(Grids._wrap_sign(x)), Grids.coordinates(grid))
+    sgn = ntuple(d -> T(Grids._wrap_sign(grid, d)), Val(N))
     p0 = Grids._raw_coords(grid, I...)
     msk = Grids.mask(grid)
     acc = init
@@ -758,6 +758,7 @@ end
     self && (acc = f(acc, I, zero(T)))
     wφ = _angle_steps(r, 2 * R, _min_step(mt, 2), sz[2])
     s1 = _min_step(mt, 1)
+    sλ = T(Grids._wrap_sign(grid, 1))
     @inbounds for δ2 in _delta_range(wφ, I[2], sz[2], wrap[2], images)
         j = wrap[2] ? mod1(I[2] + δ2, sz[2]) : I[2] + δ2
         φj = last(Grids._image_pair(geo, p0, (λ0, φs[j]), prd))[2]
@@ -768,7 +769,7 @@ end
         band = if q < one(T)                           # `B = 0` at a pole gives `±Inf` or `NaN`: whole row
             δq = 8 * eps(T) * (ar + A + B) / B
             _row_band(Axes.spacing_trait(λs), λs, I[1], 2 * asin(sqrt(min(one(T), max(q, zero(T)) + δq))),
-                      s1, sz[1], wrap[1], prd[1])
+                      s1, sz[1], wrap[1], prd[1], sλ)
         else
             _delta_range(sz[1], I[1], sz[1], wrap[1], images)
         end
@@ -786,15 +787,14 @@ end
 
 # The longitude offsets of a row's band of half-width `Δλ` about cell `i`. A uniform axis counts steps of
 # its spacing `s1`, one beyond for the rounding of `Δλ`. A stretched one brackets `λᵢ ± Δλ` by bisection
-# over the coordinates continued past the ends by whole periods `P`, one cell beyond on each side; a band
-# covering the ring takes every cell once.
-@inline _row_band(::Axes.UniformSpacing, λs, i::Int, Δλ::T, s1::T, n::Int, wrap::Bool, P::T) where {T} =
+# over the coordinates continued past the ends by whole periods `P` in the axis's direction `s`, one cell
+# beyond on each side; a band covering the ring takes every cell once.
+@inline _row_band(::Axes.UniformSpacing, λs, i::Int, Δλ::T, s1::T, n::Int, wrap::Bool, P::T, _s::T) where {T} =
     _delta_range(_steps(Δλ, s1, n) + 1, i, n, wrap, NearestImage())
 
 function _row_band(::Axes.NonuniformSpacing, λs::AbstractVector, i::Int, Δλ::T, s1::T, n::Int,
-                   wrap::Bool, P::T) where {T}
+                   wrap::Bool, P::T, s::T) where {T}
     wrap || return _delta_range(_steps(Δλ, s1, n) + 1, i, n, wrap, NearestImage())
-    s = T(Axes.wrap_sign(λs))
     λ0 = _continued_lon(λs, i, n, s, P)
     tr = min(_band_steps(t -> s * (_continued_lon(λs, i + t, n, s, P) - λ0), Δλ, n) + 1, n - 1)
     tl = min(_band_steps(t -> s * (λ0 - _continued_lon(λs, i - t, n, s, P)), Δλ, n) + 1, n - 1)

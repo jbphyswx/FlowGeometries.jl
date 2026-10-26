@@ -1,19 +1,14 @@
 # ---------------------------------------------------------------------------
-# Gauss–Legendre nodes (Golub–Welsch)
+# Gauss–Legendre nodes and weights
 # ---------------------------------------------------------------------------
 
 """
     _gauss_legendre_μ!(μ, w) -> NamedTuple{(:μ,:w)}
 
 Write `n = length(μ)`-point Gauss–Legendre nodes/weights on ``μ ∈ (-1, 1)`` into the provided
-buffers, ascending in `μ` (`length(μ) == length(w)`).
-
-Newton's method on ``Pₙ``, evaluated by the Bonnet recurrence, from a Tricomi starting estimate
-accurate to ``O(n⁻³)`` — so 2–4 iterations reach machine precision. Roots come in ``±`` pairs, so
-only the upper half is solved.
-
-Needs ``O(1)`` scratch. Time is ``O(n²)``: each of the ``n/2`` roots costs an ``O(n)`` recurrence. The
-Bogaert-style asymptotic expansions below are the ``O(n)`` path.
+buffers, ascending in `μ` (`length(μ) == length(w)`). At `Float64` width above `n = 60` they come from
+the asymptotic expansions, `O(1)` per node; otherwise from Newton on ``Pₙ``, `O(n)` per root. See
+[`_gauss_legendre!`](@ref).
 """
 function _gauss_legendre_μ!(μ::AbstractVector{T}, w::AbstractVector{T}) where {T<:AbstractFloat}
     length(w) == length(μ) || throw(DimensionMismatch("μ and w must have the same length"))
@@ -162,13 +157,8 @@ function _gauss_legendre!(
     # Work at no less than Float64 and round once: the series below sums ~30 terms, so accumulating it
     # at Float32 leaves the root short of Float32's own precision.
     TW = promote_type(T, Float64)
-    # The asymptotic expansions are Float64 coefficient sets truncated at a fixed order, so they are
-    # used only where they are actually the better answer: at Float64 width and above n = 60. Wider
-    # types and small n fall through to Newton, which is exact arithmetic converging to eps(TW).
-    # Measured relative weight error at Float64 against a high-precision reference:
-    #   n       8      33      64      1024     4096
-    #   Newton  8e-16  3e-14   5e-14   3e-12    2e-10
-    #   asy     5e-9   2e-13   1e-15   3e-15    1e-14
+    # The asymptotic expansions are Float64 coefficient sets truncated at a fixed order, accurate to
+    # Float64 above n = 60. Wider types and smaller n take Newton, which converges to eps(TW).
     if TW === Float64 && n > 60
         _gauss_legendre_asy!(T, μ, w, lat, n, m)
     else
@@ -184,10 +174,8 @@ Nodes and weights by Newton on `Pₙ`, from a Tricomi start, each root iterated 
 resolves it to a relative `eps(TW)`: a root within `π/4` of the pole in its colatitude `θ`, any other in
 its latitude `φ`. See [`_gl_newton_colatitude`](@ref) and [`_gl_newton_latitude`](@ref).
 
-`O(n)` per root, so `O(n²)` overall — but it is exact arithmetic converging to `eps(TW)`, which the
-asymptotic expansion's fixed Float64 coefficient set cannot do. That makes it the right method for
-wide element types at any `n`, and for small `n`, where the expansion is inaccurate and the quadratic
-cost is microseconds.
+`O(n)` per root, `O(n²)` overall, converging to `eps(TW)`: the method for element types wider than
+`Float64` at any `n`, and for `n ≤ 60`.
 """
 function _gauss_legendre_newton!(
     ::Type{T}, ::Type{TW}, μ::Union{Nothing,AbstractVector}, w::Union{Nothing,AbstractVector},

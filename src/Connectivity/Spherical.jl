@@ -63,7 +63,7 @@ function _csr_from_candidates(
 ) where {F,I<:Integer}
     Grids._check_ids(I, n)
     deg = Vector{Int}(undef, n)
-    Execution.run_chunks(n, execution) do rng
+    Execution.run_chunks(n, execution, Execution.Written(deg)) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             deg[i] = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -71,7 +71,7 @@ function _csr_from_candidates(
     end
     ptr = Execution.exclusive_scan!(Vector{Int}(undef, n + 1), deg, execution)
     nbrs = Vector{I}(undef, ptr[end] - 1)
-    Execution.run_chunks(n, execution) do rng
+    Execution.run_chunks(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do rng
         buf = Vector{Int}(undef, maxdeg)
         @inbounds for i in rng
             d = _sort_unique_filter!(buf, 0, emit!(buf, 0, i), i, n)
@@ -502,13 +502,13 @@ function build_connectivity(
     n = SphericalSampling.icosahedral_nvertices(ν)
     Grids._check_ids(I, n)
     deg = Execution.allocate(execution, Int, n)
-    Execution.run_indices(n, execution) do k
+    Execution.run_indices(n, execution, Execution.Written(deg)) do k
         @inbounds deg[k] = _ico_neighbor_ids(k, ν)[2]
     end
     total = _csr_total(deg, n, execution)
     ptr = Execution.exclusive_scan!(Execution.allocate(execution, Int, n + 1), deg, execution)
     nbrs = Execution.allocate(execution, I, total)
-    Execution.run_indices(n, execution) do k
+    Execution.run_indices(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
         @inbounds begin
             ids, m = _ico_neighbor_ids(k, ν)
             slot = ptr[k]

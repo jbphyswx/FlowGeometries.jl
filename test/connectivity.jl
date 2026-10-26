@@ -1573,19 +1573,26 @@ Test.@testset "A binned index answers as the scan does, in either layout" begin
         (GD.UnstructuredGrid(cart, (cx, cy), ones(n)), (17,)),
         (GD.StructuredGrid(cart, 0.0:1.0:5.0, 0.0:1.0:4.0, 0.0:1.0:3.0), (3, 3, 2)),
     )
+    # The index's candidates hold every cell of the ball. A layout that queries through an index then
+    # answers as the scan does; a structured grid's query takes its separable window and reads no index.
     for (g, I) in grids, layout in (GD.DenseBins(), GD.HashedBins()), r in (1.7,)
-        top = C.MetricTopology(g; index = GD.binned_index(g; layout))
-        Test.@test sort(C.neighbors_within(g, I...; ball = r, topology = top)) == sort(C.neighbors_within(g, I...; ball = r))
-        Test.@test C.nneighbors_within(g, I...; ball = r, topology = top) == C.nneighbors_within(g, I...; ball = r)
+        ix = GD.binned_index(g; layout)
+        ball = sort(C.neighbors_within(g, I...; ball = r))
+        Test.@test issubset(ball, GD.index_within!(Int[], ix, g, GD._cell_named_by(g, I), r))
+        GD.candidate_source(g) isa GD.IndexedCandidates || continue
+        top = C.MetricTopology(g; index = ix)
+        Test.@test sort(C.neighbors_within(g, I...; ball = r, topology = top)) == ball
+        Test.@test C.nneighbors_within(g, I...; ball = r, topology = top) == length(ball)
     end
     # Cells filling their box take the dense layout under the occupancy rule, and the clusters the hashed.
     Test.@test GD.binned_index(grids[3][1]).layout isa GD.DenseBins
     Test.@test GD.binned_index(grids[5][1]).layout isa GD.HashedBins
 
     # An index of the active cells serves that policy alone.
-    let g = grids[1][1], top = C.MetricTopology(grids[1][1]; index = GD.binned_index(grids[1][1]; active_only = true))
-        Test.@test C.nneighbors_within(g, 8, 7; ball = 1.7, topology = top) == C.nneighbors_within(g, 8, 7; ball = 1.7)
-        Test.@test_throws ArgumentError C.nneighbors_within(g, 8, 7; ball = 1.7, active_only = false, topology = top)
+    let act = [i % 7 != 0 for i in 1:n], g = GD.UnstructuredGrid(cart, (xs, ys), ones(n), act),
+        top = C.MetricTopology(g; index = GD.binned_index(g; active_only = true))
+        Test.@test C.nneighbors_within(g, 17; ball = 1.7, topology = top) == C.nneighbors_within(g, 17; ball = 1.7)
+        Test.@test_throws ArgumentError C.nneighbors_within(g, 17; ball = 1.7, active_only = false, topology = top)
     end
 
     # Every image of every cell within a ball wider than both periods, against the sum over shifted copies.

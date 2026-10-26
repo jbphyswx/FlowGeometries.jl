@@ -182,7 +182,7 @@ function interpolate!(
     policy::AbstractMaskPolicy = BlankMasked(), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S}
     nb = _check_points_out(out, field, grid, length(points))
-    Execution.run_chunks(length(points), execution) do rng
+    Execution.run_chunks(length(points), execution, Execution.Written(out, Execution.ByBlock(nb))) do rng
         @inbounds for i in rng
             interpolate!(view(out, ((i - 1) * nb + 1):(i * nb)), field, grid, points[i];
                          active_only = active_only, masked = masked, policy = policy)
@@ -308,7 +308,7 @@ function _metric_row_factors!(
     geo = Grids.grid_geometry(grid)
     sz = Grids.size_tuple(grid)
     x1 = T(Grids.origin(grid, 1))
-    ax = map(Axes._host_array, Base.tail(Grids.coordinates(grid)))
+    ax = map(Execution._host_array, Base.tail(Grids.coordinates(grid)))
     rows = CartesianIndices(ntuple(d -> sz[d + 1], Val(N - 1)))
     @inbounds for (r, Ir) in enumerate(rows)
         pt = (x1, ntuple(d -> T(ax[d][Ir[d]]), Val(N - 1))...)
@@ -375,7 +375,7 @@ function Discretization.axis_stencils(
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     return _dispatch_dim(Int(dim), Val(N)) do vd
-        Discretization.axis_stencils(Axes._host_array(Grids.coordinates(grid)[_val(vd)]), order, nodes;
+        Discretization.axis_stencils(Execution._host_array(Grids.coordinates(grid)[_val(vd)]), order, nodes;
                                      period = Grids._wrap_period(grid, _val(vd)))
     end
 end
@@ -395,7 +395,7 @@ function Discretization.stencil_plan(
 ) where {G,T,N}
     1 ≤ dim ≤ N || throw(ArgumentError("direction $dim is outside 1:$N"))
     return _dispatch_dim(Int(dim), Val(N)) do vd
-        Discretization._axis_plan(Axes._host_array(Grids.coordinates(grid)[_val(vd)]), Int(order), Int(nodes),
+        Discretization._axis_plan(Execution._host_array(Grids.coordinates(grid)[_val(vd)]), Int(order), Int(nodes),
                                   Grids._wrap_period(grid, _val(vd)))
     end
 end

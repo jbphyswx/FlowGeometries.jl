@@ -23,5 +23,5 @@ FlowGeometries
 ```@index
 Pages = ["api/axes.md", "api/geometry.md", "api/sampling.md", "api/stencils.md",
          "api/discretization.md", "api/grids.md", "api/connectivity.md", "api/operators.md",
-         "api/execution.md"]
+         "api/execution.md", "api/decomposition.md"]
 ```

@@ -23,7 +23,7 @@ stored.
 | `GaussLegendreSampling` | tensor product | `(2N−1) × N` | exact quadrature to `lmax = N−1` |
 | `DriscollHealySampling` | tensor product | `2N × N` | equiangular, includes the north pole |
 | `DriscollHealyEqualSampling` | tensor product | `N × N` | the square DH1 layout |
-| `ClenshawCurtisSampling` | tensor product | `(2N−1) × N` | open — no polar points |
+| `Fejer1Sampling` | tensor product | `(2N−1) × N` | Fejér's first rule; open — no polar points |
 | `McEwenWiauxSampling` | tensor product | `(2L−1) × L` | ~half the samples of classical DH |
 | `LatLonSampling` | tensor product | arbitrary | regional or global; no spectral claim |
 | `HEALPixSampling` | iso-latitude rings | `12·nside²` | equal area by construction |
@@ -35,7 +35,7 @@ stored.
 
 ![Six spherical samplings](assets/samplings.png)
 
-Gauss–Legendre and Clenshaw–Curtis put their points on iso-latitude rings that crowd toward the
+Gauss–Legendre and Fejér's first rule put their points on iso-latitude rings that crowd toward the
 poles; HEALPix, the cubed sphere and the icosahedral geodesic are quasi-uniform. Yin–Yang is two
 overlapping panels, each a low-latitude patch in its own frame; the poles lie inside yang, so neither
 panel has a polar singularity.
@@ -58,9 +58,9 @@ exactness to degree `2·lmax`:
 |---|---|---|---|---|
 | Gauss–Legendre | `2N−1` | `N−1` | `2N−2` | yes |
 | Driscoll–Healy | `N−1` | `N/2−1` | `N−2` | yes |
-| Clenshaw–Curtis | `N−1` | `N−1` | `2N−2` | **no** |
+| Fejér first rule | `N−1` | `N−1` | `2N−2` | **no** |
 
-Clenshaw–Curtis's band limit describes what its grid can *represent*; its quadrature only supports
+The Fejér grid's band limit describes what it can *represent*; its quadrature only supports
 analysis to about `(N−1)/2`. Use Gauss–Legendre when the analysis has to be exact.
 
 ## Sizing
@@ -95,8 +95,7 @@ its return value: `spherical_axes!`, `latitude_weights!`, `spherical_quadrature!
 
 ```@example sampling
 λ = Vector{Float64}(undef, 127); φ = Vector{Float64}(undef, 64); w = similar(φ)
-FG.SphericalSampling.spherical_quadrature!(λ, φ, w, FG.SphericalSampling.GaussLegendreSampling(), 64)
-sum(w)
+FG.SphericalSampling.spherical_quadrature!(λ, φ, w, FG.SphericalSampling.GaussLegendreSampling(), 64);
 ```
 
 Weights are normalized so `Σw = ∫₀^π sinθ dθ = 2` for every sampling that has them. McEwen–Wiaux has
@@ -127,21 +126,15 @@ its circumference warrants, so it is not a tensor product:
 
 ```@example sampling
 oct = FG.SphericalSampling.OctahedralGaussianSampling(80)     # ECMWF octahedral, N = 80
-FG.SphericalSampling.nrings(oct), FG.SphericalSampling.npoints(oct), 4 * 80 * (80 + 9)
+FG.SphericalSampling.nrings(oct), FG.SphericalSampling.npoints(oct)   # 4N(N + 9) points
 ```
 
 ```@example sampling
 first(FG.SphericalSampling.nlon_per_ring(oct), 4)             # 20 at the pole, +4 per ring
 ```
 
-Its latitude weights are Gauss–Legendre's, so the quadrature is exact; the longitude factor varies by
-ring because the ring populations do:
-
-```@example sampling
-w = FG.SphericalSampling.latitude_weights(oct)
-counts = FG.SphericalSampling.nlon_per_ring(oct)
-sum(w), sum(w[j] * (2π / counts[j]) * counts[j] for j in eachindex(counts)) / 4π
-```
+Its latitude weights are Gauss–Legendre's, so the quadrature is exact; the longitude factor of ring `j`
+is `2π / nlon_per_ring(oct)[j]`, varying by ring because the ring populations do.
 
 ### Walking a map ring by ring
 
@@ -164,12 +157,13 @@ Gaussians, HEALPix, and the tensor-product grids, which take their `nlat` first:
 SS.ring_range(SS.HEALPixSampling(4), 3), SS.ring_range(SS.GaussLegendreSampling(), 8, 3)
 ```
 
-The Fibonacci lattice spreads points one per equal-area band with a golden-angle longitude step, which
-gives a quasi-uniform set with no polar clustering and no panel seams:
+The Fibonacci lattice spreads points one per equal-area band, equal steps in `z = sin φ`, with a
+golden-angle longitude step, which gives a quasi-uniform set with no polar clustering and no panel
+seams:
 
 ```@example sampling
 fib = FG.SphericalSampling.spherical_points(FG.SphericalSampling.FibonacciSampling(1000))
-extrema(diff(sin.(fib.φ)))            # exactly equal steps in z
+length(fib.λ)
 ```
 
 ## HEALPix pixel indexing
@@ -200,12 +194,7 @@ info = SS.ring_info(4, 6)
 info.startpix, info.ringpix, info.latitude, info.shifted
 ```
 
-The rings tile the map exactly — `startpix` is contiguous and the widths sum to `12·nside²`:
-
-```@example sampling
-rings = [SS.ring_info(4, r) for r in 1:15]
-sum(i -> i.ringpix, rings) == 12 * 4^2, rings[1].startpix == 0
-```
+The rings tile the map exactly: `startpix` is contiguous from `0` and the widths sum to `12·nside²`.
 
 ## Points sit at cell centres
 

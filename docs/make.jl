@@ -19,6 +19,7 @@ const MODULES = [
     FlowGeometries.Connectivity,
     FlowGeometries.Operators,
     FlowGeometries.Execution,
+    FlowGeometries.Decomposition,
 ]
 
 makedocs(;
@@ -54,6 +55,7 @@ makedocs(;
             "Connectivity" => "api/connectivity.md",
             "Operators" => "api/operators.md",
             "Execution" => "api/execution.md",
+            "Decomposition" => "api/decomposition.md",
         ],
     ],
     # Every example in the docs is executed, and a docstring that names a signature the code does not

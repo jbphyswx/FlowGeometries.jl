@@ -52,23 +52,30 @@ end
 """
     TabulatedStencilPlan{T,MI,MW}
 
-The weight set of a stretched axis: one row of node indices and weights per sample, as the `n × K` pair
-of matrices [`axis_stencils`](@ref) returns. `K = 0` describes a direction too short for the derivative.
+The weight set of a stretched axis: one row of node indices and weights per sample, the `n × K` pair of
+matrices [`axis_stencils`](@ref) returns. Rows `left+1:n-right` read samples `j-left:j+right`, each with
+its own weights; the rows at the two ends shift inward on a bounded axis and wrap on a periodic one, as
+the uniform plan's do. `K = 0` describes a direction too short for the derivative.
 """
 struct TabulatedStencilPlan{T<:AbstractFloat, MI<:AbstractMatrix{<:Integer}, MW<:AbstractMatrix{T}} <:
        AbstractStencilPlan{T}
     indices::MI
     weights::MW
+    left::Int                 # nodes before the sample in an interior row, (K - 1) ÷ 2
+    right::Int                # nodes after it, K - 1 - left
     order::Int
 end
 
+# `idx` and `w` are a table `axis_stencils` built, whose windows place the interior rows.
 function TabulatedStencilPlan(
     idx::AbstractMatrix{<:Integer}, w::AbstractMatrix{T}, order::Integer,
 ) where {T}
     size(idx) == size(w) || throw(DimensionMismatch(
         "indices $(size(idx)) and weights $(size(w)) must have the same size",
     ))
-    return TabulatedStencilPlan{T,typeof(idx),typeof(w)}(idx, w, Int(order))
+    k = size(w, 2)
+    left = max(k - 1, 0) ÷ 2
+    return TabulatedStencilPlan{T,typeof(idx),typeof(w)}(idx, w, left, max(k - 1 - left, 0), Int(order))
 end
 
 """

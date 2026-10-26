@@ -1,8 +1,12 @@
 module FlowGeometriesMPIExt
 
-# A grid split over the ranks of an `MPIBackend`. The blocks lie on a Cartesian communicator, one per
-# rank, and halos pass between neighbouring ranks by `MPI.Sendrecv!`. Every rank holds its block of every
-# field, and every rank calls every function here, as it calls every collective.
+# A loop under `MPIBackend(inner)` runs one contiguous share of `1:n` per rank, each under `inner`. The
+# shares of every declared `Written` output are then exchanged in place, so each rank ends with the whole
+# array; a reduction gathers every rank's partial and combines them in rank order, so every rank returns
+# the same value. Every rank calls the loop, as it calls every collective.
+#
+# A grid split over the ranks keeps its blocks on a Cartesian communicator, one per rank, and halos pass
+# between neighbouring ranks by `MPI.Sendrecv!`; every rank holds its block of every split field.
 
 using MPI: MPI
 using ComputationalBackends: ComputationalBackends as CB
@@ -10,14 +14,108 @@ using FlowGeometries.Execution: Execution
 using FlowGeometries.Grids: Grids
 using FlowGeometries.Decomposition: Decomposition as D
 
+_comm(b::CB.MPIBackend) = b.comm === nothing ? MPI.COMM_WORLD : b.comm
+_comm(::CB.AbstractMPIBackend) = MPI.COMM_WORLD
+
+# ---------------------------------------------------------------------------
+# A share of the indices per rank
+# ---------------------------------------------------------------------------
+
+# Rank `r`'s share is entry `r + 1`, one per rank, empty where `1:n` has fewer indices than ranks.
+function _shares(n::Int, nranks::Int)
+    ranges = Execution.chunk_ranges(n, nranks)
+    return [k ≤ length(ranges) ? ranges[k] : ((n + 1):n) for k in 1:nranks]
+end
+
+struct _Shift{F}
+    f::F
+    off::Int
+end
+@inline (s::_Shift)(i::Integer) = s.f(i + s.off)
+
+struct _ShiftRange{F}
+    f::F
+    off::Int
+end
+@inline (s::_ShiftRange)(r::UnitRange{Int}) = s.f(r .+ s.off)
+
+# Every rank's share of `o`, exchanged in place. The spans of consecutive shares are consecutive, so each
+# rank's contribution already sits where the exchange reads it. Anything but a host `Array` is staged
+# through one, so a device array or a strided view is exchanged by its values.
+function _allgather!(o::Execution.Written, shares, comm)
+    span = Execution._host_span(o.span)
+    spans = map(span, shares)
+    counts = Cint[length(s) for s in spans]
+    displs = Cint[first(s) - 1 for s in spans]
+    A = o.array
+    buf = A isa Array ? vec(A) : Array(vec(A))
+    MPI.Allgatherv!(MPI.VBuffer(buf, counts, displs), comm)
+    A isa Array || copyto!(A, buf)
+    return nothing
+end
+
+# Every rank's object, in rank order, on every rank.
+function _allgather_objects(x, comm)
+    isbitstype(typeof(x)) && return MPI.Allgather(x, comm)
+    return MPI.bcast(MPI.gather(x, comm; root = 0), 0, comm)
+end
+
+function Execution.run_indices(
+    f::F, n::Integer, b::CB.AbstractMPIBackend, outs::Execution.Written...,
+) where {F}
+    comm = _comm(b)
+    shares = _shares(Int(n), MPI.Comm_size(comm))
+    rng = shares[MPI.Comm_rank(comm) + 1]
+    Execution.run_indices(_Shift(f, first(rng) - 1), length(rng), CB.local_backend(b))
+    foreach(o -> _allgather!(o, shares, comm), outs)
+    return nothing
+end
+
+function Execution.run_chunks(
+    f::F, n::Integer, b::CB.AbstractMPIBackend, outs::Execution.Written...,
+) where {F}
+    comm = _comm(b)
+    shares = _shares(Int(n), MPI.Comm_size(comm))
+    rng = shares[MPI.Comm_rank(comm) + 1]
+    Execution.run_chunks(_ShiftRange(f, first(rng) - 1), length(rng), CB.local_backend(b))
+    foreach(o -> _allgather!(o, shares, comm), outs)
+    return nothing
+end
+
+# This rank's chunk results, and every other rank's, concatenated in rank order.
+function Execution.map_chunks(f::F, n::Integer, b::CB.AbstractMPIBackend) where {F}
+    comm = _comm(b)
+    rng = _shares(Int(n), MPI.Comm_size(comm))[MPI.Comm_rank(comm) + 1]
+    mine = Execution.map_chunks(_ShiftRange(f, first(rng) - 1), length(rng), CB.local_backend(b))
+    return reduce(vcat, MPI.bcast(MPI.gather(mine, comm; root = 0), 0, comm))
+end
+
+function Execution.reduce_indices(
+    f::F, op::O, init, n::Integer, b::CB.AbstractMPIBackend,
+) where {F,O}
+    comm = _comm(b)
+    rng = _shares(Int(n), MPI.Comm_size(comm))[MPI.Comm_rank(comm) + 1]
+    mine = Execution.reduce_indices(_Shift(f, first(rng) - 1), op, init, length(rng), CB.local_backend(b))
+    acc = init
+    for p in _allgather_objects(mine, comm)
+        acc = op(acc, p)
+    end
+    return acc
+end
+
+# ---------------------------------------------------------------------------
+# A grid split over the ranks
+# ---------------------------------------------------------------------------
+
 """
     MPISplitGrid
 
 A grid split over the ranks of a Cartesian communicator: the whole grid's description, this rank's
-[`Decomposition.Block`](@ref), the split directions in the communicator's axis order, and this rank's
-neighbour along each direction below and above (`MPI.PROC_NULL` where there is none).
+[`Decomposition.Block`](@ref), the split directions in the communicator's axis order, this rank's
+neighbour along each direction below and above (`MPI.PROC_NULL` where there is none), and the two byte
+buffers a transpose onto the split stages through, shared by every split made from it.
 """
-struct MPISplitGrid{N,M,G,B<:D.Block{N},X} <: D.AbstractRankSplit{N}
+struct MPISplitGrid{N,M,G,B<:D.Block{N},X,V<:AbstractVector{UInt8}} <: D.AbstractRankSplit{N}
     grid::G
     block::B
     comm::MPI.Comm
@@ -25,6 +123,8 @@ struct MPISplitGrid{N,M,G,B<:D.Block{N},X} <: D.AbstractRankSplit{N}
     halo::NTuple{N,Int}
     neighbours::NTuple{N,Tuple{Int,Int}}
     execution::X
+    send_buf::V
+    recv_buf::V
 end
 
 """
@@ -44,9 +144,7 @@ D.block(s::MPISplitGrid) = s.block
 D.cartesian_comm(s::MPISplitGrid) = s.comm
 D.local_array(f::MPISplitField) = f.data
 D._halo(s::MPISplitGrid) = s.halo
-
-_comm(b::CB.MPIBackend) = b.comm === nothing ? MPI.COMM_WORLD : b.comm
-_comm(::CB.AbstractMPIBackend) = MPI.COMM_WORLD
+D._buffers(s::MPISplitGrid) = (s.send_buf, s.recv_buf)
 
 function D.split_grid(
     grid::Grids.StructuredGrid{T,G,N}, backend::CB.AbstractMPIBackend;
@@ -57,16 +155,16 @@ function D.split_grid(
     P = blocks === nothing ? ntuple(k -> Int(MPI.Dims_create(nr, zeros(Int, M))[k]), Val(M)) : blocks
     prod(P) == nr || throw(ArgumentError("$(prod(P)) blocks for $nr ranks"))
     cart = MPI.Cart_create(comm, collect(P); periodic = fill(false, M), reorder = false)
-    return _split(grid, cart, dims, P, Int(halo), backend)
+    return _split(grid, cart, dims, P, Int(halo), backend, UInt8[], UInt8[])
 end
 
 function D.split_grid(s::MPISplitGrid{N,M}; dims::NTuple{M,Int}) where {N,M}
     P = ntuple(k -> Int(MPI.Cart_get(s.comm)[1][k]), Val(M))
-    return _split(s.grid, s.comm, dims, P, maximum(s.halo), s.execution)
+    return _split(s.grid, s.comm, dims, P, maximum(s.halo), s.execution, s.send_buf, s.recv_buf)
 end
 
 function _split(grid::Grids.StructuredGrid{T,G,N}, cart::MPI.Comm, dims::NTuple{M,Int}, P::NTuple{M,Int},
-                halo::Int, backend) where {T,G,N,M}
+                halo::Int, backend, send_buf::AbstractVector{UInt8}, recv_buf::AbstractVector{UInt8}) where {T,G,N,M}
     count, h = D._plan(grid, dims, P, halo)
     me = ntuple(k -> MPI.Cart_coords(cart)[k] + 1, Val(M))
     sz = size(grid)
@@ -83,7 +181,7 @@ function _split(grid::Grids.StructuredGrid{T,G,N}, cart::MPI.Comm, dims::NTuple{
         side(c) = (1 ≤ c ≤ count[d] || wraps) ? rank(c) : Int(MPI.PROC_NULL)
         (side(at(d) - 1), side(at(d) + 1))
     end
-    return MPISplitGrid(grid, block, cart, dims, h, nb, backend)
+    return MPISplitGrid(grid, block, cart, dims, h, nb, backend, send_buf, recv_buf)
 end
 
 function D.split_field(s::MPISplitGrid, ::Type{T}, batch::Integer...) where {T}
@@ -121,7 +219,7 @@ D.exchange_halo!(f::MPISplitField, dim::Integer) = (_exchange!(f, Int(dim)); f)
 
 # Along `d`: the first `h` own cells go down and the upper halo is filled from above, then the last `h`
 # go up and the lower halo is filled from below. A slab spans every other direction whole, halos
-# included, and passes through a host buffer, so a device-resident block exchanges by its values.
+# included.
 function _exchange!(f::MPISplitField{T,N}, d::Int) where {T,N}
     s = f.split
     h = s.halo[d]
@@ -137,8 +235,18 @@ function _exchange!(f::MPISplitField{T,N}, d::Int) where {T,N}
 end
 
 # `A[send...]` to `dest`, and from `source` into `A[recv...]`. A missing neighbour is `MPI.PROC_NULL`, to
-# which nothing is sent and from which nothing arrives; a bounded end has an empty `recv`.
-function _swap!(A, send, recv, dest::Int, source::Int, comm)
+# which nothing is sent and from which nothing arrives; a bounded end has an empty `recv`. A host array
+# is sent and received in place, a slab being an MPI subarray of it, the side facing a missing neighbour
+# an empty buffer. Any other array passes through host copies, so a device-resident block exchanges by
+# its values.
+function _swap!(A::Array{T}, send, recv, dest::Int, source::Int, comm) where {T}
+    MPI.Sendrecv!(_side(A, send, dest), _side(A, recv, source), comm; dest = dest, source = source)
+    return nothing
+end
+
+@inline _side(A::Array{T}, idx::Tuple, rank::Int) where {T} = rank == MPI.PROC_NULL ? T[] : view(A, idx...)
+
+function _swap!(A::AbstractArray, send, recv, dest::Int, source::Int, comm)
     out = Array(view(A, send...))
     into = similar(out, map(length, recv))
     MPI.Sendrecv!(out, into, comm; dest = dest, source = source)

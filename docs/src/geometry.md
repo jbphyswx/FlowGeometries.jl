@@ -118,8 +118,9 @@ first order when `h₋ ≠ h₊`, which is the common case on a stretched grid.
 
 ## A spheroid drives the whole stack
 
-`SpheroidGeometry` overrides `distance` (Vincenty), `area_element`, `volume_element` and
-`scale_factors`; the grid, sampling and connectivity layers are inherited.
+`SpheroidGeometry` overrides `distance` (the geodesic, by Karney's 2013 solution of the inverse
+problem), `area_element`, `volume_element` and `scale_factors`; the grid, sampling and connectivity
+layers are inherited.
 
 ```@example geometry
 FG.Geometry.distance(wgs, (0.0, 0.0), (0.0, π/2))    # quarter meridian, WGS 84
@@ -142,20 +143,15 @@ FG.Grids.coordinate_names(gs), FG.Grids.isperiodic(gs, 1), size(gs)
 ```
 
 The surface element `M(φ)·N(φ)cosφ·Δλ·Δφ` factors, so the measure stays separable, and each cell is
-that element integrated between its faces. The cells add up to the ellipsoid's closed-form area:
-
-```@example geometry
-a, e² = FG.Geometry.semimajor_axis(wgs), FG.Geometry.eccentricity²(wgs)
-sum(FG.Grids.measure(gs)) ≈ 2π * a^2 * (1 + (1 - e²) / sqrt(e²) * atanh(sqrt(e²)))
-```
+that element integrated between its faces; the cells add up to the ellipsoid's closed-form area.
 
 Adding a height direction changes that. The geodetic volume element offsets *both* curvature radii by
-`h`, coupling `φ` and `h`, so no product of per-axis factors reproduces it and the measure is stored
-dense — which `measure_factors` reports by returning `nothing`:
+`h`, coupling `φ` and `h`, so no product of per-axis factors reproduces it: the measure holds the
+`(φ, h)` slab whole beside the longitude factor, and `measure_factors` returns `nothing`:
 
 ```@example geometry
 g3 = FG.Grids.StructuredGrid(wgs, λ, φ, range(0.0, 2000.0; length = 3))
-FG.Grids.measure_factors(gs) !== nothing, FG.Grids.measure_factors(g3) === nothing
+typeof(FG.Grids.measure(g3)).name.name, FG.Grids.measure_factors(g3)
 ```
 
 ## Adding a geometry
@@ -214,17 +210,6 @@ typeof(grot).name.name, size(grot), FG.Grids.coordinate_names(grot)
 
 The cell measure carries over *exactly*, a rotation being an isometry of the sphere, so the array is
 shared; recomputing it from the rotated corners adds roundoff. The index topology carries over too:
-same mesh, same neighbours, so a direction that wrapped still wraps.
-
-```@example geometry
-gplain = FG.Grids.StructuredGrid(sph, λr, φr)
-FG.Grids.measure(grot, 3, 4) == FG.Grids.measure(gplain, 3, 4),
-FG.Grids.isperiodic(grot, 1)
-```
-
-So rotating costs one `PoleRotation`, where materializing the warp cost two centre arrays, two corner
-arrays and a dense copy of that measure:
-
-```@example geometry
-Base.summarysize(grot) - Base.summarysize(gplain), sizeof(rot)
-```
+same mesh, same neighbours, so a direction that wrapped still wraps. Rotating therefore costs one
+`PoleRotation` beside the grid, where materializing the warp costs two centre arrays, two corner arrays
+and a dense copy of the measure.

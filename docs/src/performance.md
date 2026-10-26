@@ -27,7 +27,7 @@ size step:
 | `spherical_axes` Gauss–Legendre | 0.02 | 6 | 0.96 |
 | `spherical_quadrature` Gauss–Legendre | 0.03 | 9 | 0.97 |
 | `latitude_weights` Driscoll–Healy | 0.02 | 11 | 0.34 |
-| `latitude_weights` Clenshaw–Curtis | 0.02 | 11 | 1.14 |
+| `latitude_weights` Fejér first rule | 0.02 | 11 | 1.14 |
 | `UnstructuredGrid` k-d tree, 40k | 6.23 | 52 | 1.06 |
 | `build_connectivity` sampling | 91.48 | 9 | 0.93 |
 | `unstructured_grid` icosahedral | 4.00 | 80 | 1.04 |
@@ -125,8 +125,8 @@ when the query allocates its own.
 
 ![Quadrature exactness and cost](assets/quadrature.png)
 
-Gauss–Legendre holds machine precision past degree `2N−1`; Driscoll–Healy and Clenshaw–Curtis lose
-exactness just after `N−1`, which is the distinction
+Gauss–Legendre is exact through degree `2N−1`; Driscoll–Healy and Fejér's first rule lose exactness
+just after `N−1`, which is the distinction
 `admits_exact_bandlimited_quadrature` encodes. The fitted exponents on the right are measured per run.
 
 
@@ -145,19 +145,19 @@ Below `n = 60`, and for element types wider than `Float64`, the solve falls back
 Bonnet recurrence: the expansion's coefficients are a fixed `Float64` set and cannot exceed that
 precision, while Newton converges to `eps(T)` — `BigFloat` at 256 bits gives `|Σw − 2| = 1.7e-77`.
 
-Equiangular (DH/CC) weights are `O(n log n)` with an FFT loaded and `O(n²)` without, with the two
+Equiangular (Driscoll–Healy and Fejér) weights are `O(n log n)` with an FFT loaded and `O(n²)` without, with the two
 agreeing to 1.4e-14.
 
 ## Memory
 
 Neither of the two large per-cell fields is materialized:
 
-- **Cell measure** — held as per-axis factors: **0.046 MiB** at 2000², against 61.0 MiB dense.
+- **Cell measure** — held as per-axis factors: **0.046 MiB** at 4000 × 2000, against 61.0 MiB dense.
 - **Curvilinear corner directions** — two rows live at a time: **23.1 MiB** at 1000², against 61.3 MiB
   for the whole field, with bit-identical areas.
 
-The factored measure is also *faster* to read. At 2000² the dense array is 61 MiB and DRAM-bound while
-the factors stay in cache:
+The factored measure is also *faster* to read. At 4000 × 2000 the dense array is 61 MiB and DRAM-bound
+while the factors stay in cache:
 
 | access | factored vs dense |
 |---|---|
@@ -168,7 +168,7 @@ the factors stay in cache:
 
 !!! warning "Measure at realistic sizes"
     A memory-bound comparison taken at a size where the dense array still fits in cache measures the
-    cache. These are taken at 2000² and above.
+    cache. These are taken at 4000 × 2000.
 
 ## Threading
 

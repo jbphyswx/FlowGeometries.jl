@@ -4,8 +4,9 @@ using DelaunayTriangulation: DelaunayTriangulation as DT
 using FlowGeometries.Geometry: Geometry
 using FlowGeometries.Grids: Grids
 
-# Exact per-node planar Voronoi-cell areas, clipped to the convex hull along a bounded direction and
-# repeating along a periodic one (overrides the throwing fallback in `Grids._voronoi_areas`).
+# `Grids._voronoi_tessellation` for a planar node set: each node's exact Voronoi-cell area and the
+# Delaunay triangles as its cells, clipped to the convex hull along a bounded direction and repeating
+# along a periodic one.
 
 """
     _assert_not_collinear(pts)
@@ -43,9 +44,7 @@ function Grids._voronoi_tessellation(
     P = (Float64(period[1]), Float64(period[2]))
     pts = [(Float64(x[i]), Float64(y[i])) for i in 1:N]
 
-    # A degenerate (collinear) point set has no triangulation, and feeding one in surfaces as an
-    # opaque internal error. The precondition is `O(N)`, so it is checked up front; a `try`/`catch`
-    # around the triangulation swallows genuine bugs and interrupts alongside it.
+    # A collinear point set has no triangulation; the check is `O(N)` and runs before one is attempted.
     _assert_not_collinear(pts)
     any(>(0), P) || return _cells(DT.triangulate(pts), collect(1:N), N, T, I)
     return _periodic_cells(pts, P, N, T, I)

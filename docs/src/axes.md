@@ -51,7 +51,7 @@ a `BigFloat`-backed range:
 ```@example axes
 r = range(0.0; step = 0.5, length = 9)
 g = FG.Grids.StructuredGrid(geo, r, r)
-FG.Grids.coordinates(g, 1) === r, typeof(FG.Grids.coordinates(g, 1))
+typeof(FG.Grids.coordinates(g, 1))
 ```
 
 Nothing needs converting to earn the fast paths — they dispatch on `spacing_trait`, which is
@@ -117,16 +117,11 @@ Base.step(a::NamedAxis) = a.h
 Base.length(a::NamedAxis) = a.count
 
 z = NamedAxis(0.0, 0.25, 5, :depth)
-collect(z), sum(z), extrema(z), z[3], collect(z[2:4]), collect(reverse(z))
+collect(z)
 ```
 
-That is the whole contract. Indexing, the `O(1)` reductions, slicing, reversal and the affine
-arithmetic all follow, and no generic method reads a field — the names above are nothing like
-`UniformAxis`'s and it makes no difference:
-
-```@example axes
-collect(2.0 .* z .+ 1.0), A.isuniform(z), A.spacing(z)
-```
+That is the whole contract: indexing, the `O(1)` reductions, slicing, reversal and the affine
+arithmetic follow from those three methods, and no generic method reads a field.
 
 A derived axis is a plain `UniformAxis`, since the extra field has no generic meaning under a slice.
 Define [`similar_axis`](@ref) to say what it should be instead:
@@ -139,37 +134,14 @@ zz = reverse(z)[2:3] .+ 1.0
 typeof(zz), zz.name, collect(zz)
 ```
 
-Such an axis is stored as itself on a grid and takes every uniform fast path:
-
-```@example axes
-gz = FG.Grids.StructuredGrid(geo, z, z)
-FG.Grids.coordinates(gz, 1) === z, FG.Grids.isuniform(gz),
-typeof.(FG.Grids.measure_factors(gz)), Base.summarysize(gz)
-```
-
-## It is an `AbstractRange`
-
-```@example axes
-u isa AbstractRange, step(u)
-```
-
-Two things follow. Base solves `searchsorted` on a range in closed form, so lookup cost is flat in the
-axis length where the equivalent `Vector` bisects. And any package that already tests
-`isa AbstractRange` to pick a uniform-grid fast path accepts this type without knowing it exists.
-
-```@example axes
-big = A.UniformAxis(0.0, 1e-7, 10^7)
-searchsortedfirst(big, 0.5), searchsortedfirst(big, 0.5) == searchsortedfirst(collect(0.0:1e-7:0.9999999), 0.5)
-```
+Such an axis is stored as itself on a grid and takes every uniform fast path.
 
 ## What it buys
 
+A uniform axis is an `AbstractRange`, so Base's `searchsorted` answers a lookup in closed form, flat in
+the axis length, and a package that tests `isa AbstractRange` to choose a uniform fast path takes it.
 `minimum`, `maximum`, `extrema` and `sum` are closed forms, and the axis is `isbits`, so moving it to
 another storage backend costs nothing.
-
-```@example axes
-sum(u), extrema(u), isbits(u), sizeof(u)
-```
 
 On a grid the payoff is the cell measure. A uniform axis's per-cell width is one number repeated, held
 as a [`ConstantVector`](@ref):

@@ -7,7 +7,7 @@
 # corners, shaped by `Grids.corner_dims`. One gradient `G`, the metric-free difference across a face over
 # the distance between its centres, defines the rest:
 #
-#     D = −G*        the adjoint under the cell measure `V` and the face weight `A·g`
+#     D = −G*        the adjoint under the cell volume `V` and the face weight `A·g`
 #     L = D G        symmetric and negative semidefinite under `V`
 #
 # The metric-free differences compose to zero, so `curl(G χ) = 0` and `D(rot R) = 0` hold on every grid.
@@ -196,6 +196,9 @@ one per direction shaped by [`Grids.face_dims`](@ref):
   in the `(a, b)` plane, spanned by the four centres around it: on a rectilinear grid
   `|h_a h_b Δξ_a Δξ_b|` with the scale factors read at the corner and `Δξ` the coordinate distances between
   those centres;
+- `volume`: each cell's measure as the region its faces bound, which [`divergence!`](@ref) divides the
+  net flux by: the grid's measure, or where a sampling's quadrature weights stand in for it, the area
+  between the cell's faces, a pole row's included;
 - `orientation`: per direction `σ = ±1`, the sign of the coordinate's step along the index. A face value
   and a derivative along `d` are taken along increasing coordinate, whichever way an axis is stored; on a
   curvilinear grid, whose directions have no coordinate of their own, along increasing index.
@@ -209,7 +212,8 @@ An operator reads it in `execution`'s memory: one held on the host is moved ther
 moved once with `Execution.on_backend` is read as it is.
 """
 struct FaceMetrics{N,T,Gr<:Grids.AbstractGrid,B<:AbstractBoundaryCondition,A<:NTuple{N,AbstractArray{T,N}},
-                   F<:NTuple{N,AbstractArray{T,N}},P<:NTuple{N,AbstractArray{T,N}},E<:Tuple,M<:Tuple}
+                   F<:NTuple{N,AbstractArray{T,N}},P<:NTuple{N,AbstractArray{T,N}},E<:Tuple,M<:Tuple,
+                   V<:AbstractArray{T,N}}
     grid::Gr
     boundary::B
     area_op::A
@@ -217,6 +221,7 @@ struct FaceMetrics{N,T,Gr<:Grids.AbstractGrid,B<:AbstractBoundaryCondition,A<:NT
     gap::P
     edge::E
     corner::M
+    volume::V
     orientation::NTuple{N,T}
 end
 
@@ -236,6 +241,9 @@ factors read at the face, `w_e` the cell widths and `Δξ_d` the coordinate dist
 separates, so [`gradient!`](@ref), [`divergence!`](@ref) and [`curl!`](@ref) are exact for a linear field
 on a Cartesian one. On a curvilinear grid a face is the edge between two cell vertices, its area their
 distance and its gap the distance between the two centres it separates.
+
+Built on the host, cell by cell, from a grid held there; move the result to a device with
+[`Execution.on_backend`](@ref FlowGeometries.Execution.on_backend).
 """
 function face_metrics(grid::Grids.StructuredGrid{T,G,N}, bc::AbstractBoundaryCondition = Neumann()) where {T,G,N}
     layout = metric_layout(grid)
@@ -246,8 +254,9 @@ function face_metrics(grid::Grids.StructuredGrid{T,G,N}, bc::AbstractBoundaryCon
     corner = map_rotation_pairs(Val(N)) do va, vb
         _corner_array(grid, faces[_val(va)], faces[_val(vb)], _val(va), _val(vb), layout)
     end
-    σ = ntuple(d -> T(Axes.wrap_sign(Grids.coordinates(grid, d))), Val(N))
-    return FaceMetrics(grid, bc, area, flux, _face_gaps(grid), _edge_lengths(grid, faces, layout, Val(N)), corner, σ)
+    σ = ntuple(d -> T(Grids._wrap_sign(grid, d)), Val(N))
+    return FaceMetrics(grid, bc, area, flux, _face_gaps(grid), _edge_lengths(grid, faces, layout, Val(N)), corner,
+                       Grids._region_measure(grid), σ)
 end
 
 # The gaps of [`face_metrics`](@ref), which no boundary condition changes.
@@ -371,7 +380,8 @@ function face_metrics(grid::Grids.CurvilinearGrid{T,G,2}, bc::AbstractBoundaryCo
     gap = _face_gaps(grid)
     area = ntuple(d -> _curvilinear_area(grid, k, gap[d], d, bc, T), Val(2))
     flux = bc isa Dirichlet ? area : ntuple(d -> _curvilinear_area(grid, k, gap[d], d, Dirichlet(), T), Val(2))
-    return FaceMetrics(grid, bc, area, flux, gap, (nothing,), (_curvilinear_corner(grid, T),), (one(T), one(T)))
+    return FaceMetrics(grid, bc, area, flux, gap, (nothing,), (_curvilinear_corner(grid, T),), Grids.measure(grid),
+                       (one(T), one(T)))
 end
 
 # The area of the quadrilateral of the four centres around each corner, half the cross product of its
@@ -448,17 +458,19 @@ end
 
 # `f(I)` at every index of `dims`. On the host a chunk walks its run of linear indices carrying the
 # Cartesian index from one cell to the next; elsewhere each index is a work item.
-@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::Execution._HostBackend) where {F,N}
+@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::Execution._HostBackend,
+                            outs::Execution.Written...) where {F,N}
     cart = CartesianIndices(dims)
-    Execution.run_chunks(length(cart), b) do rng
+    Execution.run_chunks(length(cart), b, outs...) do rng
         _walk_cells(f, cart, rng)
     end
     return nothing
 end
 
-@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend) where {F,N}
+@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend,
+                            outs::Execution.Written...) where {F,N}
     cart = CartesianIndices(dims)
-    Execution.run_indices(length(cart), b) do lin
+    Execution.run_indices(length(cart), b, outs...) do lin
         f(@inbounds cart[lin])
         return nothing
     end
@@ -566,7 +578,7 @@ function gradient!(g::NTuple{N,AbstractArray}, χ::AbstractArray, fm::FaceMetric
 end
 
 function _gradient_dir!(gd::AbstractArray{S}, χ, grid, ad, gpd, σ, d::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, d), b) do F
+    _each_cell(Grids.face_dims(grid, d), b, Execution.Written(gd)) do F
         @inbounds gd[F] = iszero(ad[F]) ? zero(S) :
                           S(σ) * (_cell_value(χ, grid, F, d, true, S) - _cell_value(χ, grid, F, d, false, S)) /
                           gpd[F]
@@ -579,8 +591,8 @@ end
     divergence!(δ, v, fm::FaceMetrics; execution = SerialBackend()) -> δ
 
 `δ[I] = (1/V_I) Σ_d σ_d ((A v)[face above] − (A v)[face below])` over the `area_op` of each face of cell
-`I`, `V_I` its measure, and zero on an inactive cell: the negative adjoint of [`gradient!`](@ref) under
-the cell measure and the face weight `area_op · gap`, so `L = D G` is symmetric.
+`I`, `V_I` its `fm.volume`, and zero on an inactive cell: the negative adjoint of [`gradient!`](@ref)
+under the cell volume and the face weight `area_op · gap`, so `L = D G` is symmetric.
 """
 function divergence!(δ::AbstractArray, v::NTuple{N,AbstractArray}, fm::FaceMetrics{N,T};
                      execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
@@ -590,11 +602,11 @@ function divergence!(δ::AbstractArray, v::NTuple{N,AbstractArray}, fm::FaceMetr
     m = Execution.on_backend(b, fm)
     grid = m.grid
     msk = Grids.mask(grid)
-    meas = Grids.measure(grid)
+    meas = m.volume
     area = m.area_op
     σ = m.orientation
     S = eltype(δ)
-    _each_cell(Grids.size_tuple(grid), b) do I
+    _each_cell(Grids.size_tuple(grid), b, Execution.Written(δ)) do I
         @inbounds δ[I] = msk[I] ? S(_flux_out(v, area, σ, grid, I, Val(N), S) / meas[I]) : zero(S)
         return nothing
     end
@@ -685,7 +697,7 @@ end
 
 function _curl_pair!(Wp::AbstractArray{S}, va, vb, aa, ab, ga, gb, μ, σa, σb, grid, a::Int, b::Int,
                      bk) where {S}
-    _each_cell(size(Wp), bk) do Qc
+    _each_cell(size(Wp), bk, Execution.Written(Wp)) do Qc
         @inbounds begin
             Q = Grids.corner_to_face(grid, Qc, a, b)
             if _corner_closes(grid, aa, ab, Q, a, b)
@@ -733,7 +745,7 @@ function rotational_velocity!(u::NTuple{N,AbstractArray}, R::Tuple{Vararg{Abstra
 end
 
 function _rotational_dir!(uc::AbstractArray{S}, R, edge, ac, σ, terms, grid, c::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, c), b) do F
+    _each_cell(Grids.face_dims(grid, c), b, Execution.Written(uc)) do F
         @inbounds if iszero(ac[F])
             uc[F] = zero(S)
         else
@@ -776,7 +788,7 @@ function to_faces!(v::NTuple{N,AbstractArray}, u::NTuple{N,AbstractArray}, fm::F
 end
 
 function _to_faces_dir!(vd::AbstractArray{S}, ud, ad, grid, d::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, d), b) do F
+    _each_cell(Grids.face_dims(grid, d), b, Execution.Written(vd)) do F
         @inbounds if iszero(ad[F])
             vd[F] = zero(S)
         else
@@ -811,7 +823,7 @@ function to_centres!(u::NTuple{N,AbstractArray}, v::NTuple{N,AbstractArray}, fm:
 end
 
 function _to_centres_dir!(ud::AbstractArray{S}, vd, ad, msk, grid, d::Int, b) where {S}
-    _each_cell(Grids.size_tuple(grid), b) do I
+    _each_cell(Grids.size_tuple(grid), b, Execution.Written(ud)) do I
         @inbounds if msk[I]
             Fhi = Grids.face_above(grid, I, d)
             olo, ohi = !iszero(ad[I]), !iszero(ad[Fhi])
