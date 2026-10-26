@@ -34,7 +34,7 @@ function _reduced_gaussian_points!(
     λ::AbstractVector{T}, φ::AbstractVector{T}, s::AbstractReducedGaussianSampling,
     lat::AbstractVector{T}, nring::Int,
 ) where {T<:AbstractFloat}
-    _gauss_legendre!(T, nothing, nothing, nring; lat = view(lat, 1:nring))
+    FTB.gauss_legendre!(T, nothing, nothing, view(lat, 1:nring), nring)
     @inbounds for j in 1:nring
         # The latitudes ascend, so ring 1 (north) is the last entry.
         φj = lat[nring + 1 - j]
@@ -65,7 +65,7 @@ ring_latitudes(s::AbstractReducedGaussianSampling) = ring_latitudes(Float64, s)
 function ring_latitudes(::Type{T}, s::AbstractReducedGaussianSampling) where {T<:AbstractFloat}
     nring = nrings(s)
     lat = Vector{T}(undef, nring)
-    _gauss_legendre!(T, nothing, nothing, nring; lat = lat)
+    FTB.gauss_legendre!(T, nothing, nothing, lat, nring)
     return reverse!(lat)
 end
 
@@ -81,7 +81,7 @@ latitude_weights(s::AbstractReducedGaussianSampling) = latitude_weights(Float64,
 function latitude_weights(::Type{T}, s::AbstractReducedGaussianSampling) where {T<:AbstractFloat}
     nring = nrings(s)
     w = Vector{T}(undef, nring)
-    _gauss_legendre!(T, nothing, w, nring)
+    FTB.gauss_legendre!(T, nothing, w, nothing, nring)
     return reverse!(w)
 end
 

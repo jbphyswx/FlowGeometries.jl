@@ -90,7 +90,7 @@ function RingGrid(
     nring = SphericalSampling.nrings(sampling)
     φ = Vector{T}(undef, nring)
     w = Vector{T}(undef, nring)
-    SphericalSampling._gauss_legendre!(T, nothing, w, nring; lat = φ)
+    FTB.gauss_legendre!(T, nothing, w, φ, nring)
     nlon = SphericalSampling.nlon_per_ring(sampling)
     R² = T(Geometry.radius(geometry))^2
     lat = reverse!(φ)

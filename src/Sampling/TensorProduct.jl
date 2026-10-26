@@ -20,7 +20,7 @@ function spherical_axes!(
     nlon_eff = sz.nlon
     # The weights are not requested, so there is no scratch at all. Callers that want both should use
     # `spherical_quadrature!`, which solves once.
-    _gauss_legendre!(T, nothing, nothing, nlat; lat = φ)
+    FTB.gauss_legendre!(T, nothing, nothing, φ, nlat)
     dλ = T(2π) / T(nlon_eff)
     @inbounds for i in 1:nlon_eff
         λ[i] = T(i - 1) * dλ
@@ -191,7 +191,7 @@ function spherical_quadrature!(
     sz = axes_lengths(GaussLegendreSampling(), nlat; nlon)
     length(λ) == sz.nlon && length(φ) == sz.nlat && length(w) == sz.nlat ||
         throw(DimensionMismatch("λ/φ/w lengths must match axes_lengths"))
-    _gauss_legendre!(T, nothing, w, nlat; lat = φ)        # one solve, no scratch
+    FTB.gauss_legendre!(T, nothing, w, φ, nlat)           # one solve, no scratch
     dλ = T(2π) / T(sz.nlon)
     @inbounds for i in 1:sz.nlon
         λ[i] = T(i - 1) * dλ
@@ -232,40 +232,6 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    AbstractEquiangularAlgorithm
-
-Which construction computes an equiangular node family's sine sums: [`Recurrence`](@ref), always
-available, or [`Transform`](@ref), which needs an FFT planner.
-
-A type, as the mask policies are. The two agree to round-off, so naming one pins a result across
-machines that differ in whether an FFT backend is installed.
-"""
-abstract type AbstractEquiangularAlgorithm end
-
-"""
-    Recurrence()
-
-The angle-addition recurrence: `O(nlat·nterm)`, no dependency, defined for every element type.
-"""
-struct Recurrence <: AbstractEquiangularAlgorithm end
-
-"""
-    Transform()
-
-One length-`nlat` backward transform: `O(nlat·log nlat)`. Implemented by the `AbstractFFTs` extension,
-and raises without one — a planner has to exist for this to mean anything.
-"""
-struct Transform <: AbstractEquiangularAlgorithm end
-
-"""
-    _equiangular_algorithm(T) -> AbstractEquiangularAlgorithm
-
-The default for element type `T`: [`Recurrence`](@ref), and [`Transform`](@ref) for the types FFTW
-plans once FFTW is loaded, whose extension adds that method.
-"""
-_equiangular_algorithm(::Type) = Recurrence()
-
-"""
     latitude_weights!(w, sampling, nlat) -> w
 
 Fill preallocated latitude quadrature weights (`length(w) == nlat`). The equiangular families also
@@ -277,125 +243,40 @@ function latitude_weights! end
 # about this sampling.
 function latitude_weights!(
     w::AbstractVector{T}, ::AbstractGaussLegendreSampling, nlat::Integer;
-    algorithm::Union{Nothing,AbstractEquiangularAlgorithm} = nothing,
+    algorithm::Union{Nothing,FTB.AbstractEquiangularAlgorithm} = nothing,
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
     algorithm === nothing || throw(ArgumentError(
-        "Gauss–Legendre weights come from the Bogaert root solve, so there is no $(algorithm) to " *
-        "select. `algorithm` picks the equiangular sine-series construction, and applies to " *
+        "Gauss–Legendre weights come from a root solve, so there is no $(algorithm) to select. " *
+        "`algorithm` picks the equiangular sine-series construction, and applies to " *
         "DriscollHealySampling and Fejer1Sampling.",
     ))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    _gauss_legendre!(T, nothing, w, nlat)
+    FTB.gauss_legendre!(T, nothing, w, nothing, nlat)
     return w
 end
 
 """
-    OpenNodes(), ClosedNodes()
+    latitude_weights!(w, ::AbstractDriscollHealySampling, nlat; algorithm = FTB.Recurrence())
 
-The two equiangular colatitude families: open `θᵢ = π(i−½)/N` (Fejér's first rule) and closed
-`θᵢ = π(i−1)/N` (Driscoll–Healy). They are types, so the sum below dispatches on which one it has.
+Weights for the closed nodes `θᵢ = π(i−1)/N`: Driscoll & Healy (1994), by
+`FlowTransformBindings.equiangular_weights!`.
 """
-struct OpenNodes end
-struct ClosedNodes end
-
-@inline _node_theta(::OpenNodes, i::Int, nlat::Int, ::Type{T}) where {T} =
-    T(π) * (T(i) - T(0.5)) / T(nlat)
-@inline _node_theta(::ClosedNodes, i::Int, nlat::Int, ::Type{T}) where {T} =
-    T(π) * T(i - 1) / T(nlat)
-
-"""
-    _equiangular_sums!(s, family, nlat, nterm[, algorithm]) -> s
-
-`s[i] = Σ_{k=0}^{nterm-1} sin((2k+1)·θᵢ)/(2k+1)` for the given node family.
-
-With no `algorithm`, [`_equiangular_algorithm`](@ref) chooses one for the element type.
-"""
-@inline _equiangular_sums!(
-    s::AbstractVector{T}, family, nlat::Int, nterm::Int,
-) where {T<:AbstractFloat} =
-    _equiangular_sums!(s, family, nlat, nterm, _equiangular_algorithm(T))
-
-# `Transform` names a capability an extension supplies. This method resolves without the extension and
-# says which package to load.
-_equiangular_sums!(::AbstractVector{T}, _, ::Int, ::Int, ::Transform) where {T<:AbstractFloat} =
-    throw(ArgumentError(
-        "Transform() needs an FFT planner for $T; load an AbstractFFTs implementation (FFTW, for " *
-        "one), or ask for Recurrence()",
-    ))
-
-"""
-The recurrence: `sin((2k+1)θ) = 2cos(2θ)·sin((2k−1)θ) − sin((2k−3)θ)`, seeded with `s₋₁ = −sin θ`,
-`s₀ = sin θ`, so each term costs two multiplies and no transcendental.
-"""
-function _equiangular_sums!(
-    s::AbstractVector{T}, family, nlat::Int, nterm::Int, ::Recurrence,
-) where {T<:AbstractFloat}
-    @inbounds for i in 1:nlat
-        θi = _node_theta(family, i, nlat, T)
-        sθ = sin(θi)
-        u = 2 * cos(2 * θi)
-        skm1 = -sθ
-        sk = sθ
-        acc = zero(T)
-        for k in 0:(nterm - 1)
-            acc += sk / T(2k + 1)
-            skm1, sk = sk, u * sk - skm1
-        end
-        s[i] = acc
-    end
-    return s
-end
-
-"""
-    _equiangular_weights!(w, family, nlat[, algorithm]) -> w
-
-Latitude quadrature weights for an equiangular node set, from the sine series
-`S_m(θ) = Σ_{k=0}^{m} sin((2k+1)θ)/(2k+1)`, which satisfies
-
-    sinθ·S_m(θ) = ½ − Σ_{j=1}^{m} cos(2jθ)/(4j²−1) − cos((2m+2)θ)/(2(2m+1)).
-
-- Closed nodes, Driscoll & Healy (1994): `wᵢ = (4/N)·sinθᵢ·S_m(θᵢ)`, `m = N/2 − 1`.
-- Open nodes, Fejér's first rule `wᵢ = (2/N)[1 − 2Σ_{j=1}^{⌊N/2⌋} cos(2jθᵢ)/(4j²−1)]`:
-  `wᵢ = (4/N)[sinθᵢ·S_m(θᵢ) + cos((2m+2)θᵢ)/(2(2m+1))]`, `m = ⌊N/2⌋`.
-
-Weights sum to `∫₀^π sinθ dθ = 2` — see [`latitude_weights`](@ref) for why every sampling here uses
-that normalization. `algorithm` selects which construction computes the sums; omitted, the element
-type's default does.
-"""
-function _equiangular_weights!(
-    w::AbstractVector{T}, family, nlat::Int,
-    algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
-) where {T<:AbstractFloat}
-    nterm = _equiangular_terms(family, nlat)
-    _equiangular_sums!(w, family, nlat, nterm, algorithm)   # w doubles as the sum buffer
-    @inbounds for i in 1:nlat
-        θ = _node_theta(family, i, nlat, T)
-        w[i] = (T(4) / T(nlat)) * (sin(θ) * w[i] + _equiangular_tail(family, θ, nterm))
-    end
-    return w
-end
-
-# `m + 1` terms of `S_m`, and the term that turns `sinθ·S_m` into Fejér's sum on the open nodes.
-@inline _equiangular_terms(::ClosedNodes, nlat::Int) = (nlat + 1) ÷ 2
-@inline _equiangular_terms(::OpenNodes, nlat::Int) = nlat ÷ 2 + 1
-@inline _equiangular_tail(::ClosedNodes, θ, ::Int) = zero(θ)
-@inline _equiangular_tail(::OpenNodes, θ, nterm::Int) = cos(2nterm * θ) / (2(2nterm - 1))
-
 function latitude_weights!(
     w::AbstractVector{T}, ::AbstractDriscollHealySampling, nlat::Integer;
-    algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
+    algorithm::FTB.AbstractEquiangularAlgorithm = FTB.Recurrence(),
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
     iseven(nlat) || throw(ArgumentError("DH nlat must be even"))
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    return _equiangular_weights!(w, ClosedNodes(), nlat, algorithm)
+    return FTB.equiangular_weights!(w, FTB.ClosedNodes(), algorithm)
 end
 
 """
-    latitude_weights!(w, ::AbstractFejer1Sampling, nlat)
+    latitude_weights!(w, ::AbstractFejer1Sampling, nlat; algorithm = FTB.Recurrence())
 
-Weights for the open nodes `θᵢ = π(i−½)/N`: Fejér's first rule.
+Weights for the open nodes `θᵢ = π(i−½)/N`: Fejér's first rule, by
+`FlowTransformBindings.equiangular_weights!`.
 
 These integrate a single `P_l` exactly for `l ≤ N−1`, which is weaker than
 [`bandlimit`](@ref)`(Fejer1Sampling(), N) = N−1` suggests: spectral analysis integrates
@@ -406,11 +287,11 @@ be exact at the stated band limit.
 """
 function latitude_weights!(
     w::AbstractVector{T}, ::AbstractFejer1Sampling, nlat::Integer;
-    algorithm::AbstractEquiangularAlgorithm = _equiangular_algorithm(T),
+    algorithm::FTB.AbstractEquiangularAlgorithm = FTB.Recurrence(),
 ) where {T<:AbstractFloat}
     nlat = Int(nlat)
     length(w) == nlat || throw(DimensionMismatch("w length must equal nlat"))
-    return _equiangular_weights!(w, OpenNodes(), nlat, algorithm)
+    return FTB.equiangular_weights!(w, FTB.OpenNodes(), algorithm)
 end
 
 latitude_weights!(::AbstractVector, ::AbstractMcEwenWiauxSampling, ::Integer; _...) = throw(ArgumentError(
@@ -438,10 +319,9 @@ else; the longitude factor is the caller's, so a full-sphere integral is always
 regardless of which sampling produced the weights. Not every sampling has them — `LatLonSampling`
 has no spectral quadrature at all, and `McEwenWiauxSampling`'s is a different construction.
 
-The equiangular families — Driscoll–Healy and Fejér's first rule — additionally take
-`algorithm::`[`AbstractEquiangularAlgorithm`](@ref), which pins the construction of their sine sums.
-The two constructions agree only to round-off, so naming one fixes the result across machines that
-differ in whether an FFT backend is installed. Gauss–Legendre's weights come from a root solve, so it
+The equiangular families, Driscoll–Healy and Fejér's first rule, also take
+`algorithm = FlowTransformBindings.Recurrence()` or `FlowTransformBindings.Transform()`, the construction
+of their sine sums; the two agree to round-off. Gauss–Legendre's weights come from a root solve, so it
 takes no `algorithm`.
 """
 latitude_weights(s::AbstractSphericalSampling, nlat::Integer; kwargs...) =

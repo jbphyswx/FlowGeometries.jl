@@ -27,11 +27,9 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [extensions]
-FlowGeometriesAbstractFFTsExt = "AbstractFFTs"
 FlowGeometriesAdaptExt = "Adapt"
 FlowGeometriesDelaunayTriangulationExt = "DelaunayTriangulation"
 FlowGeometriesDistributedExt = "Distributed"
-FlowGeometriesFFTWExt = ["AbstractFFTs", "FFTW"]
 FlowGeometriesKernelAbstractionsExt = ["KernelAbstractions", "Adapt"]
 FlowGeometriesMPIExt = "MPI"
 FlowGeometriesNearestNeighborsExt = ["NearestNeighbors", "StaticArrays"]
@@ -41,12 +39,11 @@ FlowGeometriesSparseArraysExt = "SparseArrays"
 FlowGeometriesStaticArraysExt = "StaticArrays"
 
 [compat]
-AbstractFFTs = "1"
 Adapt = "4"
 ComputationalBackends = "0.1"
 DelaunayTriangulation = "1"
 Distributed = "1.11"
-FFTW = "1"
+FlowTransformBindings = "0.1"
 KernelAbstractions = "0.9, 0.10"
 MPI = "0.20"
 NearestNeighbors = "0.4"

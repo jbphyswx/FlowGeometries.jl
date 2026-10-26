@@ -480,7 +480,7 @@ on the sphere.
 end
 
 function _gl8_nodes(::Type{T}) where {T<:AbstractFloat}
-    r = SphericalSampling._gauss_legendre_μ(T, 8)
+    r = FTB.gauss_legendre(T, 8)
     return (ntuple(k -> @inbounds(r.μ[k]), Val(8)), ntuple(k -> @inbounds(r.w[k]), Val(8)))
 end
 
