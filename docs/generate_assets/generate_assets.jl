@@ -26,9 +26,8 @@ const VIEW = (0.35, 0.45)      # (λ₀, φ₀) of the orthographic viewpoint
 
 Orthographic projection onto the disc seen from `(λ₀, φ₀)`.
 
-`visible` is false on the far hemisphere. Those points must be DROPPED, not drawn: back-face points
-project onto the front one and make a sampling look twice as dense as it is, which is exactly the
-kind of figure that misleads.
+`visible` is false on the far hemisphere, whose points a figure drops: projected onto the front, they
+double a sampling's apparent density.
 """
 function ortho(λ, φ, λ₀, φ₀)
     sinφ₀, cosφ₀ = sincos(φ₀)
@@ -74,9 +73,9 @@ function fig_samplings()
     SS = FG.SphericalSampling
     cases = [
         ("Gauss–Legendre", tp_points(SS.GaussLegendreSampling(), 24)),
-        ("Clenshaw–Curtis", tp_points(SS.ClenshawCurtisSampling(), 24)),
-        # N chosen so the point count is comparable with the tensor-product panels beside it, which is
-        # the whole point of the comparison: the same budget, spent differently.
+        ("Fejér first rule", tp_points(SS.Fejer1Sampling(), 24)),
+        # N gives a point count comparable with the tensor-product panels beside it: the same budget,
+        # spent differently.
         ("Octahedral Gaussian, N 14",
          let p = SS.spherical_points(SS.OctahedralGaussianSampling(14)); (p.λ, p.φ) end),
         ("HEALPix, nside 8",
@@ -148,7 +147,7 @@ function fig_quadrature()
                   yscale = log10, title = "Exactness of the latitude rule (nlat = $nlat)")
     for (s, name, col) in ((FG.SphericalSampling.GaussLegendreSampling(), "Gauss–Legendre", :dodgerblue),
                            (FG.SphericalSampling.DriscollHealySampling(), "Driscoll–Healy", :seagreen),
-                           (FG.SphericalSampling.ClenshawCurtisSampling(), "Clenshaw–Curtis", :darkorange))
+                           (FG.SphericalSampling.Fejer1Sampling(), "Fejér first rule", :darkorange))
         e = [max(quad_error(s, nlat, d), 1e-17) for d in degrees]
         CM.lines!(ax1, degrees, e; label = name, color = col, linewidth = 2)
     end
@@ -161,15 +160,15 @@ function fig_quadrature()
                   yscale = log10,
                   title = "Cost with an FFT backend loaded")
     sizes = [64, 128, 256, 512, 1024, 2048]
-    styles = (:solid, :dash, :dot)   # DH and CC cost the same; without this one hides the other
+    styles = (:solid, :dash, :dot)   # Driscoll–Healy and Fejér cost the same, so each has its own style
     for (k, (s, name, col)) in enumerate(((FG.SphericalSampling.GaussLegendreSampling(), "Gauss–Legendre", :dodgerblue),
                                           (FG.SphericalSampling.DriscollHealySampling(), "Driscoll–Healy", :seagreen),
-                                          (FG.SphericalSampling.ClenshawCurtisSampling(), "Clenshaw–Curtis", :darkorange)))
+                                          (FG.SphericalSampling.Fejer1Sampling(), "Fejér first rule", :darkorange)))
         t = map(sizes) do n
             FG.SphericalSampling.latitude_weights(s, n)
             1e3 * minimum(@elapsed(FG.SphericalSampling.latitude_weights(s, n)) for _ in 1:5)
         end
-        # Least-squares slope in log-log IS the scaling exponent; show it rather than assert it.
+        # The least-squares slope in log-log is the scaling exponent, shown in the legend.
         lx = log.(Float64.(sizes)); ly = log.(t)
         p̂ = sum((lx .- Statistics.mean(lx)) .* (ly .- Statistics.mean(ly))) /
             sum((lx .- Statistics.mean(lx)) .^ 2)
@@ -219,7 +218,7 @@ function fig_connectivity()
     CM.save(joinpath(ASSETS_DIR, "connectivity.png"), fig; px_per_unit = 2)
 end
 
-# ─── 5. Yin–Yang overlap is geometry, not error ────────────────────────────
+# ─── 5. Yin–Yang: the overlap, and a measure that counts it once ───────────
 
 function fig_yinyang()
     fig = CM.Figure(; size = (940, 420))
@@ -232,19 +231,23 @@ function fig_yinyang()
     sphere_scatter!(ax, p.λ[(np + 1):end], p.φ[(np + 1):end];
                     color = (:dodgerblue, 0.8), markersize = 3.4)
 
-    ax2 = CM.Axis(fig[2, 2]; xlabel = "nlon  (nlat = 2·nlon/3)", ylabel = "Σ cell area / 4πR²",
-                  title = "The excess does not shrink with resolution")
+    ax2 = CM.Axis(fig[2, 2]; xlabel = "nlon  (nlat = 2·nlon/3)", ylabel = "Σ / 4πR²",
+                  title = "Cell areas count the overlap twice, measures once")
     ns = [12, 24, 48, 96, 192]
     ratio = map(ns) do n
         sum(FG.Grids.measure(FG.Grids.YinYangGrid(n, 2n ÷ 3))) / (4π * R^2)
     end
+    # Each panel's lat–lon cells tile it exactly, so at every resolution the areas sum to two panels,
+    # `3√2πR²`.
     CM.hlines!(ax2, [3 * sqrt(2) / 4]; color = (:gray, 0.8), linestyle = :dash)
-    CM.scatterlines!(ax2, Float64.(ns), ratio; color = :purple, linewidth = 2, markersize = 9)
-    CM.text!(ax2, 60, 3 * sqrt(2) / 4 - 0.012; text = "3√2/4 = 1.06066",
+    CM.text!(ax2, 60, 3 * sqrt(2) / 4 - 0.012; text = "Σ cell area: 3√2/4 = 1.06066",
              fontsize = 12, color = :gray)
+    CM.scatterlines!(ax2, Float64.(ns), ratio; color = :purple, linewidth = 2, markersize = 9,
+                     label = "Σ measure")
+    CM.axislegend(ax2; position = :rc, framevisible = false)
     CM.ylims!(ax2, 0.99, 1.11)
 
-    CM.Label(fig[1, 1:2], "Yin–Yang: a 6.07% area excess at every resolution";
+    CM.Label(fig[1, 1:2], "Yin–Yang: the panels overlap on 6.07% of the sphere, which the measure counts once";
              fontsize = 17, font = :bold)
     CM.save(joinpath(ASSETS_DIR, "yinyang.png"), fig; px_per_unit = 2)
 end

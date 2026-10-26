@@ -1025,7 +1025,7 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
         end
         Test.@test collect(GD.cell_widths(g, d)) == [D.cell_width(x, i, p) for i in 1:length(x)]
     end
-    Test.@test_throws ArgumentError GD.local_spacing(first(grids)[2], 3, 1)
+    Test.@test_throws ArgumentError GD.local_spacing(first(grids)[2], 4, 1)
 
     # The three-point first derivative assembled from the gaps is exact for a quadratic, in either
     # storage order.
@@ -1843,8 +1843,8 @@ Test.@testset "The mimetic operators are one adjoint family on every face-indexe
         dims = GD.size_tuple(grid)
         cells = CartesianIndices(dims)
         act = [GD.isactive(grid, Tuple(I)...) for I in cells]
-        V = [act[I] ? GD.measure(grid, Tuple(I)...) : 0.0 for I in cells]
         fm = O.face_metrics(grid, bc)
+        V = [act[I] ? fm.volume[I] : 0.0 for I in cells]
         faces(d) = CartesianIndices(GD.face_dims(grid, d))
         side(a, C) = C === nothing ? 0.0 : abs(a[C])
         incident(a, d, F) = side(a, GD.cell_below(grid, F, d)) + side(a, GD.cell_above(grid, F, d))
@@ -1928,6 +1928,9 @@ Test.@testset "A row of cells on a pole couples to the next row alone, and the o
         fm = O.face_metrics(g, bc)
         poles = [j for j in eachindex(φ) if abs(φ[j]) == π / 2]
         Test.@test !isempty(poles)
+        # The cells as regions tile the sphere, a pole row's included, whatever weights the measure holds.
+        Test.@test all(>(0), fm.volume)
+        Test.@test sum(fm.volume) ≈ 4π * 6.371e6^2 rtol = 1e-13
         for j in poles
             # The latitude face past the pole lies on it, and a longitude face between two cells on the pole
             # joins the point to itself: neither has area, and the second has no gap.

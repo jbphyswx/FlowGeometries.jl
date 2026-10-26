@@ -413,4 +413,7 @@ end
 # The halo width along each direction; each extension's split grid answers it.
 function _halo end
 
+# A rank split's two byte buffers, which a transpose onto it stages through.
+function _buffers end
+
 end # module Decomposition

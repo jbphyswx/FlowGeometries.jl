@@ -1,6 +1,6 @@
 # Dispatch gates over the derivative paths, on grids whose axis, closure and mask types differ by
 # direction: building the plans, the grid forms at a runtime direction, and the applies make no runtime
-# dispatch. JET refuses pre-release Julia.
+# dispatch. `JET` refuses pre-release Julia.
 using JET: JET
 
 Test.@testset "Derivative plans and their applies make no runtime dispatch" begin

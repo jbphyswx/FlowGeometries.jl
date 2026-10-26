@@ -10,6 +10,8 @@ include(joinpath(@__DIR__, "..", "process_backends.jl"))
 
 MPI.Init()
 Test.@testset "rank $(MPI.Comm_rank(MPI.COMM_WORLD)) of $(MPI.Comm_size(MPI.COMM_WORLD))" begin
+    check_process_backend(CB.MPIBackend())
+    check_process_backend(CB.MPIBackend(CB.ThreadedBackend()))
     check_split(CB.MPIBackend(), MPI.Comm_size(MPI.COMM_WORLD))
     check_split(CB.MPIBackend(CB.ThreadedBackend()), MPI.Comm_size(MPI.COMM_WORLD))
 end

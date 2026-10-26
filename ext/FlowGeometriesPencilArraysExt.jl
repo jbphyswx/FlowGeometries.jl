@@ -14,19 +14,16 @@ D.pencil(s::D.AbstractRankSplit) = _pencil(_topology(s, D.split_dims(s)), s)
 # its pencils to hold the same one.
 _topology(s::D.AbstractRankSplit, ::NTuple{M,Int}) where {M} = PencilArrays.MPITopology{M}(D.cartesian_comm(s))
 
+# The `Pencil` of `s`'s blocks on `topo`, a transpose onto it staging through `s`'s buffers.
 function _pencil(topo::PencilArrays.MPITopology, s::D.AbstractRankSplit)
-    p = PencilArrays.Pencil(topo, size(D.global_grid(s)), D.split_dims(s))
+    send_buf, recv_buf = D._buffers(s)
+    p = PencilArrays.Pencil(topo, size(D.global_grid(s)), D.split_dims(s); send_buf, recv_buf)
     PencilArrays.range_local(p) == D.block(s).ranges || throw(ArgumentError(
         "the split's blocks are not the ranges PencilArrays places on its communicator"))
     return p
 end
 
-D.pencil_array(f::D.AbstractRankField) = _pencil_array(D.pencil(D.split_of(f)), f)
-
-function _pencil_array(p::PencilArrays.Pencil, f::D.AbstractRankField)
-    A = D.local_array(f)
-    return PencilArrays.PencilArray(p, Array(view(A, D._own(D.block(D.split_of(f)), A)...)))
-end
+D.pencil_array(f::D.AbstractRankField) = PencilArrays.PencilArray(D.pencil(D.split_of(f)), Array(_own_cells(f)))
 
 function D._rank_redistribute!(::D.PencilTranspose, dst::D.AbstractRankField{T,N},
                                src::D.AbstractRankField{T,N}) where {T,N}
@@ -34,12 +31,23 @@ function D._rank_redistribute!(::D.PencilTranspose, dst::D.AbstractRankField{T,N
     D.global_grid(sd) === D.global_grid(ss) ||
         throw(ArgumentError("redistribute! moves a field between splits of one grid"))
     topo = _topology(ss, D.split_dims(ss))
-    A = D.local_array(src)
-    o = PencilArrays.PencilArray{T}(undef, _pencil(topo, sd), D._batch(A, Val(N))...)
-    PencilArrays.transpose!(o, _pencil_array(_pencil(topo, ss), src))
-    B = D.local_array(dst)
-    copyto!(view(B, D._own(D.block(sd), B)...), parent(o))
+    o = _target(_pencil(topo, sd), D.local_array(dst), _own_cells(dst))
+    PencilArrays.transpose!(o, _source(_pencil(topo, ss), D.local_array(src), _own_cells(src)))
+    _settle!(D.local_array(dst), _own_cells(dst), o)
     return dst
 end
+
+# This rank's own cells of `f`, halos left out.
+_own_cells(f::D.AbstractRankField) = (A = D.local_array(f); view(A, D._own(D.block(D.split_of(f)), A)...))
+
+# A field's own cells as a `PencilArray`: the field's memory where it is a host `Array`; otherwise a host
+# copy of a source, and a host array a target is copied back from.
+_source(p::PencilArrays.Pencil, ::Array, v::AbstractArray) = PencilArrays.PencilArray(p, v)
+_source(p::PencilArrays.Pencil, ::AbstractArray, v::AbstractArray) = PencilArrays.PencilArray(p, Array(v))
+_target(p::PencilArrays.Pencil, ::Array, v::AbstractArray) = PencilArrays.PencilArray(p, v)
+_target(p::PencilArrays.Pencil, ::AbstractArray, v::AbstractArray{T}) where {T} =
+    PencilArrays.PencilArray(p, Array{T}(undef, size(v)))
+_settle!(::Array, ::AbstractArray, ::PencilArrays.PencilArray) = nothing
+_settle!(::AbstractArray, v::AbstractArray, o::PencilArrays.PencilArray) = (copyto!(v, parent(o)); nothing)
 
 end # module FlowGeometriesPencilArraysExt

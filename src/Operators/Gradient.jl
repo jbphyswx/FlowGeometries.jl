@@ -1,4 +1,3 @@
-# A `#` comment between a docstring and its definition drops the docstring, so this sits above.
 """
     GradientPlan
 
@@ -23,13 +22,13 @@ minimising `Σₖ wₖ (∇f·Δrₖ - Δfₖ)²` gives `A ∇f = b` with `A = �
 coefficients `A⁻¹ wₖ Δrₖ` are what the plan stores; each apply is then one dot product per cell and
 allocates nothing.
 
-What this buys over inverting an index-space Jacobian:
+The fit is:
 
-- **exact for a linear field on any stencil**, however skewed — the least-squares combination cancels
-  the leading truncation term, which a 2×2 Jacobian inverse does not;
+- **exact for a linear field on any stencil**, however skewed, the least-squares combination cancelling
+  the leading truncation term;
 - second order on locally symmetric stencils, degrading toward first on strongly skewed cells;
-- it reduces to the centred difference where the stencil is separable and orthogonal (`A` diagonal), so
-  it agrees with `apply_stencil!` where both apply.
+- the centred difference where the stencil is separable and orthogonal (`A` diagonal), so it agrees with
+  `apply_stencil!` where both apply.
 
 Where `A` is rank deficient — a direction with no data, at a boundary or beside a mask — the
 pseudo-inverse **zeroes** that component, under the rule `apply_stencil!` states for a mask: a value
@@ -102,7 +101,7 @@ function gradient!(
         return outs
     end
     p = Execution.on_backend(bk, plan)
-    Execution.run_indices(n * nb, bk) do k
+    Execution.run_indices(n * nb, bk, map(Execution.Written, outs)...) do k
         off = ((k - 1) ÷ n) * n
         _gradient_at!(outs, field, p, off, k - off, S)
     end
@@ -125,9 +124,8 @@ end
     return nothing
 end
 
-# The three tuple steps of the loop above, each taking everything it touches as an argument. Written
-# inline in `gradient!`, the accumulator is a local that is both reassigned each step and captured by
-# the `ntuple` closure, which Julia boxes.
+# The three tuple steps of the loop above, each taking everything it touches as an argument, so no
+# `ntuple` closure captures the accumulator the loop reassigns.
 @inline _grad_coefs(coeffs::NTuple{D,AbstractVector}, t::Int, ::Type{S}) where {D,S} =
     ntuple(d -> @inbounds(S(coeffs[d][t])), Val(D))
 
@@ -164,15 +162,15 @@ function _gradient_component!(
     nb = length(field) ÷ n
     bk = Execution.resolve(execution)
     if bk isa CB.AbstractSerialBackend
-        c = @inbounds plan.coeffs[d]
+        cs = @inbounds plan.coeffs[d]
         @inbounds for b in 0:(nb - 1), i in 1:n
-            _gradient_component_at!(out, field, plan.ptr, plan.nbr, c, b * n, i, S)
+            _gradient_component_at!(out, field, plan.ptr, plan.nbr, cs, b * n, i, S)
         end
         return out
     end
     p = Execution.on_backend(bk, plan)
     ptr, nbr, c = p.ptr, p.nbr, @inbounds(p.coeffs[d])
-    Execution.run_indices(n * nb, bk) do k
+    Execution.run_indices(n * nb, bk, Execution.Written(out)) do k
         off = ((k - 1) ÷ n) * n
         _gradient_component_at!(out, field, ptr, nbr, c, off, k - off, S)
     end

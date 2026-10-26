@@ -60,7 +60,7 @@ function masked_stencil_plan(
     msk = _host_mask(Grids.mask(grid))
     _along_arc(grid, d, Int(order)) && return _distance_stencil_plan(grid, msk, d, Int(order), Int(nodes), policy)
     return _dispatch_dim(d, Val(N)) do vd
-        _masked_axis_plan(Axes._host_array(Grids.coordinates(grid)[_val(vd)]), msk, _val(vd), Int(order), Int(nodes),
+        _masked_axis_plan(Execution._host_array(Grids.coordinates(grid)[_val(vd)]), msk, _val(vd), Int(order), Int(nodes),
                           Grids._wrap_period(grid, _val(vd)), policy)
     end
 end
@@ -88,7 +88,7 @@ _empty_masked_plan(::Type{T}, mask, d::Int, ord::Int, k::Int, distance::Bool) wh
 
 # A grid with no inactive cell holds its mask as a size alone, readable anywhere.
 @inline _host_mask(m::Grids.AllActive) = m
-@inline _host_mask(m::AbstractArray{Bool}) = Axes._host_array(m)
+@inline _host_mask(m::AbstractArray{Bool}) = Execution._host_array(m)
 
 # Each active cell takes the table's row where every node of it is active. Elsewhere the window is the
 # largest the policy allows inside the cell's active run, shifted to fit, and its weights are solved
@@ -157,13 +157,13 @@ end
 function _distance_stencil_plan(
     grid::Grids.StructuredGrid{T,G,N}, mask::AbstractArray{Bool,N}, ::Val{d}, ord::Int, nodes::Int, policy,
 ) where {T,G,N,d}
-    x = Axes._host_array(Grids.coordinates(grid)[d])
+    x = Execution._host_array(Grids.coordinates(grid)[d])
     n = length(x)
     k = policy isa ReduceInRun ? min(nodes, n) : nodes
     policy isa ReduceInRun && n < ord + 1 && return _empty_masked_plan(T, mask, d, ord, k, true)
     Discretization._check_stencil_shape(n, k, ord)
     geo = Grids.grid_geometry(grid)
-    axes = map(Axes._host_array, Grids.coordinates(grid))
+    axes = map(Execution._host_array, Grids.coordinates(grid))
     invariant = Geometry.metric_invariant_directions(geo)
     wrap = Grids.isperiodic(grid, d)
     P = wrap ? T(Grids.period(grid, d)) * Axes.wrap_sign(x) : zero(T)
@@ -304,7 +304,7 @@ function _masked_plan_sweep!(
         end
         return out
     end
-    Execution.run_indices(length(ci), b) do lin
+    Execution.run_indices(length(ci), b, Execution.Written(out)) do lin
         c = @inbounds ci[lin]
         _masked_plan_cell!(out, field, row, indices, weights, vdim, masked, nodes, Tuple(c), c, vm, fac)
     end

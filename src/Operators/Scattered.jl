@@ -39,8 +39,8 @@ function gradient_plan(
         "gradient_plan fits each gradient from a cell's neighbours, and no cell of this grid has " *
         "one; give the grid an adjacency (`k` or `radius` on a node set) or pass `conn`",
     ))
-    # `Val(D)` from a runtime count: the body below is written once for any `D`, and the tuple
-    # arithmetic in it only stays in registers when the width is a compile-time fact.
+    # `D` is the length of the grid's coordinate tuple, fixed by its type, so this branch folds and the
+    # body below runs at a literal width, its tuple arithmetic in registers.
     return D == 2 ? _gradient_plan(grid, c, active_only, Val(2)) :
                     _gradient_plan(grid, c, active_only, Val(3))
 end
@@ -468,7 +468,7 @@ function interpolate!(
     kk = Int(k)
     tp = topology === nothing ? Connectivity.default_sweep_topology(
         grid, Connectivity._knn_seed_radius_at(grid, nothing, max(kk, 1)), false) : topology
-    Execution.run_chunks(length(points), execution) do rng
+    Execution.run_chunks(length(points), execution, Execution.Written(out, Execution.ByBlock(nb))) do rng
         nearest = (Vector{Int}(undef, kk), Vector{T}(undef, kk))
         @inbounds for i in rng
             interpolate!(view(out, ((i - 1) * nb + 1):(i * nb)), field, grid, points[i];

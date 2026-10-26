@@ -50,7 +50,7 @@ end
 
 # A direction of fewer than `ord + 1` samples takes the plan of no rows, which writes `masked`.
 function _direction_plan(grid::Grids.StructuredGrid, ::Grids.AllActive, ::Val{d}, ord::Int, k::Int, _policy) where {d}
-    x = Axes._host_array(Grids.coordinates(grid)[d])
+    x = Execution._host_array(Grids.coordinates(grid)[d])
     n = length(x)
     return Discretization._stencil_plan(Axes.spacing_trait(x), x, ord, n < ord + 1 ? 0 : min(k, n),
                                         Grids._wrap_period(grid, d))
@@ -317,7 +317,7 @@ function _frame_pass!(kind, outs::Tuple, u::NTuple{N,Any}, grid::Grids.AbstractG
     g = Execution.on_backend(b, grid)
     msk = Grids.mask(g)
     ci = CartesianIndices(size(first(outs)))
-    Execution.run_indices(length(ci), b) do lin
+    Execution.run_indices(length(ci), b, map(Execution.Written, outs)...) do lin
         _frame_cell!(kind, outs, u, g, geo, msk, masked, @inbounds(ci[lin]), Val(ndims(msk)))
     end
     return nothing

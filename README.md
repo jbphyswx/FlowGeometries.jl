@@ -70,7 +70,7 @@ when `minimum_spacing == maximum_spacing`.
 
 Periodicity is the same. An `Axes.PeriodicAxis(origin, period, n)` is `n` equal cells around one
 period, and a grid direction built on one wraps; every other direction is bounded unless the
-constructor is given `periodic` or `topology`.
+constructor's `topology` names it `Periodic()`.
 
 A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
 is a few hundred bytes, and that is all a device receives.
@@ -103,8 +103,8 @@ A stencil is named by its type, so the neighbour iterator built from it resolves
 allocates nothing per cell.
 
 A neighbourhood by physical distance is a `MetricBall`, queried under the geometry's own metric —
-great-circle, Vincenty, or the chord where a radial direction is present — with periodic seams wrapped
-by minimum image:
+great-circle on a sphere, the geodesic on a spheroid (Karney 2013), or the chord where a radial
+direction is present — with periodic seams wrapped by minimum image:
 
 ```julia
 FG.Connectivity.neighbors_within(grid, i, j; ball = S.MetricBall(500e3))   # within 500 km
@@ -184,9 +184,9 @@ FG.Connectivity.count_holes(grid)     # enclosed inactive regions; wrapping chan
 
 Every built-in layout gets true cell areas with **no optional dependency** — the latitude band
 `R²Δλ(sin φ₊ − sin φ₋)` between a rectilinear cell's faces (the quadrature weight on a Gauss–Legendre,
-Driscoll–Healy or Clenshaw–Curtis grid), the exact solid angle of its gnomonic rectangle for the cubed
-sphere, dual-cell areas from the mesh's own triangulation for icosahedral, lat–lon patches for
-Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
+Driscoll–Healy or Fejér first-rule grid), the exact solid angle of its gnomonic rectangle for the cubed
+sphere, dual-cell areas from the mesh's own triangulation for icosahedral, lat–lon patches less half
+their overlap for Yin–Yang, a ring's Gaussian weight for the reduced grids. A uniform
 `4πR²/N` is exact only for HEALPix (flat colour above); on an icosahedral geodesic the largest cell is
 nearly twice the smallest, and every area-weighted integral feels the difference. The dark spots are
 the twelve pentagons.
@@ -196,9 +196,9 @@ g = FG.Grids.CubedSphereGrid(24)                                                
 g = FG.Connectivity.unstructured_grid(FG.SphericalSampling.IcosahedralSampling(16))     # 2562 nodes, Σarea = 4πR² exactly
 ```
 
-Yin–Yang is the exception worth knowing about: its two panels **overlap by construction**, so the cell
-areas sum to 6.07% more than the sphere, at *every* resolution. The excess is the overlap itself, and
-it does not shrink with the mesh.
+Yin–Yang's two panels **overlap by construction**, so its cell areas sum to 6.07% more than the sphere
+at every resolution. A cell's measure is its area less half the part the other panel also covers, so
+the measures sum to `4πR²` and an integral counts every point of the sphere once.
 
 ![Yin–Yang overlap](docs/src/assets/yinyang.png)
 
@@ -212,8 +212,8 @@ Nodes and weights come from a single solve — ask for both if you need both:
 q = FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.GaussLegendreSampling(), 1024)   # (; λ, φ, w), Σw = 2
 ```
 
-Gauss–Legendre holds machine precision out past degree `2N−1`; Driscoll–Healy and Clenshaw–Curtis
-lose exactness just after `N−1`. That distinction is what `admits_exact_bandlimited_quadrature`
+Gauss–Legendre is exact through degree `2N−1`; Driscoll–Healy and Fejér's first rule lose exactness
+just after `N−1`. That distinction is what `admits_exact_bandlimited_quadrature`
 encodes — spectral analysis forms *products*, so it needs `2·lmax`, not `lmax`.
 
 Gauss–Legendre is `O(n)` by asymptotic expansion (Bogaert 2014; Hale & Townsend 2013), with Newton on
@@ -233,7 +233,7 @@ grid and a structured one share one implementation.
 | `StructuredGrid` / `CurvilinearGrid` | Index stencil (`Axial`/`VonNeumann`/`Moore`/`Diagonal`/`Anisotropic`/`Custom`, any radius, any `N`) + per-axis topology |
 | `HEALPixGrid` / `CubedSphereGrid` / `YinYangGrid` / `IcosahedralGrid` / `RingGrid` | Closed-form arithmetic on the cell id — face tables, the gnomonic seam fold, panel-local offsets, geodesic lattice steps, ring straddling |
 | `UnstructuredGrid` | CSR stored on the grid |
-| Tensor-product samplings (GL, CC, DH, MW, lat–lon) | `build_connectivity(sampling, nlat)` — no grid is built |
+| Tensor-product samplings (GL, Fejér, DH, MW, lat–lon) | `build_connectivity(sampling, nlat)` — no grid is built |
 | Cubed sphere | `build_connectivity(CubedSphereSampling(), n)` — 6 panels + gnomonic seams |
 | Yin–Yang | `build_connectivity(YinYangSampling(), nlon, nlat)` — panel-local |
 | HEALPix | `build_connectivity(HEALPixSampling(nside))` — RING topological neighbors |
@@ -256,7 +256,7 @@ Spherical vector and tangent helpers use the polar frame (`λ`, `φ`, `r`):
 ## Storage
 
 A structured grid's cell measure is held as its per-axis factors. It is a real `AbstractArray`, so
-indexing and broadcasting behave as for the dense form, but 2000² costs 0.046 MiB against 61 MiB and
+indexing and broadcasting behave as for the dense form, but 4000 × 2000 costs 0.046 MiB against 61 MiB and
 `sum` is `O(∑ Nᵈ)`. An all-active mask (`AllActive`) stores only its size.
 
 ```julia
@@ -274,7 +274,7 @@ FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 | `AbstractReducedGaussianSampling` | `OctahedralGaussianSampling` |
 | `AbstractGaussLegendreSampling` | `GaussLegendreSampling` |
 | `AbstractDriscollHealySampling` | `DriscollHealySampling` / `DriscollHealyEqualSampling` |
-| `AbstractClenshawCurtisSampling` | `ClenshawCurtisSampling` |
+| `AbstractFejer1Sampling` | `Fejer1Sampling` |
 | `AbstractMcEwenWiauxSampling` | `McEwenWiauxSampling` |
 | `AbstractLatLonSampling` | `LatLonSampling` |
 | `AbstractHEALPixSampling` | `HEALPixSampling` |
@@ -301,8 +301,9 @@ FG.Grids.measure_array(grid)       # materialize densely, if you truly need it
 | `AbstractFFTs` | `O(n log n)` equiangular quadrature weights |
 | `Adapt` | move a grid to another storage backend |
 | `KernelAbstractions` | index-parallel loops as device kernels, under `GPUBackend(backend)` |
-| `Distributed` | bulk loops as one share per worker, under `DistributedBackend(inner)` |
-| `MPI` | bulk loops as one share per rank, under `MPIBackend(inner, comm)` |
+| `Distributed` | bulk loops as one share per worker, under `DistributedBackend(inner)`; a grid split into a block per worker |
+| `MPI` | bulk loops as one share per rank, under `MPIBackend(inner, comm)`; a grid split into a block per rank |
+| `PencilArrays` (with `MPI`) | transposes between splits over ranks, and a split as a `Pencil` |
 
 Every bulk entry point takes a ComputationalBackends tag as `execution`, `SerialBackend()` by default;
 `ThreadedBackend()` and `AutoBackend()` need no extension.

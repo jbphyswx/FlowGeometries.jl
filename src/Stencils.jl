@@ -247,9 +247,8 @@ Every bulk neighbour kernel goes through this.
 @inline foreach_offset(f, s::AbstractStencil, ::Val{N}) where {N} =
     _foreach_tuple(f, offsets(s, Val(N)))
 
-# For the shapes defined here the offset list exists at generation time, so each offset can be emitted
-# as a literal and inference never carries the offset tuple as a value. That matters for a wide stencil:
-# `Moore(3)` in 4-D is 2400 offsets, and compiling it through the tuple below costs ~30× as long.
+# For the shapes defined here the offset list exists at generation time, so each offset is emitted as a
+# literal and inference never carries the offset tuple, 2400 offsets for `Moore(3)` in 4-D, as a value.
 @generated function foreach_offset(f, s::_BuiltinStencil, ::Val{N}) where {N}
     offs = _offset_list(s, N)
     return Expr(:block, (:(f($(o))) for o in offs)..., :nothing)

@@ -17,8 +17,9 @@ capability is a package extension that loads when — and only when — you load
 | `AbstractFFTs` | O(n log n) equiangular quadrature weights |
 | `Adapt` | move a grid to another storage backend (GPU arrays, wrappers) |
 | `KernelAbstractions` | run the index-parallel loops as device kernels, under `GPUBackend` |
-| `Distributed` | run the bulk loops as one share per worker, under `DistributedBackend` |
-| `MPI` | run the bulk loops as one share per rank, under `MPIBackend` |
+| `Distributed` | run the bulk loops as one share per worker, under `DistributedBackend`; split a grid into a block per worker |
+| `MPI` | run the bulk loops as one share per rank, under `MPIBackend`; split a grid into a block per rank |
+| `PencilArrays` (with `MPI`) | transpose a field between two splits over ranks; a split as a `Pencil`, a field as a `PencilArray` |
 
 ## NearestNeighbors — spatial search
 
@@ -28,7 +29,7 @@ Required to build an `UnstructuredGrid` from a bare point set:
 using NearestNeighbors
 g = FG.Grids.UnstructuredGrid(geo, λ, φ, mask; k = 6, areas = areas)          # k nearest
 g = FG.Grids.UnstructuredGrid(geo, x, y, mask; radius = 0.02, areas = areas,  # or by radius
-                        periodic = (true, true), period = (Lx, Ly))
+                        topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (Lx, Ly))
 ```
 
 On a sphere the tree is built on the unit-sphere embedding, where nearest-by-chord is exactly
@@ -48,7 +49,7 @@ FG.Connectivity.neighbors_within(grid, i, j; ball = r, topology = top, scratch =
 The same embedding serves construction and queries, and the index only ever returns a superset of the
 ball — the exact distance gate still decides membership — so the result is the same set of cells the
 scan gives. On a spheroid that superset is genuine: the ECEF chord the tree searches is a lower bound on
-the Vincenty geodesic, so the query over-returns and the gate trims.
+the geodesic, so the query over-returns and the gate trims.
 
 ## Quickhull / DelaunayTriangulation — Voronoi areas
 
@@ -112,8 +113,8 @@ has a thread per cell.
 
 ```julia
 using SparseArrays
-A = FG.Connectivity.sparse_adjacency_matrix(grid)      # SparseMatrixCSC{Bool,Int}
-A = FG.Connectivity.sparse_adjacency_matrix(conn; Ti = Int32, Tv = Float64)
+A = FG.Connectivity.sparse_adjacency_matrix(grid)                 # Bool entries, the graph's id type
+A = FG.Connectivity.sparse_adjacency_matrix(Float64, Int32, conn)  # entry type, then index type
 ```
 
 ## StaticArrays
@@ -132,7 +133,7 @@ either end. See [Performance](@ref performance-page) for the measured effect.
 
 ## AbstractFFTs — fast equiangular weights
 
-Driscoll–Healy and Clenshaw–Curtis weights come from a sine series that costs O(n²) directly. Loading
+Driscoll–Healy and Fejér first-rule weights come from a sine series that costs O(n²) directly. Loading
 any FFT implementation turns it into one length-`nlat` transform:
 
 ```julia
@@ -203,3 +204,34 @@ end
 
 Under `DistributedBackend` the declared arrays are filled on the calling process. Under `MPIBackend`
 every rank makes the call, after `MPI.Init()`, and every rank ends with the whole of each array.
+
+## Split grids — a field too large for one process
+
+Under a process backend each worker or rank reads its own copy of what a loop captures, which suits work
+over many points, pairs or cells of a grid every process can hold. A field too large to copy to every
+process is split instead: [`Decomposition.split_grid`](@ref) cuts a `StructuredGrid` into blocks, one per
+rank or worker, and each process holds its block of every field, with a halo of its neighbours' cells
+along every direction that has a neighbour.
+
+```julia
+using MPI: MPI
+MPI.Init()
+D = FG.Decomposition
+s = D.split_grid(grid, MPIBackend(); dims = (2,), halo = 3)   # blocks along the second direction
+f = D.distribute(s, A)                                        # each rank keeps its block of A
+o = D.split_field(s, Float64)
+FG.Operators.derivative!(o, f, 2; nodes = 3)                  # halo exchange, then each block
+whole = D.gather(o)                                           # on rank 0
+```
+
+Each block's own cells take the values the whole grid gives them. A stencil along a direction with
+halos needs a halo at least as wide as its node count, and a narrower one is refused.
+[`Decomposition.foreach_block`](@ref) and [`Decomposition.map_blocks`](@ref) run any computation on the
+blocks, each process on its own, and [`Decomposition.exchange_halo!`](@ref) refreshes the halos. Under
+`DistributedBackend` the same calls run from the caller, each worker computing on the block it holds.
+
+[`Decomposition.redistribute!`](@ref) moves a field to another split of the same grid, the distributed
+transpose: under MPI it is PencilArrays' `transpose!`, loaded with `using PencilArrays`, on splits made
+one from the other with `split_grid(split; dims)`. The blocks are the ones PencilArrays places on the
+same communicator, so [`Decomposition.pencil`](@ref) and [`Decomposition.pencil_array`](@ref) hand a split
+to PencilFFTs.

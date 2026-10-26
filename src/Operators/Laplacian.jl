@@ -71,10 +71,14 @@ Base.show(io::IO, c::LaplacianCoefficients{N,T}) where {N,T} =
 `L = D G` of [`divergence!`](@ref) and [`gradient!`](@ref) under `fm`, with the coefficients `A/g` of
 `fm.area_op` and `fm.gap`: separable where the metrics are, and the grid's own measure on an unmasked
 grid.
+
+Built on the host, the null space's components labelled by a walk over the cell graph, as are
+[`coarse_coefficients`](@ref) and [`galerkin_coefficients`](@ref); move the result to a device with
+[`Execution.on_backend`](@ref FlowGeometries.Execution.on_backend).
 """
 function laplacian_coefficients(fm::FaceMetrics{N,T}) where {N,T}
     coef = ntuple(d -> _quotient(fm.area_op[d], fm.gap[d]), Val(N))
-    return LaplacianCoefficients(fm.grid, coef, _measure_array(fm.grid, Grids.mask(fm.grid), T))
+    return LaplacianCoefficients(fm.grid, coef, _measure_array(fm.volume, Grids.mask(fm.grid), T))
 end
 
 # `A/g` per face, and zero on a face of no area, whose gap can be zero too: a cell centred on a pole
@@ -84,11 +88,12 @@ end
 @inline _quotient(a::Grids.SeparableMeasure, g::Grids.SeparableMeasure) =
     Grids.SeparableMeasure(map((x, y) -> _conductance.(x, y), a.factors, g.factors))
 
-@inline _measure_array(grid, ::Grids.AllActive, ::Type{T}) where {T} = _measure_of(Grids.measure(grid), T)
-function _measure_array(grid, msk, ::Type{T}) where {T}
-    m = zeros(T, Grids.size_tuple(grid))
+# The cell volumes, zero on an inactive cell.
+@inline _measure_array(vol::AbstractArray, ::Grids.AllActive, ::Type{T}) where {T} = _measure_of(vol, T)
+function _measure_array(vol::AbstractArray, msk, ::Type{T}) where {T}
+    m = zeros(T, size(vol))
     @inbounds for I in CartesianIndices(m)
-        msk[I] && (m[I] = T(Grids.measure(grid, Tuple(I)...)))
+        msk[I] && (m[I] = T(vol[I]))
     end
     return m
 end
@@ -250,7 +255,7 @@ _apply_laplacian!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) wh
     _laplacian_cells!(f, out, Φ, grid, msk, coef, meas, v, S, b)
 
 function _laplacian_cells!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S}
-    _each_cell(Grids.size_tuple(grid), b) do I
+    _each_cell(Grids.size_tuple(grid), b, Execution.Written(out)) do I
         @inbounds out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, coef, meas, I, v, S))) : zero(S)
         return nothing
     end
@@ -326,7 +331,8 @@ in `L`'s null space.
 function project_out_constant!(Φ::AbstractArray, c::LaplacianCoefficients{N,T};
                                execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
     c.singular || return Φ
-    b = Execution.resolve(execution)
+    # The cells of a component are scattered through `Φ`, so the passes stay in this process.
+    b = Execution.local_backend(execution)
     ns = c.nullspace
     meas = Execution.on_backend(b, c.measure)
     ns.full && return _project_mean!(Φ, meas, c.total, b, eltype(Φ))
@@ -590,7 +596,7 @@ function restrict!(coarse::AbstractArray, fine::AbstractArray, fc::LaplacianCoef
     b = Execution.resolve(execution)
     fmeas, cmeas = Execution.on_backend(b, fc.measure), Execution.on_backend(b, cc.measure)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), b) do I
+    _each_cell(Grids.size_tuple(cc.grid), b, Execution.Written(coarse)) do I
         @inbounds begin
             w = cmeas[I]
             if iszero(w)
@@ -616,7 +622,7 @@ function prolong_add!(fine::AbstractArray, coarse::AbstractArray, fc::LaplacianC
     fdims = Grids.size_tuple(fc.grid)
     b = Execution.resolve(execution)
     fmeas = Execution.on_backend(b, fc.measure)
-    _each_cell(fdims, b) do J
+    _each_cell(fdims, b, Execution.Written(fine)) do J
         @inbounds iszero(fmeas[J]) ||
                   (fine[J] += coarse[CartesianIndex(ntuple(d -> _parent(J[d], fdims[d]), Val(N)))])
         return nothing
@@ -643,7 +649,7 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
     fmeas, cmeas = Execution.on_backend(bk, fc.measure), Execution.on_backend(bk, cc.measure)
     coef, msk = Execution.on_backend(bk, fc.coef), Grids.mask(fgrid)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), bk) do I
+    _each_cell(Grids.size_tuple(cc.grid), bk, Execution.Written(coarse)) do I
         @inbounds begin
             w = cmeas[I]
             if iszero(w)

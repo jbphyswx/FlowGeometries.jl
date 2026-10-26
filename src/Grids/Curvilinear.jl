@@ -235,7 +235,8 @@ function _corner_areas(
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat, G<:Geometry.AbstractCartesianGeometry{T}}
     areas = similar(xc, T, Nx, Ny)
-    Execution.run_chunks(Int(Ny), execution) do rows
+    columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
+    Execution.run_chunks(Int(Ny), execution, columns) do rows
     @inbounds for j in rows, i in 1:Nx
         # Cell (i,j) has vertices (i,j)→(i+1,j)→(i+1,j+1)→(i,j+1) (counter-clockwise in index space).
         x1 = xc[i, j];         y1 = yc[i, j]
@@ -274,7 +275,8 @@ function _corner_areas(
     areas = similar(λc, T, Nx, Ny)
     # Chunked over rows, each chunk with its own two-row buffer. A chunk re-derives its first row, at
     # one extra row of trig per chunk, which keeps the chunks independent.
-    Execution.run_chunks(Int(Ny), execution) do rows
+    columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
+    Execution.run_chunks(Int(Ny), execution, columns) do rows
         lo = Vector{NTuple{3,T}}(undef, nk)
         hi = Vector{NTuple{3,T}}(undef, nk)
         _fill_dir_row!(lo, λc, φc, first(rows), nk)
@@ -316,9 +318,9 @@ Corners supplied this way are kept on the grid, and reconstructed ones are input
 pass `keep_corners = true` to keep those too, at one array per direction. Reconstruction happens only
 where something needs it, so a grid given its own `measure` derives none.
 
-`topology` is per-direction closure, as for [`StructuredGrid`](@ref): [`Periodic`](@ref)/[`Bounded`](@ref)
-instances, a tuple of them, a `Bool`, or a tuple of `Bool`s, a single value or a short tuple applying to
-the leading directions. When omitted, every direction is bounded.
+`topology` is per-direction closure, as for [`StructuredGrid`](@ref): [`Periodic`](@ref) or
+[`Bounded`](@ref) or a tuple of them, a single tag being direction 1's and a short tuple the leading
+directions'. When omitted, every direction is bounded.
 """
 function CurvilinearGrid(geometry::Geometry.AbstractGeometry, args...; kwargs...)
     coords, measure, mask = _split_curvilinear_args(args)
@@ -370,13 +372,13 @@ function _curvilinear_grid(
     centers = ntuple(d -> _to_arr(T, coords[d]), Val(N))
     # The vertex, area and period builders walk the centres element by element, so they read host
     # copies; what they derive is held in the centres' own storage.
-    hc = map(Axes._host_array, centers)
+    hc = map(Execution._host_array, centers)
 
     m = measure_pos === nothing ? measure : measure_pos
     # Vertex arrays are derived only where something asks for them: the area kernel, or the caller.
     kc = corners === nothing ? nothing : _given_corners(T, corners, size(mask))
     kh = kc === nothing ? _derived_corners(hc, keep_corners || (m === nothing && N == 2)) :
-                          map(Axes._host_array, kc)
+                          map(Execution._host_array, kc)
 
     meas = if m !== nothing
         size(m) == size(mask) || throw(ArgumentError(
@@ -384,7 +386,7 @@ function _curvilinear_grid(
         ))
         _to_arr(T, m)
     elseif N == 2
-        Axes._like(centers[1], _corner_areas(geometry, kh[1], kh[2], size(mask, 1), size(mask, 2);
+        Execution._like(centers[1], _corner_areas(geometry, kh[1], kh[2], size(mask, 1), size(mask, 2);
                                              execution = execution))
     else
         throw(ArgumentError(
@@ -398,7 +400,7 @@ function _curvilinear_grid(
     prd = _curvilinear_periods(geometry, hc, tp, period)
     # The caller's own vertex arrays are theirs to keep; ones derived here are the area kernel's input,
     # and are retained on request.
-    held = kc !== nothing ? kc : keep_corners ? map(Axes._like, centers, kh) : _no_corners(centers)
+    held = kc !== nothing ? kc : keep_corners ? map(Execution._like, centers, kh) : _no_corners(centers)
     return CurvilinearGrid{T, G, N, typeof(tp), typeof(centers), typeof(held), typeof(meas),
                            typeof(mask)}(
         geometry, centers, held, meas, mask, tp, prd, map(_lohi, hc), T(sum(meas)),

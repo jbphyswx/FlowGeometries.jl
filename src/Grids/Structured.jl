@@ -136,6 +136,14 @@ end
 
 @inline origin(grid::StructuredGrid, d::Integer) = _axis_stat(grid, d).first
 @inline bounds(grid::StructuredGrid, d::Integer) = (s = _axis_stat(grid, d); (s.lo, s.hi))
+
+# `-1` where direction `d` is stored descending and `+1` otherwise, from its summary, reading no element of
+# the axis; any other grid reads its axis.
+@inline function _wrap_sign(grid::StructuredGrid{T}, d::Integer) where {T}
+    s = _axis_stat(grid, d)
+    return (s.first == s.hi && s.lo != s.hi) ? -one(T) : one(T)
+end
+@inline _wrap_sign(grid::AbstractGrid, d::Integer) = _wrap_sign(coordinates(grid, d))
 @inline minimum_spacing(grid::StructuredGrid, d::Integer) = _axis_stat(grid, d).min_gap
 @inline maximum_spacing(grid::StructuredGrid, d::Integer) = _axis_stat(grid, d).max_gap
 
@@ -588,6 +596,23 @@ quadrature `weights`, the latitude factor is `R²·wⱼ`, so `Σ measure·f` is 
 """
 _cell_measure(geometry, ax, per, ::Nothing) = SeparableMeasure(_measure_factors(geometry, ax, per))
 
+"""
+    _region_measure(grid) -> AbstractArray
+
+Each cell's measure as the region between its faces: the grid's own measure object where that is
+geometric, and on a two-direction sphere measured by a sampling's quadrature weights, the exact integral
+of the metric over each cell, which those weights stand in for. Which one is fixed by the grid's type.
+"""
+_region_measure(grid::StructuredGrid) = _region_measure(grid, sampling(grid))
+_region_measure(grid::StructuredGrid, _sampling) = measure(grid)
+function _region_measure(
+    grid::StructuredGrid{T,<:Geometry.AbstractSphericalGeometry,2}, ::_WeightedSampling,
+) where {T}
+    tp = topology(grid)
+    per = ntuple(d -> _is_periodic(tp[d]) ? getfield(grid, :period)[d] : nothing, Val(2))
+    return _cell_measure(grid_geometry(grid), coordinates(grid), per, nothing)
+end
+
 function _cell_measure(
     geometry::Geometry.AbstractSphericalGeometry{T}, ax::NTuple{2,AbstractVector{T}},
     per::NTuple{2,Union{Nothing,Real}}, w::AbstractVector{T},
@@ -654,11 +679,10 @@ entering as plain widths. A `CartesianGeometry` measure is the product of the pe
 - `mask`: an `N`-D `Bool` array of active cells. Omit it (or pass `nothing`) for an all-active grid,
   which stores only its size — see [`AllActive`](@ref). It may also be given positionally, after the
   axes.
-- `topology`: per-direction closure. Accepts [`Periodic`](@ref)/[`Bounded`](@ref) instances, a tuple
-  of them, a `Bool`, or a tuple of `Bool`s; a single value or a short tuple applies to the leading
-  directions and the rest are `Bounded`. When omitted, a direction is `Periodic` where its axis is an
-  [`Axes.PeriodicAxis`](@ref) and `Bounded` otherwise. A `PeriodicAxis` direction declared `Bounded`
-  raises.
+- `topology`: per-direction closure, [`Periodic`](@ref) or [`Bounded`](@ref) or a tuple of them. A
+  single tag is direction 1's and a short tuple the leading directions', the rest being `Bounded`.
+  When omitted, a direction is `Periodic` where its axis is an [`Axes.PeriodicAxis`](@ref) and
+  `Bounded` otherwise. A `PeriodicAxis` direction declared `Bounded` raises.
 - `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used: a
   `PeriodicAxis`'s period (which on spherical longitude is `2π`), `2π` for any other spherical
   longitude, and `extent + one spacing` for a Cartesian direction, which is exact for a uniform axis

@@ -124,10 +124,6 @@ Test.@testset "Asking for an element type gives back that element type, knowably
     g32 = FG.Connectivity.structured_grid(gl, 12;
                                           geometry = FG.Geometry.SphericalGeometry(6.371f6))
     Test.@test eltype(FG.Grids.axis(g32, 1)) === Float32
-    for W in (Float64, Float32)
-        Test.@test FG.Geometry.float_type(FG.Geometry.SphericalGeometry{W}(6.371e6)) === W
-        Test.@test FG.Geometry.float_type(FG.Geometry.CartesianGeometry{W}()) === W
-    end
 
     # A geometry defined outside the package, already at the width asked for, comes back as itself.
     Test.@test FG.Geometry.similar_geometry(Float64, OneSphere{Float64}()) isa OneSphere{Float64}

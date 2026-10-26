@@ -157,7 +157,8 @@ function Adapt.adapt_structure(to, m::Operators.FaceMetrics)
     area = _adapt_tuple(to, m.area_op)
     flux = m.area_flux === m.area_op ? area : _adapt_tuple(to, m.area_flux)
     return Operators.FaceMetrics(Adapt.adapt(to, m.grid), m.boundary, area, flux, _adapt_tuple(to, m.gap),
-                                 _adapt_tuple(to, m.edge), _adapt_tuple(to, m.corner), m.orientation)
+                                 _adapt_tuple(to, m.edge), _adapt_tuple(to, m.corner), Adapt.adapt(to, m.volume),
+                                 m.orientation)
 end
 
 Adapt.adapt_structure(to, ns::Operators.ComponentNullspace) =

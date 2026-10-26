@@ -955,11 +955,10 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
         Test.@test isempty(short)
     end
 
-    Test.@testset "YinYangGrid storage is independent of resolution" begin
-        sizes = [Base.summarysize(G.YinYangGrid(geo, nl, nt))
-                 for (nl, nt) in ((4, 3), (192, 128))]
-        Test.@test allequal(sizes)
-        Test.@test length(G.YinYangGrid(geo, 192, 128)) == 2 * 192 * 128
+    Test.@testset "YinYangGrid stores one panel's measures, which both panels share" begin
+        g = G.YinYangGrid(geo, 192, 128)
+        Test.@test length(g) == 2 * 192 * 128
+        Test.@test Base.summarysize(g) < sizeof(Float64) * 192 * 128 + 1024
     end
 
     Test.@testset "Yin–Yang coords are the panel formula and its rotation" begin
@@ -1025,16 +1024,21 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
             Test.@test sum(m) ≈ 4π * R^2 rtol = 1e-14
             Test.@test sum(collect(m)) ≈ 4π * R^2 rtol = 1e-13
             Δλ, Δφ = (3π / 2) / nlon, (π / 2) / nlat
-            area(j) = R^2 * Δλ * (sin(-π / 4 + j * Δφ) - sin(-π / 4 + (j - 1) * Δφ))
+            # The band area as `2 cos φ̄ sin(Δφ/2)`, which holds its relative precision where a difference
+            # of sines does not.
+            area(j) = R^2 * Δλ * 2 * cos(-π / 4 + (j - 0.5) * Δφ) * sin(Δφ / 2)
             Test.@test all(m[G.cell_id(g, 1, i, j)] === m[G.cell_id(g, 2, i, j)] for i in 1:nlon, j in 1:nlat)
-            Test.@test all(0 < m[G.cell_id(g, 1, i, j)] ≤ area(j) * (1 + 1e-14) for i in 1:nlon, j in 1:nlat)
+            Test.@test all(0 < m[G.cell_id(g, 1, i, j)] ≤ area(j) * (1 + 8eps()) for i in 1:nlon, j in 1:nlat)
         end
 
         # Cell by cell: a panel corner, the middle of an edge, two cells the overlap's edge crosses, one
         # in the top row, and one in the middle the other panel does not reach. Against the scan, which
-        # resolves a sliver of overlap to about `1e-6` of the cell at this width; and the closed form at
-        # each width against itself at 256 bits on the same cell edges.
-        let g16 = G.YinYangGrid(geo, 16, 12), dλ = (3π / 2) / 16, dφ = (π / 2) / 12
+        # resolves a sliver of overlap to about `1e-6` of the cell at this width. The closed form, a
+        # difference of antiderivatives of size one, against itself at 256 bits on the same cell edges: a
+        # few `eps` on the unit sphere at either width. A `Float32` grid's measures against the cells' own at
+        # 256 bits: `Float32`'s precision per cell.
+        let g16 = G.YinYangGrid(geo, 16, 12), dλ = (3π / 2) / 16, dφ = (π / 2) / 12,
+            g32 = G.YinYangGrid(GE.SphericalGeometry(Float32(R)), 16, 12)
             for (i, j) in ((1, 1), (1, 6), (2, 1), (1, 3), (11, 12), (8, 6))
                 λa, φa = -3π / 4 + (i - 1) * dλ, -π / 4 + (j - 1) * dφ
                 cell = (λa, λa + dλ, φa, φa + dφ)
@@ -1043,8 +1047,13 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
                 Test.@test abs(got - (a - overlap_by_scan(cell...; nλ = 4000) / 2)) < 1e-5 * a
                 for T in (Float64, Float32)
                     Test.@test abs(G._yin_yang_overlap(T.(cell)...) - G._yin_yang_overlap(big.(T.(cell))...)) <
-                               8eps(T) * a
+                               8eps(T)
                 end
+                bλ, bφ = (3 * big(π) / 2) / 16, (big(π) / 2) / 12
+                bλa, bφa = -3 * big(π) / 4 + (i - 1) * bλ, -big(π) / 4 + (j - 1) * bφ
+                want = big(R)^2 * (bλ * (sin(bφa + bφ) - sin(bφa)) -
+                                   G._yin_yang_overlap(bλa, bλa + bλ, bφa, bφa + bφ) / 2)
+                Test.@test abs(G.measure(g32, G.cell_id(g32, 1, i, j)) - want) ≤ 4eps(Float32) * want
             end
             Test.@test G.measure(g16, G.cell_id(g16, 1, 8, 6)) ≈ R^2 * dλ * sin(dφ) rtol = 1e-14
         end

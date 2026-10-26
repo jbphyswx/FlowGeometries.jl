@@ -63,7 +63,9 @@ function cubed_sphere_points!(
     # coincident nodes. Cell centres give 6n² distinct points that match the connectivity, and n=1
     # (one cell per face, at the face centre) falls out of the same formula.
     # Each output slot is a pure function of its own linear index, so each index is a work item.
-    Execution.run_indices(N, execution) do k
+    outs = panel === nothing ? (Execution.Written(λ), Execution.Written(φ)) :
+                               (Execution.Written(λ), Execution.Written(φ), Execution.Written(panel))
+    Execution.run_indices(N, execution, outs...) do k
         f, i, j = _cubed_unlin(k, n)
         @inbounds λ[k], φ[k] = _cubed_cell_lonlat(T, n, f, i, j)
         _put!(panel, k, f)
@@ -646,8 +648,8 @@ end
 """
     icosahedral_vertices([T = Float64], frequency=1) -> NamedTuple{(:λ,:φ)}
 
-The `10ν²+2` geodesic vertices as longitude/latitude, without building the mesh topology — several
-times faster than [`icosahedral_mesh`](@ref) at large `ν`, which also returns edges and triangles.
+The `10ν²+2` geodesic vertices as longitude/latitude, with no mesh topology built;
+[`icosahedral_mesh`](@ref) returns the edges and triangles as well.
 """
 icosahedral_vertices(frequency::Integer = 1) = icosahedral_vertices(Float64, frequency)
 

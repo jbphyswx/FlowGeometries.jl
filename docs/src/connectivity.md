@@ -5,7 +5,7 @@ CurrentModule = FlowGeometries.Connectivity
 ```@setup connectivity
 using FlowGeometries: FlowGeometries as FG
 geo   = FG.Geometry.SphericalGeometry()
-grid  = FG.Connectivity.structured_grid(FG.SphericalSampling.ClenshawCurtisSampling(), 16)
+grid  = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 16)
 conn  = FG.Connectivity.build_connectivity(grid)
 i, j  = 3, 5
 nlon, nlat = size(grid)
@@ -132,14 +132,9 @@ buf
 The candidate window is [`Connectivity.metric_window`](@ref) — `O(1)` per direction on any separable
 axis, uniform or stretched, given the minimum steps [`Connectivity.MetricTopology`](@ref) carries —
 and each candidate is then kept or dropped by the geometry's `distance`, so the result is a genuine
-metric ball: great-circle on a sphere, Vincenty on a spheroid, the chord where a radial or height
-direction is present. Periodic directions wrap by minimum image, so a ball sitting on the seam is the
-same ball as anywhere else:
-
-```@example conn
-FG.Connectivity.neighbors_within(g, 1, 7; ball = 1.5e6) ==
-    FG.Connectivity.neighbors_within(g, 1, 7; ball = S.MetricBall(1.5e6))
-```
+metric ball: great-circle on a sphere, the geodesic on a spheroid (Karney 2013), the chord where a
+radial or height direction is present. Periodic directions wrap by minimum image, so a ball sitting on the seam is the
+same ball as anywhere else.
 
 ### Distance between two cells
 
@@ -150,7 +145,7 @@ periodic seam it takes the short way round:
 gper = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
                                range(0.0; step = 1.0, length = 10),
                                range(0.0; step = 1.0, length = 6);
-                               periodic = true, period = 10.0)
+                               topology = FG.Grids.Periodic(), period = 10.0)
 FG.Geometry.distance(gper, (1, 1), (10, 1)), FG.Grids.displacement(gper, (1, 1), (10, 1))
 ```
 
@@ -175,7 +170,7 @@ displacements. [`Connectivity.fold_within`](@ref) takes the convention as an arg
 Nx, Δx = 32, 62.5; Lx = Nx * Δx
 axx = range(0.0; step = Δx, length = Nx)
 gt = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), axx, axx;
-                             periodic = (true, true), period = (Lx, Lx))
+                             topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (Lx, Lx))
 count_within(conv, rad) = FG.Connectivity.fold_within(
     (a, J, d) -> a + 1, 0, gt, 1, 1; ball = rad, images = conv)
 count_within(FG.Connectivity.NearestImage(), 3500.0),
@@ -389,19 +384,19 @@ FG.Grids.neighbors(conn, i)                                # a view into the fla
 ```
 
 `CSRConnectivity` stores one flat neighbour array plus offsets, so a traversal reads contiguous memory
-and the whole graph is two allocations. Both buffers accept any `Integer`, and a builder picks the
-narrowest that holds both a node id and an offset: `Int32` below two billion of either, halving the
-graph's memory and the bandwidth every traversal of it costs. `Ti` names a width explicitly.
+and the whole graph is two allocations. Node ids are `Int32` unless the first argument names another
+integer type, `build_connectivity(Int64, grid)`, and a graph whose ids overflow it raises before
+anything is built; offsets are `Int`. A stored mesh's graph keeps the mesh's own id type.
 
 Building from a sampling never constructs a grid:
 
 ```@example connectivity
-FG.Connectivity.build_connectivity(FG.SphericalSampling.GaussLegendreSampling(), 1000)
+FG.Connectivity.build_connectivity(FG.SphericalSampling.GaussLegendreSampling(), 64)
 ```
 
 The neighbour graph of a tensor-product sampling is fixed by its axis *lengths* and longitude wrapping
-alone, so the axes are never evaluated. For Gauss–Legendre, evaluating them is an `O(n²)` root solve
-whose result the graph does not depend on.
+alone, so the axes are never evaluated. For Gauss–Legendre, evaluating them is a root solve whose
+result the graph does not depend on.
 
 ## Index topology directly
 
@@ -496,7 +491,7 @@ an enclosed one:
 
 ```@example conn
 gp = FG.Grids.StructuredGrid(geo, 0.0:1.0:8.0, 0.0:1.0:8.0, m;
-                             periodic = (true, true), period = (9.0, 9.0))
+                             topology = (FG.Grids.Periodic(), FG.Grids.Periodic()), period = (9.0, 9.0))
 C.count_holes(gp)
 ```
 

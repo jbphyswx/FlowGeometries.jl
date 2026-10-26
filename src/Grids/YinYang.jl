@@ -146,17 +146,22 @@ Every panel cell's measure, `nlon × nlat`, the same on both panels. A cell `[λ
 panel's frame has area `R²·Δλ·2 sin(Δφ/2)·cos φ`, and its measure is that less half its overlap with the
 other panel, which [`_yin_yang_overlap`](@ref) integrates exactly. The overlap is symmetric under
 `λ → −λ` and `φ → −φ`, so a quarter of the cells is computed and the rest mirrored.
+
+An overlap is a difference of antiderivatives of size one, accurate to a few `eps` on the unit sphere
+whatever the cell's size. The table is built once on the host at no less than `Float64` and stored in
+`T`, so each cell holds `T`'s own precision.
 """
 function _yin_yang_measures(R::T, nlon::Int, nlat::Int) where {T<:AbstractFloat}
-    Δλ = (T(3π) / 2) / T(nlon)
-    Δφ = (T(π) / 2) / T(nlat)
+    TW = promote_type(T, Float64) # TODO :: Make this work in native res, on devices etc
+    Δλ = (3 * TW(π) / 2) / TW(nlon)
+    Δφ = (TW(π) / 2) / TW(nlat)
     m = Matrix{T}(undef, nlon, nlat)
     for j in 1:cld(nlat, 2), i in 1:cld(nlon, 2)
-        λa = -T(3π) / 4 + T(i - 1) * Δλ
-        φa = -T(π) / 4 + T(j - 1) * Δφ
-        _, φc = SphericalSampling._yin_yang_panel_coords(T, nlon, nlat, i, j)
+        λa = -3 * TW(π) / 4 + TW(i - 1) * Δλ
+        φa = -TW(π) / 4 + TW(j - 1) * Δφ
+        _, φc = SphericalSampling._yin_yang_panel_coords(TW, nlon, nlat, i, j)
         area = Δλ * 2 * sin(Δφ / 2) * cos(φc)
-        v = R^2 * (area - _yin_yang_overlap(λa, λa + Δλ, φa, φa + Δφ) / 2)
+        v = T(TW(R)^2 * (area - _yin_yang_overlap(λa, λa + Δλ, φa, φa + Δφ) / 2))
         m[i, j] = v
         m[nlon + 1 - i, j] = v
         m[i, nlat + 1 - j] = v
