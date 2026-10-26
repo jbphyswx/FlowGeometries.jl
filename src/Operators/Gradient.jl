@@ -102,7 +102,7 @@ function gradient!(
         return outs
     end
     p = Execution.on_backend(bk, plan)
-    Execution.run_indices(n * nb, bk, map(Execution.Written, outs)...) do k
+    Execution.run_indices(n * nb, bk) do k
         off = ((k - 1) ÷ n) * n
         _gradient_at!(outs, field, p, off, k - off, S)
     end
@@ -172,7 +172,7 @@ function _gradient_component!(
     end
     p = Execution.on_backend(bk, plan)
     ptr, nbr, c = p.ptr, p.nbr, @inbounds(p.coeffs[d])
-    Execution.run_indices(n * nb, bk, Execution.Written(out)) do k
+    Execution.run_indices(n * nb, bk) do k
         off = ((k - 1) ÷ n) * n
         _gradient_component_at!(out, field, ptr, nbr, c, off, k - off, S)
     end

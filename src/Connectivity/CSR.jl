@@ -19,12 +19,10 @@ end
 """
     _csr_total(deg, n, backend) -> Int
 
-The CSR's edge count, `sum(deg)`, reduced where `deg` is held: under `backend`'s
-[`Execution.local_backend`](@ref), since the counting pass leaves `deg` whole on every process that
-reads it.
+The CSR's edge count, `sum(deg)`, reduced under `backend`, where the counting pass left `deg`.
 """
 @inline function _csr_total(deg::AbstractVector, n::Int, backend::CB.AbstractExecutionBackend)
-    return Execution.reduce_indices(+, 0, n, Execution.local_backend(backend)) do k
+    return Execution.reduce_indices(+, 0, n, backend) do k
         return @inbounds Int(deg[k])
     end
 end

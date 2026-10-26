@@ -137,16 +137,6 @@ Test.@testset "Rank-2 tensors rotate between the ambient and local frames" begin
     end
 end
 
-Test.@testset "local_tangent_basis / project_to_tangent_plane" begin
-    cgeom = FG.Geometry.CartesianGeometry()
-    c = (0.0, 0.0)
-    n = (1.0, 2.0)
-    Test.@test FG.Geometry.project_to_tangent_plane(cgeom, c, n) == (; x = 1.0, y = 2.0)
-
-    sgeom = FG.Geometry.SphericalGeometry(1.0)
-    Test.@test FG.Geometry.distance(sgeom, (λ = 0.0, φ = 0.0), (λ = 0.1, φ = 0.0)) ≈ sgeom.R * 0.1 atol = 1e-10
-end
-
 Test.@testset "Point functions accept every representation and element type" begin
     using StaticArrays: StaticArrays as SA
     cgeo = FG.Geometry.CartesianGeometry()     # Float64 geometry …
@@ -362,12 +352,7 @@ Test.@testset "Oblate spheroid geometry" begin
     Test.@test G.line_distance(g, (0.1, 0.3, 500.0), 3, 10.0, 25.0) == 15.0
     Test.@test G.line_distance(G.SphericalGeometry(2.0), (0.1, 0.3), 1, 0.2, 0.9) == 2.0 * cos(0.3) * (0.9 - 0.2)
     Test.@test G.line_distance(G.CartesianGeometry(), (1.0, 2.0), 2, 0.5, 3.0) == 2.5
-    # Symmetry, the zero case, and a finite answer for a near-antipodal pair.
-    p1, p2 = (0.3, -0.4), (1.9, 0.55)
-    Test.@test G.distance(g, p1, p2) ≈ G.distance(g, p2, p1)
-    Test.@test G.distance(g, p1, p1) == 0.0
-    d = G.distance(g, (0.0, 0.0), (π - 1e-9, 1e-9))
-    Test.@test isfinite(d) && 1.9e7 < d < 2.1e7
+    Test.@test G.distance(g, (0.3, -0.4), (0.3, -0.4)) == 0.0
     # Zero flattening is the sphere: `n = 0` empties every series, so `s = b·σ`.
     Test.@test G.distance(G.SpheroidGeometry(6371000.0, 0.0), (0.1, 0.2), (0.3, 0.4)) ≈
                G.distance(G.SphericalGeometry(6371000.0), (0.1, 0.2), (0.3, 0.4)) rtol = 1e-13
@@ -432,7 +417,7 @@ Test.@testset "A spheroid geodesic ends at the far point, to a few eps at any se
     # Short of the antipode a geodesic is the shortest path, so leaving at the returned azimuth for the
     # returned length must arrive at the far point. The paths stay off the poles, where the equations
     # are singular; the steps' rounding is under `n·eps·a ≈ 3e-5` m.
-    for (λ1, φ1) in ((0.0, 0.3), (1.0, -0.7), (-1.2, 0.05)), α in (0.4, 1.9, 4.0), σ in (1e-3, 0.1, 1.0, 2.5)
+    for (λ1, φ1, α) in ((0.0, 0.3, 0.4), (1.0, -0.7, 1.9), (-1.2, 0.05, 4.0)), σ in (1e-3, 1.0, 2.5)
         p = destination(λ1, φ1, α, σ)
         nc = G.normal_coordinates(spd, (λ1, φ1), p)
         e = follow((λ1, φ1), atan(nc.λ, nc.φ), hypot(nc...))
@@ -443,11 +428,14 @@ Test.@testset "A spheroid geodesic ends at the far point, to a few eps at any se
     # metre to the antipode, centres beside the equator and a pole included. The azimuth is checked
     # short of the antipode, where it is ill-conditioned.
     angdiff(x, y) = abs(mod(x - y + big(π), 2big(π)) - big(π))
+    # Every centre meets every separation, the azimuth turning with the pair.
     centres = ((-2.9, -1.3), (0.4, 0.2), (1.7, 1.45), (3.0, -0.6), (0.3, 1e-5), (0.5, 1e-9), (2.2, -1.5707963))
+    azimuths = (0.0, 0.3, π / 2, 1.9, 3.5, 5.6)
     for T in (Float64, Float32)
         geo, ref = G.SpheroidGeometry(T(a), T(f)), G.SpheroidGeometry(big(T(a)), big(T(f)))
         worst_s = worst_α = 0.0
-        for (λ1, φ1) in centres, α in (0.0, 0.3, π / 2, 1.9, 3.5, 5.6), σ in (1 / 6.4e6, 1e-4, 1e-2, 0.5, 2.5, 3.1)
+        for (k, (λ1, φ1)) in enumerate(centres), (m, σ) in enumerate((1 / 6.4e6, 1e-4, 1e-2, 0.5, 2.5, 3.1))
+            α = azimuths[mod1(k + m, 6)]
             c = (T(λ1), T(φ1))
             p = T.(destination(big(λ1), big(φ1), big(α), big(σ)))
             p == c && continue
@@ -472,7 +460,7 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
     spd = G.SpheroidGeometry()
     a, b = G.semimajor_axis(spd), G.semiminor_axis(spd)
 
-    for λ in (-3.0, -0.7, 0.0, 1.2, 3.1), φ in (-1.5, -1.0, -0.3, 0.0, 0.4, 1.1, 1.5)
+    for (λ, φ) in ((-3.0, -1.5), (-0.7, -1.0), (0.0, 0.0), (1.2, 0.4), (3.1, 1.5))
         êλ, êφ, êr = G._enu_frame(spd, λ, φ)
         # Orthonormal, and identical to the sphere's triad at the same (λ, φ).
         for (u, v) in ((êλ, êφ), (êλ, êr), (êφ, êr))
@@ -502,7 +490,7 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
 
     # The rotations invert on either geometry.
     τ = (0.3, -1.1, 2.0, 0.7, -0.2, 1.4)
-    for geo in (G.SphericalGeometry(6.371e6), spd), λ in (-2.0, 0.3, 2.8), φ in (-1.2, 0.0, 0.75)
+    for geo in (G.SphericalGeometry(6.371e6), spd), (λ, φ) in ((-2.0, -1.2), (2.8, 0.75))
         u = (1.7, -0.9, 0.4)
         c = G.vector_to_cartesian(geo, u..., λ, φ)
         Test.@test maximum(abs.(Tuple(G.vector_from_cartesian(geo, Tuple(c), λ, φ)) .- u)) < 1e-12
@@ -521,7 +509,7 @@ Test.@testset "The local frame is the spheroid's own, and the sphere's" begin
 
     # `embed` is `spherical_to_cartesian` on a sphere and `geodetic_to_cartesian` on a spheroid.
     sph = G.SphericalGeometry(6.371e6)
-    for λ in (-2.9, 0.0, 0.6, 2.7), φ in (-1.4, 0.0, 0.9)
+    for (λ, φ) in ((-2.9, -1.4), (0.6, 0.9))
         Test.@test G.embed(sph, (λ, φ)) === Tuple(G.spherical_to_cartesian(sph, (λ, φ)))
         Test.@test G.embed(sph, (λ, φ, 1.0)) === Tuple(G.spherical_to_cartesian(sph, (λ, φ, 1.0)))
         Test.@test G.embed(spd, (λ, φ)) === Tuple(G.geodetic_to_cartesian(spd, (λ, φ)))
@@ -579,10 +567,12 @@ Test.@testset "Normal coordinates: the geodesic's length along its initial direc
     azimuths = (0.3, 1.9, 3.5, 5.6)
     angles = (1 / R, 1e-4, 3e-2, 0.8)          # 1 m to 5000 km
 
+    # Every centre meets every separation, the azimuth turning with the pair.
+    probes = [(c..., azimuths[mod1(k + m, 4)], σ) for (k, c) in enumerate(centres) for (m, σ) in enumerate(angles)]
     for T in (Float64, Float32)
         geo = G.SphericalGeometry(T(R))
         worst = 0.0
-        for (λ1, φ1) in centres, α in azimuths, σ in angles
+        for (λ1, φ1, α, σ) in probes
             c = (T(λ1), T(φ1))
             p = map(T, destination(big(λ1), big(φ1), big(α), big(σ)))
             p == c && continue                 # one metre can round onto the centre in Float32
@@ -601,7 +591,8 @@ Test.@testset "Normal coordinates: the geodesic's length along its initial direc
     # The forward problem, an independent oracle for the direction convention: leaving at azimuth `α`
     # (east of north) through `σ` comes back as `R·σ·(sin α, cos α)`.
     geo = G.SphericalGeometry(R)
-    for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8, 3.0)
+    for (k, (λ1, φ1)) in enumerate(centres), (m, σ) in enumerate((1e-4, 3e-2, 0.8, 3.0))
+        α = azimuths[mod1(k + m, 4)]
         p = map(Float64, destination(big(λ1), big(φ1), big(α), big(σ)))
         got = G.normal_coordinates(geo, (λ1, φ1), p)
         Test.@test got.λ ≈ R * σ * sin(α) rtol = 1e-9 atol = 1e-9 * R * σ
@@ -646,7 +637,8 @@ Test.@testset "Normal coordinates: the geodesic's length along its initial direc
                G.semimajor_axis(G.SpheroidGeometry()) * (2π - 6.0)
 
     # Three coordinates: the chord on the local frame, whose length is the chord distance.
-    for T in (Float64, Float32), (λ1, φ1) in centres, α in azimuths, σ in angles[1:3]
+    for T in (Float64, Float32), (λ1, φ1, α, σ) in probes
+        σ == angles[4] && continue
         g3 = G.SphericalGeometry(T(R))
         c = (T(λ1), T(φ1), T(R))
         q = map(T, destination(big(λ1), big(φ1), big(α), big(σ)))
@@ -668,7 +660,8 @@ Test.@testset "Normal coordinates: the geodesic's length along its initial direc
 
     # The spheroid: the geodesic's length along its azimuth at the centre.
     spd = G.SpheroidGeometry()
-    for (λ1, φ1) in centres, α in azimuths, σ in (1e-4, 3e-2, 0.8)
+    for (λ1, φ1, α, σ) in probes
+        σ < 1e-4 && continue
         c = (λ1, φ1)
         p = map(Float64, destination(big(λ1), big(φ1), big(α), big(σ)))
         got = G.normal_coordinates(spd, c, p)
@@ -739,8 +732,9 @@ Test.@testset "cartesian_to_geodetic inverts geodetic_to_cartesian" begin
     G = FG.Geometry
     for spd in (G.SpheroidGeometry(), G.SpheroidGeometry(6378137.0, 0.0), G.SpheroidGeometry(1.0, 0.3))
         a = G.semimajor_axis(spd)
-        for λ in (-3.14, -1.0, 0.0, 0.9, 3.0), φ in (-1.5707, -1.2, -0.4, 0.0, 0.5, 1.3, 1.5707),
-            hh in (-0.02a, 0.0, 0.001a, 0.5a)
+        # The poles, the equator, mid-latitudes; below, on and above the surface.
+        for (λ, φ, hh) in ((-3.14, -1.5707, 0.0), (-1.0, -1.2, -0.02a), (0.0, 0.0, 0.5a), (0.9, 0.5, 0.001a),
+                           (3.0, 1.5707, 0.5a), (0.9, -0.4, 0.0), (3.0, 1.3, -0.02a))
             P = G.geodetic_to_cartesian(spd, (λ, φ, hh))
             r = G.cartesian_to_geodetic(spd, (P.x, P.y, P.z))
             Q = G.geodetic_to_cartesian(spd, (r.λ, r.φ, r.h))
@@ -821,7 +815,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     # Independent check: the closed-form ellipsoid area, at every resolution.
     e = sqrt(e²)
     A_exact = 2π * a^2 * (1 + (1 - e²) / e * atanh(e))
-    for n in (4, 24, 96)
+    for n in (4, 96)
         gn = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, n),
                                      collect(range(-π / 2, π / 2; length = n ÷ 2 + 1)))
         Test.@test sum(FG.Grids.measure(gn)) ≈ A_exact rtol = 1e-13

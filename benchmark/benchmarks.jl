@@ -162,11 +162,86 @@ function bench_derivative()
     end
 end
 
+# A held stencil plan reads its weights from a row per index, or from one shared row on a uniform axis;
+# the table holds a row per index whatever the axis.
+function bench_plan()
+    group("held stencil plan against the table, 1024×1024")
+    n = 1024
+    f = [sin(3a) * cos(2b) for a in 1:n, b in 1:n]
+    out = similar(f)
+    for (nm, x) in (("uniform", range(0.0, 1.0; length = n)),
+                    ("stretched", cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = n)))))
+        for k in (3, 5)
+            pl = D.stencil_plan(x, 1, k)
+            idx, w = D.axis_stencils(x, 1, k)
+            for dim in 1:2
+                tp = best(() -> O.apply_stencil!(out, f, pl, dim), 5)
+                tt = best(() -> O.apply_stencil!(out, f, idx, w, dim), 5)
+                row("$nm k=$k dim=$dim  plan", tp)
+                row("$nm k=$k dim=$dim  table", tt)
+            end
+        end
+    end
+end
+
+# A binned index's two layouts against the cell list, per query, and the dense layout's offsets in bytes,
+# over boxes per point: `OccupancyBins` takes the dense layout while bins ≤ 8 points.
+function bench_binned()
+    group("binned index: dense, hashed, cell list (ball of ~10 points)")
+    jitter(i) = mod(sin(12.9898 * i) * 43758.5453, 1.0)
+    n = 20_000
+    for (nm, spread) in (("uniform", 1.0), ("clustered", 0.01))
+        xs = [spread * jitter(i) + (i ≤ n ÷ 2 ? 0.0 : 1.0) for i in 1:n]
+        ys = [spread * jitter(i + 7919) + (i ≤ n ÷ 2 ? 0.0 : 1.0) for i in 1:n]
+        g = GD.UnstructuredGrid(CART, (xs, ys), ones(n))
+        r = sqrt(10 / (n * π)) * spread
+        qs = [(xs[i], ys[i]) for i in 1:97:n]
+        for (lnm, ix) in (("dense", GD.binned_index(g; layout = GD.DenseBins())),
+                          ("hashed", GD.binned_index(g; layout = GD.HashedBins())),
+                          ("cell list", GD.cell_list(g; ball = r)))
+            top = C.MetricTopology(g; index = ix)
+            t = best(() -> sum(q -> C.nneighbors_within(g, q; ball = r, topology = top), qs), 3) / length(qs)
+            row("$nm  $lnm  per query", t)
+            lnm == "dense" && Printf.@printf("  %-46s %10d B\n", "$nm  dense offsets", Base.summarysize(ix))
+        end
+    end
+end
+
+# The spheroid geodesic per distance, at the separations a ball query sees and across the sphere.
+function bench_geodesic()
+    group("spheroid geodesic distance")
+    spd = FG.Geometry.SpheroidGeometry()
+    for (nm, q) in (("10 km", (0.3016, 0.4012)), ("1000 km", (0.45, 0.5)), ("near-antipodal", (π - 0.02, -0.35)))
+        t = best(() -> FG.Geometry.distance(spd, (0.3, 0.4), q), 10_000)
+        row(nm, t)
+    end
+end
+
+# A ball query's latitude band bracketed by search on a longitude axis whose spacing varies eightfold,
+# against the uniform axis's closed form.
+function bench_rowbracket()
+    group("ball query: stretched against uniform longitude, 720×361")
+    sph = FG.Geometry.SphericalGeometry(6.371e6)
+    nλ, nφ = 720, 361
+    sp = [1 + 7 * (1 + sin(2π * (k - 0.5) / nλ)) / 2 for k in 1:nλ]
+    λs = (cumsum(sp) .- sp[1]) .* (2π / sum(sp))
+    φ = collect(range(-π / 2, π / 2; length = nφ))
+    for (nm, g) in (("uniform", GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, nλ), φ)),
+                    ("stretched", GD.StructuredGrid(sph, λs, φ; topology = GD.Periodic())))
+        for r in (2.0e5, 2.0e6)
+            t = best(() -> C.nneighbors_within(g, 200, 250; ball = r), 200)
+            row("$nm  r=$(Int(r ÷ 1000)) km", t)
+        end
+    end
+end
+
 const GROUPS = ("stencil" => bench_stencil, "location" => bench_location,
                 "queries" => bench_queries, "axis" => bench_axis, "weights" => bench_weights,
-                "derivative" => bench_derivative)
+                "derivative" => bench_derivative, "plan" => bench_plan, "binned" => bench_binned,
+                "geodesic" => bench_geodesic, "rowbracket" => bench_rowbracket)
 
 function main(args)
+    println("julia ", VERSION, "  threads: ", Threads.nthreads(), "  project: ", Base.active_project())
     want = isempty(args) ? first.(GROUPS) : args
     for (name, f) in GROUPS
         name in want && f()

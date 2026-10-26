@@ -12,12 +12,12 @@ JLArrays = "27aeb0d3-9eb9-45fb-866b-73c2ecf80fcb"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
+PencilArrays = "0e08944d-e94e-41b1-9406-dcf66b6a9d2e"
 Quickhull = "baca2653-9c88-49d2-a488-12dbf25fc4fb"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-# Sibling package, not registered — CI has no local checkout to fall back on.
 ComputationalBackends = {url = "https://github.com/jbphyswx/ComputationalBackends.jl"}
 FlowGeometries = {path = ".."}

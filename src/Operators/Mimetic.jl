@@ -448,19 +448,17 @@ end
 
 # `f(I)` at every index of `dims`. On the host a chunk walks its run of linear indices carrying the
 # Cartesian index from one cell to the next; elsewhere each index is a work item.
-@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::Execution._HostBackend,
-                            outs::Execution.Written...) where {F,N}
+@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::Execution._HostBackend) where {F,N}
     cart = CartesianIndices(dims)
-    Execution.run_chunks(length(cart), b, outs...) do rng
+    Execution.run_chunks(length(cart), b) do rng
         _walk_cells(f, cart, rng)
     end
     return nothing
 end
 
-@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend,
-                            outs::Execution.Written...) where {F,N}
+@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend) where {F,N}
     cart = CartesianIndices(dims)
-    Execution.run_indices(length(cart), b, outs...) do lin
+    Execution.run_indices(length(cart), b) do lin
         f(@inbounds cart[lin])
         return nothing
     end
@@ -568,7 +566,7 @@ function gradient!(g::NTuple{N,AbstractArray}, χ::AbstractArray, fm::FaceMetric
 end
 
 function _gradient_dir!(gd::AbstractArray{S}, χ, grid, ad, gpd, σ, d::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, d), b, Execution.Written(gd)) do F
+    _each_cell(Grids.face_dims(grid, d), b) do F
         @inbounds gd[F] = iszero(ad[F]) ? zero(S) :
                           S(σ) * (_cell_value(χ, grid, F, d, true, S) - _cell_value(χ, grid, F, d, false, S)) /
                           gpd[F]
@@ -596,7 +594,7 @@ function divergence!(δ::AbstractArray, v::NTuple{N,AbstractArray}, fm::FaceMetr
     area = m.area_op
     σ = m.orientation
     S = eltype(δ)
-    _each_cell(Grids.size_tuple(grid), b, Execution.Written(δ)) do I
+    _each_cell(Grids.size_tuple(grid), b) do I
         @inbounds δ[I] = msk[I] ? S(_flux_out(v, area, σ, grid, I, Val(N), S) / meas[I]) : zero(S)
         return nothing
     end
@@ -687,7 +685,7 @@ end
 
 function _curl_pair!(Wp::AbstractArray{S}, va, vb, aa, ab, ga, gb, μ, σa, σb, grid, a::Int, b::Int,
                      bk) where {S}
-    _each_cell(size(Wp), bk, Execution.Written(Wp)) do Qc
+    _each_cell(size(Wp), bk) do Qc
         @inbounds begin
             Q = Grids.corner_to_face(grid, Qc, a, b)
             if _corner_closes(grid, aa, ab, Q, a, b)
@@ -735,7 +733,7 @@ function rotational_velocity!(u::NTuple{N,AbstractArray}, R::Tuple{Vararg{Abstra
 end
 
 function _rotational_dir!(uc::AbstractArray{S}, R, edge, ac, σ, terms, grid, c::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, c), b, Execution.Written(uc)) do F
+    _each_cell(Grids.face_dims(grid, c), b) do F
         @inbounds if iszero(ac[F])
             uc[F] = zero(S)
         else
@@ -778,7 +776,7 @@ function to_faces!(v::NTuple{N,AbstractArray}, u::NTuple{N,AbstractArray}, fm::F
 end
 
 function _to_faces_dir!(vd::AbstractArray{S}, ud, ad, grid, d::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, d), b, Execution.Written(vd)) do F
+    _each_cell(Grids.face_dims(grid, d), b) do F
         @inbounds if iszero(ad[F])
             vd[F] = zero(S)
         else
@@ -813,7 +811,7 @@ function to_centres!(u::NTuple{N,AbstractArray}, v::NTuple{N,AbstractArray}, fm:
 end
 
 function _to_centres_dir!(ud::AbstractArray{S}, vd, ad, msk, grid, d::Int, b) where {S}
-    _each_cell(Grids.size_tuple(grid), b, Execution.Written(ud)) do I
+    _each_cell(Grids.size_tuple(grid), b) do I
         @inbounds if msk[I]
             Fhi = Grids.face_above(grid, I, d)
             olo, ohi = !iszero(ad[I]), !iszero(ad[Fhi])

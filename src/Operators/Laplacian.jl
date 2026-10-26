@@ -250,7 +250,7 @@ _apply_laplacian!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) wh
     _laplacian_cells!(f, out, Φ, grid, msk, coef, meas, v, S, b)
 
 function _laplacian_cells!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S}
-    _each_cell(Grids.size_tuple(grid), b, Execution.Written(out)) do I
+    _each_cell(Grids.size_tuple(grid), b) do I
         @inbounds out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, coef, meas, I, v, S))) : zero(S)
         return nothing
     end
@@ -326,8 +326,7 @@ in `L`'s null space.
 function project_out_constant!(Φ::AbstractArray, c::LaplacianCoefficients{N,T};
                                execution::CB.AbstractExecutionBackend = CB.SerialBackend()) where {N,T}
     c.singular || return Φ
-    # The cells of a component are scattered through `Φ`, so the passes stay in this process.
-    b = Execution.local_backend(execution)
+    b = Execution.resolve(execution)
     ns = c.nullspace
     meas = Execution.on_backend(b, c.measure)
     ns.full && return _project_mean!(Φ, meas, c.total, b, eltype(Φ))
@@ -591,7 +590,7 @@ function restrict!(coarse::AbstractArray, fine::AbstractArray, fc::LaplacianCoef
     b = Execution.resolve(execution)
     fmeas, cmeas = Execution.on_backend(b, fc.measure), Execution.on_backend(b, cc.measure)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), b, Execution.Written(coarse)) do I
+    _each_cell(Grids.size_tuple(cc.grid), b) do I
         @inbounds begin
             w = cmeas[I]
             if iszero(w)
@@ -617,7 +616,7 @@ function prolong_add!(fine::AbstractArray, coarse::AbstractArray, fc::LaplacianC
     fdims = Grids.size_tuple(fc.grid)
     b = Execution.resolve(execution)
     fmeas = Execution.on_backend(b, fc.measure)
-    _each_cell(fdims, b, Execution.Written(fine)) do J
+    _each_cell(fdims, b) do J
         @inbounds iszero(fmeas[J]) ||
                   (fine[J] += coarse[CartesianIndex(ntuple(d -> _parent(J[d], fdims[d]), Val(N)))])
         return nothing
@@ -644,7 +643,7 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
     fmeas, cmeas = Execution.on_backend(bk, fc.measure), Execution.on_backend(bk, cc.measure)
     coef, msk = Execution.on_backend(bk, fc.coef), Grids.mask(fgrid)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), bk, Execution.Written(coarse)) do I
+    _each_cell(Grids.size_tuple(cc.grid), bk) do I
         @inbounds begin
             w = cmeas[I]
             if iszero(w)

@@ -81,3 +81,23 @@ Test.@testset "Builders, indices, queries and the geodesic make no runtime dispa
         JET.@test_opt target_modules = (FG,) O.laplacian_coefficients(fm)
     end
 end
+
+Test.@testset "A block of a split grid is typed by the grid alone" begin
+    if isempty(VERSION.prerelease)
+        D, GD = FG.Decomposition, FG.Grids
+        mk = trues(16, 9)
+        mk[5, 4] = false
+        y = cumsum(1.0 .+ 0.3 .* sin.(1:9))
+        for g in (GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, 16),
+                                    collect(range(-1.2, 1.2; length = 9)), mk),
+                  GD.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), range(0.0, 1.0; length = 16), y;
+                                    topology = (GD.Bounded(), GD.Periodic()), period = (0.0, y[end] - y[1] + 1.0)))
+            # A block at a seam and one inside: the same type, inferred.
+            halo = (3, 3)
+            seam = D._block(g, (1:8, 1:9), halo, CB.SerialBackend())
+            inner = D._block(g, (5:12, 1:9), halo, CB.SerialBackend())
+            Test.@test typeof(seam) === typeof(inner)
+            JET.@test_opt target_modules = (FG,) D._block(g, (1:8, 1:9), halo, CB.SerialBackend())
+        end
+    end
+end
