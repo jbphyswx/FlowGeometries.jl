@@ -182,7 +182,7 @@ function interpolate!(
     policy::AbstractMaskPolicy = BlankMasked(), execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {S}
     nb = _check_points_out(out, field, grid, length(points))
-    Execution.run_chunks(length(points), execution, Execution.Written(out, Execution.ByBlock(nb))) do rng
+    Execution.run_chunks(length(points), execution) do rng
         @inbounds for i in rng
             interpolate!(view(out, ((i - 1) * nb + 1):(i * nb)), field, grid, points[i];
                          active_only = active_only, masked = masked, policy = policy)

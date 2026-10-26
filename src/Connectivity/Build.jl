@@ -128,7 +128,7 @@ function _build_connectivity_topology(
     deg = Execution.allocate(execution, Int, n)
     # Per index: nothing here carries across cells, so the same body runs as a device kernel under a
     # device backend. Every cell writes its own degree, so the buffer needs no zeroing pass.
-    Execution.run_indices(n, execution, Execution.Written(deg)) do k
+    Execution.run_indices(n, execution) do k
         @inbounds begin
             Ik = Tuple(ci[k])
             c = 0
@@ -146,7 +146,7 @@ function _build_connectivity_topology(
     total = _csr_total(deg, n, execution)
     ptr = Execution.exclusive_scan!(Execution.allocate(execution, Int, n + 1), deg, execution)
     nbrs = Execution.allocate(execution, I, total)
-    Execution.run_indices(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
+    Execution.run_indices(n, execution) do k
         @inbounds begin
             Ik = Tuple(ci[k])
             if !(active_only && !_active(t, Ik...))
@@ -187,19 +187,17 @@ default_sweep_topology(grid, ball, active_only::Bool, ::Grids.IndexedCandidates)
 
 # One cell pass. Which form it takes is [`_buffered_candidates`](@ref) — per index where the candidates
 # need no storage, per chunk where each task needs its own buffer — and the choice folds away, being a
-# property of the topology's type. `body(k, scratch)` handles cell `k` and writes `outs`.
-@inline function _within_pass(
-    body::F, n::Int, topology::MetricTopology, backend, outs::Execution.Written...,
-) where {F}
+# property of the topology's type. `body(k, scratch)` handles cell `k`.
+@inline function _within_pass(body::F, n::Int, topology::MetricTopology, backend) where {F}
     if _buffered_candidates(topology.index)
-        Execution.run_chunks(n, backend, outs...) do rng
+        Execution.run_chunks(n, backend) do rng
             s = ball_scratch()
             @inbounds for k in rng
                 body(k, s)
             end
         end
     else
-        Execution.run_indices(n, backend, outs...) do k
+        Execution.run_indices(n, backend) do k
             body(k, nothing)
         end
     end
@@ -268,14 +266,14 @@ function _within_build(
 ) where {I<:Integer}
     # Every cell writes its own degree, so the buffer needs no zeroing pass before the count.
     deg = Execution.allocate(backend, Int, n)
-    _within_pass(n, topology, backend, Execution.Written(deg)) do k, s
+    _within_pass(n, topology, backend) do k, s
         @inbounds deg[k] = _within_scan(nothing, grid, Grids.cell_at(grid, cs[k]), ball,
                                         active_only, topology, s)
         return nothing
     end
     ptr = Execution.exclusive_scan!(Execution.allocate(backend, Int, n + 1), deg, backend)
     nbrs = Execution.allocate(backend, I, _csr_total(deg, n, backend))
-    _within_pass(n, topology, backend, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k, s
+    _within_pass(n, topology, backend) do k, s
         @inbounds if deg[k] != 0
             _within_scan(view(nbrs, ptr[k]:(ptr[k + 1] - 1)), grid,
                          Grids.cell_at(grid, cs[k]), ball, active_only, topology, s)

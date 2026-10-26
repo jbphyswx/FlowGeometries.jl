@@ -88,7 +88,7 @@ function _launch_plan!(
     out::AbstractArray{S,N}, field, plan, mask, masked, ::Val{dim}, ::Val{N}, ::Val{M}, backend, fac, vk,
 ) where {S,N,dim,M}
     ci = CartesianIndices(size(field))
-    Execution.run_indices(length(ci), backend, Execution.Written(out)) do lin
+    Execution.run_indices(length(ci), backend) do lin
         c = @inbounds ci[lin]
         I = Tuple(c)
         nodes, wts = Discretization.plan_row(plan, I[dim], vk)
@@ -147,7 +147,7 @@ function _plan_sweep_host!(
         # counted over directions `2:N` in column-major order, is `nruns · ((j−1) + n·p)`.
         nruns = stride ÷ sz[1]
         runlen = fac === nothing ? stride : sz[1]
-        Execution.run_chunks(npost * stride * n, backend, Execution.Written(out)) do rng
+        Execution.run_chunks(npost * stride * n, backend) do rng
             _plan_span_linear!(out, field, plan, mask, masked, Val(dim), first(rng) - 1, last(rng), n,
                                stride, mpost, nruns, runlen, fac, vk)
         end

@@ -235,8 +235,7 @@ function _corner_areas(
     execution::CB.AbstractExecutionBackend = CB.SerialBackend(),
 ) where {T<:AbstractFloat, G<:Geometry.AbstractCartesianGeometry{T}}
     areas = similar(xc, T, Nx, Ny)
-    columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
-    Execution.run_chunks(Int(Ny), execution, columns) do rows
+    Execution.run_chunks(Int(Ny), execution) do rows
     @inbounds for j in rows, i in 1:Nx
         # Cell (i,j) has vertices (i,j)→(i+1,j)→(i+1,j+1)→(i,j+1) (counter-clockwise in index space).
         x1 = xc[i, j];         y1 = yc[i, j]
@@ -275,8 +274,7 @@ function _corner_areas(
     areas = similar(λc, T, Nx, Ny)
     # Chunked over rows, each chunk with its own two-row buffer. A chunk re-derives its first row, at
     # one extra row of trig per chunk, which keeps the chunks independent.
-    columns = Execution.Written(areas, Execution.ByBlock(Int(Nx)))     # row index j writes areas[:, j]
-    Execution.run_chunks(Int(Ny), execution, columns) do rows
+    Execution.run_chunks(Int(Ny), execution) do rows
         lo = Vector{NTuple{3,T}}(undef, nk)
         hi = Vector{NTuple{3,T}}(undef, nk)
         _fill_dir_row!(lo, λc, φc, first(rows), nk)

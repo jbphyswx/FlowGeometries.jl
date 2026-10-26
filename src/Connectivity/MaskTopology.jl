@@ -47,7 +47,7 @@ function _interior(
     # Every cell writes its own answer, so the buffer needs no fill.
     out = Execution.allocate(execution, Bool, sz...)
     ci = CartesianIndices(sz)
-    Execution.run_indices(prod(sz), execution, Execution.Written(out)) do k
+    Execution.run_indices(prod(sz), execution) do k
         @inbounds out[k] = _stencil_closed(t, sten, Tuple(ci[k]))
     end
     return out
@@ -75,7 +75,7 @@ function _boundary_cells(
     sz = t.size
     out = Execution.allocate(execution, Bool, sz...)
     ci = CartesianIndices(sz)
-    Execution.run_indices(prod(sz), execution, Execution.Written(out)) do k
+    Execution.run_indices(prod(sz), execution) do k
         I = Tuple(@inbounds ci[k])
         @inbounds out[k] = _active(t, I...) && !_stencil_closed(t, sten, I)
     end

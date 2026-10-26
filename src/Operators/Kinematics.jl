@@ -317,7 +317,7 @@ function _frame_pass!(kind, outs::Tuple, u::NTuple{N,Any}, grid::Grids.AbstractG
     g = Execution.on_backend(b, grid)
     msk = Grids.mask(g)
     ci = CartesianIndices(size(first(outs)))
-    Execution.run_indices(length(ci), b, map(Execution.Written, outs)...) do lin
+    Execution.run_indices(length(ci), b) do lin
         _frame_cell!(kind, outs, u, g, geo, msk, masked, @inbounds(ci[lin]), Val(ndims(msk)))
     end
     return nothing

@@ -107,13 +107,13 @@ function build_connectivity(
     # Every buffer comes from `Execution.allocate`, so all three land wherever the passes that fill
     # them run, and the build is device-resident end to end under a backend that launches kernels.
     deg = Execution.allocate(execution, Int, n)
-    Execution.run_indices(n, execution, Execution.Written(deg)) do k
+    Execution.run_indices(n, execution) do k
         @inbounds deg[k] = _nneighbors(grid, k, nothing, active_only, Grids.FormulaNeighbors())
     end
     total = _csr_total(deg, n, execution)
     ptr = Execution.exclusive_scan!(Execution.allocate(execution, Int, n + 1), deg, execution)
     nbrs = Execution.allocate(execution, I, total)
-    Execution.run_indices(n, execution, Execution.Written(nbrs, Execution.ByOffsets(ptr))) do k
+    Execution.run_indices(n, execution) do k
         @inbounds begin
             ids, m = _formula_ids(grid, k, active_only)
             slot = ptr[k]

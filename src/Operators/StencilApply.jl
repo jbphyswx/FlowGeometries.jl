@@ -153,7 +153,7 @@ function _apply_stencil_degrade!(
             end
         end
     end
-    Execution.run_chunks(length(ci), b, Execution.Written(out)) do rng
+    Execution.run_chunks(length(ci), b) do rng
         wbuf = Vector{T}(undef, k)
         cbuf = Matrix{T}(undef, k, ord + 1)
         nbuf = Vector{T}(undef, k)
@@ -192,13 +192,12 @@ end
     _Degrade(r, Vector{T}(undef, r.k), Matrix{T}(undef, r.k, r.ord + 1), Vector{T}(undef, r.k))
 @inline _chunk_degrade(r::_DegradeRecipe, s::Discretization.StencilScratch) = _Degrade(r, s.w, s.c, s.n)
 
-# Chunk `c`'s buffers: set `c` of a caller's per-chunk vector, a caller's single set for the first chunk,
-# and none otherwise, where the chunk allocates its own. Chunk numbers are distinct within a call, so no
-# two chunks share a set.
+# Chunk `c`'s buffers: set `c` of a caller's per-chunk vector, which `_check_scratch` holds long enough,
+# a caller's single set for the first chunk, and none otherwise, where the chunk allocates its own. Chunk
+# numbers are distinct within a call, so no two chunks share a set.
 @inline _scratch_for(::Nothing, ::Int) = nothing
 @inline _scratch_for(s::Discretization.StencilScratch, c::Int) = c == 1 ? s : nothing
-@inline _scratch_for(p::AbstractVector{<:Discretization.StencilScratch}, c::Int) =
-    1 ≤ c ≤ length(p) ? @inbounds(p[c]) : nothing
+@inline _scratch_for(p::AbstractVector{<:Discretization.StencilScratch}, c::Int) = @inbounds p[c]
 
 _check_scratch(::Nothing, _b, ::Type, ::Int, ::Int) = nothing
 _check_scratch(s::Discretization.StencilScratch, _b, ::Type{T}, k::Int, ord::Int) where {T} =
@@ -386,15 +385,11 @@ function _apply_table!(
     end
 end
 
-# Whether a sweep runs as the host nest: always on a serial or threaded backend, and on a Distributed or
-# MPI one where the layout is linear, each process sweeping a contiguous share of the cells. A device
-# launches one work item per cell.
+# Whether a sweep runs as the host nest: on a serial or threaded backend. A device launches one work item
+# per cell.
 @inline _sweeps_on_host(
     ::Union{CB.AbstractSerialBackend,CB.AbstractThreadedBackend}, _out, _field, _mask, _fac,
 ) = true
-@inline _sweeps_on_host(
-    ::Union{CB.AbstractDistributedBackend,CB.AbstractMPIBackend}, out, field, mask, fac,
-) = _run_addressable(out, field, mask, fac)
 @inline _sweeps_on_host(_b, _out, _field, _mask, _fac) = false
 
 # Over the entire field, batch axes included, so a batched sweep is a single launch over
@@ -404,7 +399,7 @@ function _launch_stencil!(
     ::Val{M}, backend, fac,
 ) where {S,N,dim,M}
     ci = CartesianIndices(size(field))
-    Execution.run_indices(length(ci), backend, Execution.Written(out)) do lin
+    Execution.run_indices(length(ci), backend) do lin
         _stencil_cell!(out, field, indices, weights, Val(dim), mask, masked, nodes,
                        Tuple(@inbounds ci[lin]), (@inbounds ci[lin]), Val(M), fac)
     end
@@ -520,7 +515,7 @@ The arithmetic and its order are identical to `_stencil_cell!`, so the two paths
 
 `fac` is the metric factor each value is written with — see [`_RowFactors`](@ref) — or `nothing` for
 the plain sweep. Under `backend` a chunk is a contiguous range of cells, written in place, so a threaded
-or distributed sweep is this nest over each chunk's share. `dg` is the degrading policy's recipe for a
+sweep is this nest over each chunk's share. `dg` is the degrading policy's recipe for a
 cell whose window reads an inactive sample, or `nothing` to write `masked` there; `scratch` its buffers
 under a serial backend.
 """
@@ -545,7 +540,7 @@ function _stencil_sweep_host!(
         # repeats the grid's runs, so `_run_factor` takes the count modulo their number.
         nruns = stride ÷ sz[1]
         runlen = fac === nothing ? stride : sz[1]
-        Execution.run_numbered_chunks(npost * stride * n, backend, Execution.Written(out)) do c, rng
+        Execution.run_numbered_chunks(npost * stride * n, backend) do c, rng
             dgc = _chunk_degrade(dg, _scratch_for(scratch, c))
             _stencil_span_linear!(out, field, indices, weights, mask, masked, Val(dim), nodes,
                                   first(rng) - 1, last(rng), n, stride, mpost, nruns, runlen, fac, dgc)

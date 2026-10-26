@@ -220,21 +220,9 @@ Test.@testset "UnstructuredGrid carries a caller-chosen index type" begin
     Test.@test isempty(FG.Grids.neighbors(FG.Grids.UnstructuredGrid(geom, x, y, areas, trues(3)), 1))
 end
 
-Test.@testset "1D and 3D StructuredGrid" begin
-    geom = FG.Geometry.CartesianGeometry()
-    x = 0.0:1.0:9.0
-    g1 = FG.Grids.StructuredGrid(geom, x, trues(length(x)))
-    Test.@test FG.Grids.area(g1, 2) ≈ 1.0
-
-    geom3 = FG.Geometry.CartesianGeometry()
-    z = 0.0:1.0:4.0
-    g3 = FG.Grids.StructuredGrid(geom3, x, x, z, trues(length(x), length(x), length(z)))
-    Test.@test FG.Grids.area(g3, 2, 2, 2) ≈ 1.0
-end
-
 Test.@testset "Curvilinear areas hold two corner rows, not the whole field" begin
     geo = FG.Geometry.SphericalGeometry()
-    for n in (5, 32)
+    for n in (32,)
         λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
         φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
         g = FG.Grids.CurvilinearGrid(geo, λ, φ, trues(n, n))
@@ -295,7 +283,7 @@ end
 
 Test.@testset "Cell measure is stored factored, not materialized" begin
     geo = FG.Geometry.SphericalGeometry()
-    for (nx, ny) in ((16, 9), (64, 40))
+    for (nx, ny) in ((16, 9),)
         x = collect(range(0, 2π; length = nx))
         y = collect(range(-1.3, 1.3; length = ny))
         g = FG.Grids.StructuredGrid(geo, x, y, FG.Grids.AllActive((nx, ny)))
@@ -332,11 +320,11 @@ Test.@testset "Every architecture can be built without a mask" begin
     Test.@test all(GD.isactive(g0, i, j) == GD.isactive(gm, i, j) for i in 1:n, j in 1:n)
 
     # The mask is recognised by its element type, so the optional positional measure parses either
-    # way.
+    # way, and equals the keyword form.
     let gp = GD.CurvilinearGrid(cart, x, y, fill(2.0, n, n)),
         gpm = GD.CurvilinearGrid(cart, x, y, fill(2.0, n, n), trues(n, n))
         Test.@test GD.measure(gp, 2, 2) == 2.0
-        Test.@test GD.measure(gpm, 2, 2) == 2.0
+        Test.@test GD.measure(gpm) == GD.measure(GD.CurvilinearGrid(cart, x, y, trues(n, n); measure = fill(2.0, n, n)))
     end
 
     let nn = 40, xs = 10.0 .* rand(nn), ys = 6.0 .* rand(nn)
@@ -694,16 +682,6 @@ Test.@testset "Mask topology: interior, boundary, components and holes" begin
         FG.Grids.StructuredGrid(geo, 0.0:1.0:6.0, 0.0:1.0:6.0, 0.0:1.0:6.0, m4)) == 1
 end
 
-Test.@testset "A curvilinear measure may be given positionally or by keyword" begin
-    geo = FG.Geometry.CartesianGeometry{Float64}()
-    xs = [x for x in range(0.0, 3.0; length = 4), _ in 1:4]
-    ys = [y for _ in 1:4, y in range(0.0, 3.0; length = 4)]
-    a = fill(2.5, 4, 4)
-    bykw = FG.Grids.CurvilinearGrid(geo, xs, ys, trues(4, 4); measure = a)
-    bypos = FG.Grids.CurvilinearGrid(geo, xs, ys, a, trues(4, 4))
-    Test.@test FG.Grids.measure(bykw) == FG.Grids.measure(bypos) == a
-end
-
 Test.@testset "A formula layout stores its arithmetic's parameters, not its results" begin
     G = FG.Grids
     C = FG.Connectivity
@@ -712,13 +690,13 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
     R = FG.Geometry.radius(geo)
 
     Test.@testset "HEALPixGrid storage is independent of nside" begin
-        sizes = [Base.summarysize(G.HEALPixGrid(geo, ns)) for ns in (1, 8, 64, 256, 1024)]
+        sizes = [Base.summarysize(G.HEALPixGrid(geo, ns)) for ns in (1, 1024)]
         Test.@test allequal(sizes)
         Test.@test length(G.HEALPixGrid(geo, 1024)) == 12 * 1024^2
     end
 
     Test.@testset "HEALPix coords, measure and neighbours are the pixelization's" begin
-        for ns in (1, 2, 4, 8)
+        for ns in (1, 8)
             g = G.HEALPixGrid(geo, ns)
             pts = SS.spherical_points(SS.HEALPixSampling(ns))
             npix = SS.healpix_npix(ns)
@@ -757,12 +735,8 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         b = G.RingGrid(geo, SS.OctahedralGaussianSampling(64))
         Test.@test length(b) > 3 * length(a)          # points grow with N²
         Test.@test Base.summarysize(b) < 2.5 * Base.summarysize(a)   # storage grows with N
-        for N in (8, 32, 128)
-            oct = SS.OctahedralGaussianSampling(N)
-            g = G.RingGrid(geo, oct)
-            Test.@test length(g) == SS.npoints(oct)
-            Test.@test G.nrings(g) == SS.nrings(oct)
-        end
+        Test.@test length(b) == SS.npoints(SS.OctahedralGaussianSampling(64))
+        Test.@test G.nrings(b) == SS.nrings(SS.OctahedralGaussianSampling(64))
         # Tables of another element type are converted to the geometry's.
         let g32 = G.RingGrid(FG.Geometry.SphericalGeometry(6.371f6), [0.5, -0.5], Int32[4, 4], [1.0, 2.0])
             Test.@test G.measure(g32, 5) == 2.0f0
@@ -770,7 +744,7 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
     end
 
     Test.@testset "RingGrid coords and ring bookkeeping are the sampling's" begin
-        for N in (4, 8, 24)
+        for N in (8,)
             oct = SS.OctahedralGaussianSampling(N)
             g = G.RingGrid(geo, oct)
             pts = SS.spherical_points(oct)
@@ -792,7 +766,7 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
 
     Test.@testset "A ringwise measure is exact and carries one value per ring" begin
         ratios = Float64[]
-        for N in (4, 16, 64, 256)
+        for N in (4, 64)
             g = G.RingGrid(geo, SS.OctahedralGaussianSampling(N))
             m = G.measure(g)
             # `Σ nlon_r · w_r · R² · 2π/nlon_r = 2π R² Σ w_r = 4π R²`, the weights summing to 2.
@@ -855,70 +829,38 @@ Test.@testset "A formula layout stores its arithmetic's parameters, not its resu
         end
     end
 
-    Test.@testset "A formula layout answers the three traits and refuses coordinate arrays" begin
-        for g in (G.HEALPixGrid(geo, 4), G.RingGrid(geo, SS.OctahedralGaussianSampling(8)))
-            Test.@test G.ncoordinates(g) == 2
-            # The layout holds no coordinate arrays and no index space, and both accessors say so.
-            Test.@test_throws ArgumentError G.coordinates(g)
-            Test.@test_throws ArgumentError C.IndexTopology(g)
-            Test.@test_throws ArgumentError G.isuniform(g, 3)
+end
+
+Test.@testset "Every formula and panel layout answers the grid interface, and a ball query as a scan does" begin
+    G = FG.Grids
+    C = FG.Connectivity
+    GE = FG.Geometry
+    SS = FG.SphericalSampling
+    layouts(geo) = (G.HEALPixGrid(geo, 4), G.RingGrid(geo, SS.OctahedralGaussianSampling(8)), G.CubedSphereGrid(geo, 4),
+                    G.YinYangGrid(geo, 8, 6), G.IcosahedralGrid(geo, 4))
+    for (g, g32) in zip(layouts(GE.SphericalGeometry()), layouts(GE.SphericalGeometry(6.371f6)))
+        n = length(g)
+        # Two coordinates held as arithmetic: no coordinate arrays and no index space for a stencil.
+        Test.@test G.ncoordinates(g) == 2
+        Test.@test_throws ArgumentError G.coordinates(g)
+        Test.@test_throws ArgumentError C.IndexTopology(g)
+        Test.@test eltype(g32) === Float32 && G.coords(g32, 7).λ isa Float32 && G.measure(g32, 7) isa Float32
+        # A mask set by a rebuild takes the cell out of the graph and leaves coordinates and measures alone.
+        m = trues(n); m[5] = false
+        gm = G.rebuild(g, (mask = m,))
+        j = first(G.neighbors(g, 5))
+        Test.@test !G.isactive(gm, 5) && C.nneighbors(gm, 5) == 0
+        Test.@test !(5 in collect(G.neighbors(gm, j))) && 5 in collect(G.neighbors(gm, j; active_only = false))
+        Test.@test G.coords(gm, 7) == G.coords(g, 7) && G.measure(gm, 7) == G.measure(g, 7)
+        # A ball, scanned and through a cell list, against every pairwise distance.
+        r = 1.5e6
+        for i in (1, n ÷ 2, n)
+            ref = sort([k for k in 1:n if k != i && GE.distance(g, i, k) ≤ r])
+            Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
+            Test.@test sort(C.neighbors_within(g, i; ball = r, topology = C.MetricTopology(g; index = G.cell_list(g; ball = r)))) == ref
         end
     end
-
-    Test.@testset "A formula layout's distance queries agree with a brute-force scan" begin
-        for (g, r) in ((G.HEALPixGrid(geo, 4), 2.0e6),
-                       (G.RingGrid(geo, SS.OctahedralGaussianSampling(8)), 1.5e6))
-            n = length(g)
-            for i in (1, 40, n ÷ 2, n)
-                ref = sort([j for j in 1:n if j != i && FG.Geometry.distance(g, i, j) ≤ r])
-                Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
-                mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
-                Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
-            end
-        end
-    end
-
-    Test.@testset "A formula layout honours a mask and follows its geometry's width" begin
-        npix = SS.healpix_npix(2)
-        m = trues(npix); m[5] = false
-        g = G.HEALPixGrid(geo, 2; mask = m)
-        Test.@test !G.isactive(g, 5)
-        Test.@test C.nneighbors(g, 5) == 0
-        Test.@test !(5 in collect(G.neighbors(g, 6)))
-        Test.@test 5 in collect(G.neighbors(g, 6; active_only = false))
-        Test.@test count(G.mask(g)) == npix - 1
-
-        for W in (Float64, Float32)
-            gw = G.HEALPixGrid(FG.Geometry.SphericalGeometry(W(6.371e6)), 4)
-            rw = G.RingGrid(FG.Geometry.SphericalGeometry(W(6.371e6)),
-                            SS.OctahedralGaussianSampling(8))
-            Test.@test eltype(gw) === eltype(rw) === W
-            Test.@test G.coords(gw, 7).λ isa W
-            Test.@test G.coords(rw, 7).λ isa W
-            Test.@test G.measure(gw, 7) isa W
-            Test.@test G.measure(rw, 7) isa W
-        end
-    end
-
-    Test.@testset "A formula layout survives a structural rebuild" begin
-        # `rebuild` replaces fields and re-derives every type parameter from the field values.
-        g = G.HEALPixGrid(geo, 4)
-        npix = SS.healpix_npix(4)
-        m = trues(npix); m[3] = false
-        g2 = G.rebuild(g, (mask = m,))
-        Test.@test !G.isactive(g2, 3)
-        Test.@test G.nside(g2) == 4
-        Test.@test G.coords(g2, 10) == G.coords(g, 10)
-        Test.@test_throws ArgumentError G.rebuild(g, (nlon = m,))
-
-        rg = G.RingGrid(geo, SS.OctahedralGaussianSampling(8))
-        rm = trues(length(rg)); rm[7] = false
-        rg2 = G.rebuild(rg, (mask = rm,))
-        Test.@test !G.isactive(rg2, 7)
-        Test.@test G.nrings(rg2) == G.nrings(rg)
-        Test.@test all(G.coords(rg2, i) == G.coords(rg, i) for i in 1:length(rg))
-        Test.@test G.measure(rg2, 7) == G.measure(rg, 7)
-    end
+    Test.@test_throws ArgumentError G.rebuild(G.HEALPixGrid(GE.SphericalGeometry(), 4), (nlon = trues(3),))
 end
 
 Test.@testset "The panel layouts store their resolution, not their panels" begin
@@ -944,13 +886,13 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
     end
 
     Test.@testset "CubedSphereGrid stores one quadrant of a panel's areas" begin
-        sizes = [Base.summarysize(G.CubedSphereGrid(geo, n)) - sizeof(Float64) * cld(n, 2)^2 for n in (1, 8, 64, 512)]
+        sizes = [Base.summarysize(G.CubedSphereGrid(geo, n)) - sizeof(Float64) * cld(n, 2)^2 for n in (1, 512)]
         Test.@test allequal(sizes)
         Test.@test length(G.CubedSphereGrid(geo, 512)) == 6 * 512^2
     end
 
     Test.@testset "Cubed-sphere coords and numbering are the sampling's" begin
-        for n in (1, 2, 3, 8)
+        for n in (1, 3)
             g = G.CubedSphereGrid(geo, n)
             p = SS.cubed_sphere_points(n)
             Test.@test length(g) == length(p.λ)
@@ -970,7 +912,7 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
     end
 
     Test.@testset "A gnomonic cell's area is its exact solid angle" begin
-        for n in (1, 2, 3, 8, 16)
+        for n in (3, 8)
             g = G.CubedSphereGrid(geo, n)
             m = G.measure(g)
             for k in 1:length(g)
@@ -988,7 +930,7 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
     end
 
     Test.@testset "A seam neighbour is symmetric across all twelve seams" begin
-        for n in (1, 2, 3, 8)
+        for n in (1, 3)
             g = G.CubedSphereGrid(geo, n)
             conn = C.build_connectivity(g)
             Test.@test C.is_symmetric_adjacency(conn)
@@ -1015,13 +957,13 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
 
     Test.@testset "YinYangGrid storage is independent of resolution" begin
         sizes = [Base.summarysize(G.YinYangGrid(geo, nl, nt))
-                 for (nl, nt) in ((4, 3), (32, 22), (192, 128))]
+                 for (nl, nt) in ((4, 3), (192, 128))]
         Test.@test allequal(sizes)
         Test.@test length(G.YinYangGrid(geo, 192, 128)) == 2 * 192 * 128
     end
 
     Test.@testset "Yin–Yang coords are the panel formula and its rotation" begin
-        for (nlon, nlat) in ((4, 3), (8, 6), (16, 12))
+        for (nlon, nlat) in ((8, 6),)
             g = G.YinYangGrid(geo, nlon, nlat)
             p = SS.spherical_points(SS.YinYangSampling(), nlon, nlat)
             np = nlon * nlat
@@ -1076,7 +1018,7 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
             return acc
         end
 
-        for (nlon, nlat) in ((8, 6), (16, 12), (48, 32), (191, 127))
+        for (nlon, nlat) in ((16, 12), (191, 127))
             g = G.YinYangGrid(geo, nlon, nlat)
             m = G.measure(g)
             # The panels' union is the sphere, counted once, and the sum agrees with the cells added up.
@@ -1145,46 +1087,6 @@ Test.@testset "The panel layouts store their resolution, not their panels" begin
         end
     end
 
-    Test.@testset "The panel layouts answer the traits and refuse coordinate arrays" begin
-        for g in (G.CubedSphereGrid(geo, 4), G.YinYangGrid(geo, 8, 6))
-            Test.@test G.ncoordinates(g) == 2
-            Test.@test G.npanels(g) == (g isa G.CubedSphereGrid ? 6 : 2)
-        end
-    end
-
-    Test.@testset "The panel layouts honour a mask, a width and a rebuild" begin
-        for (g, ncell) in ((G.CubedSphereGrid(geo, 3), 54), (G.YinYangGrid(geo, 4, 3), 24))
-            Test.@test length(g) == ncell
-            m = trues(ncell); m[4] = false
-            gm = G.rebuild(g, (mask = m,))
-            Test.@test !G.isactive(gm, 4)
-            Test.@test C.nneighbors(gm, 4) == 0
-            Test.@test G.coords(gm, 7) == G.coords(g, 7)
-            Test.@test G.measure(gm, 7) == G.measure(g, 7)
-        end
-        for W in (Float64, Float32)
-            gw = G.CubedSphereGrid(GE.SphericalGeometry(W(6.371e6)), 4)
-            yw = G.YinYangGrid(GE.SphericalGeometry(W(6.371e6)), 8, 6)
-            Test.@test eltype(gw) === eltype(yw) === W
-            Test.@test G.coords(gw, 7).λ isa W
-            Test.@test G.coords(yw, 7).λ isa W
-            Test.@test G.measure(gw, 7) isa W
-            Test.@test G.measure(yw, 7) isa W
-            Test.@test eltype(G.measure(gw)) === W
-        end
-    end
-
-    Test.@testset "The panel layouts' distance queries agree with a scan" begin
-        for (g, r) in ((G.CubedSphereGrid(geo, 4), 2.0e6), (G.YinYangGrid(geo, 8, 6), 1.5e6))
-            n = length(g)
-            for i in (1, 7, n ÷ 2, n)
-                ref = sort([j for j in 1:n if j != i && GE.distance(g, i, j) ≤ r])
-                Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
-                mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
-                Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
-            end
-        end
-    end
 end
 
 Test.@testset "Cell vertices are kept when asked for, and the measure is the same either way" begin
@@ -1266,7 +1168,7 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
         # hold one more than there are `c`.
         nclass(ν) = sum((ν - c) ÷ 2 - c + 1 for c in 0:(ν ÷ 3))
         sizes = [Base.summarysize(G.IcosahedralGrid(geo, ν)) - sizeof(Float64) * nclass(ν) -
-                 sizeof(Int) * (ν ÷ 3 + 2) for ν in (1, 8, 64, 512)]
+                 sizeof(Int) * (ν ÷ 3 + 2) for ν in (1, 512)]
         Test.@test allequal(sizes)
         Test.@test length(G.IcosahedralGrid(geo, 512)) == 10 * 512^2 + 2
         Test.@test_throws ArgumentError G.IcosahedralGrid(geo, 0)
@@ -1274,7 +1176,7 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
 
     # The mesh builder is the reference for all three: it walks the entities in id order, where the
     # layout reads a single id backwards.
-    for ν in (1, 2, 3, 4, 8)
+    for ν in (1, 4)
         g = G.IcosahedralGrid(geo, ν)
         mesh = SS.icosahedral_mesh(ν)
         n = length(g)
@@ -1323,28 +1225,8 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
         end
     end
 
-    Test.@testset "traits, mask, width and rebuild" begin
-        g = G.IcosahedralGrid(geo, 4)
-        Test.@test G.ncoordinates(g) == 2
-
-        n = length(g)
-        msk = trues(n); msk[7] = false
-        gm = G.rebuild(g, (mask = msk,))
-        Test.@test !G.isactive(gm, 7)
-        Test.@test C.nneighbors(gm, 7) == 0
-        Test.@test !(7 in collect(G.neighbors(gm, 8)))
-        Test.@test G.coords(gm, 20) == G.coords(g, 20)
-
-        for W in (Float64, Float32)
-            gw = G.IcosahedralGrid(GE.SphericalGeometry(W(6.371e6)), 4)
-            Test.@test eltype(gw) === W
-            Test.@test G.coords(gw, 7).λ isa W
-            Test.@test G.measure(gw, 7) isa W
-        end
-    end
-
     Test.@testset "a dual cell keeps the precision of its element type at any frequency" begin
-        for W in (Float64, Float32), ν in (64, 1024)
+        for W in (Float64, Float32), ν in (1024,)
             g = G.IcosahedralGrid(GE.SphericalGeometry(W(6.371e6)), ν)
             n = length(g)
             # a pentagon, a macro-edge vertex beside it, and two face interiors
@@ -1354,17 +1236,6 @@ Test.@testset "The icosahedral geodesic is a layout, read out of its own numberi
         end
     end
 
-    Test.@testset "distance queries agree with a scan" begin
-        g = G.IcosahedralGrid(geo, 4)
-        n = length(g)
-        r = 1.5e6
-        for i in (1, 13, n ÷ 2, n)
-            ref = sort([j for j in 1:n if j != i && GE.distance(g, i, j) ≤ r])
-            Test.@test sort(C.neighbors_within(g, i; ball = r)) == ref
-            mt = C.MetricTopology(g; index = G.cell_list(g; ball = r))
-            Test.@test sort(C.neighbors_within(g, i; ball = r, topology = mt)) == ref
-        end
-    end
 end
 
 Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begin

@@ -1,10 +1,10 @@
 module Execution
 
 # Where this package decides *how* a bulk loop runs. Every bulk entry point takes a ComputationalBackends
-# tag, `SerialBackend()` by default. Serial and threaded loops run here; a `GPUBackend` wrapping a
-# KernelAbstractions backend launches through the KernelAbstractions extension; a `DistributedBackend` or
-# an `MPIBackend` runs a share of the indices on each process through the Distributed or MPI extension,
-# and gathers what the loop declares it writes.
+# tag, `SerialBackend()` by default. Serial and threaded loops run here, and a `GPUBackend` wrapping a
+# KernelAbstractions backend launches through the KernelAbstractions extension. A `DistributedBackend`
+# or an `MPIBackend` splits a grid into blocks (`Decomposition.split_grid`), and each block's loops run
+# here under the backend's `local_backend`.
 #
 # Two shapes, because bulk loops here come in two: `run_chunks` hands a contiguous range to a body that
 # writes across it, and `run_indices` applies a body to one index at a time. Only the second maps to a
@@ -31,8 +31,8 @@ resolve(::CB.AbstractAutoBackend) = CB.ThreadedBackend()
     local_backend(backend) -> backend
 
 The backend a process runs its own loops under: the inner backend of a `DistributedBackend` or an
-`MPIBackend`, and [`resolve`](@ref)`(backend)` otherwise. A pass over data every process already holds
-whole — a scan of gathered counts, a sum of them — runs under this, with nothing to exchange.
+`MPIBackend`, and [`resolve`](@ref)`(backend)` otherwise. Each block of a split grid runs its loops under
+this.
 """
 local_backend(b::CB.AbstractExecutionBackend) = resolve(b)
 local_backend(b::_ProcessBackend) = CB.local_backend(b)
@@ -40,71 +40,12 @@ local_backend(b::_ProcessBackend) = CB.local_backend(b)
 @noinline _unsupported(b::CB.AbstractGPUBackend) = throw(ArgumentError(
     "$(nameof(typeof(b))) launches through KernelAbstractions: load it (`using KernelAbstractions`) " *
     "and pass `GPUBackend(backend)` with a KernelAbstractions backend."))
-@noinline _unsupported(b::CB.AbstractDistributedBackend) = throw(ArgumentError(
-    "$(nameof(typeof(b))) runs through the Distributed extension: `using Distributed`, and load " *
-    "FlowGeometries on every worker (`Distributed.@everywhere using FlowGeometries`)."))
-@noinline _unsupported(b::CB.AbstractMPIBackend) = throw(ArgumentError(
-    "$(nameof(typeof(b))) runs through the MPI extension: `using MPI`, and call `MPI.Init()`."))
+@noinline _unsupported(b::_ProcessBackend) = throw(ArgumentError(
+    "$(nameof(typeof(b))) runs a field split into blocks, one per process: split the grid with " *
+    "`Decomposition.split_grid(grid, backend)` and pass split fields. A whole-grid loop takes a local " *
+    "backend."))
 @noinline _unsupported(b::CB.AbstractExecutionBackend) = throw(ArgumentError(
     "no FlowGeometries loop is defined for $(nameof(typeof(b)))."))
-
-# ---------------------------------------------------------------------------
-# What a loop writes
-# ---------------------------------------------------------------------------
-
-"""
-    Written(array[, span = ByIndex()])
-
-An array a bulk loop writes, declared alongside the loop: the indices `rng` write the linear positions
-`span(rng)` of `array`, one contiguous range, and consecutive index ranges write consecutive ranges of
-positions. [`ByIndex`](@ref), [`ByBlock`](@ref) and [`ByOffsets`](@ref) are the spans.
-
-Within one process a loop writes `array` in place, and the declaration changes nothing. Under a
-`DistributedBackend` or an `MPIBackend` each process runs a share of the indices against its own copy of
-what the loop captures, and the declared spans are gathered into `array`: on the calling process for
-Distributed, on every rank for MPI. A write the loop does not declare stays on the process that made it.
-"""
-struct Written{A<:AbstractArray,S}
-    array::A
-    span::S
-end
-Written(array::AbstractArray) = Written(array, ByIndex())
-
-"""
-    ByIndex()
-
-Index `k` writes linear position `k`.
-"""
-struct ByIndex end
-@inline (::ByIndex)(rng::UnitRange{Int}) = rng
-
-"""
-    ByBlock(m)
-
-Index `k` writes the `m` positions `(k-1)m+1 : km`: a column of `m` rows per index, in column-major
-storage.
-"""
-struct ByBlock
-    m::Int
-end
-@inline (s::ByBlock)(rng::UnitRange{Int}) = ((first(rng) - 1) * s.m + 1):(last(rng) * s.m)
-
-"""
-    ByOffsets(ptr)
-
-Index `k` writes positions `ptr[k] : ptr[k+1]-1`: row `k` of a CSR array with offsets `ptr`.
-"""
-struct ByOffsets{P<:AbstractVector{<:Integer}}
-    ptr::P
-end
-@inline function (s::ByOffsets)(rng::UnitRange{Int})
-    lo = Int(@inbounds s.ptr[first(rng)])
-    return lo:(isempty(rng) ? lo - 1 : Int(@inbounds s.ptr[last(rng) + 1]) - 1)
-end
-
-# A span as the host evaluates it: offsets held in device memory are copied to the host once.
-_host_span(s) = s
-_host_span(s::ByOffsets) = s.ptr isa Array ? s : ByOffsets(Array(s.ptr))
 
 # ---------------------------------------------------------------------------
 # The loops
@@ -157,21 +98,19 @@ end
 @inline _nchunks(b::BalancedThreads, n::Int, nt::Int) = min(n, nt * b.chunks_per_thread)
 
 """
-    run_chunks(f, n, backend, outputs::Written...)
+    run_chunks(f, n, backend)
 
-Apply `f(range)` over a partition of `1:n`, under the execution policy `backend` names. `outputs` are the
-arrays `f` writes; see [`Written`](@ref).
+Apply `f(range)` over a partition of `1:n`, under the execution policy `backend` names.
 
 `f` must be safe to run on disjoint index ranges concurrently — every write it makes has to be
 determined by the index, never accumulated across chunks. A serial backend hands `f` the whole range in
 one call, so the serial path adds no partitioning at all; a threaded one runs one chunk per thread.
 """
-run_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend, ::Written...) where {F} =
-    (n > 0 && f(1:Int(n)); nothing)
+run_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend) where {F} = (n > 0 && f(1:Int(n)); nothing)
 
 # One chunk per thread: the loops this drives are short-bodied, so per-index scheduling costs more than
 # the body it schedules. `BalancedThreads` cuts more chunks and hands them out as threads finish.
-function run_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend, ::Written...) where {F}
+function run_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend) where {F}
     m = Int(n)
     m > 0 || return nothing
     nt = Threads.nthreads()
@@ -197,25 +136,22 @@ end
 
 # A chunked body is a host loop by construction — it carries state across the indices in its range — so a
 # device backend gets the one-index form or an error, never a silent host fallback.
-@noinline run_chunks(f, n::Integer, b::CB.AbstractGPUBackend, ::Written...) = throw(ArgumentError(
+@noinline run_chunks(f, n::Integer, b::CB.AbstractGPUBackend) = throw(ArgumentError(
     "a chunked loop cannot be launched on $(nameof(typeof(b))): its body accumulates across a range. " *
     "Use the index-parallel entry point, or run this operation on the host."))
 
-run_chunks(f::F, n::Integer, b::CB.AbstractAutoBackend, outs::Written...) where {F} =
-    run_chunks(f, n, resolve(b), outs...)
-run_chunks(f, n::Integer, b::CB.AbstractExecutionBackend, ::Written...) = _unsupported(b)
+run_chunks(f::F, n::Integer, b::CB.AbstractAutoBackend) where {F} = run_chunks(f, n, resolve(b))
+run_chunks(f, n::Integer, b::CB.AbstractExecutionBackend) = _unsupported(b)
 
 """
-    run_numbered_chunks(f, n, backend, outputs::Written...)
+    run_numbered_chunks(f, n, backend)
 
-[`run_chunks`](@ref) with each chunk's number, `f(c, range)`: on a serial or threaded backend `c` lies in
-`1:max_chunks(backend)` and is distinct across the chunks of one call, so it indexes per-chunk storage
-the caller holds. Where chunks run on other processes every chunk is numbered `0`, which indexes none.
+[`run_chunks`](@ref) with each chunk's number, `f(c, range)`: `c` lies in `1:max_chunks(backend)` and is
+distinct across the chunks of one call, so it indexes per-chunk storage the caller holds.
 """
-run_numbered_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend, ::Written...) where {F} =
-    (n > 0 && f(1, 1:Int(n)); nothing)
+run_numbered_chunks(f::F, n::Integer, ::CB.AbstractSerialBackend) where {F} = (n > 0 && f(1, 1:Int(n)); nothing)
 
-function run_numbered_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend, ::Written...) where {F}
+function run_numbered_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend) where {F}
     m = Int(n)
     m > 0 || return nothing
     nt = Threads.nthreads()
@@ -225,23 +161,21 @@ function run_numbered_chunks(f::F, n::Integer, b::CB.AbstractThreadedBackend, ::
     return nothing
 end
 
-run_numbered_chunks(f::F, n::Integer, b::CB.AbstractAutoBackend, outs::Written...) where {F} =
-    run_numbered_chunks(f, n, resolve(b), outs...)
-run_numbered_chunks(f::F, n::Integer, b::CB.AbstractExecutionBackend, outs::Written...) where {F} =
-    run_chunks(rng -> f(0, rng), n, b, outs...)
+run_numbered_chunks(f::F, n::Integer, b::CB.AbstractAutoBackend) where {F} = run_numbered_chunks(f, n, resolve(b))
+run_numbered_chunks(f, n::Integer, b::CB.AbstractExecutionBackend) = _unsupported(b)
 
 """
     max_chunks(backend) -> Int
 
 The most chunks one call of [`run_numbered_chunks`](@ref) numbers under `backend`, so storage of that
 many entries serves every call: one serially, one per Julia thread threaded, `chunks_per_thread` per
-thread under [`BalancedThreads`](@ref), and none where chunks run on other processes.
+thread under [`BalancedThreads`](@ref).
 """
 max_chunks(::CB.AbstractSerialBackend) = 1
 max_chunks(::CB.AbstractThreadedBackend) = Threads.nthreads()
 max_chunks(b::BalancedThreads) = Threads.nthreads() * b.chunks_per_thread
 max_chunks(b::CB.AbstractAutoBackend) = max_chunks(resolve(b))
-max_chunks(::CB.AbstractExecutionBackend) = 0
+max_chunks(b::CB.AbstractExecutionBackend) = _unsupported(b)
 
 """
     map_chunks(f, n, backend) -> Vector
@@ -291,16 +225,15 @@ _reduce_chunks(f::F, op::O, n::Integer, backend::CB.AbstractExecutionBackend) wh
     reduce(op, map_chunks(f, n, backend))
 
 """
-    run_indices(f, n, backend, outputs::Written...)
+    run_indices(f, n, backend)
 
-Apply `f(i)` for each `i in 1:n`, under the execution policy `backend` names. `outputs` are the arrays
-`f` writes; see [`Written`](@ref). `f` must write only what `i` determines, with no accumulation across
-indices — the same contract as [`run_chunks`](@ref), stated per index, the form a device launch
-expresses.
+Apply `f(i)` for each `i in 1:n`, under the execution policy `backend` names. `f` must write only what
+`i` determines, with no accumulation across indices — the same contract as [`run_chunks`](@ref), stated
+per index, the form a device launch expresses.
 
 With `KernelAbstractions` loaded and a `GPUBackend`, `f` becomes the body of a launch over `1:n`.
 """
-function run_indices(f::F, n::Integer, ::CB.AbstractSerialBackend, ::Written...) where {F}
+function run_indices(f::F, n::Integer, ::CB.AbstractSerialBackend) where {F}
     @inbounds for i in 1:Int(n)
         f(i)
     end
@@ -309,7 +242,7 @@ end
 
 # Per-index semantics, chunked granularity: these bodies are short enough that per-index scheduling
 # dominates the work.
-function run_indices(f::F, n::Integer, backend::CB.AbstractThreadedBackend, ::Written...) where {F}
+function run_indices(f::F, n::Integer, backend::CB.AbstractThreadedBackend) where {F}
     return run_chunks(n, backend) do rng
         @inbounds for i in rng
             f(i)
@@ -317,9 +250,8 @@ function run_indices(f::F, n::Integer, backend::CB.AbstractThreadedBackend, ::Wr
     end
 end
 
-run_indices(f::F, n::Integer, b::CB.AbstractAutoBackend, outs::Written...) where {F} =
-    run_indices(f, n, resolve(b), outs...)
-run_indices(f, n::Integer, b::CB.AbstractExecutionBackend, ::Written...) = _unsupported(b)
+run_indices(f::F, n::Integer, b::CB.AbstractAutoBackend) where {F} = run_indices(f, n, resolve(b))
+run_indices(f, n::Integer, b::CB.AbstractExecutionBackend) = _unsupported(b)
 
 """
     reduce_indices(f, op, init, n, backend)
@@ -328,9 +260,8 @@ Reduce `f(i)` over `i in 1:n` with `op`, under the execution policy `backend` na
 
 The per-index counterpart of [`_reduce_chunks`](@ref), and the reduction a device can run: `f` reads
 index `i` and nothing else, so the work splits without a chunk body. Every integral, norm and count over
-a grid goes through this. On a host or device backend `f` may also write what `i` determines, as in
-[`run_indices`](@ref), so an update and a reduction of its result take one pass; a process backend runs
-`f` on other processes and keeps those writes there.
+a grid goes through this. `f` may also write what `i` determines, as in [`run_indices`](@ref), so an
+update and a reduction of its result take one pass.
 
 `op` must be associative and `init` its identity. `init` seeds each partial as well as the whole, so
 the partials combine in any grouping.
@@ -368,14 +299,13 @@ reduce_indices(f, op, init, n::Integer, b::CB.AbstractExecutionBackend) = _unsup
     allocate(backend, T, dims...) -> AbstractArray{T}
 
 An uninitialised array of size `dims` the loops running under `backend` can write: an ordinary `Array`
-on a host backend and on each process of a distributed one, device memory on a `GPUBackend`.
+on a host backend, device memory on a `GPUBackend`.
 
 A CSR build allocates its degree, offset and neighbour arrays through this, so the buffers land where
 the passes that fill them run.
 """
 allocate(::_HostBackend, ::Type{T}, dims::Integer...) where {T} = Array{T}(undef, Int.(dims)...)
-allocate(b::Union{CB.AbstractAutoBackend,_ProcessBackend}, ::Type{T}, dims::Integer...) where {T} =
-    allocate(local_backend(b), T, dims...)
+allocate(b::CB.AbstractAutoBackend, ::Type{T}, dims::Integer...) where {T} = allocate(resolve(b), T, dims...)
 allocate(b::CB.AbstractExecutionBackend, ::Type, ::Integer...) = _unsupported(b)
 
 """
@@ -386,7 +316,7 @@ host memory. On a `GPUBackend` wrapping a KernelAbstractions backend, `Adapt.ada
 the array's own package decides what that backend's memory is, and a struct moves by its `Adapt` rules.
 """
 on_backend(::_HostBackend, x) = x
-on_backend(b::Union{CB.AbstractAutoBackend,_ProcessBackend}, x) = on_backend(local_backend(b), x)
+on_backend(b::CB.AbstractAutoBackend, x) = on_backend(resolve(b), x)
 on_backend(b::CB.AbstractExecutionBackend, _) = _unsupported(b)
 
 # Whether a `BitArray` becomes an `Array{Bool}` before it moves to the Adapt target `to`. The Adapt
@@ -402,9 +332,7 @@ Write the exclusive prefix sums of `counts` into `out`, which is one element lon
 
 This is a CSR offset array — `out[k]` is where row `k` starts and `out[end] - init` is the total — and
 every connectivity builder here calls it between its counting pass and its filling pass. Under a
-threaded `backend` it is two passes over `counts` plus a serial scan of one sum per chunk. Under a
-distributed one `counts` is whole on every process that holds it, the counting pass having gathered it,
-so each process scans it under its [`local_backend`](@ref).
+threaded `backend` it is two passes over `counts` plus a serial scan of one sum per chunk.
 """
 function exclusive_scan!(
     out::AbstractVector, counts::AbstractVector,
@@ -461,9 +389,8 @@ function exclusive_scan!(
     return out
 end
 
-exclusive_scan!(out::AbstractVector, counts::AbstractVector,
-                b::Union{CB.AbstractAutoBackend,_ProcessBackend}; init::Integer = 1) =
-    exclusive_scan!(out, counts, local_backend(b); init = init)
+exclusive_scan!(out::AbstractVector, counts::AbstractVector, b::CB.AbstractAutoBackend; init::Integer = 1) =
+    exclusive_scan!(out, counts, resolve(b); init = init)
 exclusive_scan!(::AbstractVector, ::AbstractVector, b::CB.AbstractExecutionBackend; init::Integer = 1) =
     _unsupported(b)
 

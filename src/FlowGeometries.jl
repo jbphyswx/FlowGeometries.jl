@@ -32,7 +32,8 @@ FG.Geometry.distance(geo, p1, p2)
 Submodules: `Axes` (coordinate axes and the spacing trait), `Geometry` (metrics), `Stencils`
 (neighbourhood shapes), `Discretization` (location, interpolation, staggering, derivative weights),
 `SphericalSampling` (where the points go), `Grids` (storage), `Connectivity` (topology), `Operators`
-(everything that reads or writes a field), `Execution` (how bulk loops run).
+(everything that reads or writes a field), `Execution` (how bulk loops run), `Decomposition` (a grid and
+its fields split into blocks over MPI ranks or Distributed workers).
 """
 module FlowGeometries
 
@@ -62,5 +63,8 @@ using .Connectivity: Connectivity
 
 include("Operators.jl")
 using .Operators: Operators
+
+include("Decomposition.jl")
+using .Decomposition: Decomposition
 
 end # module FlowGeometries

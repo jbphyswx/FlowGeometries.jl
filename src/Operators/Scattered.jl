@@ -468,7 +468,7 @@ function interpolate!(
     kk = Int(k)
     tp = topology === nothing ? Connectivity.default_sweep_topology(
         grid, Connectivity._knn_seed_radius_at(grid, nothing, max(kk, 1)), false) : topology
-    Execution.run_chunks(length(points), execution, Execution.Written(out, Execution.ByBlock(nb))) do rng
+    Execution.run_chunks(length(points), execution) do rng
         nearest = (Vector{Int}(undef, kk), Vector{T}(undef, kk))
         @inbounds for i in rng
             interpolate!(view(out, ((i - 1) * nb + 1):(i * nb)), field, grid, points[i];

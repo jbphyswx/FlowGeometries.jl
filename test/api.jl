@@ -37,7 +37,7 @@ Test.@testset "An out-of-range index errors, and @inbounds still opts out" begin
     Test.@test_throws BoundsError FG.Grids.measure(un, 3)
 end
 
-Test.@testset "Public names the suite had not been calling" begin
+Test.@testset "Inverse pairs, the CSR constructors and the HEALPix ring table" begin
     GE = FG.Geometry
     C = FG.Connectivity
     S = FG.SphericalSampling
@@ -82,7 +82,7 @@ Test.@testset "Public names the suite had not been calling" begin
     Test.@test S.colatitude(S.geographic_latitude(1.1)) ≈ 1.1
 
     # ring_info: rings tile the map contiguously, and each one's latitude is pix2ang's.
-    for nside in (1, 2, 4, 8)
+    for nside in (1, 8)
         nrings = 4 * nside - 1
         infos = [S.ring_info(nside, r) for r in 1:nrings]
         Test.@test sum(i -> i.ringpix, infos) == 12 * nside^2

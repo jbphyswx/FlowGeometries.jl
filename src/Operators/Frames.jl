@@ -7,11 +7,6 @@
 # axes past the grid's own: element `k` sits on cell `mod1(k, ncells)`. The launch reads the grid in the
 # backend's memory.
 
-# The arrays among `xs` a loop writes, as `Execution.Written` declarations.
-@inline _written() = ()
-@inline _written(::Nothing, xs...) = _written(xs...)
-@inline _written(x::AbstractArray, xs...) = (Execution.Written(x), _written(xs...)...)
-
 @inline _cell(cells::CartesianIndices, k::Integer) = @inbounds Tuple(cells[mod1(k, length(cells))])
 
 @inline _lonlat(grid, c::Tuple) = (p = Grids.coords(grid, c...); (p[1], p[2]))
@@ -37,7 +32,7 @@ function to_planetary!(
     geo = Grids.grid_geometry(grid)
     cells = CartesianIndices(size(Grids.mask(grid)))
     g = Execution.on_backend(execution, grid)
-    Execution.run_indices(length(X), execution, _written(X, Y, Z)...) do k
+    Execution.run_indices(length(X), execution) do k
         c = _cell(cells, k)
         if Grids.isactive(g, c...)
             λ, φ = _lonlat(g, c)
@@ -65,7 +60,7 @@ function to_local!(
     geo = Grids.grid_geometry(grid)
     cells = CartesianIndices(size(Grids.mask(grid)))
     g = Execution.on_backend(execution, grid)
-    Execution.run_indices(length(u), execution, _written(u, v, w)...) do k
+    Execution.run_indices(length(u), execution) do k
         c = _cell(cells, k)
         if Grids.isactive(g, c...)
             λ, φ = _lonlat(g, c)
@@ -96,7 +91,7 @@ function tensor_to_local!(
     geo = Grids.grid_geometry(grid)
     cells = CartesianIndices(size(Grids.mask(grid)))
     g = Execution.on_backend(execution, grid)
-    Execution.run_indices(length(xx), execution, _written(λλ, φφ, rr, λφ, λr, φr)...) do k
+    Execution.run_indices(length(xx), execution) do k
         c = _cell(cells, k)
         if Grids.isactive(g, c...)
             λ, φ = _lonlat(g, c)

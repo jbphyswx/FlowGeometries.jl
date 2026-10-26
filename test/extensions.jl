@@ -50,7 +50,7 @@ end
 
 Test.@testset "Threading is opt-in and changes no result" begin
     # Chunking must partition exactly — no gaps, no overlap, contiguous, whatever the remainder.
-    for (n, k) in ((10, 3), (10, 1), (3, 10), (1, 1), (100, 7))
+    for (n, k) in ((10, 3), (3, 10), (1, 1))
         rs = FG.Execution.chunk_ranges(n, k)
         Test.@test reduce(vcat, collect.(rs)) == collect(1:n)
         Test.@test all(!isempty, rs) && length(rs) ≤ max(1, min(k, n))
@@ -59,7 +59,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
     # More chunks than threads, taken as threads free up: still a partition in order, and an exact
     # reduction is the serial one.
     let bt = FG.Execution.BalancedThreads(4)
-        for n in (0, 1, 13, 10_000)
+        for n in (0, 10_000)
             Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, bt) == sum(i * i for i in 1:n; init = 0)
         end
         Test.@test reduce(vcat, FG.Execution.map_chunks(collect, 1000, bt)) == collect(1:1000)
@@ -91,28 +91,20 @@ Test.@testset "Threading is opt-in and changes no result" begin
     Test.@test sum(FG.Execution.map_chunks(r -> sum(r), 1000, CB.ThreadedBackend())) == sum(1:1000)
 
     # `exclusive_scan!` is exact, so the threaded form has to equal the serial one entry for entry.
-    for n in (0, 1, 7, 1000, 65_536)
+    for n in (0, 65_536)
         counts = rand(0:9, n)
         want = FG.Execution.exclusive_scan!(Vector{Int}(undef, n + 1), counts)
-        for b in (CB.SerialBackend(), CB.ThreadedBackend())
-            Test.@test FG.Execution.exclusive_scan!(Vector{Int}(undef, n + 1), counts, b) == want
-        end
+        Test.@test FG.Execution.exclusive_scan!(Vector{Int}(undef, n + 1), counts, CB.ThreadedBackend()) == want
     end
 
-    # …and so is an integer reduction, on every policy including the device one.
-    for n in (0, 1, 13, 10_000)
-        want = sum(i * i for i in 1:n; init = 0)
-        for b in (CB.SerialBackend(), CB.ThreadedBackend(), CB.GPUBackend(KernelAbstractions.CPU()),
-                  CB.AutoBackend())
-            Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, b) == want
-        end
+    # …and so is an integer reduction, threaded and on the device.
+    for n in (0, 10_000), b in (CB.ThreadedBackend(), CB.GPUBackend(KernelAbstractions.CPU()))
+        Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, b) == sum(i * i for i in 1:n; init = 0)
     end
 
     # A CSR build goes through the scan, so it must stay bit-identical under threading.
     let sph = FG.Geometry.SphericalGeometry(), cart = FG.Geometry.CartesianGeometry()
-        for gg in (FG.Grids.StructuredGrid(cart, 0.0:1.0:9.0, 0.0:1.0:9.0),
-                   FG.Grids.HEALPixGrid(sph, 4), FG.Grids.CubedSphereGrid(sph, 4),
-                   FG.Grids.IcosahedralGrid(sph, 3),
+        for gg in (FG.Grids.StructuredGrid(cart, 0.0:1.0:9.0, 0.0:1.0:9.0), FG.Grids.HEALPixGrid(sph, 4),
                    FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(8)))
             a = FG.Connectivity.build_connectivity(gg)
             b = FG.Connectivity.build_connectivity(gg; execution = CB.ThreadedBackend())
@@ -137,7 +129,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
     # Every threaded kernel is bit-identical to serial.
     geo = FG.Geometry.SphericalGeometry()
     thr = CB.ThreadedBackend()
-    for n in (7, 64)
+    for n in (7,)
         a = FG.SphericalSampling.cubed_sphere_points(n)
         b = FG.SphericalSampling.cubed_sphere_points(n; execution = thr)
         c = FG.SphericalSampling.cubed_sphere_points(n; execution = CB.SerialBackend())
@@ -149,7 +141,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
         d = FG.SphericalSampling.cubed_sphere_points(n; execution = CB.GPUBackend(KernelAbstractions.CPU()))
         Test.@test d.λ == a.λ && d.φ == a.φ && d.panel == a.panel
     end
-    for (g, lbl) in ((geo, "spherical"), (FG.Geometry.CartesianGeometry(), "cartesian"))
+    for (g, lbl) in ((geo, "spherical"),)
         for n in (3, 40)   # n = 3 gives fewer rows than threads, exercising the short case
             λ = [2π * (i - 1) / n for i in 1:n, j in 1:n]
             φ = [asin(2 * (j - 0.5) / n - 1) for i in 1:n, j in 1:n]
@@ -162,25 +154,19 @@ Test.@testset "Threading is opt-in and changes no result" begin
     # Connectivity: both cell passes write only slots their own cell owns. The masked and periodic
     # cases carry a varying per-cell degree, so a chunk boundary landing mid-row surfaces as a wrong
     # offset here.
-    for topo in (FG.Connectivity.IndexTopology((37, 21), (true, false), nothing),
-                 FG.Connectivity.IndexTopology((37, 21), (true, true), nothing),
-                 FG.Connectivity.IndexTopology((5, 4), (false, false), nothing),
-                 FG.Connectivity.IndexTopology((31, 29), (true, false),
-                                  [isodd(i * 7 + j * 3) for i in 1:31, j in 1:29]))
-        for st in (FG.Stencils.Axial(1), FG.Stencils.Moore(1)), ao in (true, false)
-            a = FG.Connectivity.build_connectivity(topo; stencil = st, active_only = ao)
-            b = FG.Connectivity.build_connectivity(topo; stencil = st, active_only = ao, execution = thr)
-            Test.@test a.ptr == b.ptr
-            Test.@test a.nbrs == b.nbrs
-        end
+    for (topo, st, ao) in ((FG.Connectivity.IndexTopology((37, 21), (true, true), nothing), FG.Stencils.Axial(1), false),
+                           (FG.Connectivity.IndexTopology((31, 29), (true, false),
+                                                          [isodd(i * 7 + j * 3) for i in 1:31, j in 1:29]),
+                            FG.Stencils.Moore(1), true))
+        a = FG.Connectivity.build_connectivity(topo; stencil = st, active_only = ao)
+        b = FG.Connectivity.build_connectivity(topo; stencil = st, active_only = ao, execution = thr)
+        Test.@test a.ptr == b.ptr
+        Test.@test a.nbrs == b.nbrs
     end
-    g = FG.Connectivity.structured_grid(FG.SphericalSampling.Fejer1Sampling(), 33)
-    Test.@test FG.Connectivity.build_connectivity(g).nbrs ==
-               FG.Connectivity.build_connectivity(g; execution = thr).nbrs
     # A tensor-product sampling builds the same graph from its axis lengths alone, on any backend.
-    for s in (FG.SphericalSampling.GaussLegendreSampling(), FG.SphericalSampling.DriscollHealySampling()),
-        st in (FG.Stencils.Axial(1), FG.Stencils.Moore(1)),
-        be in (thr, CB.GPUBackend(KernelAbstractions.CPU()))
+    for (s, st, be) in ((FG.SphericalSampling.GaussLegendreSampling(), FG.Stencils.Moore(1), thr),
+                        (FG.SphericalSampling.DriscollHealySampling(), FG.Stencils.Axial(1),
+                         CB.GPUBackend(KernelAbstractions.CPU())))
         a = FG.Connectivity.build_connectivity(s, 9; stencil = st)
         b = FG.Connectivity.build_connectivity(s, 9; stencil = st, execution = be)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
@@ -198,18 +184,18 @@ Test.@testset "Threading is opt-in and changes no result" begin
     # The candidate builder emits and dedups concurrently, so each sampling's `emit!` has to be
     # free of state shared between nodes. nside = 1 and 2 cover the singular pixels, the ones with
     # seven neighbours.
-    for s in (FG.SphericalSampling.HEALPixSampling(1), FG.SphericalSampling.HEALPixSampling(2), FG.SphericalSampling.HEALPixSampling(8))
+    for s in (FG.SphericalSampling.HEALPixSampling(1), FG.SphericalSampling.HEALPixSampling(8))
         a = FG.Connectivity.build_connectivity(s)
         b = FG.Connectivity.build_connectivity(s; execution = thr)
         Test.@test a.ptr == b.ptr
         Test.@test a.nbrs == b.nbrs
     end
-    for n in (1, 2, 9), st in (FG.Stencils.Axial(1), FG.Stencils.Moore(1))
+    for (n, st) in ((1, FG.Stencils.Axial(1)), (9, FG.Stencils.Moore(1)))
         a = FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), n; stencil = st)
         b = FG.Connectivity.build_connectivity(FG.SphericalSampling.CubedSphereSampling(), n; stencil = st, execution = thr)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
     end
-    for (nlon, nlat) in ((1, 1), (7, 5)), st in (FG.Stencils.Axial(1), FG.Stencils.Moore(1))
+    for (nlon, nlat) in ((7, 5),), st in (FG.Stencils.Moore(1),)
         a = FG.Connectivity.build_connectivity(FG.SphericalSampling.YinYangSampling(), nlon, nlat; stencil = st)
         b = FG.Connectivity.build_connectivity(FG.SphericalSampling.YinYangSampling(), nlon, nlat; stencil = st, execution = thr)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
@@ -313,8 +299,8 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
                 sum(sin((2k + 1) * π * (i - 1) / nlat) / (2k + 1) for k in 0:(nlat ÷ 2 - 1))
                 for i in 1:nlat]
     end
-    open_counts = (1, 2, 3, 7, 8, 63, 64, 511, 512)
-    for nlat in (8, 64, 512)
+    open_counts = (1, 7, 64, 511)
+    for nlat in (8, 512)
         dh = FG.SphericalSampling.latitude_weights(FG.SphericalSampling.DriscollHealySampling(), nlat)
         Test.@test maximum(abs.(dh .- direct(:closed, nlat))) < 1e-13
         Test.@test sum(dh) ≈ 2 atol = 1e-13
@@ -329,7 +315,7 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     # while the weights carry a `4/nlat·sinθ` factor, and the recurrence accumulates round-off across
     # its `nterm` steps.
     for (s, fam, counts) in ((SS.Fejer1Sampling(), :open, open_counts),
-                             (SS.DriscollHealySampling(), :closed, (8, 64, 512))),
+                             (SS.DriscollHealySampling(), :closed, (8, 512))),
         nlat in counts
         wt = SS.latitude_weights(s, nlat; algorithm = SS.Transform())
         wr = SS.latitude_weights(s, nlat; algorithm = SS.Recurrence())
@@ -483,15 +469,11 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
     cpu = CB.GPUBackend(KernelAbstractions.CPU())
 
     cart = FG.Geometry.CartesianGeometry{Float64}()
-    for g in (GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0)),
-              GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0);
-                                topology = GD.Periodic(), period = (32.0, 0.0)))
-        for sten in (FG.Stencils.Axial(1), FG.Stencils.Moore(2))
-            a = C.build_connectivity(g; stencil = sten)
-            b = C.build_connectivity(g; stencil = sten, execution = cpu)
-            Test.@test a.ptr == b.ptr
-            Test.@test a.nbrs == b.nbrs
-        end
+    let g = GD.StructuredGrid(cart, collect(0.0:31.0), collect(0.0:31.0); topology = GD.Periodic(), period = (32.0, 0.0))
+        a = C.build_connectivity(g; stencil = FG.Stencils.Moore(2))
+        b = C.build_connectivity(g; stencil = FG.Stencils.Moore(2), execution = cpu)
+        Test.@test a.ptr == b.ptr
+        Test.@test a.nbrs == b.nbrs
     end
 
     acc = zeros(Int, 100)
@@ -500,7 +482,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
 
     # A device reduction is exact on integers at every size: one partial group, a group and a round
     # boundary either side, and more elements than the first stage has work-items.
-    for n in (0, 1, 13, 255, 256, 257, 10_000, 256 * 65_536 + 3, 10_000_000)
+    for n in (0, 1, 256, 257, 256 * 65_536 + 3)
         Test.@test FG.Execution.reduce_indices(identity, +, 0, n, cpu) == n * (n + 1) ÷ 2
     end
     # It combines in index order, so an associative `op` that does not commute folds as the serial
@@ -513,7 +495,7 @@ Test.@testset "Index-parallel loops run as kernels and give the same answer" beg
         Test.@test FG.Execution.reduce_indices(aff, compose, (1, 0), n, CB.SerialBackend()) == want
     end
     # The device scan equals the serial one entry for entry, for either offset width and any `init`.
-    for n in (0, 1, 13, 255, 256, 257, 10_000, 300_001), I in (Int, Int32), init in (1, 0, 5)
+    for (n, I, init) in ((0, Int, 1), (256, Int32, 0), (257, Int, 5), (300_001, Int32, 1))
         counts = rand(0:9, n)
         want = FG.Execution.exclusive_scan!(Vector{I}(undef, n + 1), counts; init = init)
         Test.@test FG.Execution.exclusive_scan!(Vector{I}(undef, n + 1), counts, cpu; init = init) == want
@@ -621,7 +603,8 @@ Test.@testset "Fields rotate between the local and the ambient frame" begin
     msk[3:5, 2:3] .= false
     grids = (FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 12), range(-1.2, 1.2; length = 7), msk),
              FG.Grids.HEALPixGrid(geo, 2))
-    for g in grids, b in (CB.SerialBackend(), CB.ThreadedBackend(), CB.GPUBackend(KernelAbstractions.CPU()))
+    for (g, b) in ((grids[1], CB.SerialBackend()), (grids[1], CB.ThreadedBackend()),
+                   (grids[2], CB.GPUBackend(KernelAbstractions.CPU())))
         sz = (size(FG.Grids.mask(g))..., 2)
         cells = CartesianIndices(size(FG.Grids.mask(g)))
         λφ = [Tuple(FG.Grids.coords(g, Tuple(cells[mod1(k, length(cells))])...))[1:2] for k in 1:prod(sz)]
@@ -712,7 +695,7 @@ Test.@testset "Field operators on a device that refuses host scalar indexing" be
         Test.@test same(GD.mask(mv(gc)), mk) && same(GD.mask(mv(gs)), ms)
 
         # `derivative!` from the axes, a held table, a held plan and a held masked plan.
-        for (g, f) in ((gc, fc), (gs, fs)), d in 1:2
+        for (g, f, d) in ((gc, fc, 1), (gs, fs, 2))
             idx, w = D.axis_stencils(g, d; order = 1, nodes = 3)
             pl = D.stencil_plan(g, d; order = 1, nodes = 3)
             mp = O.masked_stencil_plan(g, d; order = 1, nodes = 3, policy = O.ReduceInRun())

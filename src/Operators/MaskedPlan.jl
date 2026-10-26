@@ -304,7 +304,7 @@ function _masked_plan_sweep!(
         end
         return out
     end
-    Execution.run_indices(length(ci), b, Execution.Written(out)) do lin
+    Execution.run_indices(length(ci), b) do lin
         c = @inbounds ci[lin]
         _masked_plan_cell!(out, field, row, indices, weights, vdim, masked, nodes, Tuple(c), c, vm, fac)
     end
