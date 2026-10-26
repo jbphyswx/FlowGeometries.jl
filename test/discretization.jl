@@ -1928,9 +1928,11 @@ Test.@testset "A row of cells on a pole couples to the next row alone, and the o
         fm = O.face_metrics(g, bc)
         poles = [j for j in eachindex(φ) if abs(φ[j]) == π / 2]
         Test.@test !isempty(poles)
-        # The cells as regions tile the sphere, a pole row's included, whatever weights the measure holds.
+        # The cells as regions tile the band between the outermost latitude faces, a pole row's included,
+        # whatever weights the measure holds.
+        fφ = clamp.(FG.Discretization.faces(φ), -π / 2, π / 2)
         Test.@test all(>(0), fm.volume)
-        Test.@test sum(fm.volume) ≈ 4π * 6.371e6^2 rtol = 1e-13
+        Test.@test sum(fm.volume) ≈ 2π * 6.371e6^2 * abs(sin(fφ[end]) - sin(fφ[1])) rtol = 1e-13
         for j in poles
             # The latitude face past the pole lies on it, and a longitude face between two cells on the pole
             # joins the point to itself: neither has area, and the second has no gap.
