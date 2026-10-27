@@ -1,5 +1,5 @@
-using Documenter
-using FlowGeometries
+using Documenter: Documenter
+using FlowGeometries: FlowGeometries
 
 DocMeta.setdocmeta!(
     FlowGeometries,
