@@ -217,10 +217,12 @@ end
 end
 
 # Raw bin `i` of a direction of `n` bins as the bin on the lattice and the offset of the image it is,
-# `(-1, 0)` past a bounded edge.
+# `(-1, 0)` past a bounded edge. A bin one period out wraps by a comparison, a farther one by a division.
 @inline function _binned_wrap(i::Int, n::Int, wrap::Bool, P::T) where {T}
     0 <= i < n && return i, zero(T)
     wrap || return -1, zero(T)
+    -n <= i < 0 && return i + n, -P
+    n <= i < 2n && return i - n, P
     return mod(i, n), T(fld(i, n)) * P
 end
 
