@@ -250,7 +250,6 @@ Test.@testset "The ! forms allocate nothing beyond their return value, at every 
         Test.@test nalloc(() -> SS.spherical_axes!(λ, φ, gl, n)) <= 1
         Test.@test nalloc(() -> SS.spherical_points!(L, P, gl, n)) <= 1
         Test.@test nalloc(() -> SS.spherical_quadrature!(λ, φ, w, gl, n)) <= 1
-        Test.@test nalloc(() -> SS._gauss_legendre_μ!(φ, w)) <= 1
     end
 
     # Cubed sphere: the panel id is not part of `spherical_points!`'s result, so it is not built.

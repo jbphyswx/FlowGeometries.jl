@@ -6,6 +6,7 @@ DelaunayTriangulation = "927a84f5-c5f4-47a5-9785-b46e178433df"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 FlowGeometries = "0ccd6995-f618-4175-b01e-f437d0cb4974"
+FlowTransformBindings = "73c6b5d6-1010-4337-8b9e-d550f02c124c"
 GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
 JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
 JLArrays = "27aeb0d3-9eb9-45fb-866b-73c2ecf80fcb"
@@ -18,6 +19,11 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
+[extras]
+SpectralBackends = "289ded02-b044-41b2-8b2d-71f2a47755d1"
+
 [sources]
 ComputationalBackends = {url = "https://github.com/jbphyswx/ComputationalBackends.jl"}
 FlowGeometries = {path = ".."}
+FlowTransformBindings = {url = "https://github.com/jbphyswx/FlowTransformBindings.jl.git"}
+SpectralBackends = {url = "https://github.com/jbphyswx/SpectralBackends.jl.git"}

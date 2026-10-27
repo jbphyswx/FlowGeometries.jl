@@ -291,7 +291,7 @@ Test.@testset "Metric scale factors and the Jacobian" begin
     i, j = 7, 11
     Δλ = FG.Grids.cell_width(gg, 1, i)
     f = FG.Discretization.faces(FG.Grids.coordinates(gg, 2))
-    gl = FG.SphericalSampling._gauss_legendre_μ(16)
+    gl = FTB.gauss_legendre(16)
     mid, half = (f[j] + f[j + 1]) / 2, (f[j + 1] - f[j]) / 2
     ∫J = half * sum(gl.w[k] * G.jacobian(sg, (0.0, mid + half * gl.μ[k])) for k in eachindex(gl.μ))
     Test.@test FG.Grids.measure(gg, i, j) ≈ Δλ * ∫J rtol = 1e-13
@@ -790,7 +790,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
 
     # Every cell is the geometry's own element integrated over the cell, latitude faces clamped to the
     # poles; the reference integrates by 64-point Gauss–Legendre.
-    gl = FG.SphericalSampling._gauss_legendre_μ(64)
+    gl = FTB.gauss_legendre(64)
     ∫seg(f, lo, hi) = (hi - lo) / 2 * sum(gl.w[k] * f((lo + hi) / 2 + (hi - lo) / 2 * gl.μ[k])
                                           for k in eachindex(gl.μ))
     ∫lat(f, lo, hi) = ∫seg(f, clamp(lo, -π / 2, π / 2), clamp(hi, -π / 2, π / 2))

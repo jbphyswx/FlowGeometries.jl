@@ -1,5 +1,6 @@
 using FlowGeometries: FlowGeometries as FG
 using ComputationalBackends: ComputationalBackends as CB
+using FlowTransformBindings: FlowTransformBindings as FTB
 using Test: Test
 
 # Every weak dependency is loaded up front so the extensions are exercised by the whole suite. The

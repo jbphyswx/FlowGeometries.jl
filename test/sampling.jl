@@ -27,60 +27,7 @@ Test.@testset "Fejér first-rule nodes are the open equiangular colatitudes" beg
     Test.@test λ[2] - λ[1] ≈ 2π / (2nθ - 1)
 end
 
-Test.@testset "Gauss–Legendre solves once for axes and weights, and is exact to 2n-1" begin
-    for n in (1, 8, 257)
-        r = FG.SphericalSampling._gauss_legendre_μ(n)
-        Test.@test issorted(r.μ)
-        Test.@test r.μ ≈ -reverse(r.μ) atol = 1e-15    # roots come in ± pairs
-        Test.@test all(>(0), r.w)
-        Test.@test sum(r.w) ≈ 2 rtol = 1e-14
-        # An n-point rule is exact for every polynomial up to degree 2n-1.
-        for d in (0, 1, 2n - 2, 2n - 1)
-            exact = isodd(d) ? 0.0 : 2 / (d + 1)
-            Test.@test sum(r.w .* r.μ .^ d) ≈ exact atol = 1e-11
-        end
-    end
-    # Odd n has its central node at positive zero.
-    Test.@test FG.SphericalSampling._gauss_legendre_μ(9).μ[5] === 0.0
-
-    # Two regimes cross over at n = 60: Newton at and below, an asymptotic expansion above.
-    SS = FG.SphericalSampling
-    for n in (60, 61)
-        r = SS._gauss_legendre_μ(n)
-        Test.@test issorted(r.μ)
-        Test.@test sum(r.w) ≈ 2 rtol = 1e-14
-        d = 2n - 2
-        Test.@test sum(r.w .* r.μ .^ d) ≈ 2 / (d + 1) rtol = 1e-11
-    end
-    # Above the crossover the two regimes agree, to the Newton's accuracy.
-    for n in (64, 1024)
-        m = (n + 1) ÷ 2
-        asy = SS._gauss_legendre_μ(n)                      # takes the asymptotic path
-        mμ = Vector{Float64}(undef, n); mw = Vector{Float64}(undef, n)
-        SS._gauss_legendre_newton!(Float64, Float64, mμ, mw, nothing, n, m)
-        Test.@test maximum(abs.(asy.μ .- mμ)) < 1e-13
-        Test.@test maximum(abs.(asy.w .- mw) ./ mw) < 1e-9
-        Test.@test sum(mw) ≈ 2 rtol = 1e-13
-    end
-    # A wider element type takes the Newton path, where precision follows the type.
-    μb, wb = setprecision(BigFloat, 192) do
-        μ = Vector{BigFloat}(undef, 128); w = Vector{BigFloat}(undef, 128)
-        SS._gauss_legendre_μ!(μ, w); (μ, w)
-    end
-    Test.@test abs(sum(wb) - 2) < 1e-40
-    # …and the Float64 result agrees with that reference to Float64 precision.
-    r64 = SS._gauss_legendre_μ(128)
-    Test.@test maximum(abs.(r64.w .- Float64.(wb)) ./ Float64.(wb)) < 1e-14
-    Test.@test maximum(abs.(r64.μ .- Float64.(μb))) < 1e-15
-
-    # The Bonnet recurrence sums n terms, so Float32 cannot resolve the roots on its own; the
-    # solve runs at Float64 and rounds once, keeping the result correctly rounded.
-    r32 = FG.SphericalSampling._gauss_legendre_μ(Float32, 64)
-    r64 = FG.SphericalSampling._gauss_legendre_μ(64)
-    Test.@test eltype(r32.μ) === Float32
-    Test.@test maximum(abs.(Float64.(r32.w) .- r64.w) ./ r64.w) < 4 * eps(Float32)
-    Test.@test maximum(abs.(Float64.(r32.μ) .- r64.μ)) < 4 * eps(Float32)
-
+Test.@testset "Gauss–Legendre axes and weights come from one solve" begin
     # One solve serves both, and agrees with the two separate entry points.
     for n in (5, 32)
         q = FG.SphericalSampling.spherical_quadrature(FG.SphericalSampling.GaussLegendreSampling(), n)
@@ -611,7 +558,7 @@ Test.@testset "Float32 angles are accurate at the poles" begin
     # absolute accuracy in the colatitude. A reduced Gaussian grid's rings come from the same solve.
     for n in (60, 512)
         μb = Vector{BigFloat}(undef, n)
-        SS._gauss_legendre_newton!(BigFloat, BigFloat, μb, nothing, nothing, n, (n + 1) ÷ 2)
+        FTB.gauss_legendre!(BigFloat, μb, nothing, nothing, n)
         φb = asin.(μb)
         for T in (Float32, Float64)
             u = eps(T(π) / 2)

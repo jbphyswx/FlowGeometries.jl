@@ -278,14 +278,8 @@ Test.@testset "Grids can be moved to another storage backend" begin
     Test.@test adapt(FakeDev(), t2).mask isa DevArr
 end
 
-Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with the definition" begin
-    using FFTW: FFTW          # loads AbstractFFTs, which fires the extensions
-    Test.@test Base.get_extension(FG, :FlowGeometriesAbstractFFTsExt) !== nothing
-    Test.@test Base.get_extension(FG, :FlowGeometriesFFTWExt) !== nothing
-    # With FFTW the element types it plans default to the transform, and every other to the recurrence.
-    Test.@test FG.SphericalSampling._equiangular_algorithm(Float64) === FG.SphericalSampling.Transform()
-    Test.@test FG.SphericalSampling._equiangular_algorithm(Float32) === FG.SphericalSampling.Transform()
-    Test.@test FG.SphericalSampling._equiangular_algorithm(BigFloat) === FG.SphericalSampling.Recurrence()
+Test.@testset "Equiangular weights by either algorithm agree with the definition" begin
+    using FFTW: FFTW          # an FFT for `FTB.Transform()`
 
     # Literal evaluation of each rule — no recurrence, no transform: Fejér's first rule (a cosine
     # series) on the open nodes, Driscoll–Healy's sine series on the closed ones.
@@ -317,8 +311,8 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     for (s, fam, counts) in ((SS.Fejer1Sampling(), :open, open_counts),
                              (SS.DriscollHealySampling(), :closed, (8, 512))),
         nlat in counts
-        wt = SS.latitude_weights(s, nlat; algorithm = SS.Transform())
-        wr = SS.latitude_weights(s, nlat; algorithm = SS.Recurrence())
+        wt = SS.latitude_weights(s, nlat; algorithm = FTB.Transform())
+        wr = SS.latitude_weights(s, nlat; algorithm = FTB.Recurrence())
         Test.@test maximum(abs.(wt .- wr)) < 1e-14
         # Each construction independently reproduces the literal defining sum.
         Test.@test maximum(abs.(wt .- direct(fam, nlat))) < 1e-13
@@ -326,37 +320,7 @@ Test.@testset "Equiangular weights: FFT path and recurrence fallback agree with 
     end
     # Gauss–Legendre is not an equiangular family, so asking it for one of these says so.
     Test.@test_throws ArgumentError SS.latitude_weights(
-        SS.GaussLegendreSampling(), 8; algorithm = SS.Recurrence())
-
-    # The plan is held across calls, so a repeat at the same size does not rebuild it: planning
-    # allocates and a cache hit does not.
-    steady = map((64, 256)) do nlat
-        s = zeros(Float64, nlat)
-        fam = SS.ClosedNodes()
-        # Drop the cached entry, so the first call plans.
-        delete!(get!(() -> Dict{Tuple{DataType,Int},Any}(), task_local_storage(),
-                     :flowgeometries_equiangular_plans), (Float64, nlat))
-        first = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
-        again = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
-        third = @allocated SS._equiangular_sums!(s, fam, nlat, nlat ÷ 2, SS.Transform())
-        Test.@test again < first
-        Test.@test third == again                 # steady state
-        again
-    end
-    # Four times the latitudes costs the same, so neither the plan nor an `nlat`-sized buffer is
-    # being rebuilt: a per-call allocation of either scales with `nlat` and shows up here.
-    Test.@test steady[2] == steady[1]
-    # A cached plan and buffer are task-local, so two tasks at the same size do not share a buffer.
-    let nlat = 128
-        here = zeros(Float64, nlat)
-        SS._equiangular_sums!(here, SS.OpenNodes(), nlat, nlat ÷ 2, SS.Transform())
-        there = fetch(Threads.@spawn begin
-            v = zeros(Float64, nlat)
-            SS._equiangular_sums!(v, SS.OpenNodes(), nlat, nlat ÷ 2, SS.Transform())
-            v
-        end)
-        Test.@test all(isequal(a, b) for (a, b) in zip(here, there))
-    end
+        SS.GaussLegendreSampling(), 8; algorithm = FTB.Recurrence())
 end
 
 Test.@testset "Sparse adjacency assembles straight into CSC" begin

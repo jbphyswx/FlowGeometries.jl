@@ -15,6 +15,10 @@ the order [`cubed_sphere_points!`](@ref) writes, so it is what every consumer of
     return (q + 1, i + 1, j + 1)
 end
 
+# An optional output: written when given, skipped when `nothing`.
+@inline _put!(::Nothing, ::Int, _) = nothing
+@inline _put!(v::AbstractVector, i::Int, x) = (@inbounds v[i] = x; nothing)
+
 """
     _cubed_cell_angles(::Type{T}, n, i, j) -> (ξ, η)
 
