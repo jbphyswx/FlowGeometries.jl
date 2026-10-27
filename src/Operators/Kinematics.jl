@@ -332,7 +332,8 @@ function _frame_cells!(kind, outs, u, grid, masked, b)
     return nothing
 end
 
-_frame_lines!(kind, outs, u, grid, masked, ::NTuple{1,Int}, b) = _frame_cells!(kind, outs, u, grid, masked, b)
+_frame_lines!(kind, outs, u, grid::Grids.StructuredGrid, masked, ::NTuple{1,Int}, b) =
+    _frame_cells!(kind, outs, u, grid, masked, b)
 
 function _frame_lines!(kind, outs, u, grid::Grids.StructuredGrid{T,G,M}, masked, dims::NTuple{D,Int}, b) where {T,G,M,D}
     dims[1] == 0 && return nothing

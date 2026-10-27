@@ -112,20 +112,21 @@ end
 
 `Σᵢ f(i)·measure[i]` over the active cells `i` (linear indices), each measure container walked in its own
 shape: a [`SeparableMeasure`](@ref) as a direction-1 sum per row times the row's factor, a
-[`RingwiseVector`](@ref) as a sum per ring times the ring's value, a constant once.
+[`RingwiseVector`](@ref) as a sum per ring times the ring's value, a constant once. The terms of a run are
+grouped across vector lanes (`@simd`); `f` is evaluated at every cell, an inactive one adding zero.
 """
 function _weighted_sum(f::F, msk, m::AbstractArray, z::S) where {F,S}
     acc = z
-    @inbounds for i in 1:length(m)
-        _active(msk, i) && (acc += f(i) * S(m[i]))
+    @inbounds @simd for i in 1:length(m)
+        acc += ifelse(_active(msk, i), f(i) * S(m[i]), z)
     end
     return acc
 end
 
 function _weighted_sum(f::F, msk, m::Axes.ConstantVector, z::S) where {F,S}
     acc = z
-    @inbounds for i in 1:length(m)
-        _active(msk, i) && (acc += f(i))
+    @inbounds @simd for i in 1:length(m)
+        acc += ifelse(_active(msk, i), f(i), z)
     end
     return S(m.value) * acc
 end
@@ -134,8 +135,8 @@ function _weighted_sum(f::F, msk, m::RingwiseVector, z::S) where {F,S}
     acc = z
     @inbounds for r in eachindex(m.value)
         row = z
-        for i in (m.offset[r] + 1):m.offset[r + 1]
-            _active(msk, i) && (row += f(i))
+        @simd for i in (m.offset[r] + 1):m.offset[r + 1]
+            row += ifelse(_active(msk, i), f(i), z)
         end
         acc += S(m.value[r]) * row
     end
@@ -150,8 +151,8 @@ function _weighted_sum(f::F, msk, m::SeparableMeasure{T,N}, z::S) where {F,S,T,N
         wrest = prod(ntuple(d -> S(m.factors[d + 1][I[d]]), Val(N - 1)))
         base = (q - 1) * sz[1]
         row = z
-        for i in 1:sz[1]
-            _active(msk, base + i) && (row += f(base + i) * S(w1[i]))
+        @simd for i in 1:sz[1]
+            row += ifelse(_active(msk, base + i), f(base + i) * S(w1[i]), z)
         end
         acc += wrest * row
     end

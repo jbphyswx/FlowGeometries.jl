@@ -255,11 +255,11 @@ end
 # test: a zero coefficient carries the mask there.
 function _apply_laplacian!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S}
     inner = function (I)
-        @inbounds out[I] = msk[I] ? S(f(I, _laplacian_interior(Φ, coef, meas, I, v, S))) : zero(S)
+        @inbounds out[I] = ifelse(msk[I], S(@inline f(I, _laplacian_interior(Φ, coef, meas, I, v, S))), zero(S))
         return nothing
     end
     edge = function (I)
-        @inbounds out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, coef, meas, I, v, S))) : zero(S)
+        @inbounds out[I] = msk[I] ? S(@inline f(I, _laplacian_at(Φ, grid, coef, meas, I, v, S))) : zero(S)
         return nothing
     end
     _each_cell_split(inner, edge, Grids.size_tuple(grid), b, Execution.Written(out))
@@ -583,8 +583,8 @@ function prolong_add!(fine::AbstractArray, coarse::AbstractArray, fc::LaplacianC
     b = Execution.resolve(execution)
     fmeas = Execution.on_backend(b, fc.measure)
     add = function (J)
-        @inbounds iszero(fmeas[J]) ||
-                  (fine[J] += coarse[CartesianIndex(ntuple(d -> _parent(J[d], fdims[d]), Val(N)))])
+        @inbounds fine[J] += ifelse(iszero(fmeas[J]), zero(eltype(fine)),
+                                    coarse[CartesianIndex(ntuple(d -> _parent(J[d], fdims[d]), Val(N)))])
         return nothing
     end
     _each_cell_split(add, add, fdims, b, Execution.Written(fine))
@@ -610,6 +610,26 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
     fmeas, cmeas = Execution.on_backend(bk, fc.measure), Execution.on_backend(bk, cc.measure)
     coef, msk = Execution.on_backend(bk, fc.coef), Grids.mask(fgrid)
     S = eltype(coarse)
+    cdims = Grids.size_tuple(cc.grid)
+    # Where every direction halves, a coarse cell strictly inside has the `2^N` children `2I − 1 + o`,
+    # `o ∈ {0,1}^N`, each strictly inside the fine grid, so the sum over them is written out.
+    if all(≥(4), fdims)
+        halved = function (I)
+            @inbounds begin
+                J0 = CartesianIndex(ntuple(d -> 2I[d] - 1, Val(N)))
+                acc = _child_sum(Val(N), S) do o
+                    J = J0 + CartesianIndex(o)
+                    ifelse(msk[J], S(fmeas[J] * b[J]) + _flux_interior(x, coef, J, S(x[J]), Val(N), S), zero(S))
+                end
+                w = cmeas[I]
+                coarse[I] = ifelse(iszero(w), zero(S), acc / S(w))
+            end
+            return nothing
+        end
+        _each_cell_split(halved, _restrict_general(coarse, b, x, fgrid, coef, msk, fmeas, cmeas, fdims, Val(N), S),
+                         cdims, bk, Execution.Written(coarse))
+        return coarse
+    end
     # The children of a coarse cell strictly inside are strictly inside the fine grid, so their fluxes
     # read their neighbours at fixed offsets.
     inner = function (I)
@@ -628,7 +648,14 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
         end
         return nothing
     end
-    general = function (I)
+    _each_cell_split(inner, _restrict_general(coarse, b, x, fgrid, coef, msk, fmeas, cmeas, fdims, Val(N), S),
+                     cdims, bk, Execution.Written(coarse))
+    return coarse
+end
+
+# `restrict_residual!` at any coarse cell: its children by `_children`, their fluxes by `_flux_sum`.
+function _restrict_general(coarse, b, x, fgrid, coef, msk, fmeas, cmeas, fdims, ::Val{N}, ::Type{S}) where {N,S}
+    return function (I)
         @inbounds begin
             w = cmeas[I]
             if iszero(w)
@@ -644,6 +671,15 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
         end
         return nothing
     end
-    _each_cell_split(inner, general, Grids.size_tuple(cc.grid), bk, Execution.Written(coarse))
-    return coarse
+end
+
+# `zero(S) + f(o₁) + f(o₂) + …` over `o ∈ {0,1}^N`, the first entry fastest, the order `CartesianIndices`
+# walks the children in.
+@generated function _child_sum(f::F, ::Val{N}, ::Type{S}) where {F,N,S}
+    ex = :(zero(S))
+    for k in 0:(2^N - 1)
+        o = ntuple(d -> (k >> (d - 1)) & 1, N)
+        ex = :($ex + f($o))
+    end
+    return ex
 end
