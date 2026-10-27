@@ -318,6 +318,16 @@ has_bandlimit(::AbstractSphericalSampling) = false
 has_bandlimit(::AbstractSpectralQuadratureSampling) = true
 
 """
+    covers_sphere(sampling) -> Bool
+
+Whether every grid built from `sampling` spans the whole sphere, from the sampling's type alone. A lat–lon
+sampling takes latitude and longitude ranges and a scattered one any node set, so neither does.
+"""
+covers_sphere(::AbstractSphericalSampling) = true
+covers_sphere(::AbstractLatLonSampling) = false
+covers_sphere(::AbstractScatteredSphericalSampling) = false
+
+"""
     nlat_for_bandlimit(sampling, lmax) -> nlat
 """
 nlat_for_bandlimit(::AbstractGaussLegendreSampling, lmax::Integer) = Int(lmax) + 1

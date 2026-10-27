@@ -180,18 +180,17 @@ function strain_rate!(
     return S
 end
 
-# The derivative part: `S_cc = d_c u_c`, and each off-diagonal the half sum of its two derivatives.
+# The derivative part: `S_cc = d_c u_c`, and each off-diagonal the half sum of its two derivatives. `d_k u_c`
+# for `c ≤ k` lands in its component directly; `S_ck` then takes `d_c u_k` in one fused update.
 function _strain_terms!(comps, u, g, grid, derivs, nan, b, ::Val{N}) where {N}
     ntuple(Val(N)) do c
-        _gradient_into!(g, u[c], grid, derivs, nan, b)
         ntuple(Val(N)) do k
             s = comps[_sym_slot(c, k, Val(N))]
-            if k == c
-                copyto!(s, g[k])
-            elseif c < k
-                s .= g[k] ./ 2
+            if c ≤ k
+                _derivative_along!(s, u[c], grid, derivs, k, g, nan, b)
             else
-                s .+= g[k] ./ 2
+                _derivative_along!(g[1], u[c], grid, derivs, k, g, nan, b)
+                s .= s ./ 2 .+ g[1] ./ 2
             end
             return nothing
         end
@@ -312,13 +311,58 @@ struct _DivergenceTerms end
 # Adds the `γ` terms of `kind` to `outs` at every cell and writes `masked` where the cell is inactive, the
 # metric degenerates there, or a derivative read is undefined (NaN). One work item per cell, batch
 # elements included, reading the grid in the backend's memory.
-function _frame_pass!(kind, outs::Tuple, u::NTuple{N,Any}, grid::Grids.AbstractGrid, masked, b) where {N}
+_frame_pass!(kind, outs::Tuple, u::Tuple, grid::Grids.AbstractGrid, masked, b) =
+    _frame_cells!(kind, outs, u, grid, masked, b)
+
+# On the host, a structured grid whose metric does not vary along direction 1 takes the scale factors and
+# `log_scale_gradients` once per direction-1 line.
+function _frame_pass!(kind, outs::Tuple, u::Tuple, grid::Grids.StructuredGrid, masked, b::Execution._HostBackend)
+    1 in Geometry.metric_invariant_directions(Grids.grid_geometry(grid)) ||
+        return _frame_cells!(kind, outs, u, grid, masked, b)
+    return _frame_lines!(kind, outs, u, grid, masked, size(first(outs)), b)
+end
+
+function _frame_cells!(kind, outs, u, grid, masked, b)
     geo = Grids.grid_geometry(grid)
     g = Execution.on_backend(b, grid)
     msk = Grids.mask(g)
-    ci = CartesianIndices(size(first(outs)))
-    Execution.run_indices(length(ci), b, map(Execution.Written, outs)...) do lin
-        _frame_cell!(kind, outs, u, g, geo, msk, masked, @inbounds(ci[lin]), Val(ndims(msk)))
+    Execution.run_cells(size(first(outs)), b, map(Execution.Written, outs)...) do I
+        _frame_cell!(kind, outs, u, g, geo, msk, masked, I, Val(ndims(msk)))
+    end
+    return nothing
+end
+
+_frame_lines!(kind, outs, u, grid, masked, ::NTuple{1,Int}, b) = _frame_cells!(kind, outs, u, grid, masked, b)
+
+function _frame_lines!(kind, outs, u, grid::Grids.StructuredGrid{T,G,M}, masked, dims::NTuple{D,Int}, b) where {T,G,M,D}
+    dims[1] == 0 && return nothing
+    geo = Grids.grid_geometry(grid)
+    msk = Grids.mask(grid)
+    Execution.run_chunks(dims[D], b, map(Execution.Written, outs)...) do slab
+        mid = CartesianIndices(ntuple(e -> dims[e + 1], Val(D - 2)))
+        @inbounds for jD in slab, Im in mid
+            _frame_line!(kind, outs, u, grid, geo, msk, masked, dims[1], (Tuple(Im)..., jD), Val(M))
+        end
+    end
+    return nothing
+end
+
+# The direction-1 line whose other indices are `rest`, its metric taken at its first cell.
+@inline function _frame_line!(kind, outs, u, grid, geo, msk, masked, n::Int, rest::Tuple, ::Val{M}) where {M}
+    @inbounds begin
+        grest = ntuple(e -> rest[e], Val(M - 1))
+        p = Tuple(Grids.coords(grid, 1, grest...))
+        if any(iszero, Geometry.scale_factors(geo, p))
+            for i in 1:n
+                _write_all!(outs, CartesianIndex(i, rest...), masked)
+            end
+            return nothing
+        end
+        γ = Geometry.log_scale_gradients(geo, p)
+        for i in 1:n
+            I = CartesianIndex(i, rest...)
+            msk[i, grest...] ? _frame_terms!(kind, outs, u, masked, I, γ) : _write_all!(outs, I, masked)
+        end
     end
     return nothing
 end
@@ -335,7 +379,13 @@ end
             _write_all!(outs, I, masked)
             return nothing
         end
-        γ = Geometry.log_scale_gradients(geo, p)
+        _frame_terms!(kind, outs, u, masked, I, Geometry.log_scale_gradients(geo, p))
+    end
+    return nothing
+end
+
+@inline function _frame_terms!(kind, outs, u, masked, I, γ)
+    @inbounds begin
         v = map(c -> c[I], u)
         _add_terms!(kind, outs, I, v, γ)
         any(o -> isnan(o[I]), outs) && _write_all!(outs, I, masked)

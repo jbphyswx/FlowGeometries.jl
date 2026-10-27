@@ -69,7 +69,9 @@ triangles — the dual of the convex hull on the sphere.
 Bulk loops here come in two shapes, and only one maps to a kernel. `run_indices` applies a body to one
 index at a time with nothing carried across indices; `run_chunks` hands a contiguous range to a body that
 accumulates across it. Loading `KernelAbstractions` makes the first launchable on any backend it
-supports; the second raises on a device backend.
+supports; the second raises on a device backend. `run_cells` and `reduce_cells` are the first shape over
+the Cartesian indices of an array: on the host they walk lines along direction 1, and on a device they
+launch one work item per index.
 
 ```julia
 using KernelAbstractions
@@ -88,7 +90,7 @@ mimetic `curl!` and `divergence!`, the frame rotations, the other mimetic operat
 read the grid, metrics and plans they are given in the backend's memory. One held on the host is moved
 there for the call; one moved once with `Execution.on_backend(execution, x)` is read where it is, at no
 cost. Build metrics and plans (`face_metrics`, `laplacian_coefficients`, `stencil_plans`,
-`gradient_plan`) from a host grid and move them; `derivative!` builds its own weights and metric factors
+`gradient_plan`, `frame_plan`) from a host grid and move them; `derivative!` builds its own weights and metric factors
 on the host, from host copies of the grid's axes.
 
 A kernel cannot allocate, and the suite gates every per-cell entry point at zero bytes.

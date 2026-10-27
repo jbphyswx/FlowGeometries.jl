@@ -456,37 +456,53 @@ end
 
 # ---- sweeps ---------------------------------------------------------------------
 
-# `f(I)` at every index of `dims`. On the host a chunk walks its run of linear indices carrying the
-# Cartesian index from one cell to the next; elsewhere each index is a work item.
-@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::Execution._HostBackend,
-                            outs::Execution.Written...) where {F,N}
-    cart = CartesianIndices(dims)
-    Execution.run_chunks(length(cart), b, outs...) do rng
-        _walk_cells(f, cart, rng)
+"""
+    _each_cell_split(inner, general, dims, backend, outs::Written...)
+
+`inner(I)` at every index of `dims` lying strictly inside along every direction, and `general(I)` at the
+rest: the two write the same value wherever both apply, `inner` reading its neighbours one step away at
+fixed offsets, with no end or wrap to test. On the host the last direction splits into chunks and each
+line along direction 1 hands the cells between its two ends to `inner`; elsewhere, and in one direction,
+every index takes `general`.
+"""
+@inline _each_cell_split(inner::FI, general::FN, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend,
+                         outs::Execution.Written...) where {FI,FN,N} = Execution.run_cells(general, dims, b, outs...)
+@inline _each_cell_split(inner::FI, general::FN, dims::NTuple{1,Int}, b::Execution._HostBackend,
+                         outs::Execution.Written...) where {FI,FN} = Execution.run_cells(general, dims, b, outs...)
+
+@inline function _each_cell_split(inner::FI, general::FN, dims::NTuple{N,Int}, b::Execution._HostBackend,
+                                  outs::Execution.Written...) where {FI,FN,N}
+    mid = CartesianIndices(ntuple(e -> dims[e + 1], Val(N - 2)))
+    Execution.run_chunks(dims[N], b, outs...) do slab
+        _split_lines(inner, general, dims, mid, slab)
     end
     return nothing
 end
 
-@inline function _each_cell(f::F, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend,
-                            outs::Execution.Written...) where {F,N}
-    cart = CartesianIndices(dims)
-    Execution.run_indices(length(cart), b, outs...) do lin
-        f(@inbounds cart[lin])
-        return nothing
+@inline function _split_lines(inner::FI, general::FN, dims::NTuple{N,Int}, mid, slab) where {FI,FN,N}
+    n1 = dims[1]
+    @inbounds for jN in slab, Im in mid
+        rest = (Tuple(Im)..., jN)
+        if n1 < 3 || _rest_on_edge(rest, dims)
+            for i in 1:n1
+                general(CartesianIndex(i, rest...))
+            end
+        else
+            general(CartesianIndex(1, rest...))
+            @simd for i in 2:(n1 - 1)
+                @inline inner(CartesianIndex(i, rest...))
+            end
+            general(CartesianIndex(n1, rest...))
+        end
     end
     return nothing
 end
 
-@inline function _walk_cells(f::F, cart::CartesianIndices, rng::UnitRange{Int}) where {F}
-    isempty(rng) && return nothing
-    I = @inbounds cart[first(rng)]
-    for _ in rng
-        f(I)
-        nxt = iterate(cart, I)
-        nxt === nothing && return nothing
-        I = nxt[1]
+@inline function _rest_on_edge(rest::NTuple{M,Int}, dims::NTuple{N,Int}) where {M,N}
+    @inbounds for e in 1:M
+        (rest[e] == 1 || rest[e] == dims[e + 1]) && return true
     end
-    return nothing
+    return false
 end
 
 # `f(Val(d))` for `d = 1:N`, written out, so a tuple indexed by `d` inside `f` reads one fixed slot.
@@ -577,13 +593,19 @@ function gradient!(g::NTuple{N,AbstractArray}, χ::AbstractArray, fm::FaceMetric
     return g
 end
 
-function _gradient_dir!(gd::AbstractArray{S}, χ, grid, ad, gpd, σ, d::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, d), b, Execution.Written(gd)) do F
+function _gradient_dir!(gd::AbstractArray{S,N}, χ, grid, ad, gpd, σ, d::Int, b) where {S,N}
+    e = Grids._unit_index(Val(N), d)
+    inner = function (F)
+        @inbounds gd[F] = ifelse(iszero(ad[F]), zero(S), S(σ) * (S(χ[F]) - S(χ[F - e])) / gpd[F])
+        return nothing
+    end
+    general = function (F)
         @inbounds gd[F] = iszero(ad[F]) ? zero(S) :
                           S(σ) * (_cell_value(χ, grid, F, d, true, S) - _cell_value(χ, grid, F, d, false, S)) /
                           gpd[F]
         return nothing
     end
+    _each_cell_split(inner, general, Grids.face_dims(grid, d), b, Execution.Written(gd))
     return nothing
 end
 
@@ -606,10 +628,15 @@ function divergence!(δ::AbstractArray, v::NTuple{N,AbstractArray}, fm::FaceMetr
     area = m.area_op
     σ = m.orientation
     S = eltype(δ)
-    _each_cell(Grids.size_tuple(grid), b, Execution.Written(δ)) do I
+    inner = function (I)
+        @inbounds δ[I] = ifelse(msk[I], S(_flux_out_inner(v, area, σ, I, Val(N), S) / meas[I]), zero(S))
+        return nothing
+    end
+    general = function (I)
         @inbounds δ[I] = msk[I] ? S(_flux_out(v, area, σ, grid, I, Val(N), S) / meas[I]) : zero(S)
         return nothing
     end
+    _each_cell_split(inner, general, Grids.size_tuple(grid), b, Execution.Written(δ))
     return δ
 end
 
@@ -621,6 +648,17 @@ end
         here = S(σ[d]) * (ad[Fhi] * vd[Fhi] - ad[I] * vd[I])
     end
     return _flux_out(v, area, σ, grid, I, Val(d - 1), S) + here
+end
+
+# `_flux_out` at a cell strictly inside, its face above along `d` at `I + e_d`.
+@inline _flux_out_inner(v, area, σ, I::CartesianIndex, ::Val{0}, ::Type{S}) where {S} = zero(S)
+@inline function _flux_out_inner(v, area, σ, I::CartesianIndex{N}, ::Val{d}, ::Type{S}) where {N,d,S}
+    @inbounds begin
+        ad, vd = area[d], v[d]
+        Fhi = I + Grids._unit_index(Val(N), d)
+        here = S(σ[d]) * (ad[Fhi] * vd[Fhi] - ad[I] * vd[I])
+    end
+    return _flux_out_inner(v, area, σ, I, Val(d - 1), S) + here
 end
 
 """
@@ -695,9 +733,22 @@ function curl!(W::Tuple{Vararg{AbstractArray}}, v::NTuple{N,AbstractArray}, fm::
     return W
 end
 
-function _curl_pair!(Wp::AbstractArray{S}, va, vb, aa, ab, ga, gb, μ, σa, σb, grid, a::Int, b::Int,
-                     bk) where {S}
-    _each_cell(size(Wp), bk, Execution.Written(Wp)) do Qc
+function _curl_pair!(Wp::AbstractArray{S,N}, va, vb, aa, ab, ga, gb, μ, σa, σb, grid, a::Int, b::Int,
+                     bk) where {S,N}
+    ea, eb = Grids._unit_index(Val(N), a), Grids._unit_index(Val(N), b)
+    off = Grids.corner_to_face(grid, CartesianIndex(ntuple(_ -> 0, Val(N))), a, b)
+    inner = function (Qc)
+        @inbounds begin
+            Q = Qc + off
+            Cla, Clb = Q - ea, Q - eb
+            open = iszero(ab[Cla]) | iszero(ab[Q]) | iszero(aa[Clb]) | iszero(aa[Q])
+            Wp[Qc] = ifelse(open, zero(S),
+                            (S(σa) * (vb[Q] * gb[Q] - vb[Cla] * gb[Cla]) - S(σb) * (va[Q] * ga[Q] - va[Clb] * ga[Clb])) /
+                            μ[Qc])
+        end
+        return nothing
+    end
+    general = function (Qc)
         @inbounds begin
             Q = Grids.corner_to_face(grid, Qc, a, b)
             if _corner_closes(grid, aa, ab, Q, a, b)
@@ -714,6 +765,7 @@ function _curl_pair!(Wp::AbstractArray{S}, va, vb, aa, ab, ga, gb, μ, σa, σb,
         end
         return nothing
     end
+    _each_cell_split(inner, general, size(Wp), bk, Execution.Written(Wp))
     return nothing
 end
 
@@ -744,8 +796,24 @@ function rotational_velocity!(u::NTuple{N,AbstractArray}, R::Tuple{Vararg{Abstra
     return u
 end
 
-function _rotational_dir!(uc::AbstractArray{S}, R, edge, ac, σ, terms, grid, c::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, c), b, Execution.Written(uc)) do F
+function _rotational_dir!(uc::AbstractArray{S,N}, R, edge, ac, σ, terms, grid, c::Int, b) where {S,N}
+    # Strictly inside, both corners of every term are in `R`'s arrays.
+    inner = function (F)
+        @inbounds begin
+            acc = zero(S)
+            for (e, p, s) in terms
+                Rp, ℓp = R[p], edge[p]
+                Qlo = Grids.face_to_corner(grid, F, c, e)
+                Qhi = Grids.face_to_corner(grid, F + Grids._unit_index(Val(N), e), c, e)
+                lo = S(Rp[Qlo]) * _edge(ℓp, Qlo, S)
+                hi = S(Rp[Qhi]) * _edge(ℓp, Qhi, S)
+                acc += S(s) * S(σ[e]) * (hi - lo)
+            end
+            uc[F] = ifelse(iszero(ac[F]), zero(S), acc / ac[F])
+        end
+        return nothing
+    end
+    general = function (F)
         @inbounds if iszero(ac[F])
             uc[F] = zero(S)
         else
@@ -763,6 +831,7 @@ function _rotational_dir!(uc::AbstractArray{S}, R, edge, ac, σ, terms, grid, c:
         end
         return nothing
     end
+    _each_cell_split(inner, general, Grids.face_dims(grid, c), b, Execution.Written(uc))
     return nothing
 end
 
@@ -787,8 +856,13 @@ function to_faces!(v::NTuple{N,AbstractArray}, u::NTuple{N,AbstractArray}, fm::F
     return v
 end
 
-function _to_faces_dir!(vd::AbstractArray{S}, ud, ad, grid, d::Int, b) where {S}
-    _each_cell(Grids.face_dims(grid, d), b, Execution.Written(vd)) do F
+function _to_faces_dir!(vd::AbstractArray{S,N}, ud, ad, grid, d::Int, b) where {S,N}
+    e = Grids._unit_index(Val(N), d)
+    inner = function (F)
+        @inbounds vd[F] = ifelse(iszero(ad[F]), zero(S), (S(ud[F - e]) + S(ud[F])) / S(2))
+        return nothing
+    end
+    general = function (F)
         @inbounds if iszero(ad[F])
             vd[F] = zero(S)
         else
@@ -797,6 +871,7 @@ function _to_faces_dir!(vd::AbstractArray{S}, ud, ad, grid, d::Int, b) where {S}
         end
         return nothing
     end
+    _each_cell_split(inner, general, Grids.face_dims(grid, d), b, Execution.Written(vd))
     return nothing
 end
 
@@ -822,8 +897,19 @@ function to_centres!(u::NTuple{N,AbstractArray}, v::NTuple{N,AbstractArray}, fm:
     return u
 end
 
-function _to_centres_dir!(ud::AbstractArray{S}, vd, ad, msk, grid, d::Int, b) where {S}
-    _each_cell(Grids.size_tuple(grid), b, Execution.Written(ud)) do I
+function _to_centres_dir!(ud::AbstractArray{S,N}, vd, ad, msk, grid, d::Int, b) where {S,N}
+    e = Grids._unit_index(Val(N), d)
+    inner = function (I)
+        @inbounds begin
+            Fhi = I + e
+            olo, ohi = !iszero(ad[I]), !iszero(ad[Fhi])
+            w = olo + ohi
+            v = (ifelse(olo, S(vd[I]), zero(S)) + ifelse(ohi, S(vd[Fhi]), zero(S))) / S(w)
+            ud[I] = ifelse(msk[I] & !iszero(w), v, zero(S))
+        end
+        return nothing
+    end
+    general = function (I)
         @inbounds if msk[I]
             Fhi = Grids.face_above(grid, I, d)
             olo, ohi = !iszero(ad[I]), !iszero(ad[Fhi])
@@ -834,5 +920,6 @@ function _to_centres_dir!(ud::AbstractArray{S}, vd, ad, msk, grid, d::Int, b) wh
         end
         return nothing
     end
+    _each_cell_split(inner, general, Grids.size_tuple(grid), b, Execution.Written(ud))
     return nothing
 end

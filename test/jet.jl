@@ -41,8 +41,18 @@ Test.@testset "Derivative plans and their applies make no runtime dispatch" begi
                 JET.@test_opt target_modules = (FG,) O.derivative!(out, f, g, pl, d; masked = NaN)
                 JET.@test_opt target_modules = (FG,) O.derivative!(out, f, g, p, d; masked = NaN)
                 JET.@test_opt target_modules = (FG,) O.strain_rate!(S, u, g, p; scratch = sc)
+                JET.@test_opt target_modules = (FG,) O.divergence!(out, u, g, p; scratch = sc)
                 GD.mask(g) isa GD.AllActive ||
                     JET.@test_opt target_modules = (FG,) O.masked_stencil_plan(g, d; nodes = 3)
+                if GD.grid_geometry(g) isa FG.Geometry.SphericalGeometry
+                    fp = O.frame_plan(g)
+                    X = ntuple(_ -> zeros(sz), 3)
+                    JET.@test_opt target_modules = (FG,) O.frame_plan(g)
+                    JET.@test_opt target_modules = (FG,) O.to_planetary!(X..., u[1], u[2], nothing, fp)
+                    JET.@test_opt target_modules = (FG,) O.to_local!(X..., u[1], u[2], f, fp)
+                    JET.@test_opt target_modules = (FG,) O.tensor_to_local!(X..., nothing, nothing, nothing,
+                                                                            ntuple(_ -> f, 6)..., fp)
+                end
             end
         end
     end
@@ -76,6 +86,7 @@ Test.@testset "Builders, indices, queries and the geodesic make no runtime dispa
         JET.@test_opt target_modules = (FG,) C.nneighbors_within(sg, 5, 5; ball = 2.0)
         JET.@test_opt target_modules = (FG,) C.nneighbors_within(un, 5; ball = 0.2, topology = C.indexed(un))
         JET.@test_opt target_modules = (FG,) FG.Execution.reduce_indices(i -> i, +, 0, 100, CB.AutoBackend())
+        JET.@test_opt target_modules = (FG,) FG.Execution.reduce_cells(I -> I[1], +, 0, (16, 9), CB.AutoBackend())
         fm = O.face_metrics(poles)
         JET.@test_opt target_modules = (FG,) O.face_metrics(poles)
         JET.@test_opt target_modules = (FG,) O.laplacian_coefficients(fm)

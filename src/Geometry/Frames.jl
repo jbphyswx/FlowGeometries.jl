@@ -34,10 +34,14 @@ cannot drift apart. [`local_tangent_basis`](@ref) is its first two vectors under
 @inline function _enu_frame(::AbstractLonLatGeometry{T}, λ::Real, φ::Real) where {T}
     sinλ, cosλ = sincos(convert(T, λ))
     sinφ, cosφ = sincos(convert(T, φ))
-    return ((-sinλ, cosλ, zero(T)),
-            (-sinφ * cosλ, -sinφ * sinλ, cosφ),
-            (cosφ * cosλ, cosφ * sinλ, sinφ))
+    return _enu_frame(sinλ, cosλ, sinφ, cosφ)
 end
+
+# The triad from the sines and cosines of `λ` and `φ`.
+@inline _enu_frame(sinλ::T, cosλ::T, sinφ::T, cosφ::T) where {T} =
+    ((-sinλ, cosλ, zero(T)),
+     (-sinφ * cosλ, -sinφ * sinλ, cosφ),
+     (cosφ * cosλ, cosφ * sinλ, sinφ))
 
 """
     vector_to_cartesian(geo, u_λ, u_φ, u_r, λ, φ) -> NamedTuple{(:x,:y,:z)}
@@ -55,10 +59,12 @@ A rotation of the frame and nothing else, so it is one and the same on a sphere 
     geo::AbstractLonLatGeometry{T},
     u_λ::Real, u_φ::Real, u_r::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
-    uλ = convert(T, u_λ)
-    uφ = convert(T, u_φ)
-    ur = convert(T, u_r)
-    êλ, êφ, êr = _enu_frame(geo, λ, φ)
+    return _to_cartesian(_enu_frame(geo, λ, φ), convert(T, u_λ), convert(T, u_φ), convert(T, u_r))
+end
+
+# `(x, y, z)` of the local components `(uλ, uφ, ur)` on the triad `ê`.
+@inline function _to_cartesian(ê, uλ::T, uφ::T, ur::T) where {T}
+    êλ, êφ, êr = ê
     # `ê_λ` has no `z` component, the parallel lying in a plane of constant `z`, so `z` drops the `uλ`
     # term.
     return (;
@@ -91,15 +97,17 @@ sphere and on a spheroid.
     geo::AbstractLonLatGeometry{T},
     ux::Real, uy::Real, uz::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
-    uxT = convert(T, ux)
-    uyT = convert(T, uy)
-    uzT = convert(T, uz)
-    êλ, êφ, êr = _enu_frame(geo, λ, φ)
+    return _from_cartesian(_enu_frame(geo, λ, φ), convert(T, ux), convert(T, uy), convert(T, uz))
+end
+
+# The components of the ambient `(ux, uy, uz)` along the triad `ê`.
+@inline function _from_cartesian(ê, ux::T, uy::T, uz::T) where {T}
+    êλ, êφ, êr = ê
     # `ê_λ` has no `z` component, so `uz` does not enter the eastward projection.
     return (;
-        λ = uxT * êλ[1] + uyT * êλ[2],
-        φ = uxT * êφ[1] + uyT * êφ[2] + uzT * êφ[3],
-        r = uxT * êr[1] + uyT * êr[2] + uzT * êr[3],
+        λ = ux * êλ[1] + uy * êλ[2],
+        φ = ux * êφ[1] + uy * êφ[2] + uz * êφ[3],
+        r = ux * êr[1] + uy * êr[2] + uz * êr[3],
     )
 end
 
@@ -140,9 +148,12 @@ a rotation of the frame alone, it holds on a spheroid as it does on a sphere.
     geo::AbstractLonLatGeometry{T},
     τxx::Real, τyy::Real, τzz::Real, τxy::Real, τxz::Real, τyz::Real, λ::Real, φ::Real,
 ) where {T<:AbstractFloat}
-    xx, yy, zz = convert(T, τxx), convert(T, τyy), convert(T, τzz)
-    xy, xz, yz = convert(T, τxy), convert(T, τxz), convert(T, τyz)
-    ê = _enu_frame(geo, λ, φ)
+    return _tensor_to_local(_enu_frame(geo, λ, φ), convert(T, τxx), convert(T, τyy), convert(T, τzz),
+                            convert(T, τxy), convert(T, τxz), convert(T, τyz))
+end
+
+# `R τ Rᵀ` on the triad `ê`, from the six ambient components.
+@inline function _tensor_to_local(ê, xx::T, yy::T, zz::T, xy::T, xz::T, yz::T) where {T}
     a1, a2, a3 = ê[1]                                       # ê_λ
     b1, b2, b3 = ê[2]                                       # ê_φ
     c1, c2, c3 = ê[3]                                       # ê_r
@@ -522,7 +533,8 @@ end
 """
     metric_invariant_directions(geo) -> NTuple{K,Int}
 
-The coordinate directions along which [`scale_factors`](@ref) does not vary.
+The coordinate directions along which [`scale_factors`](@ref) does not vary, nor, being formed from
+them, [`log_scale_gradients`](@ref).
 
 A bulk operation that divides by a scale factor then solves it once per line: on a sphere no factor
 depends on longitude, so a whole row shares one value.

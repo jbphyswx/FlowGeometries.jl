@@ -366,6 +366,98 @@ reduce_indices(f::F, op::O, init, n::Integer, b::CB.AbstractAutoBackend) where {
 reduce_indices(f, op, init, n::Integer, b::CB.AbstractExecutionBackend) = _unsupported(b)
 
 """
+    run_cells(f, dims, backend, outputs::Written...)
+
+[`run_indices`](@ref) over the Cartesian indices of an array of size `dims`, `f(I)` at each `I`. On a
+serial or threaded backend the partition is by ranges of the last direction, each range walked with
+direction 1 innermost, so no index is converted from linear form; elsewhere `f` runs per linear index.
+"""
+function run_cells(f::F, dims::NTuple{N,Int}, b::_HostBackend, outs::Written...) where {F,N}
+    run_chunks(dims[N], b, outs...) do slab
+        _run_lines(f, dims, slab)
+    end
+    return nothing
+end
+
+# `f(I)` at the indices whose last entry lies in `slab`.
+@inline function _run_lines(f::F, dims::NTuple{N,Int}, slab) where {F,N}
+    mid = CartesianIndices(ntuple(e -> dims[e + 1], Val(N - 2)))
+    @inbounds for jN in slab, Im in mid
+        @simd for i in 1:dims[1]
+            @inline f(CartesianIndex(i, Tuple(Im)..., jN))
+        end
+    end
+    return nothing
+end
+
+@inline function _run_lines(f::F, ::NTuple{1,Int}, slab) where {F}
+    @inbounds for i in slab
+        @inline f(CartesianIndex(i))
+    end
+    return nothing
+end
+
+run_cells(f::F, dims::NTuple{N,Int}, b::CB.AbstractAutoBackend, outs::Written...) where {F,N} =
+    run_cells(f, dims, resolve(b), outs...)
+
+function run_cells(f::F, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend, outs::Written...) where {F,N}
+    cart = CartesianIndices(dims)
+    run_indices(length(cart), b, outs...) do lin
+        f(@inbounds cart[lin])
+        return nothing
+    end
+    return nothing
+end
+
+"""
+    reduce_cells(f, op, init, dims, backend)
+
+[`reduce_indices`](@ref) over the Cartesian indices of an array of size `dims`, `f(I)` at each `I`. On a
+serial or threaded backend the partition is by ranges of the last direction, each range walked with
+direction 1 innermost, so no index is converted from linear form; elsewhere `f` runs per linear index.
+
+On the host the terms of a direction-1 line are grouped across vector lanes (`@simd`), so a floating-point
+sum is deterministic but may differ from the left fold in its last bits.
+"""
+reduce_cells(f::F, op::O, init, dims::NTuple{N,Int}, ::CB.AbstractSerialBackend) where {F,O,N} =
+    _reduce_lines(f, op, init, dims, 1:dims[N])
+
+function reduce_cells(f::F, op::O, init, dims::NTuple{N,Int}, b::CB.AbstractThreadedBackend) where {F,O,N}
+    (Threads.nthreads() == 1 || dims[N] == 0) && return _reduce_lines(f, op, init, dims, 1:dims[N])
+    return _reduce_chunks(op, dims[N], b) do slab
+        _reduce_lines(f, op, init, dims, slab)
+    end
+end
+
+reduce_cells(f::F, op::O, init, dims::NTuple{N,Int}, b::CB.AbstractAutoBackend) where {F,O,N} =
+    reduce_cells(f, op, init, dims, resolve(b))
+
+function reduce_cells(f::F, op::O, init, dims::NTuple{N,Int}, b::CB.AbstractExecutionBackend) where {F,O,N}
+    cart = CartesianIndices(dims)
+    return reduce_indices(lin -> f(@inbounds cart[lin]), op, init, length(cart), b)
+end
+
+# `op` over `f(I)` at the indices whose last entry lies in `slab`.
+@inline function _reduce_lines(f::F, op::O, init, dims::NTuple{N,Int}, slab) where {F,O,N}
+    acc = init
+    mid = CartesianIndices(ntuple(e -> dims[e + 1], Val(N - 2)))
+    @inbounds for jN in slab, Im in mid
+        @simd for i in 1:dims[1]
+            acc = op(acc, @inline f(CartesianIndex(i, Tuple(Im)..., jN)))
+        end
+    end
+    return acc
+end
+
+@inline function _reduce_lines(f::F, op::O, init, ::NTuple{1,Int}, slab) where {F,O}
+    acc = init
+    @inbounds @simd for i in slab
+        acc = op(acc, @inline f(CartesianIndex(i)))
+    end
+    return acc
+end
+
+"""
     allocate(backend, T, dims...) -> AbstractArray{T}
 
 An uninitialised array of size `dims` the loops running under `backend` can write: an ordinary `Array`

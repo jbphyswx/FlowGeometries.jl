@@ -24,6 +24,17 @@ on an unmasked grid; on a partial-sky sphere, `f_sky`.
 sky_fraction(grid::AbstractGrid{G,T}) where {G,T} = covered_area(grid) / T(sum(measure(grid)))
 
 """
+    covers_sphere(grid) -> Bool
+
+Whether `grid`'s cells span the whole sphere, from its type: built from a sampling that always does
+(`SphericalSampling.covers_sphere`). A grid built from bare axes or nodes carries no sampling and does not
+answer. The mask is separate: [`sky_fraction`](@ref) gives the active share.
+"""
+covers_sphere(grid::AbstractGrid) = _covers_sphere(sampling(grid))
+_covers_sphere(::Nothing) = false
+_covers_sphere(s::SphericalSampling.AbstractSphericalSampling) = SphericalSampling.covers_sphere(s)
+
+"""
     integrate(field, grid; active_only = true, execution = SerialBackend())
 
 `Σᵢ field[i]·measure(grid)[i]` over the cells: the integral of `field` over the region they cover, by the
@@ -87,13 +98,14 @@ _integrate_over(field, grid::AbstractGrid, msk, off::Int, ::Type{S}, ::CB.Abstra
 function _integrate_over(field, grid::AbstractGrid, msk, off::Int, ::Type{S},
                          backend::CB.AbstractExecutionBackend) where {S}
     m = measure(grid)
-    return Execution.reduce_indices(+, zero(S), length(grid), backend) do i
-        @inbounds _active(msk, i) ? S(field[off + i]) * S(m[i]) : zero(S)
+    lin = LinearIndices(size(grid))
+    return Execution.reduce_cells(+, zero(S), size(grid), backend) do I
+        @inbounds _active(msk, I) ? S(field[off + lin[I]]) * S(m[I]) : zero(S)
     end
 end
 
-@inline _active(::AllActive, ::Int) = true
-@inline _active(msk::AbstractArray{Bool}, i::Int) = @inbounds msk[i]
+@inline _active(::AllActive, _) = true
+@inline _active(msk::AbstractArray{Bool}, i) = @inbounds msk[i]
 
 """
     _weighted_sum(f, mask, measure, zero) -> S

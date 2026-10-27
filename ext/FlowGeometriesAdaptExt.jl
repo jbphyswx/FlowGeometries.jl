@@ -127,6 +127,11 @@ end
 Adapt.adapt_structure(to, p::Discretization.TabulatedStencilPlan) =
     Discretization.TabulatedStencilPlan(Adapt.adapt(to, p.indices), Adapt.adapt(to, p.weights), p.order)
 
+Adapt.adapt_structure(to, p::Operators.FramePlan) = Operators.FramePlan(
+    Adapt.adapt(to, p.sinλ), Adapt.adapt(to, p.cosλ), Adapt.adapt(to, p.sinφ), Adapt.adapt(to, p.cosφ),
+    _move(to, p.mask), p.layout,
+)
+
 Adapt.adapt_structure(to, p::Operators.GradientPlan) = Operators.GradientPlan(
     Adapt.adapt(to, p.ptr), Adapt.adapt(to, p.nbr), _adapt_tuple(to, p.coeffs), p.names,
 )

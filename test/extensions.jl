@@ -102,6 +102,24 @@ Test.@testset "Threading is opt-in and changes no result" begin
         Test.@test FG.Execution.reduce_indices(i -> i * i, +, 0, n, b) == sum(i * i for i in 1:n; init = 0)
     end
 
+    # A cell loop visits every index of its shape once, an empty direction included, and an integer
+    # reduction over the cells is exact on every backend.
+    for dims in ((0,), (37,), (13, 0), (13, 11), (7, 5, 4)),
+        b in (CB.SerialBackend(), CB.ThreadedBackend(), FG.Execution.BalancedThreads(4),
+              CB.GPUBackend(KernelAbstractions.CPU()))
+        hits = zeros(Int, dims)
+        FG.Execution.run_cells(I -> (hits[I] += 1; nothing), dims, b, FG.Execution.Written(hits))
+        Test.@test all(==(1), hits)
+        lin = LinearIndices(dims)
+        Test.@test FG.Execution.reduce_cells(I -> lin[I]^2, +, 0, dims, b) == sum(abs2, 1:prod(dims); init = 0)
+    end
+    # A floating-point cell sum regroups each line's terms, the same way on every call.
+    let x = randn(257, 33)
+        s = FG.Execution.reduce_cells(I -> x[I], +, 0.0, size(x), CB.SerialBackend())
+        Test.@test s === FG.Execution.reduce_cells(I -> x[I], +, 0.0, size(x), CB.SerialBackend())
+        Test.@test abs(s - sum(x)) ≤ length(x) * eps() * sum(abs, x)
+    end
+
     # A CSR build goes through the scan, so it must stay bit-identical under threading.
     let sph = FG.Geometry.SphericalGeometry(), cart = FG.Geometry.CartesianGeometry()
         for gg in (FG.Grids.StructuredGrid(cart, 0.0:1.0:9.0, 0.0:1.0:9.0), FG.Grids.HEALPixGrid(sph, 4),
@@ -594,10 +612,21 @@ Test.@testset "Fields rotate between the local and the ambient frame" begin
         for (q, ref) in zip(t, (u .* u, v .* v, w .* w, u .* v, u .* w, v .* w))
             Test.@test maximum(abs, q .- act .* ref) < 1e-14
         end
+
+        # The grid's frame plan in its place writes the same bits.
+        fp = O.frame_plan(g; execution = b)
+        P, L, T6 = ntuple(_ -> fill(NaN, sz), 3), ntuple(_ -> fill(NaN, sz), 3), ntuple(_ -> fill(NaN, sz), 6)
+        O.to_planetary!(P..., u, v, w, fp; execution = b)
+        O.to_local!(L..., X, Y, Z, fp; execution = b)
+        O.tensor_to_local!(T6..., amb..., fp; execution = b)
+        Test.@test isequal(P, (X, Y, Z)) && isequal(L, (u2, v2, w2)) && isequal(T6, t)
         if b isa CB.SerialBackend
             Test.@test _alloc(q_toplan!, (X, Y, Z), (u, v, w), g) == 0
             Test.@test _alloc(q_toloc!, (u2, v2, w2), (X, Y, Z), g) == 0
             Test.@test _alloc(q_tens!, t, amb, g) == 0
+            Test.@test _alloc(q_toplan!, P, (u, v, w), fp) == 0
+            Test.@test _alloc(q_toloc!, L, (X, Y, Z), fp) == 0
+            Test.@test _alloc(q_tens!, T6, amb, fp) == 0
         end
     end
 end
@@ -697,6 +726,12 @@ Test.@testset "Field operators on a device that refuses host scalar indexing" be
             O.to_planetary!(Xd, Yd, Zd, mv(us), mv(vs), nothing, gg; execution = dev)
             Test.@test same(Xd, X) && same(Yd, Y) && same(Zd, Z)
         end
+        # The same through the grid's frame plan, its tables moved to the device.
+        fp = O.frame_plan(gs; execution = dev)
+        Test.@test fp.sinλ isa JLArrays.JLArray && fp.mask isa JLArrays.JLArray{Bool}
+        Xd, Yd, Zd = mv(zeros(12, 9)), mv(zeros(12, 9)), mv(zeros(12, 9))
+        O.to_planetary!(Xd, Yd, Zd, mv(us), mv(vs), nothing, fp; execution = dev)
+        Test.@test same(Xd, X) && same(Yd, Y) && same(Zd, Z)
 
         # The mimetic gradient and divergence, the assembled Laplacian and the restriction to the next
         # level on the masked plane, from metrics and coefficients built on the host.

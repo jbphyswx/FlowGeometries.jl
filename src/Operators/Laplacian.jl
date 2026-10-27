@@ -251,54 +251,19 @@ end
     return _flux_sum(Φ, grid, coef, I, ΦI, Val(d - 1), S) + here
 end
 
-_apply_laplacian!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S} =
-    _laplacian_cells!(f, out, Φ, grid, msk, coef, meas, v, S, b)
-
-function _laplacian_cells!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S}
-    _each_cell(Grids.size_tuple(grid), b, Execution.Written(out)) do I
+# A cell strictly inside takes `_laplacian_interior`, which reads at fixed offsets with no wrap or ghost
+# test: a zero coefficient carries the mask there.
+function _apply_laplacian!(f::F, out, Φ, grid, msk, coef, meas, v::Val, ::Type{S}, b) where {F,S}
+    inner = function (I)
+        @inbounds out[I] = msk[I] ? S(f(I, _laplacian_interior(Φ, coef, meas, I, v, S))) : zero(S)
+        return nothing
+    end
+    edge = function (I)
         @inbounds out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, coef, meas, I, v, S))) : zero(S)
         return nothing
     end
+    _each_cell_split(inner, edge, Grids.size_tuple(grid), b, Execution.Written(out))
     return out
-end
-
-# On the host the trailing direction splits into slabs. Along a run of direction 1 whose other indices are
-# all interior only the two end cells meet the boundary, and the cells between take `_laplacian_interior`,
-# which reads at fixed offsets with no wrap or ghost test: a zero coefficient carries the mask there.
-function _apply_laplacian!(f::F, out::Array, Φ::Array, grid, msk, coef, meas, v::Val{N}, ::Type{S},
-                           b::Execution._HostBackend) where {F,N,S}
-    N == 1 && return _laplacian_cells!(f, out, Φ, grid, msk, coef, meas, v, S, b)
-    dims = Grids.size_tuple(grid)
-    mid = CartesianIndices(ntuple(e -> dims[e + 1], Val(N - 2)))
-    Execution.run_chunks(dims[N], b) do slab
-        _laplacian_slab!(f, out, Φ, grid, msk, coef, meas, v, S, slab, dims, mid)
-    end
-    return out
-end
-
-function _laplacian_slab!(f::F, out, Φ, grid, msk, coef, meas, v::Val{N}, ::Type{S}, slab, dims,
-                          mid) where {F,N,S}
-    n1 = dims[1]
-    cf = ntuple(d -> @inbounds(coef[d]), v)
-    @inbounds for jN in slab, Im in mid
-        rest = (Tuple(Im)..., jN)
-        if n1 < 3 || _rest_on_edge(rest, dims)
-            for i in 1:n1
-                I = CartesianIndex(i, rest...)
-                out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, cf, meas, I, v, S))) : zero(S)
-            end
-        else
-            for i in (1, n1)
-                I = CartesianIndex(i, rest...)
-                out[I] = msk[I] ? S(f(I, _laplacian_at(Φ, grid, cf, meas, I, v, S))) : zero(S)
-            end
-            for i in 2:(n1 - 1)
-                I = CartesianIndex(i, rest...)
-                out[I] = msk[I] ? S(f(I, _laplacian_interior(Φ, cf, meas, I, v, S))) : zero(S)
-            end
-        end
-    end
-    return nothing
 end
 
 @inline _laplacian_interior(Φ, coef, meas, I::CartesianIndex, v::Val, ::Type{S}) where {S} =
@@ -313,13 +278,6 @@ end
         here = cd[I] * (S(Φ[I - e]) - ΦI) + cd[Ihi] * (S(Φ[Ihi]) - ΦI)
     end
     return _flux_interior(Φ, coef, I, ΦI, Val(d - 1), S) + here
-end
-
-@inline function _rest_on_edge(rest::NTuple{M,Int}, dims::NTuple{N,Int}) where {M,N}
-    @inbounds for e in 1:M
-        (rest[e] == 1 || rest[e] == dims[e + 1]) && return true
-    end
-    return false
 end
 
 """
@@ -358,14 +316,15 @@ end
 
 function _project_mean!(Φ, meas, total, b, ::Type{S}) where {S}
     iszero(total) && return Φ
-    acc = Execution.reduce_indices(+, zero(S), length(Φ), b) do lin
-        @inbounds S(Φ[lin] * meas[lin])
+    acc = Execution.reduce_cells(+, zero(S), size(Φ), b) do I
+        @inbounds S(Φ[I] * meas[I])
     end
     m = acc / S(total)
-    Execution.run_indices(length(Φ), b) do lin
-        @inbounds iszero(meas[lin]) || (Φ[lin] -= m)
+    sub = function (I)
+        @inbounds iszero(meas[I]) || (Φ[I] -= m)
         return nothing
     end
+    _each_cell_split(sub, sub, size(Φ), b, Execution.Written(Φ))
     return Φ
 end
 
@@ -596,7 +555,7 @@ function restrict!(coarse::AbstractArray, fine::AbstractArray, fc::LaplacianCoef
     b = Execution.resolve(execution)
     fmeas, cmeas = Execution.on_backend(b, fc.measure), Execution.on_backend(b, cc.measure)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), b, Execution.Written(coarse)) do I
+    mean = function (I)
         @inbounds begin
             w = cmeas[I]
             if iszero(w)
@@ -611,6 +570,7 @@ function restrict!(coarse::AbstractArray, fine::AbstractArray, fc::LaplacianCoef
         end
         return nothing
     end
+    _each_cell_split(mean, mean, Grids.size_tuple(cc.grid), b, Execution.Written(coarse))
     return coarse
 end
 
@@ -622,11 +582,12 @@ function prolong_add!(fine::AbstractArray, coarse::AbstractArray, fc::LaplacianC
     fdims = Grids.size_tuple(fc.grid)
     b = Execution.resolve(execution)
     fmeas = Execution.on_backend(b, fc.measure)
-    _each_cell(fdims, b, Execution.Written(fine)) do J
+    add = function (J)
         @inbounds iszero(fmeas[J]) ||
                   (fine[J] += coarse[CartesianIndex(ntuple(d -> _parent(J[d], fdims[d]), Val(N)))])
         return nothing
     end
+    _each_cell_split(add, add, fdims, b, Execution.Written(fine))
     return fine
 end
 
@@ -649,7 +610,25 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
     fmeas, cmeas = Execution.on_backend(bk, fc.measure), Execution.on_backend(bk, cc.measure)
     coef, msk = Execution.on_backend(bk, fc.coef), Grids.mask(fgrid)
     S = eltype(coarse)
-    _each_cell(Grids.size_tuple(cc.grid), bk, Execution.Written(coarse)) do I
+    # The children of a coarse cell strictly inside are strictly inside the fine grid, so their fluxes
+    # read their neighbours at fixed offsets.
+    inner = function (I)
+        @inbounds begin
+            w = cmeas[I]
+            if iszero(w)
+                coarse[I] = zero(S)
+            else
+                acc = zero(S)
+                for J in CartesianIndices(ntuple(d -> _children(I[d], fdims[d]), Val(N)))
+                    msk[J] || continue
+                    acc += S(fmeas[J] * b[J]) + _flux_interior(x, coef, J, S(x[J]), Val(N), S)
+                end
+                coarse[I] = acc / S(w)
+            end
+        end
+        return nothing
+    end
+    general = function (I)
         @inbounds begin
             w = cmeas[I]
             if iszero(w)
@@ -665,5 +644,6 @@ function restrict_residual!(coarse::AbstractArray, b::AbstractArray, x::Abstract
         end
         return nothing
     end
+    _each_cell_split(inner, general, Grids.size_tuple(cc.grid), bk, Execution.Written(coarse))
     return coarse
 end
