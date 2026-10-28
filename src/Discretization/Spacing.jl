@@ -63,8 +63,7 @@ end
 end
 
 # A periodic axis's seam is one step wide, so every gap is the step.
-@inline function local_spacing(x::Axes.PeriodicAxis, ::Integer, period::Real)
-    Axes.own_period(x, period)
+@inline function local_spacing(x::Axes.PeriodicUniformAxis, ::Integer, period::Real)
     return step(x), step(x)
 end
 
@@ -111,7 +110,7 @@ end
 [`cell_width`](@ref) at every index of an axis at once: the coordinate widths a separable measure or a
 flux divergence is weighted by.
 
-A bounded uniform axis and an [`Axes.PeriodicAxis`](@ref) get an [`Axes.ConstantVector`](@ref), one
+A bounded uniform axis and an [`Axes.PeriodicUniformAxis`](@ref) get an [`Axes.ConstantVector`](@ref), one
 number and a length, every one of their cells having the same width. Anything else is built densely
 into the same kind of storage as `x`, by broadcasts over views, so a device-resident axis is widened on
 its device: that includes a uniform axis of another type given a `period`, whose seam gap its type does
@@ -131,8 +130,7 @@ function cell_widths(x::AbstractRange{T}, ::Nothing = nothing) where {T<:Abstrac
     return Axes.ConstantVector(abs(T(step(x))), n)
 end
 
-function cell_widths(x::Axes.PeriodicAxis{T}, period::Real) where {T<:AbstractFloat}
-    Axes.own_period(x, period)
+function cell_widths(x::Axes.PeriodicUniformAxis{T}, ::Real) where {T<:AbstractFloat}
     return cell_widths(x, nothing)
 end
 

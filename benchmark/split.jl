@@ -34,7 +34,7 @@ function main()
     D, O, GD = FG.Decomposition, FG.Operators, FG.Grids
     nλ, nφ = 1440, 720
     h = π / nφ
-    g = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, nλ),
+    g = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicUniformAxis(0.0, 2π, nλ),
                           collect(range(-π / 2 + h / 2, π / 2 - h / 2; length = nφ)))
     ROOT && println("julia ", VERSION, "  ranks: ", MPI.Comm_size(COMM), "  threads: ", Threads.nthreads(),
                     "  grid: $nλ×$nφ sphere")

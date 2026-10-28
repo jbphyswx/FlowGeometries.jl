@@ -318,7 +318,7 @@ length and corner area, built once:
 
 ```@example disc
 sph = FG.Geometry.SphericalGeometry(6.371e6)
-gs  = FG.Grids.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 48), collect(range(-1.3, 1.3; length = 24)))
+gs  = FG.Grids.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 48), collect(range(-1.3, 1.3; length = 24)))
 fm  = O.face_metrics(gs, O.Dirichlet())
 χ   = [sin(2λ) * cos(φ)^2 for λ in FG.Grids.coordinates(gs, 1), φ in FG.Grids.coordinates(gs, 2)]
 gχ  = O.gradient!(O.allocate_faces(Float64, gs), χ, fm)

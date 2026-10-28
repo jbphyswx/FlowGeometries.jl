@@ -301,7 +301,7 @@ Test.@testset "Per-cell entry points allocate nothing, on every grid shape" begi
     check_shape("structured 1-D range",   FG.Grids.StructuredGrid(cart, rg), (12,))
     check_shape("structured 3-D MIXED",   FG.Grids.StructuredGrid(cart, rg, v, rg), (12, 12, 12))
     check_shape("spherical 2-D MIXED",    FG.Grids.StructuredGrid(sph,
-                    FG.Axes.PeriodicAxis(0.0, 2π, n),
+                    FG.Axes.PeriodicUniformAxis(0.0, 2π, n),
                     collect(range(-1.2, 1.2; length = n))), (12, 12))
     check_shape("curvilinear 2-D", FG.Grids.CurvilinearGrid(cart, cx, cy, trues(n, n);
                     measure = fill(1.0, n, n)), (12, 12))
@@ -538,7 +538,7 @@ Test.@testset "A held stencil plan is read and applied without allocating" begin
     D = FG.Discretization
     # A plan is read per cell; `plan_row` returns two stack tuples for a `Val` node count and two
     # vectors over the plan for an `Int`.
-    for (x, per) in ((FG.Axes.PeriodicAxis(0.0, 2π, 64), 2π), (collect(cumsum(fill(0.5, 64))), nothing)), k in (5, 11)
+    for (x, per) in ((FG.Axes.PeriodicUniformAxis(0.0, 2π, 64), 2π), (collect(cumsum(fill(0.5, 64))), nothing)), k in (5, 11)
         pl = D.stencil_plan(x, 1, k; period = per)
         for j in (1, 32, 64)
             Test.@test _alloc(D.plan_row, pl, j, Val(k)) == 0
@@ -711,7 +711,7 @@ Test.@testset "A per-index gap or width lookup allocates nothing on every axis m
     rng1 = range(0.0, 1.0; length = 8)
     grids = (
         GD.StructuredGrid(cart, rng1, vec1, collect(0.0:2.0)),
-        GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 9))),
+        GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 9))),
     )
     # A runtime `d` indexes a tuple whose entries have different types on the mixed grids, so the
     # lookup must not allocate for any of them.
@@ -815,11 +815,11 @@ Test.@testset "The mimetic operators allocate nothing" begin
     hole = trues(21, 16)
     hole[8:10, 6:9] .= false
     # Separable metrics on a box and a sphere, dense ones on a masked grid, three directions on a shell.
-    for (grid, bc) in ((GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 24), collect(range(-1.2, 1.2; length = 13))),
+    for (grid, bc) in ((GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 24), collect(range(-1.2, 1.2; length = 13))),
                         O.Dirichlet()),
                        (GD.StructuredGrid(cart, collect(range(0.0, 4.0; length = 21)), range(0.0, 3.0; length = 16), hole),
                         O.Neumann()),
-                       (GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), collect(range(-1.0, 1.0; length = 7)),
+                       (GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 12), collect(range(-1.0, 1.0; length = 7)),
                                           collect(range(6.371e6, 6.4e6; length = 5))), O.Neumann()))
         fm = O.face_metrics(grid, bc)
         c = O.laplacian_coefficients(fm)

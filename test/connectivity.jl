@@ -42,7 +42,7 @@ Test.@testset "Connectivity CSR / structured neighbors" begin
 
     # Every layout has a dense form, row `k` holding cell `k`'s neighbours.
     sph = FG.Geometry.SphericalGeometry()
-    sg = FG.Grids.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), range(-1.0, 1.0; length = 6))
+    sg = FG.Grids.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 12), range(-1.0, 1.0; length = 6))
     for g in (FG.Grids.HEALPixGrid(2), FG.Grids.CubedSphereGrid(3), FG.Grids.IcosahedralGrid(2),
               FG.Grids.YinYangGrid(6, 4), FG.Grids.RingGrid(sph, FG.SphericalSampling.OctahedralGaussianSampling(4)),
               FG.Grids.rotate(sg, FG.Geometry.PoleRotation(0.3, 1.1)))
@@ -817,7 +817,7 @@ Test.@testset "MetricBall queries match a brute-force scan of the same metric" b
 
     R = 6.371e6
     sph = FG.Geometry.SphericalGeometry(R)
-    λ = FG.Axes.PeriodicAxis(0.0, 2π, 24)
+    λ = FG.Axes.PeriodicUniformAxis(0.0, 2π, 24)
     φ = range(-π / 2, π / 2; length = 13)
     g2 = FG.Grids.StructuredGrid(sph, λ, φ)
     # Pole cells (full longitude ring in range), the seam, and a radius past the antipode.

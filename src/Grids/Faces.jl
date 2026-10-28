@@ -112,7 +112,7 @@ end
 The coordinates of the faces normal to direction `d` of a rectilinear grid, [`nfaces`](@ref) of them:
 midway between neighbouring centres, the first of a wrapping direction midway across its seam, the two
 outermost of a bounded one half a cell beyond its end centres. The face axis of an
-[`Axes.PeriodicAxis`](@ref) is another and that of a uniform axis is uniform; they are the face axes of
+[`Axes.PeriodicUniformAxis`](@ref) is another and that of a uniform axis is uniform; they are the face axes of
 [`StaggeredGrid`](@ref). With `d` a `Val`, the axis's type is known where it is called.
 """
 @inline face_coordinates(grid::StructuredGrid, d::Integer) =

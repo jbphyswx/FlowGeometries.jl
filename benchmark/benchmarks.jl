@@ -149,7 +149,7 @@ function bench_derivative()
     group("derivative! on a 1440×720 sphere, in field copies")
     nλ, nφ = 1440, 720
     h = π / nφ
-    g = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, nλ),
+    g = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicUniformAxis(0.0, 2π, nλ),
                           collect(range(-π / 2 + h / 2, π / 2 - h / 2; length = nφ)))
     f = [sin(3λ) * cos(φ) for λ in FG.Grids.coordinates(g, 1), φ in FG.Grids.coordinates(g, 2)]
     out = similar(f)
@@ -234,7 +234,7 @@ function bench_rowbracket()
     sp = [1 + 7 * (1 + sin(2π * (k - 0.5) / nλ)) / 2 for k in 1:nλ]
     λs = (cumsum(sp) .- sp[1]) .* (2π / sum(sp))
     φ = collect(range(-π / 2, π / 2; length = nφ))
-    for (nm, g) in (("uniform", GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, nλ), φ)),
+    for (nm, g) in (("uniform", GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, nλ), φ)),
                     ("stretched", GD.StructuredGrid(sph, λs, φ; topology = GD.Periodic())))
         for r in (2.0e5, 2.0e6)
             k = C.nneighbors_within(g, 200, 250; ball = r)

@@ -29,7 +29,7 @@ Test.@testset "A periodic longitude axis wraps, a plain longitude axis is bounde
     geom = FG.Geometry.SphericalGeometry(R)
     nλ, nφ = 8, 5
     dλ = 2π / nλ
-    lon = FG.Axes.PeriodicAxis(0.0, 2π, nλ)
+    lon = FG.Axes.PeriodicUniformAxis(0.0, 2π, nλ)
     lat = range(-π / 4, π / 4; length = nφ)
     grid = FG.Grids.StructuredGrid(geom, lon, lat, trues(nλ, nφ))
     Test.@test FG.Grids.isperiodic(grid, 1)
@@ -129,7 +129,7 @@ Test.@testset "Cell measure is the exact integral of the metric over each cell" 
 
     # A whole sphere's cells sum to 4πR², whether the outer faces fall on the poles or beyond them:
     # a node on a pole owns its polar cap.
-    λ16 = FG.Axes.PeriodicAxis(0.0, 2π, 16)
+    λ16 = FG.Axes.PeriodicUniformAxis(0.0, 2π, 16)
     for φs in (collect(range(-π / 2 + π / 64, π / 2 - π / 64; length = 32)),
                collect(range(-π / 2, π / 2; length = 33)),
                collect(range(π / 2, -π / 2; length = 33)))
@@ -367,8 +367,8 @@ Test.@testset "A periodic axis wraps whichever way it is stored, and states its 
     # A circle is a circle whichever way it is traversed, and a descending axis is routine.
     sg = FG.Geometry.SphericalGeometry()
     n = 8
-    asc = FG.Axes.PeriodicAxis(0.0, 2π, n)
-    desc = FG.Axes.PeriodicAxis(2π - 2π / n, -2π, n)
+    asc = FG.Axes.PeriodicUniformAxis(0.0, 2π, n)
+    desc = FG.Axes.PeriodicUniformAxis(2π - 2π / n, -2π, n)
     Test.@test collect(desc) ≈ reverse(collect(asc))
     Test.@test FG.Axes.period(desc) == 2π && step(desc) == -step(asc)
     for x in (asc, desc)
@@ -393,10 +393,10 @@ Test.@testset "A periodic axis wraps whichever way it is stored, and states its 
     # A periodic axis declared bounded, a longitude axis of another period, or a periodic axis given
     # another period raises.
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; topology = FG.Grids.Bounded())
-    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, FG.Axes.PeriodicAxis(0.0, π, n), φ)
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, FG.Axes.PeriodicUniformAxis(0.0, π, n), φ)
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; period = π)
     # A Cartesian periodic axis wraps at its own period.
-    cg = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float32}(), FG.Axes.PeriodicAxis(0.0, 5.0, 10),
+    cg = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float32}(), FG.Axes.PeriodicUniformAxis(0.0, 5.0, 10),
                                  0.0f0:1.0f0:3.0f0)
     Test.@test FG.Grids.isperiodic(cg, 1) && FG.Grids.period(cg, 1) == 5.0f0
 end
@@ -407,7 +407,7 @@ Test.@testset "A distance across a periodic seam keeps the precision of the gap"
     for T in (Float32, Float64)
         # A sphere at 1°: the two stored seam longitudes differ by nearly a turn, the cells by one step.
         R = T(6.371e6)
-        gs = G.StructuredGrid(GE.SphericalGeometry(R), FG.Axes.PeriodicAxis{T}(zero(T), T(2π), 360),
+        gs = G.StructuredGrid(GE.SphericalGeometry(R), FG.Axes.PeriodicUniformAxis{T}(zero(T), T(2π), 360),
                               collect(T, range(-1.2, 1.2; length = 9)))
         for j in (1, 5, 9)
             a, b = G.coords(Tuple, gs, 360, j), G.coords(Tuple, gs, 1, j)
@@ -419,7 +419,7 @@ Test.@testset "A distance across a periodic seam keeps the precision of the gap"
         # A Cartesian periodic axis off the origin, whose two seam coordinates are not within a factor
         # of two.
         L = T(10)
-        gc = G.StructuredGrid(GE.CartesianGeometry(T), FG.Axes.PeriodicAxis{T}(T(0.003), L, 1000), T[0, 1])
+        gc = G.StructuredGrid(GE.CartesianGeometry(T), FG.Axes.PeriodicUniformAxis{T}(T(0.003), L, 1000), T[0, 1])
         a, b = G.coords(Tuple, gc, 1000, 1), G.coords(Tuple, gc, 1, 1)
         gap = big(b[1]) + big(L) - big(a[1])
         Test.@test abs(G.displacement(gc, (1000, 1), (1, 1))[1] - gap) / gap < 2eps(T)
@@ -592,7 +592,7 @@ Test.@testset "Grids and connectivity work in any number of dimensions" begin
 
     # A spherical grid in 1-D measures arc length, and in 4-D keeps its metric directions.
     sgeo = FG.Geometry.SphericalGeometry(2.0)
-    g1 = FG.Grids.StructuredGrid(sgeo, FG.Axes.PeriodicAxis(0.0, 2π, 9))
+    g1 = FG.Grids.StructuredGrid(sgeo, FG.Axes.PeriodicUniformAxis(0.0, 2π, 9))
     Test.@test sum(FG.Grids.measure(g1)) ≈ 2.0 * 2π rtol = 1e-14   # R·Δλ over the full circle
     g4s = FG.Grids.StructuredGrid(sgeo, collect(range(0, 2π; length = 8)),
                             collect(range(-1.0, 1.0; length = 6)),
@@ -1276,7 +1276,7 @@ Test.@testset "A staggered grid is one mesh read at any Arakawa C location" begi
         Test.@test GD.isperiodic(GD.grid_at(sp, (F, C)), 1)
         Test.@test GD.period(GD.grid_at(sp, (F, C)), 1) ≈ 2π
         # A periodic axis's faces are another half a step back, and wrap at the same period.
-        sr = GD.StaggeredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 12), φ)
+        sr = GD.StaggeredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 12), φ)
         fr = GD.axis_at(sr, 1, F)
         Test.@test FG.Axes.period(fr) == 2π
         Test.@test collect(fr) ≈ collect(GD.axis_at(sp, 1, F))
@@ -1463,7 +1463,7 @@ Test.@testset "Rings, coverage and integrals read the grid's own structure" begi
     Test.@test reduce(vcat, collect.(GD.eachring(g))) == 1:length(g)
     Test.@test_throws ArgumentError GD.ring_range(g, nlat + 1)
     # In three directions, a ring per latitude and level.
-    g3 = GD.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 5)),
+    g3 = GD.StructuredGrid(geo, FG.Axes.PeriodicUniformAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 5)),
                            [R, R + 1e3, R + 2e3])
     Test.@test GD.nrings(g3) == 15
     Test.@test GD.ring_latitude(g3, 7) == GD.coordinates(g3, 2)[2]
@@ -1562,4 +1562,19 @@ Test.@testset "Rings, coverage and integrals read the grid's own structure" begi
     Test.@test _alloc(GD.integrate, f, g) == 0
     Test.@test _alloc(GD.integrate!, zeros(3), fb, g) == 0
     Test.@test _alloc(GE.geocentric_latitude, sp, 0.7) == 0
+end
+
+Test.@testset "isuniform on a periodic direction counts the gap at its wrap" begin
+    geo = FG.Geometry.CartesianGeometry()
+    P = FG.Grids.Periodic()
+    grid(x; kw...) = FG.Grids.StructuredGrid(geo, x; kw...)
+    Test.@test FG.Grids.isuniform(grid(1.0:1.0:10.0; topology = P), 1)
+    Test.@test FG.Grids.isuniform(grid(0.0:1.0:15.0; topology = P, period = 16), 1)
+    Test.@test !FG.Grids.isuniform(grid(0.0:1.0:15.0; topology = P, period = 19), 1)
+    Test.@test !FG.Grids.isuniform(grid(collect(0.0:1.0:15.0); topology = P, period = 16), 1)
+    Test.@test FG.Grids.isuniform(grid(FG.Axes.PeriodicUniformAxis(0.0, 10.0, 10)), 1)
+    Test.@test FG.Grids.isuniform(grid(0.0:1.0:15.0), 1)
+    # By type alone, only a `PeriodicUniformAxis` is uniform around its wrap.
+    Test.@test FG.Grids.spacing_trait(grid(1.0:1.0:10.0; topology = P), Val(1)) === FG.Axes.NonuniformSpacing()
+    Test.@test FG.Grids.spacing_trait(grid(FG.Axes.PeriodicUniformAxis(0.0, 10.0, 10)), Val(1)) === FG.Axes.UniformSpacing()
 end

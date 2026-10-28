@@ -190,17 +190,17 @@ end
 
 Test.@testset "A periodic axis is n equal cells around one period" begin
     A = FG.Axes
-    r = A.PeriodicAxis(0.0, 2π, 12)
+    r = A.PeriodicUniformAxis(0.0, 2π, 12)
     Test.@test A.isuniform(r) && step(r) == 2π / 12 && A.period(r) == 2π
     Test.@test collect(r) == [(i - 1) * (2π / 12) for i in 1:12]
     # Descending: a negative period, the same magnitude.
-    d = A.PeriodicAxis(2π, -2π, 12)
+    d = A.PeriodicUniformAxis(2π, -2π, 12)
     Test.@test step(d) == -step(r) && A.period(d) == 2π && first(d) == 2π
     Test.@test collect(r[2:5]) == collect(r)[2:5]
-    Test.@test A.period(A.PeriodicAxis{Float32}(0, 2π, 8)) == Float32(2π)
-    Test.@test_throws ArgumentError A.PeriodicAxis(0.0, 2π, 0)
-    Test.@test_throws ArgumentError A.PeriodicAxis(0.0, 0.0, 4)
-    Test.@test_throws ArgumentError A.PeriodicAxis(0.0, Inf, 4)
+    Test.@test A.period(A.PeriodicUniformAxis{Float32}(0, 2π, 8)) == Float32(2π)
+    Test.@test_throws ArgumentError A.PeriodicUniformAxis(0.0, 2π, 0)
+    Test.@test_throws ArgumentError A.PeriodicUniformAxis(0.0, 0.0, 4)
+    Test.@test_throws ArgumentError A.PeriodicUniformAxis(0.0, Inf, 4)
 end
 
 Test.@testset "Axis widths use bulk operations, not per-element scalar reads" begin

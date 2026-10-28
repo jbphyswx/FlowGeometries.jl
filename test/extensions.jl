@@ -193,7 +193,7 @@ Test.@testset "Threading is opt-in and changes no result" begin
     # The metric-ball builder chunks the same two owned-slot passes, and per-cell degrees vary
     # even more (polar rows reach every longitude), so the same chunk-boundary argument applies.
     gball = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
-                                    FG.Axes.PeriodicAxis(0.0, 2π, 24),
+                                    FG.Axes.PeriodicUniformAxis(0.0, 2π, 24),
                                     range(-π / 2, π / 2; length = 13))
     a = FG.Connectivity.build_connectivity_within(gball; ball = 2.0e6)
     b = FG.Connectivity.build_connectivity_within(gball; ball = 2.0e6, execution = thr)
@@ -559,7 +559,7 @@ Test.@testset "Every layout's cell centres can be indexed, not just the three ar
                ("icosahedral", GD.IcosahedralGrid(4)),
                ("rotated", GD.rotate(
                     GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6),
-                                      FG.Axes.PeriodicAxis(0.0, 2π, 24),
+                                      FG.Axes.PeriodicUniformAxis(0.0, 2π, 24),
                                       range(-1.2, 1.2; length = 13)),
                     FG.Geometry.PoleRotation(0.7, 1.1))))
     for (_, g) in layouts
@@ -583,7 +583,7 @@ Test.@testset "Fields rotate between the local and the ambient frame" begin
     geo = FG.Geometry.SphericalGeometry()
     msk = trues(12, 7)
     msk[3:5, 2:3] .= false
-    grids = (FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 12), range(-1.2, 1.2; length = 7), msk),
+    grids = (FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicUniformAxis(0.0, 2π, 12), range(-1.2, 1.2; length = 7), msk),
              FG.Grids.HEALPixGrid(geo, 2))
     for (g, b) in ((grids[1], CB.SerialBackend()), (grids[1], CB.ThreadedBackend()),
                    (grids[2], CB.GPUBackend(KernelAbstractions.CPU())))
@@ -672,7 +672,7 @@ Test.@testset "Field operators on a device that refuses host scalar indexing" be
     φs = [-1.2 + 2.4 * (t / 8)^1.2 for t in 0:8]
     ms = trues(12, 9)
     ms[5, 4] = false
-    gs = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, 12), φs, ms)
+    gs = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicUniformAxis(0.0, 2π, 12), φs, ms)
     λs = collect(GD.coordinates(gs, 1))
     fc = [sin(x) * cos(2y) for x in xs, y in ys]
     fs = [sin(2l) * cos(p) for l in λs, p in φs]

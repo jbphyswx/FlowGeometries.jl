@@ -92,7 +92,7 @@ end
 sits midway across the seam, `(x[N] − P + x[1])/2`, and face `N+1` is face `1` one period on. With
 `period = nothing` these are the bounded forms.
 
-An [`Axes.PeriodicAxis`](@ref) has a seam one step wide, so its faces are another uniform axis.
+An [`Axes.PeriodicUniformAxis`](@ref) has a seam one step wide, so its faces are another uniform axis.
 """
 faces(x::AbstractVector{T}, ::Nothing) where {T<:AbstractFloat} = faces(x)
 
@@ -102,8 +102,7 @@ function faces(x::AbstractVector{T}, period::Real) where {T<:AbstractFloat}
     return faces!(similar(x, T, n + 1), x, period)
 end
 
-function faces(a::Axes.PeriodicAxis{T}, period::Real) where {T<:AbstractFloat}
-    Axes.own_period(a, period)
+function faces(a::Axes.PeriodicUniformAxis{T}, ::Real) where {T<:AbstractFloat}
     return faces(a)
 end
 

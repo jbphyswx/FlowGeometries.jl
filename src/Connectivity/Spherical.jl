@@ -137,7 +137,7 @@ end
 
 Build a spherical `StructuredGrid` from a tensor-product sampling (Fejér first rule,
 Gauss–Legendre, Driscoll–Healy, McEwen–Wiaux, lat–lon, …). The samplings space their longitudes
-evenly around the circle, so the longitude axis is an [`Axes.PeriodicAxis`](@ref) over `2π` and the grid
+evenly around the circle, so the longitude axis is an [`Axes.PeriodicUniformAxis`](@ref) over `2π` and the grid
 wraps in longitude.
 
 A sampling with latitude quadrature weights (Gauss–Legendre, Driscoll–Healy, Fejér first rule) gives
@@ -162,7 +162,7 @@ function structured_grid(
     mask = nothing,
 ) where {T<:AbstractFloat}
     q = _axes_and_weights(T, s, nlat, nlon)
-    λ = Axes.PeriodicAxis{T}(zero(T), T(2π), length(q.λ))
+    λ = Axes.PeriodicUniformAxis{T}(zero(T), T(2π), length(q.λ))
     m = mask === nothing ? Grids.AllActive((length(λ), length(q.φ))) : mask
     return Grids._structured_grid(Geometry.similar_geometry(T, geometry), (λ, q.φ), m, nothing,
                                   nothing, s, q.w)

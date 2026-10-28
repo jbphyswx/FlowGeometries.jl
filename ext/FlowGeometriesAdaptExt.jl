@@ -71,7 +71,7 @@ Adapt.adapt_structure(::Any, mt::Connectivity.MetricTopology) = throw(ArgumentEr
 # `isbits`: no heap reference to move. An analytic axis is its formula's parameters, and those are what
 # reach the device; the formula runs there.
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.UniformAxis) = a
-Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.PeriodicAxis) = a
+Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.PeriodicUniformAxis) = a
 Adapt.adapt_structure(::Any, a::FlowGeometries.Axes.AbstractAnalyticAxis) = a
 Adapt.adapt_structure(::Any, c::FlowGeometries.Axes.ConstantVector) = c
 

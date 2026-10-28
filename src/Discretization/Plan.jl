@@ -111,7 +111,7 @@ A uniform axis gives a [`UniformStencilPlan`](@ref) and a stretched one a
 [`TabulatedStencilPlan`](@ref); which it is comes from the axis's type through
 [`Axes.spacing_trait`](@ref), never from inspecting its values.
 
-With a `period`, an [`Axes.PeriodicAxis`](@ref) gives the uniform form, its seam being one step wide. Any
+With a `period`, an [`Axes.PeriodicUniformAxis`](@ref) gives the uniform form, its seam being one step wide. Any
 other axis given a period gives the tabulated form, which describes whatever seam gap the period leaves.
 """
 stencil_plan(
@@ -139,9 +139,8 @@ function _tabulated_plan(x::AbstractVector{T}, ord::Int, k::Int, period) where {
 end
 
 function _stencil_plan(
-    ::Axes.UniformSpacing, x::Axes.PeriodicAxis{T}, ord::Int, k::Int, period::Real,
+    ::Axes.UniformSpacing, x::Axes.PeriodicUniformAxis{T}, ord::Int, k::Int, ::Real,
 ) where {T}
-    Axes.own_period(x, period)
     left = max(k - 1, 0) ÷ 2
     w = k == 0 ? T[] : _uniform_row(T, step(x), -left, k, ord)
     return UniformStencilPlan{T,Vector{T},Matrix{Int},Matrix{T}}(

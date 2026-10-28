@@ -237,7 +237,7 @@ Test.@testset "A pole rotation applies to a point set and to a grid" begin
     Test.@test_throws DimensionMismatch GE.rotate!(zeros(3), zeros(4), rot)
 
     sph = FG.Geometry.SphericalGeometry(6.371e6)
-    λa = FG.Axes.PeriodicAxis(0.0, 2π, 24)
+    λa = FG.Axes.PeriodicUniformAxis(0.0, 2π, 24)
     φa = range(-1.2, 1.2; length = 13)
     gs = GR.StructuredGrid(sph, λa, φa)
     gr = GR.unrotate(gs, rot)
@@ -692,7 +692,7 @@ Test.@testset "Normal coordinates: the geodesic's length along its initial direc
         Test.@test G.normal_coordinates(gc, (1, 2), (10, 3)) === (x = -1.0, y = 1.0)
         Test.@test G.normal_coordinates(gc, CartesianIndex(1, 2), CartesianIndex(10, 3)) === (x = -1.0, y = 1.0)
     end
-    let gs = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, 24), range(-1.2, 1.2; length = 13))
+    let gs = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicUniformAxis(0.0, 2π, 24), range(-1.2, 1.2; length = 13))
         Test.@test collect(Tuple(G.normal_coordinates(gs, (24, 5), (1, 6)))) ≈
                    collect(Tuple(G.normal_coordinates(geo, FG.Grids.coords(Tuple, gs, 24, 5),
                                                       FG.Grids.coords(Tuple, gs, 1, 6)))) rtol = 1e-13
@@ -773,7 +773,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     GE = FG.Geometry
     geo = GE.SpheroidGeometry()
     a, e² = GE.semimajor_axis(geo), GE.eccentricity²(geo)
-    λ8 = FG.Axes.PeriodicAxis(0.0, 2π, 8)
+    λ8 = FG.Axes.PeriodicUniformAxis(0.0, 2π, 8)
     φ7 = collect(range(-π / 2, π / 2; length = 7))
     h4 = collect(range(0.0, 3000.0; length = 4))
     g1 = FG.Grids.StructuredGrid(geo, λ8)
@@ -816,7 +816,7 @@ Test.@testset "A spheroid drives the grid stack in every dimension" begin
     e = sqrt(e²)
     A_exact = 2π * a^2 * (1 + (1 - e²) / e * atanh(e))
     for n in (4, 96)
-        gn = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicAxis(0.0, 2π, n),
+        gn = FG.Grids.StructuredGrid(geo, FG.Axes.PeriodicUniformAxis(0.0, 2π, n),
                                      collect(range(-π / 2, π / 2; length = n ÷ 2 + 1)))
         Test.@test sum(FG.Grids.measure(gn)) ≈ A_exact rtol = 1e-13
     end

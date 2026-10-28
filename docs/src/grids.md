@@ -62,7 +62,7 @@ g4  = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(),
 size(g4)
 ```
 
-A direction wraps when its axis type says so — a [`PeriodicAxis`](@ref FlowGeometries.Axes.PeriodicAxis),
+A direction wraps when its axis type says so — a [`PeriodicUniformAxis`](@ref FlowGeometries.Axes.PeriodicUniformAxis),
 `n` equal cells around one period, as a sampling's longitude is — or when `topology` names it
 [`Periodic`](@ref). Every other direction is bounded; nothing is read off the coordinate values. On a periodic axis
 the seam is one step wide by construction, so its widths, faces and stencil rows keep their uniform
@@ -70,7 +70,7 @@ forms; a plain axis declared periodic takes the per-cell forms, which hold whate
 leaves.
 
 ```@example grids
-wrapped = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), FG.Axes.PeriodicAxis(0.0, 2π, 64), φaxis)
+wrapped = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), FG.Axes.PeriodicUniformAxis(0.0, 2π, 64), φaxis)
 FG.Grids.isperiodic(wrapped, 1), FG.Grids.isperiodic(FG.Grids.StructuredGrid(geo, λaxis, φaxis), 1)
 ```
 

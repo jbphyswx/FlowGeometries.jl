@@ -33,7 +33,7 @@ function check_process_backend(backend)
         b = C.build_connectivity(SS.GaussLegendreSampling(), 9; stencil = st, execution = backend)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
     end
-    gball = GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 24), range(-π / 2, π / 2; length = 13))
+    gball = GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 24), range(-π / 2, π / 2; length = 13))
     let a = C.build_connectivity_within(gball; ball = 2.0e6),
         b = C.build_connectivity_within(gball; ball = 2.0e6, execution = backend)
         Test.@test a.ptr == b.ptr && a.nbrs == b.nbrs
@@ -105,10 +105,10 @@ function check_split(backend, nproc::Int)
     # second stretched, split along that one, its first held whole and wrapped onto itself, so a block's
     # corners come from a neighbour's halo.
     msk = trues(24, 17); msk[5, 8] = false; msk[20, 3] = false
-    gs = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, 24),
+    gs = GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicUniformAxis(0.0, 2π, 24),
                            collect(range(-1.3, 1.3; length = 17)), msk)
     y = cumsum(1.0 .+ 0.3 .* sin.(1:18))
-    gp = GD.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), FG.Axes.PeriodicAxis(0.0, 4.0, 12), y;
+    gp = GD.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), FG.Axes.PeriodicUniformAxis(0.0, 4.0, 12), y;
                            topology = (GD.Periodic(), GD.Periodic()), period = (4.0, y[end] - y[1] + 1.0))
     for (g, dim) in ((gs, 1), (gp, 2))
         s = D.split_grid(g, backend; dims = (dim,), blocks = (nproc,), halo = 5)

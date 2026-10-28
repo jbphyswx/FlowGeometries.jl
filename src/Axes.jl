@@ -54,6 +54,17 @@ spacing(x) = throw(ArgumentError(
     "index, or `Discretization.cell_width` for one cell's width.",
 ))
 
+
+# ---------------------------------------------------------------------------
+# Period
+# ---------------------------------------------------------------------------
+
+abstract type AbstractPeriod end
+struct Aperiodic <: AbstractPeriod end
+struct Periodic{T} <: AbstractPeriod
+    period::T
+end
+
 # ---------------------------------------------------------------------------
 # UniformAxis
 # ---------------------------------------------------------------------------
@@ -107,10 +118,11 @@ primary datum.
 An `AbstractRange`: that gets Base's `searchsorted` in closed form, so a lookup is `O(1)` in the axis
 length, and `isa AbstractRange` dispatch from other packages.
 """
-struct UniformAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
-    origin::T
-    Δ::T
+Base.@kwdef struct UniformAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
+    origin::T = zero(T)
+    Δ::T = one(T)
     n::Int
+    # period::AbstractPeriod
 
     function UniformAxis{T}(origin, Δ, n::Integer) where {T<:AbstractFloat}
         n ≥ 0 || throw(ArgumentError("a UniformAxis needs n ≥ 0, got $n"))
@@ -134,6 +146,8 @@ end
 # Everything below is written in terms of `first`/`step`/`length` alone, so it holds for any subtype.
 spacing_trait(::AbstractUniformAxis) = UniformSpacing()
 @inline spacing(a::AbstractUniformAxis) = step(a)
+
+@inline periodicity(::AbstractUniformAxis) = Aperiodic()
 
 @inline Base.size(a::AbstractUniformAxis) = (length(a),)
 Base.IndexStyle(::Type{<:AbstractUniformAxis}) = IndexLinear()
@@ -247,12 +261,16 @@ Base.:(==)(a::AbstractUniformAxis, b::AbstractUniformAxis) =
     (isempty(a) || (first(a) == first(b) && (length(a) == 1 || step(a) == step(b))))
 
 # ---------------------------------------------------------------------------
-# PeriodicAxis
+# PeriodicUniformAxis
 # ---------------------------------------------------------------------------
 
+
+
+abstract type AbstractPeriodicUniformAxis{T} <: AbstractUniformAxis{T} end
+
 """
-    PeriodicAxis(origin, period, n)
-    PeriodicAxis{T}(origin, period, n)
+    PeriodicUniformAxis(origin, period, n)
+    PeriodicUniformAxis{T}(origin, period, n)
 
 `n` samples `period/n` apart from `origin`: `n` equal cells around one period, so the cell after the
 last is the first, one period on. A negative `period` stores the samples descending.
@@ -262,14 +280,14 @@ widths, faces and stencil rows there are those of every other cell.
 
 A slice or an affine map of a periodic axis is a plain [`UniformAxis`](@ref).
 """
-struct PeriodicAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
+struct PeriodicUniformAxis{T<:AbstractFloat} <: AbstractPeriodicUniformAxis{T}
     origin::T
     Δ::T
     period::T     # the length one turn covers, positive
     n::Int
 
-    function PeriodicAxis{T}(origin, period, n::Integer) where {T<:AbstractFloat}
-        n ≥ 1 || throw(ArgumentError("a PeriodicAxis needs n ≥ 1, got $n"))
+    function PeriodicUniformAxis{T}(origin, period, n::Integer) where {T<:AbstractFloat}
+        n ≥ 1 || throw(ArgumentError("a PeriodicUniformAxis needs n ≥ 1, got $n"))
         P = convert(T, period)
         (isfinite(P) && !iszero(P)) ||
             throw(ArgumentError("a PeriodicAxis needs a finite nonzero period, got $P"))
@@ -277,29 +295,23 @@ struct PeriodicAxis{T<:AbstractFloat} <: AbstractUniformAxis{T}
     end
 end
 
-function PeriodicAxis(origin::Real, period::Real, n::Integer)
+function PeriodicUniformAxis(origin::Real, period::Real, n::Integer)
     T = float(promote_type(typeof(origin), typeof(period)))
-    return PeriodicAxis{T}(origin, period, n)
+    return PeriodicUniformAxis{T}(origin, period, n)
 end
 
-@inline Base.step(a::PeriodicAxis) = a.Δ
-@inline Base.first(a::PeriodicAxis) = a.origin
-@inline Base.length(a::PeriodicAxis) = a.n
-@inline similar_axis(::PeriodicAxis{T}, origin, Δ, n::Integer) where {T} = UniformAxis{T}(origin, Δ, n)
+@inline Base.step(a::PeriodicUniformAxis) = a.Δ
+@inline Base.first(a::PeriodicUniformAxis) = a.origin
+@inline Base.length(a::PeriodicUniformAxis) = a.n
+@inline similar_axis(::PeriodicUniformAxis{T}, origin, Δ, n::Integer) where {T} = UniformAxis{T}(origin, Δ, n)
 
 """
-    period(a::PeriodicAxis) -> T
+    period(a::PeriodicUniformAxis) -> T
 
 The length one turn of `a` covers, positive whichever way the samples run.
 """
-@inline period(a::PeriodicAxis) = a.period
+@inline period(a::PeriodicUniformAxis) = a.period
 
-# `P` checked as the period of `a`, which wraps at its own period and no other.
-@inline function own_period(a::PeriodicAxis{T}, P::Real) where {T}
-    T(P) == a.period || throw(ArgumentError(
-        "a PeriodicAxis of period $(a.period) was given period $P; it wraps at its own period"))
-    return a.period
-end
 
 """
     uniform_axis(x) -> UniformAxis
@@ -318,6 +330,21 @@ uniform_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = throw(Argu
     "its spacing is known — `UniformAxis(origin, Δ, n)` — or keep it as it is, since nonuniform axes " *
     "are supported everywhere.",
 ))
+
+
+# ---------------------------------------------------------------------------
+# Nonuniform axes
+# ---------------------------------------------------------------------------
+
+abstract type AbstractNonuniformAxis{T} <: AbstractVector{T} end
+
+abstract type AbstractPeriodicNonuniformAxis{T, VT <: AbstractVector{T}} <: AbstractNonuniformAxis{T} end
+struct PeriodicNonuniformAxis{T, VT <: AbstractVector{T}} <: AbstractPeriodicNonuniformAxis{T, VT}
+    x::VT
+    period::T
+end
+
+# const AbstractPeriodicAxis{T} = Union{AbstractPeriodicUniformAxis{T}, AbstractPeriodicNonuniformAxis{T}}
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +378,7 @@ checks it once. Where `index_at` cannot answer — a coordinate outside the form
 far-extrapolated face can be — it returns a non-finite value and the caller falls back to the search,
 reaching the same answer.
 """
-abstract type AbstractAnalyticAxis{T<:AbstractFloat} <: AbstractVector{T} end
+abstract type AbstractAnalyticAxis{T<:AbstractFloat} <: AbstractNonuniformAxis{T} end
 
 """
     coordinate(a, ξ) -> T
@@ -591,5 +618,32 @@ end
 
 # An analytic axis is its formula and a constant vector its value, both read on the host.
 @inline Execution._on_host(::Union{AbstractAnalyticAxis,ConstantVector}) = true
+
+# ---------------------------------------------------------------------------
+# AbstractAxis
+# ---------------------------------------------------------------------------
+
+
+const AbstractAxis{T} = Union{AbstractUniformAxis{T}, AbstractNonuniformAxis{T}, AbstractAnalyticAxis{T}, ConstantVector{T}} # unsatisfying, but a workaround since julia has single inheritance
+
+Periodic(axis::AbstractAxis{T}) where {T} = Periodic{T}(period(axis))
+
+# ---------------------------------------------------------------------------
+# PeriodicAxes
+# ---------------------------------------------------------------------------
+
+
+abstract type AbstractPeriodicAxis{T, A <: AbstractAxis{T}} end
+struct PeriodicAxis{T, A <: AbstractAxis{T}} <: AbstractPeriodicAxis{T, A}
+    axis::A
+    period::T
+end
+PeriodicAxis(::AbstractUniformAxis{T}, ::T) where {T} = error("period already defined for AbstractUniformAxis")
+PeriodicAxis(::AbstractVector{T}) where {T} = PeriodicAxis(axis, maximum(axis) - minimum(axis))
+PeriodicAxis(axis::AbstractRange{T}) where {T} = PeriodicAxis(axis, step(axis) * T(length(axis)))
+
+periodicity(paxis::AbstractPeriodicAxis) = Periodic(period(paxis.axis))
+
+
 
 end # module Axes

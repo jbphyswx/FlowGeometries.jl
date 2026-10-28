@@ -220,15 +220,15 @@ Write positional coordinates into a preallocated `AbstractVector` (`length(out) 
     return out
 end
 
-# A direction's topology from its axis type: an `Axes.PeriodicAxis` wraps, any other axis ends.
-@inline _axis_topology(::Axes.PeriodicAxis) = Periodic()
+# A direction's topology from its axis type: an `Axes.PeriodicUniformAxis` wraps, any other axis ends.
+@inline _axis_topology(::Axes.PeriodicUniformAxis) = Periodic()
 @inline _axis_topology(::AbstractVector) = Bounded()
 
 # A caller's topology for a direction, which a periodic axis requires to be `Periodic`.
 @inline _agree_topology(t::AbstractTopology, ::AbstractVector, ::Int) = t
-@inline _agree_topology(t::Periodic, ::Axes.PeriodicAxis, ::Int) = t
-@noinline _agree_topology(::Bounded, ::Axes.PeriodicAxis, d::Int) = throw(ArgumentError(
-    "direction $d is a PeriodicAxis, which wraps; a bounded direction takes another axis type"))
+@inline _agree_topology(t::Periodic, ::Axes.PeriodicUniformAxis, ::Int) = t
+@noinline _agree_topology(::Bounded, ::Axes.PeriodicUniformAxis, d::Int) = throw(ArgumentError(
+    "direction $d is a PeriodicUniformAxis, which wraps; a bounded direction takes another axis type"))
 
 _grid_topology(::Val{N}, ::Nothing, ax::Tuple) where {N} = map(_axis_topology, ax)
 _grid_topology(::Val{N}, topo, ax::Tuple) where {N} =
@@ -264,15 +264,15 @@ Methods ordered so nothing is ambiguous (a `StepRangeLen{T}` is both an `Abstrac
 `AbstractVector{T}`, so the parameterized range form is needed to break that tie):
 - `AbstractRange{T}` / `AbstractVector{T}`: passthrough, zero cost, type preserved.
 - `AbstractRange` (wrong eltype): rebuilt as `UniformAxis{T}`, still uniform and now `isbits`.
-- [`Axes.PeriodicAxis`](@ref) (wrong eltype): rebuilt as a `PeriodicAxis{T}` of the same period.
+- [`Axes.PeriodicUniformAxis`](@ref) (wrong eltype): rebuilt as a `PeriodicUniformAxis{T}` of the same period.
 - `AbstractVector` (wrong eltype): copied with `similar`, so a device-resident array stays in its own
   storage.
 """
 _to_axis(::Type{T}, x::AbstractRange{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractRange) where {T<:AbstractFloat} = Axes.uniform_axis(T, x)
-_to_axis(::Type{T}, x::Axes.PeriodicAxis{T}) where {T<:AbstractFloat} = x
-_to_axis(::Type{T}, x::Axes.PeriodicAxis) where {T<:AbstractFloat} =
-    Axes.PeriodicAxis{T}(first(x), Axes.wrap_sign(x) * Axes.period(x), length(x))
+_to_axis(::Type{T}, x::Axes.PeriodicUniformAxis{T}) where {T<:AbstractFloat} = x
+_to_axis(::Type{T}, x::Axes.PeriodicUniformAxis) where {T<:AbstractFloat} =
+    Axes.PeriodicUniformAxis{T}(first(x), Axes.wrap_sign(x) * Axes.period(x), length(x))
 _to_axis(::Type{T}, x::AbstractVector{T}) where {T<:AbstractFloat} = x
 _to_axis(::Type{T}, x::AbstractVector) where {T<:AbstractFloat} = copyto!(similar(x, T), x)
 
@@ -681,14 +681,14 @@ entering as plain widths. A `CartesianGeometry` measure is the product of the pe
   axes.
 - `topology`: per-direction closure, [`Periodic`](@ref) or [`Bounded`](@ref) or a tuple of them. A
   single tag is direction 1's and a short tuple the leading directions', the rest being `Bounded`.
-  When omitted, a direction is `Periodic` where its axis is an [`Axes.PeriodicAxis`](@ref) and
-  `Bounded` otherwise. A `PeriodicAxis` direction declared `Bounded` raises.
+  When omitted, a direction is `Periodic` where its axis is an [`Axes.PeriodicUniformAxis`](@ref) and
+  `Bounded` otherwise. A `PeriodicUniformAxis` direction declared `Bounded` raises.
 - `period`: the wrap length of each periodic direction. Omit it and the axis's own closure is used: a
-  `PeriodicAxis`'s period (which on spherical longitude is `2π`), `2π` for any other spherical
+  `PeriodicUniformAxis`'s period (which on spherical longitude is `2π`), `2π` for any other spherical
   longitude, and `extent + one spacing` for a Cartesian direction, which is exact for a uniform axis
   (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer, its seam gap being
-  undetermined by its samples, so `period` is required there. A period given for a `PeriodicAxis`
-  direction is its own. A `PeriodicAxis` has a seam one step wide, so its cell widths, faces and
+  undetermined by its samples, so `period` is required there. A period given for a `PeriodicUniformAxis`
+  direction is its own. A `PeriodicUniformAxis` has a seam one step wide, so its cell widths, faces and
   stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
   whatever seam gap its period leaves.
 - `sampling`: the [`SphericalSampling.AbstractSphericalSampling`](@ref) the axes came from, kept on
@@ -776,7 +776,7 @@ function _wrap_periods(
 end
 
 _given_period(::AbstractVector, P::T) where {T} = P
-_given_period(x::Axes.PeriodicAxis, P::T) where {T} = T(Axes.own_period(x, P))
+_given_period(x::Axes.PeriodicUniformAxis, P::T) where {T} = T(Axes.own_period(x, P))
 
 _period_tuple(::Val{N}, ::Type{T}, ::Nothing) where {N,T} = ntuple(_ -> nothing, Val(N))
 _period_tuple(::Val{N}, ::Type{T}, p::Real) where {N,T} =
@@ -798,15 +798,15 @@ _inferred_period(
 # A periodic axis's period is its own; on longitude that has to be the circle.
 function _inferred_period(
     ::Union{Geometry.AbstractSphericalGeometry{T},Geometry.AbstractEllipsoidalGeometry{T}},
-    x::Axes.PeriodicAxis, d::Int,
+    x::Axes.PeriodicUniformAxis, d::Int,
 ) where {T}
     P = T(Axes.period(x))
     (d != 1 || P == T(2π)) || throw(ArgumentError(
-        "a longitude PeriodicAxis covers 2π = $(T(2π)); this one covers $P"))
+        "a longitude PeriodicUniformAxis covers 2π = $(T(2π)); this one covers $P"))
     return P
 end
 
-_inferred_period(::Geometry.AbstractCartesianGeometry{T}, x::Axes.PeriodicAxis, ::Int) where {T} =
+_inferred_period(::Geometry.AbstractCartesianGeometry{T}, x::Axes.PeriodicUniformAxis, ::Int) where {T} =
     T(Axes.period(x))
 
 # "extent + one spacing" is exact only when there IS one spacing; on a stretched axis the samples do

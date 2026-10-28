@@ -191,7 +191,7 @@ Test.@testset "derivative! is with respect to distance, and masks where the metr
     # differences along it. `f = r` has derivative one, exact for three nodes on a linear field.
     let R32 = Float32(R), r32 = collect(range(R32, 1.01f0 * R32; length = 5))
         s32 = GE.SphericalGeometry(R32)
-        g3 = GD.StructuredGrid(s32, FG.Axes.PeriodicAxis(0.0f0, Float32(2π), 8),
+        g3 = GD.StructuredGrid(s32, FG.Axes.PeriodicUniformAxis(0.0f0, Float32(2π), 8),
                                collect(range(-1.0f0, 1.0f0; length = 5)), r32)
         o3 = zeros(Float32, 8, 5, 5)
         O.derivative!(o3, [r for _ in 1:8, _ in 1:5, r in r32], g3, 3; order = 1, nodes = 3, masked = NaN32)
@@ -879,7 +879,7 @@ Test.@testset "Staggering, point location and interpolation weights" begin
     Test.@test D.faces([0.5, 1.0, 3.0], nothing) == D.faces([0.5, 1.0, 3.0])
     # A periodic axis's seam is one step wide by its type, so its faces are a uniform axis; a range given
     # a period takes the per-cell form, whatever seam the period leaves.
-    let pa = A.PeriodicAxis(0.0, 5.0, 5)
+    let pa = A.PeriodicUniformAxis(0.0, 5.0, 5)
         Test.@test A.isuniform(D.faces(pa, 5.0))
         Test.@test collect(D.faces(pa, 5.0)) ≈ D.faces(collect(0.0:1.0:4.0), 5.0)
         Test.@test D.faces(0.0:1.0:4.0, 5.0) ≈ D.faces(collect(0.0:1.0:4.0), 5.0)
@@ -1005,7 +1005,7 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
         Test.@test collect(D.cell_widths(x, p)) ≈ [D.cell_width(x, i, p) for i in eachindex(x)]
     end
     # A periodic axis wraps at its own period and no other.
-    let pa = FG.Axes.PeriodicAxis(0.0, 2π, 16)
+    let pa = FG.Axes.PeriodicUniformAxis(0.0, 2π, 16)
         Test.@test collect(D.cell_widths(pa, 2π)) ≈ D.cell_widths(λ, 2π)
         Test.@test_throws ArgumentError D.cell_widths(pa, π)
     end
@@ -1644,13 +1644,13 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
     A = FG.Axes
 
     # A periodic axis wraps at its own period and no other.
-    Test.@test_throws ArgumentError D.stencil_plan(A.PeriodicAxis(0.0, 2π, 32), 1, 5; period = π)
+    Test.@test_throws ArgumentError D.stencil_plan(A.PeriodicUniformAxis(0.0, 2π, 32), 1, 5; period = π)
 
     # A plan reads exactly the samples the table reads, and its weights are the same numbers to
     # round-off, the table computing each row from its own window: a stretched axis and a wrapping one,
     # each row read through the unrolled and the run-time node count.
     for (x, per, ord, k) in ((collect(cumsum(1.0 .+ 0.3 .* sin.(range(0, 3π; length = 40)))), nothing, 2, 5),
-                             (A.PeriodicAxis(0.0, 2π, 32), 2π, 1, 4))
+                             (A.PeriodicUniformAxis(0.0, 2π, 32), 2π, 1, 4))
         pl = D.stencil_plan(x, ord, k; period = per)
         idx, w = D.axis_stencils(x, ord, k; period = per)
         for j in 1:length(x), nk in (Val(k), k)
@@ -1666,7 +1666,7 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
 
     # Applying a plan agrees with applying the table: along the contiguous and the strided direction, on
     # a masked batch, and at a node count past the unrolled ones.
-    let xs = A.PeriodicAxis(0.0, 2π, 17), ys = range(0.0, 2.0; length = 9)
+    let xs = A.PeriodicUniformAxis(0.0, 2π, 17), ys = range(0.0, 2.0; length = 9)
         fld = [sin(a) * cos(b) + 0.1c for a in collect(xs), b in ys, c in 1:3]
         msk = trues(17, 9); msk[3, 2] = false; msk[8, 4] = false
         for (ax, d, ord, k, per) in ((xs, 1, 1, 11, 2π), (ys, 2, 2, 5, nothing))
@@ -1724,7 +1724,7 @@ Test.@testset "derivative! writes each value with its metric factor, and a maske
     # A masked sphere with a row on each pole, where the longitude factor is zero; a spheroid shell with a
     # stretched latitude axis and a batch; and a geometry whose longitude factor varies with longitude, so
     # each cell takes its own factor.
-    λ = FG.Axes.PeriodicAxis(0.0, 2π, 12)
+    λ = FG.Axes.PeriodicUniformAxis(0.0, 2π, 12)
     msk = trues(12, 9); msk[2, 4] = false
     grids = ((GE.SphericalGeometry(), GD.StructuredGrid(GE.SphericalGeometry(), λ, range(-π / 2, π / 2; length = 9), msk), (12, 9)),
              (GE.SpheroidGeometry(), GD.StructuredGrid(GE.SpheroidGeometry(), λ, [-1.4 + 2.8 * (t / 6)^1.3 for t in 0:6],
@@ -1826,15 +1826,15 @@ Test.@testset "The mimetic operators are one adjoint family on every face-indexe
     # spherical (rows on the poles, the Driscoll–Healy pole row, a shell) and curvilinear.
     kinds = (
         ("stretched, descending", GD.StructuredGrid(cart, stretched, reverse(collect(ys))), O.Neumann()),
-        ("channel", GD.StructuredGrid(cart, FG.Axes.PeriodicAxis(0.0, 1.0, 12), ys), O.Dirichlet()),
+        ("channel", GD.StructuredGrid(cart, FG.Axes.PeriodicUniformAxis(0.0, 1.0, 12), ys), O.Dirichlet()),
         ("masked hole", GD.StructuredGrid(cart, xs, ys, hole), O.Neumann()),
-        ("rows on both poles", GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 16),
+        ("rows on both poles", GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 16),
                                                  collect(range(-π / 2, π / 2; length = 9))), O.Neumann()),
         ("Driscoll–Healy, Dirichlet", FG.Connectivity.structured_grid(FG.SphericalSampling.DriscollHealySampling(), 8;
                                                                       geometry = sph), O.Dirichlet()),
-        ("3-D box", GD.StructuredGrid(cart, FG.Axes.PeriodicAxis(0.0, 1.0, 6), stretched[1:5],
+        ("3-D box", GD.StructuredGrid(cart, FG.Axes.PeriodicUniformAxis(0.0, 1.0, 6), stretched[1:5],
                                       range(0.5, 0.0; length = 4)), O.Dirichlet()),
-        ("3-D shell", GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 6)),
+        ("3-D shell", GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 8), collect(range(-1.0, 1.0; length = 6)),
                                         collect(range(1.0, 1.6; length = 4))), O.Neumann()),
         ("curvilinear", warped(11, 9), O.Dirichlet()),
     )
@@ -2027,7 +2027,7 @@ Test.@testset "The mimetic operators are exact for linear fields and second orde
         Test.@test all(collect(GD.face_coordinates(grid, d)) == collect(GD.axis_at(sg, d, D.Face())) for d in 1:2)
         Test.@test O.face_metrics(sg, O.Dirichlet()).gap == fm.gap
         Test.@test GD.face_dims(grid, 1) == (n1 + 1, n2) && GD.corner_dims(grid, 1, 2) == (n1 - 1, n2 - 1)
-        wrapped = GD.StructuredGrid(cart, FG.Axes.PeriodicAxis(0.0, 1.0, 8), ys)
+        wrapped = GD.StructuredGrid(cart, FG.Axes.PeriodicUniformAxis(0.0, 1.0, 8), ys)
         Test.@test GD.face_dims(wrapped, 1) == (8, n2) && GD.corner_dims(wrapped, 1, 2) == (8, n2 - 1)
     end
 
@@ -2038,7 +2038,7 @@ Test.@testset "The mimetic operators are exact for linear fields and second orde
     let Rs = 6.371e6, sph = GE.SphericalGeometry(Rs)
         rel(a, b) = maximum(abs, a .- b) / maximum(abs, b)
         errs = map((24, 48, 96)) do nlon
-            gs = GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, nlon), collect(range(-1.3, 1.3; length = nlon ÷ 2 + 1)))
+            gs = GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, nlon), collect(range(-1.3, 1.3; length = nlon ÷ 2 + 1)))
             fs = O.face_metrics(gs, O.Dirichlet())
             z = zeros(GD.face_dims(gs, 2))
             d1 = O.divergence!(zeros(GD.size_tuple(gs)), (on_faces((l, p) -> sin(l) * cos(p), gs, 1), z), fs)
@@ -2053,7 +2053,7 @@ Test.@testset "The mimetic operators are exact for linear fields and second orde
             Test.@test errs[1][k] / errs[2][k] > 3.5 && errs[2][k] / errs[3][k] > 3.5
         end
         errs3 = map((16, 32, 64)) do nlon
-            gs = GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, nlon), collect(range(-1.2, 1.2; length = nlon ÷ 2 + 1)),
+            gs = GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, nlon), collect(range(-1.2, 1.2; length = nlon ÷ 2 + 1)),
                                    collect(range(Rs, 1.01Rs; length = 5)))
             fs = O.face_metrics(gs)
             us = (on_faces((l, p, r) -> cos(p), gs, 1), zeros(GD.face_dims(gs, 2)), zeros(GD.face_dims(gs, 3)))
@@ -2088,9 +2088,9 @@ Test.@testset "A coarse level is the Galerkin product of the fine one" begin
                 for j in 1:n; fill!(e, 0); e[j] = 1; A[:, j] .= vec(O.apply_laplacian!(zeros(size(e)), e, c)); end; A)
     for (name, grid, bc) in (("odd, Dirichlet", GD.StructuredGrid(cart, odd, odd), O.Dirichlet()),
                              ("odd, Neumann", GD.StructuredGrid(cart, odd, odd), O.Neumann()),
-                             ("odd periodic", GD.StructuredGrid(cart, FG.Axes.PeriodicAxis(0.0, 1.0, 9),
-                                                                FG.Axes.PeriodicAxis(0.0, 1.0, 9)), O.Neumann()),
-                             ("even periodic", GD.StructuredGrid(cart, FG.Axes.PeriodicAxis(0.0, 1.0, 8), odd),
+                             ("odd periodic", GD.StructuredGrid(cart, FG.Axes.PeriodicUniformAxis(0.0, 1.0, 9),
+                                                                FG.Axes.PeriodicUniformAxis(0.0, 1.0, 9)), O.Neumann()),
+                             ("even periodic", GD.StructuredGrid(cart, FG.Axes.PeriodicUniformAxis(0.0, 1.0, 8), odd),
                               O.Dirichlet()),
                              ("odd masked, Dirichlet", GD.StructuredGrid(cart, odd, odd, hole), O.Dirichlet()),
                              ("curvilinear, Dirichlet", mimetic_warped(9, 7), O.Dirichlet()))
@@ -2183,7 +2183,7 @@ Test.@testset "A coarse level holds each zero where the fine operator does" begi
     GD = FG.Grids
     O = FG.Operators
     cart = FG.Geometry.CartesianGeometry{Float64}()
-    ys = FG.Axes.PeriodicAxis(0.0, 1.0, 8)
+    ys = FG.Axes.PeriodicUniformAxis(0.0, 1.0, 8)
     balance(c, Φ) = O.apply_laplacian!(zeros(size(Φ)), Φ, c)
     tol(c, Φ) = 32eps() * maximum(abs, c.diag) * maximum(abs, Φ)
     along_x(v, ny) = [v[i] for i in eachindex(v), _ in 1:ny]
@@ -2251,7 +2251,7 @@ Test.@testset "Strain rate, curl and divergence carry the turning of the local f
     Q(φ) = -0.5 + 0.2φ + 0.9φ^2
     dQ(φ) = 0.2 + 1.8φ
     nλ, nφ = 16, 13
-    λs = A.PeriodicAxis(0.0, 2π, nλ)
+    λs = A.PeriodicUniformAxis(0.0, 2π, nλ)
     φs = [-1.3 + 2.6 * (t / 12)^1.2 for t in 0:12]
     u = ([P(φ) for _ in λs, φ in φs], [Q(φ) for _ in λs, φ in φs])
     # Each derivative sums three products of a value of size `U` and a weight of a few `1/Δφ`, each
@@ -2277,7 +2277,7 @@ Test.@testset "Strain rate, curl and divergence carry the turning of the local f
 
     # A shell `(λ, φ, r)`, where `γ_λφ = −tan φ/r` and `γ_λr = γ_φr = 1/r`, with
     # `u = ((r/R)P(φ), Q(φ), (r/R)²/10)`.
-    let λ3 = A.PeriodicAxis(0.0, 2π, 8), φ3 = φs[1:2:end], rs = collect(range(R, 1.5R; length = 5))
+    let λ3 = A.PeriodicUniformAxis(0.0, 2π, 8), φ3 = φs[1:2:end], rs = collect(range(R, 1.5R; length = 5))
         g3 = GD.StructuredGrid(sph, λ3, φ3, rs)
         p3 = O.stencil_plans(g3; nodes = 3)
         cell(f) = [f(φ, r) for _ in λ3, φ in φ3, r in rs]
@@ -2298,7 +2298,7 @@ Test.@testset "Strain rate, curl and divergence carry the turning of the local f
         Test.@test all(maximum(abs, ω3[c] .- ωw[c]) ≤ t3 for c in 1:3)
         Test.@test maximum(abs, O.divergence(u3, g3, p3) .- δw) ≤ t3
         # A radius's factor is one, so in Float32 as in Float64 nothing off a pole is masked.
-        g32 = GD.StructuredGrid(GE.SphericalGeometry(Float32(R)), A.PeriodicAxis(0.0f0, Float32(2π), 8),
+        g32 = GD.StructuredGrid(GE.SphericalGeometry(Float32(R)), A.PeriodicUniformAxis(0.0f0, Float32(2π), 8),
                                 Float32.(φ3), Float32.(rs))
         S32 = O.strain_rate(map(a -> Float32.(a), u3), g32, O.stencil_plans(g32; nodes = 3))
         Test.@test all(c -> all(isfinite, c), S32)

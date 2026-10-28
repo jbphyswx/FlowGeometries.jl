@@ -35,7 +35,7 @@ The same three choices on a plane, with a stretched vertical direction:
 geo = FG.Geometry.CartesianGeometry()
 
 # doubly periodic and uniform in x and y, stretched in z — each direction keeps its own answer
-x    = FG.Axes.PeriodicAxis(0.0, 1e5, 200)                 # 200 cells around a 100 km period
+x    = FG.Axes.PeriodicUniformAxis(0.0, 1e5, 200)                 # 200 cells around a 100 km period
 z    = cumsum([0.0; fill(10.0, 4); fill(40.0, 4)])
 grid = FG.Grids.StructuredGrid(geo, x, x, z)
 
@@ -68,7 +68,7 @@ No code path inspects coordinate values to decide this, so no tolerance enters t
 data question matters, the spacing accessors answer it exactly — an axis is equally spaced precisely
 when `minimum_spacing == maximum_spacing`.
 
-Periodicity is the same. An `Axes.PeriodicAxis(origin, period, n)` is `n` equal cells around one
+Periodicity is the same. An `Axes.PeriodicUniformAxis(origin, period, n)` is `n` equal cells around one
 period, and a grid direction built on one wraps; every other direction is bounded unless the
 constructor's `topology` names it `Periodic()`.
 

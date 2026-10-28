@@ -10,7 +10,7 @@ Test.@testset "Derivative plans and their applies make no runtime dispatch" begi
         sph = FG.Geometry.SphericalGeometry(6.371e6)
         mk = trues(16, 9)
         mk[5, 4] = false
-        λ = FG.Axes.PeriodicAxis(0.0, 2π, 16)
+        λ = FG.Axes.PeriodicUniformAxis(0.0, 2π, 16)
         φ = collect(range(-1.2, 1.2; length = 9))
         grids = (
             ("box, ranges", GD.StructuredGrid(cart, range(0.0, 1.0; length = 16), range(0.0, 2.0; length = 9))),
@@ -19,7 +19,7 @@ Test.@testset "Derivative plans and their applies make no runtime dispatch" begi
             ("sphere", GD.StructuredGrid(sph, λ, φ)),
             ("masked sphere", GD.StructuredGrid(sph, λ, φ, mk)),
             ("one latitude", GD.StructuredGrid(sph, λ, [0.4])),
-            ("shell", GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 8), range(-1.0, 1.0; length = 6),
+            ("shell", GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 8), range(-1.0, 1.0; length = 6),
                                         collect(range(6.371e6, 6.4e6; length = 5)))),
         )
         for (name, g) in grids
@@ -67,7 +67,7 @@ Test.@testset "Builders, indices, queries and the geodesic make no runtime dispa
         hp = GD.HEALPixGrid(sph, 4)
         xs, ys = rand(60), rand(60)
         un = GD.UnstructuredGrid(cart, (xs, ys), trues(60); k = 4, areas = ones(60))
-        poles = GD.StructuredGrid(sph, FG.Axes.PeriodicAxis(0.0, 2π, 16), collect(range(-π / 2, π / 2; length = 9)))
+        poles = GD.StructuredGrid(sph, FG.Axes.PeriodicUniformAxis(0.0, 2π, 16), collect(range(-π / 2, π / 2; length = 9)))
         for T in (Float64, Float32)
             spd = GE.SpheroidGeometry(T(6378137), T(1 / 298.257223563))
             JET.@test_opt target_modules = (FG,) GE.distance(spd, (T(0.1), T(0.2)), (T(2.0), T(-0.3)))
@@ -99,7 +99,7 @@ Test.@testset "A block of a split grid is typed by the grid alone" begin
         mk = trues(16, 9)
         mk[5, 4] = false
         y = cumsum(1.0 .+ 0.3 .* sin.(1:9))
-        for g in (GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicAxis(0.0, 2π, 16),
+        for g in (GD.StructuredGrid(FG.Geometry.SphericalGeometry(6.371e6), FG.Axes.PeriodicUniformAxis(0.0, 2π, 16),
                                     collect(range(-1.2, 1.2; length = 9)), mk),
                   GD.StructuredGrid(FG.Geometry.CartesianGeometry{Float64}(), range(0.0, 1.0; length = 16), y;
                                     topology = (GD.Bounded(), GD.Periodic()), period = (0.0, y[end] - y[1] + 1.0)))

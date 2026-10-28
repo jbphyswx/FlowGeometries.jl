@@ -298,7 +298,7 @@ end
 # An axis on indices `j`. Along a periodic direction `j` may run past either end, an index `n` past the
 # end standing one period further on in the axis's direction: a periodic axis continues uniformly, its
 # seam being one step, and any other becomes a vector. A bounded direction's block lies within its ends.
-_slice_axis(x::Axes.PeriodicAxis{T}, j::UnitRange{Int}, ::Real, ::Grids.Periodic) where {T} =
+_slice_axis(x::Axes.PeriodicUniformAxis{T}, j::UnitRange{Int}, ::Real, ::Grids.Periodic) where {T} =
     Axes.UniformAxis{T}(first(x) + T(first(j) - 1) * step(x), step(x), length(j))
 
 function _slice_axis(x::AbstractVector{T}, j::UnitRange{Int}, P::Real, ::Grids.Periodic) where {T}
