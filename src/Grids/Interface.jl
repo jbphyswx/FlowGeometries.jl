@@ -275,7 +275,11 @@ Direction `d`'s coordinate axis. Only rectilinear grids have axes; this is
 """
     spacing_trait(grid, ::Val{d}) -> UniformSpacing() | NonuniformSpacing()
 
-Whether direction `d`'s spacing is known from its type, as a value a method can **dispatch** on.
+Whether direction `d`'s spacing is constant, known from its type, as a value a method can **dispatch** on.
+A periodic direction's spacing includes the gap from its last sample to its first one period on. An
+[`Axes.PeriodicAxis`](@ref) closes its period in equal steps; any other axis leaves whatever gap the
+period does, so a periodic direction is uniform only on a `PeriodicAxis`. [`Axes.spacing_trait`](@ref)
+answers for the axis alone.
 
 [`isuniform`](@ref) answers the same question as a `Bool`, which a method can only branch on. A kernel
 that selects the uniform form of an expression — a stencil row that is the same at every interior
@@ -285,7 +289,7 @@ sample, an `O(1)` locate — selects it by dispatch, and that needs the directio
 `isuniform(grid, d::Integer)` serves a direction chosen at run time.
 """
 @inline spacing_trait(grid::AbstractStructuredGrid, ::Val{d}) where {d} =
-    Axes.spacing_trait(@inbounds coordinates(grid)[d])
+    _wrap_spacing(@inbounds(topology(grid)[d]), @inbounds coordinates(grid)[d])
 @inline spacing_trait(::AbstractGrid, ::Val) = Axes.NonuniformSpacing()
 
 """
@@ -293,15 +297,17 @@ sample, an `O(1)` locate — selects it by dispatch, and that needs the directio
     isuniform(grid) -> Bool
 
 Whether coordinate direction `d` has constant spacing known from its type (all directions, for the
-no-`d` form). The answer comes from the type alone; no code path inspects coordinate values to decide
-it. See [`spacing_trait`](@ref) for the form a method can dispatch on.
+no-`d` form), a periodic direction's including the gap where it wraps, as [`spacing_trait`](@ref)
+states. The answer comes from the types alone; no code path inspects coordinate values to decide it.
 
 Only a rectilinear grid has axes. Every other layout is never uniform: a curvilinear or unstructured
 grid's coordinates are per-cell fields, and a pixelization's are a formula of the cell.
 """
-@inline isuniform(grid::AbstractStructuredGrid, d::Integer) =
-    _at_axis(Axes.isuniform, coordinates(grid), d)
-@inline isuniform(grid::AbstractStructuredGrid) = all(Axes.isuniform, coordinates(grid))
+@inline isuniform(grid::AbstractStructuredGrid, d::Integer) = _at_axis(identity, _uniform_flags(grid), d)
+@inline isuniform(grid::AbstractStructuredGrid) = all(_uniform_flags(grid))
+
+@inline _uniform_flags(grid::AbstractStructuredGrid) =
+    map((t, x) -> _wrap_spacing(t, x) === Axes.UniformSpacing(), topology(grid), coordinates(grid))
 @inline function isuniform(grid::AbstractGrid, d::Integer)
     1 ≤ d ≤ ncoordinates(grid) || throw(ArgumentError("direction $d is outside this grid's directions"))
     return false
@@ -530,6 +536,11 @@ topology tuple it stays type-stable under a runtime direction.
 
 @inline _is_periodic(::Periodic) = true
 @inline _is_periodic(::Bounded) = false
+
+# The spacing trait of a direction with topology `t` and axis `x`, its wrap included where it wraps.
+@inline _wrap_spacing(::Bounded, x) = Axes.spacing_trait(x)
+@inline _wrap_spacing(::Periodic, x::Axes.PeriodicAxis) = Axes.spacing_trait(x)
+@inline _wrap_spacing(::Periodic, _) = Axes.NonuniformSpacing()
 
 # Direction `d`'s wrap length where it wraps and `nothing` where it ends, chosen by its topology's type.
 @inline _wrap_period(grid::AbstractGrid, d::Integer) = _wrap_period(topology(grid, d), period(grid, d))
