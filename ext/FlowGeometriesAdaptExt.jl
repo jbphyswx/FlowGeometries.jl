@@ -127,6 +127,8 @@ end
 Adapt.adapt_structure(to, p::Discretization.TabulatedStencilPlan) =
     Discretization.TabulatedStencilPlan(Adapt.adapt(to, p.indices), Adapt.adapt(to, p.weights), p.order)
 
+Adapt.adapt_structure(to, s::Operators._GridFrames) = Operators._GridFrames(s.geometry, Adapt.adapt(to, s.grid))
+
 Adapt.adapt_structure(to, p::Operators.FramePlan) = Operators.FramePlan(
     Adapt.adapt(to, p.sinλ), Adapt.adapt(to, p.cosλ), Adapt.adapt(to, p.sinφ), Adapt.adapt(to, p.cosφ),
     _move(to, p.mask), p.layout,
