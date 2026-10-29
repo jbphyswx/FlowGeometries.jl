@@ -424,6 +424,25 @@ Test.@testset "A spheroid geodesic ends at the far point, to a few eps at any se
         Test.@test sqrt(sum(abs2, G.embed(spd, (e[1], e[2])) .- G.embed(spd, p))) < 1e-4
     end
 
+    # The direct problem places the point the equations reach along an azimuth.
+    for (λ1, φ1, α, s) in ((0.0, 0.3, 0.4, 5e3), (1.0, -0.7, 1.9, 2e6), (-1.2, 0.05, 4.0, 9e6))
+        e = follow((λ1, φ1), α, s)
+        q = G._geodesic_direct(spd, (λ1, φ1), α, s)
+        Test.@test sqrt(sum(abs2, G.embed(spd, q) .- G.embed(spd, (e[1], e[2])))) < 1e-4
+    end
+    # And the inverse returns its length and azimuth, from a metre to three quarters of the way to the cut locus,
+    # along meridians and over the poles included. The far point's latitude rounds to `eps` absolute, `eps·a` along
+    # the surface, which bounds both.
+    worst_s = worst_α = 0.0
+    for (λ1, φ1) in ((0.0, 0.3), (1.0, -0.7), (-1.2, 0.05), (2.0, 1.45), (0.5, -1.5)),
+        α in (0.0, 0.4, 1.9, π, 4.0, 5.5), s in (1.0, 1e3, 1e5, 3e6, 1.5e7)
+        d, sα, cα = G._geodesic_inverse(spd, (λ1, φ1), G._geodesic_direct(spd, (λ1, φ1), α, s))
+        worst_s = max(worst_s, abs(d - s))
+        worst_α = max(worst_α, abs(rem(atan(sα, cα) - α, 2π, RoundNearest)) * s)
+    end
+    Test.@test worst_s < 8eps() * a
+    Test.@test worst_α < 8eps() * a
+
     # Rounding: Float64 and Float32 against the same solution at 256 bits on the same inputs, from a
     # metre to the antipode, centres beside the equator and a pole included. The azimuth is checked
     # short of the antipode, where it is ill-conditioned.

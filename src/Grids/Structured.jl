@@ -687,10 +687,10 @@ entering as plain widths. A `CartesianGeometry` measure is the product of the pe
   `PeriodicUniformAxis`'s period (which on spherical longitude is `2π`), `2π` for any other spherical
   longitude, and `extent + one spacing` for a Cartesian direction, which is exact for a uniform axis
   (`n·|Δ|`). A **nonuniform** periodic Cartesian direction has no closure to infer, its seam gap being
-  undetermined by its samples, so `period` is required there. A period given for a `PeriodicUniformAxis`
-  direction is its own. A `PeriodicUniformAxis` has a seam one step wide, so its cell widths, faces and
-  stencil rows take their uniform forms; any other periodic axis takes the per-cell forms, which hold
-  whatever seam gap its period leaves.
+  undetermined by its samples, so `period` is required there. A `PeriodicUniformAxis` direction takes its
+  period from the axis, and a period given for it raises. A `PeriodicUniformAxis` has a seam one step
+  wide, so its cell widths, faces and stencil rows take their uniform forms; any other periodic axis takes
+  the per-cell forms, which hold whatever seam gap its period leaves.
 - `sampling`: the [`SphericalSampling.AbstractSphericalSampling`](@ref) the axes came from, kept on
   the grid (see [`sampling`](@ref)). On a 2-D spherical grid a sampling with latitude quadrature
   weights sets the latitude factor of the measure to `R²·wⱼ`, so `sum(f .* measure(grid))` is its
@@ -776,7 +776,8 @@ function _wrap_periods(
 end
 
 _given_period(::AbstractVector, P::T) where {T} = P
-_given_period(x::Axes.PeriodicUniformAxis, P::T) where {T} = T(Axes.own_period(x, P))
+_given_period(x::Axes.PeriodicUniformAxis, _) = throw(ArgumentError(
+    "a PeriodicUniformAxis carries its own period, $(Axes.period(x)); pass `nothing` for its direction"))
 
 _period_tuple(::Val{N}, ::Type{T}, ::Nothing) where {N,T} = ntuple(_ -> nothing, Val(N))
 _period_tuple(::Val{N}, ::Type{T}, p::Real) where {N,T} =

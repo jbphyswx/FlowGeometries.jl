@@ -65,6 +65,9 @@ const _GEOD_ORDER = 6
 
 const _A1_COEFF = (1, 4, 64, 0, 256)
 const _C1_COEFF = (-1, 6, -16, 32, -9, 64, -128, 2048, 9, -16, 768, 3, -5, 512, -7, 1280, -7, 2048)
+# `C′₁ₗ`, the reverted series `σ = τ + Σ C′₁ₗ sin 2lτ`, Karney eq. (21).
+const _C1P_COEFF = (205, -432, 768, 1536, 4005, -4736, 3840, 12288, -225, 116, 384, -7173, 2695, 7680, 3467, 7680,
+                    38081, 61440)
 const _A2_COEFF = (-11, -28, -192, 0, 256)
 const _C2_COEFF = (1, 2, 16, 32, 35, 64, 384, 2048, 15, 80, 768, 7, 35, 512, 63, 1280, 77, 2048)
 const _A3_COEFF = (-3, 128, -2, -3, 64, -1, -3, -1, 16, 3, -1, -2, 8, 1, -1, 2, 1, 1)
@@ -514,3 +517,53 @@ end
 
 @inline _geodesic_inverse(g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real,Real}, p2::Tuple{Real,Real}) where {T} =
     _geodesic_inverse(_GeodesicConstants(T(semimajor_axis(g)), T(flattening(g))), _at(T, p1), _at(T, p2))
+
+"""
+    _geodesic_direct(g, (λ₁, φ₁), α₁, s) -> (λ₂, φ₂)
+
+The point a geodesic distance `s` from `(λ₁, φ₁)` along the azimuth `α₁` (east of north) on the ellipsoid `g`,
+by Karney's (2013) series, eqs. (5)–(8) and (15)–(23), with no iteration. `λ₂ − λ₁` is the longitude the
+geodesic sweeps, so a geodesic over a pole arrives at `λ₁ ± π`. Accurate to round-off for `|f| ≤ 0.01`.
+"""
+function _geodesic_direct(g::_GeodesicConstants{T}, p1::NTuple{2,T}, α1::T, s12::T) where {T}
+    tiny = _tiny(T)
+    salp1, calp1 = sincos(α1)
+    lat1 = _lat_flush(p1[2])
+    sbet1, cbet1 = _norm2(g.f1 * sin(lat1), _cos_latitude(lat1))
+    cbet1 = max(tiny, cbet1)
+    # The geodesic's azimuth at the equator, and its arc `σ` and longitude `ω` on the auxiliary sphere from there.
+    salp0 = salp1 * cbet1
+    calp0 = hypot(calp1, salp1 * sbet1)
+    somg1 = salp0 * sbet1
+    comg1 = (sbet1 != 0 || calp1 != 0) ? cbet1 * calp1 : one(T)
+    ssig1, csig1 = _norm2(sbet1, comg1)
+    k2 = calp0^2 * g.ep2
+    ε = k2 / (2 * (1 + sqrt(1 + k2)) + k2)
+    a1m1 = _a1m1(ε)
+    b11 = _sin_series(ssig1, csig1, _c12(_C1_COEFF, ε))
+    sb, cb = sincos(b11)
+    stau1, ctau1 = ssig1 * cb + csig1 * sb, csig1 * cb - ssig1 * sb
+    # `τ₁₂ = s/(b A₁)`, and `σ₁₂` from `τ₁ + τ₁₂` by the reverted series.
+    tau12 = s12 / (g.b * (1 + a1m1))
+    st, ct = sincos(tau12)
+    b12 = -_sin_series(stau1 * ct + ctau1 * st, ctau1 * ct - stau1 * st, _c12(_C1P_COEFF, ε))
+    sig12 = tau12 - (b12 - b11)
+    ssig12, csig12 = sincos(sig12)
+    ssig2 = ssig1 * csig12 + csig1 * ssig12
+    csig2 = csig1 * csig12 - ssig1 * ssig12
+    sbet2 = calp0 * ssig2
+    cbet2 = hypot(salp0, calp0 * csig2)
+    if iszero(cbet2)
+        cbet2 = csig2 = tiny
+    end
+    # `ω₁₂` unrolled through the poles, and `λ₁₂ = ω₁₂ − f sin α₀ A₃ (σ₁₂ + I₃)`, Karney eq. (8).
+    E = copysign(one(T), salp0)
+    omg12 = E * (sig12 - (atan(ssig2, csig2) - atan(ssig1, csig1)) +
+                 (atan(E * salp0 * ssig2, csig2) - atan(E * somg1, comg1)))
+    c3a = _c3(g.c3x, ε)
+    lam12 = omg12 - g.f * salp0 * _a3(g.a3x, ε) * (sig12 + (_sin_series(ssig2, csig2, c3a) - _sin_series(ssig1, csig1, c3a)))
+    return p1[1] + lam12, atan(sbet2, g.f1 * cbet2)
+end
+
+@inline _geodesic_direct(g::AbstractEllipsoidalGeometry{T}, p1::Tuple{Real,Real}, α1::Real, s12::Real) where {T} =
+    _geodesic_direct(_GeodesicConstants(T(semimajor_axis(g)), T(flattening(g))), _at(T, p1), T(α1), T(s12))

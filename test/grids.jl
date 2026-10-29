@@ -390,11 +390,12 @@ Test.@testset "A periodic axis wraps whichever way it is stored, and states its 
                                                   FG.Grids.AllActive((n, 5)); topology = FG.Grids.Periodic()))
     Test.@test sum(ma) ≈ sum(md) rtol = 1e-14
     Test.@test sum(ma) ≈ sum(mv) rtol = 1e-14
-    # A periodic axis declared bounded, a longitude axis of another period, or a periodic axis given
-    # another period raises.
+    # A periodic axis declared bounded, a longitude axis of another period, or a periodic axis given a
+    # period, its own included, raises: the axis carries it.
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; topology = FG.Grids.Bounded())
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, FG.Axes.PeriodicUniformAxis(0.0, π, n), φ)
     Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; period = π)
+    Test.@test_throws ArgumentError FG.Grids.StructuredGrid(sg, asc, φ; period = 2π)
     # A Cartesian periodic axis wraps at its own period.
     cg = FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry{Float32}(), FG.Axes.PeriodicUniformAxis(0.0, 5.0, 10),
                                  0.0f0:1.0f0:3.0f0)
