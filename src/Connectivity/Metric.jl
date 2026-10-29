@@ -284,9 +284,9 @@ function metric_window(
     cosmin = _cos_extreme(grid, Val(N))
     if N ≥ 3
         hmin = mt.min3
-        wφ = _steps(r, (M0 + hmin - r) * _min_step(mt, 2), sz[2])
-        wλ = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(mt, 1), sz[1])
-        return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
+        wφh = _steps(r, (M0 + hmin - r) * _min_step(mt, 2), sz[2])
+        wλh = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(mt, 1), sz[1])
+        return ntuple(d -> d == 1 ? wλh : d == 2 ? wφh : wrest[d - 2], Val(N))
     end
     wφ = N ≥ 2 ? _steps(r, M0 * _min_step(mt, 2), sz[2]) : 0
     wλ = _steps(r, a * cosmin * _min_step(mt, 1), sz[1])
@@ -418,10 +418,10 @@ function metric_window(
     wrest = ntuple(d -> _steps(r, _min_step(mt, d + 2), sz[d + 2]), Val(max(N - 2, 0)))
     if N ≥ 3
         hmin = mt.min3
-        wφ = _steps(r, (M0 + hmin - r) * _min_step(mt, 2), sz[2])
-        cosmin = _window_min(φ -> abs(cos(φ)), Grids.coordinates(grid, 2), Int(I[2]), wφ, per[2])
-        wλ = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(mt, 1), sz[1])
-        return ntuple(d -> d == 1 ? wλ : d == 2 ? wφ : wrest[d - 2], Val(N))
+        wφh = _steps(r, (M0 + hmin - r) * _min_step(mt, 2), sz[2])
+        cosmin = _window_min(φ -> abs(cos(φ)), Grids.coordinates(grid, 2), Int(I[2]), wφh, per[2])
+        wλh = _angle_steps(r, 2 * (M0 + min(hmin, zero(T))) * cosmin, _min_step(mt, 1), sz[1])
+        return ntuple(d -> d == 1 ? wλh : d == 2 ? wφh : wrest[d - 2], Val(N))
     end
     wφ = N ≥ 2 ? _steps(r, M0 * _min_step(mt, 2), sz[2]) : 0
     cosreach = if N ≥ 2

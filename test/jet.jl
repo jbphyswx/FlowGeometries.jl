@@ -72,6 +72,15 @@ Test.@testset "Builders, indices, queries and the geodesic make no runtime dispa
             spd = GE.SpheroidGeometry(T(6378137), T(1 / 298.257223563))
             JET.@test_opt target_modules = (FG,) GE.distance(spd, (T(0.1), T(0.2)), (T(2.0), T(-0.3)))
             JET.@test_opt target_modules = (FG,) GE.normal_coordinates(spd, (T(0.1), T(0.2)), (T(2.0), T(-0.3)))
+            JET.@test_opt target_modules = (FG,) GE._geodesic_direct(spd, (T(0.1), T(0.2)), T(2.0), T(1e6))
+        end
+        # A spheroid's ball windows along a ring, a lattice and one with heights.
+        spd = GE.SpheroidGeometry(6378137.0, 1 / 298.257223563)
+        for g in (GD.StructuredGrid(spd, FG.Axes.PeriodicUniformAxis(0.0, 2π, 24)),
+                  GD.StructuredGrid(spd, FG.Axes.PeriodicUniformAxis(0.0, 2π, 24), collect(-1.0:0.25:1.0)),
+                  GD.StructuredGrid(spd, FG.Axes.PeriodicUniformAxis(0.0, 2π, 24), collect(-1.0:0.25:1.0), collect(0.0:1e4:5e4)))
+            JET.@test_opt target_modules = (FG,) C.metric_window(g, 5e5)
+            JET.@test_opt target_modules = (FG,) C.metric_window(g, map(_ -> 2, GD.size_tuple(g)), 5e5)
         end
         JET.@test_opt target_modules = (FG,) C.build_connectivity(sg)
         JET.@test_opt target_modules = (FG,) C.build_connectivity(Int, hp)
