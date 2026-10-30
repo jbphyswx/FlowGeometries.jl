@@ -58,7 +58,7 @@ end
 
 # The faces of a periodic axis sit half a step before its centres, `n` of them around the same period.
 @inline _face_axis(x::Axes.PeriodicUniformAxis{T}, ::Periodic, P) where {T} = Axes.PeriodicUniformAxis{T}(
-    first(x) - step(x) / 2, Axes.wrap_sign(x) * period(x), length(x))
+    first(x) - step(x) / 2, Axes.wrap_sign(x) * Axes.period(x), length(x))
 
 """
     center_grid(sg) -> StructuredGrid

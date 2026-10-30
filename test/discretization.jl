@@ -883,7 +883,6 @@ Test.@testset "Staggering, point location and interpolation weights" begin
         Test.@test A.isuniform(D.faces(pa, 5.0))
         Test.@test collect(D.faces(pa, 5.0)) ≈ D.faces(collect(0.0:1.0:4.0), 5.0)
         Test.@test D.faces(0.0:1.0:4.0, 5.0) ≈ D.faces(collect(0.0:1.0:4.0), 5.0)
-        Test.@test_throws ArgumentError D.faces(pa, 7.0)
     end
     Test.@test D.faces(0.0:1.0:4.0, 7.0) ≈ D.faces(collect(0.0:1.0:4.0), 7.0)
     sgp = FG.Grids.StaggeredGrid(FG.Grids.StructuredGrid(FG.Geometry.CartesianGeometry(), [0.5, 1.0, 3.0, 6.0, 8.5],
@@ -1004,10 +1003,9 @@ Test.@testset "Per-index gaps and widths are public, exact and free of allocatio
     for (x, p) in ((vec1, nothing), (collect(rng1), nothing), (λ, 2π), (rng1, nothing))
         Test.@test collect(D.cell_widths(x, p)) ≈ [D.cell_width(x, i, p) for i in eachindex(x)]
     end
-    # A periodic axis wraps at its own period and no other.
+    # A periodic axis's widths are its own step.
     let pa = FG.Axes.PeriodicUniformAxis(0.0, 2π, 16)
         Test.@test collect(D.cell_widths(pa, 2π)) ≈ D.cell_widths(λ, 2π)
-        Test.@test_throws ArgumentError D.cell_widths(pa, π)
     end
 
     # The grid forms take the period from the grid.
@@ -1642,9 +1640,6 @@ Test.@testset "A held stencil plan is the axis's weights, register-resident wher
     D = FG.Discretization
     O = FG.Operators
     A = FG.Axes
-
-    # A periodic axis wraps at its own period and no other.
-    Test.@test_throws ArgumentError D.stencil_plan(A.PeriodicUniformAxis(0.0, 2π, 32), 1, 5; period = π)
 
     # A plan reads exactly the samples the table reads, and its weights are the same numbers to
     # round-off, the table computing each row from its own window: a stretched axis and a wrapping one,

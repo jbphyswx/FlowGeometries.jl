@@ -89,15 +89,12 @@ end
 @inline _derivative_along!(out, f, _grid, plan::GradientPlan, d::Int, _scratch, _masked, b) =
     _gradient_component!(out, f, plan, d, b)
 
-# `g[k] = d_k f` for every direction `k`.
-@inline function _gradient_into!(
+# `g[k] = d_k f` for every direction `k`, each direction's plan read at a literal index: the plans differ in type.
+@generated function _gradient_into!(
     g::NTuple{N,AbstractArray}, f, grid::Grids.StructuredGrid, plans::StencilPlans{N}, masked, b,
 ) where {N}
-    ntuple(Val(N)) do d
-        _held_derivative!(g[d], f, grid, @inbounds(plans.plans[d]), d, masked, b)
-        return nothing
-    end
-    return nothing
+    calls = (:(_held_derivative!(g[$d], f, grid, @inbounds(plans.plans[$d]), $d, masked, b)) for d in 1:N)
+    return Expr(:block, calls..., :(return nothing))
 end
 
 @inline function _gradient_into!(g::NTuple{N,AbstractArray}, f, _grid, plan::GradientPlan{N}, _masked, b) where {N}
@@ -181,22 +178,21 @@ function strain_rate!(
 end
 
 # The derivative part: `S_cc = d_c u_c`, and each off-diagonal the half sum of its two derivatives. `d_k u_c`
-# for `c ≤ k` lands in its component directly; `S_ck` then takes `d_c u_k` in one fused update.
-function _strain_terms!(comps, u, g, grid, derivs, nan, b, ::Val{N}) where {N}
-    ntuple(Val(N)) do c
-        ntuple(Val(N)) do k
-            s = comps[_sym_slot(c, k, Val(N))]
-            if c ≤ k
-                _derivative_along!(s, u[c], grid, derivs, k, g, nan, b)
-            else
-                _derivative_along!(g[1], u[c], grid, derivs, k, g, nan, b)
-                s .= s ./ 2 .+ g[1] ./ 2
-            end
-            return nothing
+# for `c ≤ k` lands in its component directly; `S_ck` then takes `d_c u_k` in one fused update. Straight-line code,
+# each direction `k` a literal, so a derivative source of plans that differ in type is read without dispatch.
+@generated function _strain_terms!(comps, u, g, grid, derivs, nan, b, ::Val{N}) where {N}
+    ex = Expr(:block)
+    for c in 1:N, k in 1:N
+        slot = _sym_slot(c, k, Val(N))
+        if c ≤ k
+            push!(ex.args, :(_derivative_along!(comps[$slot], u[$c], grid, derivs, $k, g, nan, b)))
+        else
+            push!(ex.args, :(_derivative_along!(g[1], u[$c], grid, derivs, $k, g, nan, b)))
+            push!(ex.args, :(comps[$slot] .= comps[$slot] ./ 2 .+ g[1] ./ 2))
         end
-        return nothing
     end
-    return nothing
+    push!(ex.args, :(return nothing))
+    return ex
 end
 
 """
@@ -399,20 +395,17 @@ end
     return nothing
 end
 
-@inline function _add_terms!(::_StrainTerms, S, I, v::NTuple{N}, γ) where {N}
-    @inbounds ntuple(Val(N)) do i
-        ntuple(Val(N)) do j
-            s = S[_sym_slot(i, j, Val(N))]
-            if i == j
-                s[I] += sum(ntuple(k -> v[k] * γ[i][k], Val(N)))
-            elseif i < j
-                s[I] -= (v[i] * γ[i][j] + v[j] * γ[j][i]) / 2
-            end
-            return nothing
-        end
-        return nothing
+# Straight-line code per component, so no closure holds the output arrays.
+@generated function _add_terms!(::_StrainTerms, S, I, v::NTuple{N,Any}, γ) where {N}
+    ex = Expr(:block)
+    for i in 1:N, j in i:N
+        slot = _sym_slot(i, j, Val(N))
+        push!(ex.args, i == j ?
+            :(@inbounds S[$slot][I] += $(Expr(:call, :+, (:(v[$k] * γ[$i][$k]) for k in 1:N)...))) :
+            :(@inbounds S[$slot][I] -= (v[$i] * γ[$i][$j] + v[$j] * γ[$j][$i]) / 2))
     end
-    return nothing
+    push!(ex.args, :(return nothing))
+    return ex
 end
 
 @inline function _add_terms!(::_CurlTerms, ω, I, v::NTuple{2}, γ)
@@ -420,13 +413,14 @@ end
     return nothing
 end
 
-@inline function _add_terms!(::_CurlTerms, ω, I, v::NTuple{3}, γ)
-    @inbounds ntuple(Val(3)) do i
+@generated function _add_terms!(::_CurlTerms, ω, I, v::NTuple{3,Any}, γ)
+    ex = Expr(:block)
+    for i in 1:3
         j, k = mod1(i + 1, 3), mod1(i + 2, 3)
-        ω[i][I] += v[k] * γ[k][j] - v[j] * γ[j][k]
-        return nothing
+        push!(ex.args, :(@inbounds ω[$i][I] += v[$k] * γ[$k][$j] - v[$j] * γ[$j][$k]))
     end
-    return nothing
+    push!(ex.args, :(return nothing))
+    return ex
 end
 
 @inline function _add_terms!(::_DivergenceTerms, δ, I, v::NTuple{N}, γ) where {N}

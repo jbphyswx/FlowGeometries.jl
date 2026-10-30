@@ -257,7 +257,7 @@ function latitude_weights!(
 end
 
 """
-    latitude_weights!(w, ::AbstractDriscollHealySampling, nlat; algorithm = FTB.Recurrence())
+    latitude_weights!(w, ::AbstractDriscollHealySampling, nlat; algorithm = FlowTransformBindings.Recurrence())
 
 Weights for the closed nodes `θᵢ = π(i−1)/N`: Driscoll & Healy (1994), by
 `FlowTransformBindings.equiangular_weights!`.
@@ -273,7 +273,7 @@ function latitude_weights!(
 end
 
 """
-    latitude_weights!(w, ::AbstractFejer1Sampling, nlat; algorithm = FTB.Recurrence())
+    latitude_weights!(w, ::AbstractFejer1Sampling, nlat; algorithm = FlowTransformBindings.Recurrence())
 
 Weights for the open nodes `θᵢ = π(i−½)/N`: Fejér's first rule, by
 `FlowTransformBindings.equiangular_weights!`.
