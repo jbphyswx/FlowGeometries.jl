@@ -1,7 +1,7 @@
 using Documenter: Documenter
 using FlowGeometries: FlowGeometries
 
-DocMeta.setdocmeta!(
+Documenter.DocMeta.setdocmeta!(
     FlowGeometries,
     :DocTestSetup,
     :(using FlowGeometries: FlowGeometries as FG);
@@ -22,7 +22,7 @@ const MODULES = [
     FlowGeometries.Decomposition,
 ]
 
-makedocs(;
+Documenter.makedocs(;
     modules = MODULES,
     authors = "Jordan Benjamin",
     sitename = "FlowGeometries.jl",
@@ -65,7 +65,7 @@ makedocs(;
     checkdocs = :all,
 )
 
-deploydocs(;
+Documenter.deploydocs(;
     repo = "github.com/jbphyswx/FlowGeometries.jl",
     devbranch = "main",
     push_preview = true,

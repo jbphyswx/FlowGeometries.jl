@@ -1565,17 +1565,16 @@ Test.@testset "Rings, coverage and integrals read the grid's own structure" begi
     Test.@test _alloc(GE.geocentric_latitude, sp, 0.7) == 0
 end
 
-Test.@testset "isuniform on a periodic direction counts the gap at its wrap" begin
+Test.@testset "isuniform on a periodic direction counts the gap at its wrap, by type" begin
     geo = FG.Geometry.CartesianGeometry()
-    P = FG.Grids.Periodic()
     grid(x; kw...) = FG.Grids.StructuredGrid(geo, x; kw...)
-    Test.@test FG.Grids.isuniform(grid(1.0:1.0:10.0; topology = P), 1)
-    Test.@test FG.Grids.isuniform(grid(0.0:1.0:15.0; topology = P, period = 16), 1)
-    Test.@test !FG.Grids.isuniform(grid(0.0:1.0:15.0; topology = P, period = 19), 1)
-    Test.@test !FG.Grids.isuniform(grid(collect(0.0:1.0:15.0); topology = P, period = 16), 1)
-    Test.@test FG.Grids.isuniform(grid(FG.Axes.PeriodicUniformAxis(0.0, 10.0, 10)), 1)
+    pua = grid(FG.Axes.PeriodicUniformAxis(0.0, 10.0, 10))
+    Test.@test FG.Grids.isuniform(pua, 1)
+    Test.@test FG.Grids.spacing_trait(pua, Val(1)) === FG.Axes.UniformSpacing()
+    # A periodic range leaves whatever gap its period does, so only its axis is uniform.
+    per = grid(1.0:1.0:10.0; topology = FG.Grids.Periodic())
+    Test.@test !FG.Grids.isuniform(per, 1)
+    Test.@test FG.Grids.spacing_trait(per, Val(1)) === FG.Axes.NonuniformSpacing()
+    Test.@test FG.Grids.axis(per, 1) isa AbstractRange && FG.Grids.spacing(per, 1) == 1.0
     Test.@test FG.Grids.isuniform(grid(0.0:1.0:15.0), 1)
-    # By type alone, only a `PeriodicUniformAxis` is uniform around its wrap.
-    Test.@test FG.Grids.spacing_trait(grid(1.0:1.0:10.0; topology = P), Val(1)) === FG.Axes.NonuniformSpacing()
-    Test.@test FG.Grids.spacing_trait(grid(FG.Axes.PeriodicUniformAxis(0.0, 10.0, 10)), Val(1)) === FG.Axes.UniformSpacing()
 end

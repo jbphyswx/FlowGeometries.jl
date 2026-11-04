@@ -67,7 +67,7 @@ A direction wraps when its axis type says so — a [`PeriodicUniformAxis`](@ref 
 [`Periodic`](@ref). Every other direction is bounded; nothing is read off the coordinate values. On a periodic axis
 the seam is one step wide by construction, so its widths, faces and stencil rows keep their uniform
 forms; a plain axis declared periodic takes the per-cell forms, which hold whatever seam its period
-leaves.
+leaves, and [`isuniform`](@ref) counts that direction nonuniform.
 
 ```@example grids
 wrapped = FG.Grids.StructuredGrid(FG.Geometry.SphericalGeometry(), FG.Axes.PeriodicUniformAxis(0.0, 2π, 64), φaxis)

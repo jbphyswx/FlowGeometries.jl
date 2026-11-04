@@ -4,8 +4,9 @@
 #
 # A reduction over the outer product factors into a reduction over the axes when the pair `(f, op)`
 # permits it, turning `O(∏ Nᵈ)` into `O(∑ Nᵈ)`. Dispatch is on that pair: `mapreduce` is where `sum`,
-# `prod`, `maximum`, `minimum`, `sum(f, ·)`, `count` and the `dims` forms all arrive, so one method each
-# covers them, and any pair not listed here falls through to the generic dense path.
+# `prod`, `maximum`, `minimum` and `sum(f, ·)` arrive, so one method each covers them. Any pair not
+# listed here, `count`, and every `dims` form (a keyword call, which these keyword-free methods do not
+# take) run the generic dense path.
 #
 # `f` must be multiplicative — `f(xy) = f(x)f(y)` — for a sum or product to factor. `identity`, `abs`,
 # `abs2`, `sqrt` and `inv` are; `exp` and `log` are not, and stay off this path.
@@ -19,14 +20,10 @@ Base.mapreduce(f::_MultiplicativeF, ::typeof(Base.add_sum), m::SeparableMeasure)
 
 # ∏_{i,j} f(wxᵢ·wyⱼ) = ∏ᵈ (∏ᵢ f(wᵈᵢ))^(∏_{e≠d} Nᵉ). Each partial product is carried as a significand in
 # [0.5, 1) and a binary exponent, so it neither overflows nor underflows before the whole does.
-function Base.mapreduce(f::_MultiplicativeF, ::typeof(Base.mul_prod), m::SeparableMeasure{T,N}) where {T,N}
-    n = size(m)
-    total = prod(n)
-    acc = (one(T), 0)
-    for d in 1:N
-        acc = _split_mul(acc, _split_pow(_split_prod(f, m.factors[d]), total ÷ n[d]))
-    end
-    return ldexp(acc[1], acc[2])
+function Base.mapreduce(f::_MultiplicativeF, ::typeof(Base.mul_prod), m::SeparableMeasure{T}) where {T}
+    total = prod(size(m))
+    parts = map(w -> _split_pow(_split_prod(f, w), total ÷ length(w)), m.factors)
+    return ldexp(foldl(_split_mul, parts; init = (one(T), 0))...)
 end
 
 @inline function _split_mul((a, ea), (b, eb))
@@ -71,7 +68,7 @@ alone holds only for non-negative ones, and it costs `O(∑ Nᵈ + 2^N)` against
 """
 function _sep_extrema(f, m::SeparableMeasure{T,N}) where {T,N}
     isempty(m) && throw(ArgumentError("extrema of an empty SeparableMeasure is undefined"))
-    ends = ntuple(d -> extrema(m.factors[d]), Val(N))
+    ends = map(extrema, m.factors)
     lo = hi = f(prod(ntuple(d -> ends[d][1], Val(N))))
     for corner in 0:(2^N - 1)
         v = f(prod(ntuple(d -> ends[d][1 + ((corner >> (d - 1)) & 1)], Val(N))))
@@ -81,28 +78,18 @@ function _sep_extrema(f, m::SeparableMeasure{T,N}) where {T,N}
     return (lo, hi)
 end
 
-# Reducing direction `d` away replaces its factor by the single number that direction contributes, so
-# the result is still separable and still costs O(∑ Nᵈ).
-function Base.sum(m::SeparableMeasure{T,N}; dims = :) where {T,N}
-    dims === (:) && return mapreduce(identity, Base.add_sum, m)
-    reduced = ntuple(Val(N)) do d
-        d in dims ? Axes.ConstantVector(sum(m.factors[d]), 1) : m.factors[d]
-    end
-    return SeparableMeasure(reduced)
-end
-
 # The largest cell sits where every factor is largest, so the index is the per-axis argmax — no scan of
 # the product. Only valid while the factors are non-negative, which a measure's are by construction;
 # a factor that is not falls back to the generic search.
-function Base.findmax(m::SeparableMeasure{T,N}) where {T,N}
+function Base.findmax(m::SeparableMeasure)
     all(fac -> minimum(fac) ≥ 0, m.factors) || return @invoke findmax(m::AbstractArray)
-    I = ntuple(d -> argmax(m.factors[d]), Val(N))
+    I = map(argmax, m.factors)
     return (m[I...], CartesianIndex(I))
 end
 
-function Base.findmin(m::SeparableMeasure{T,N}) where {T,N}
+function Base.findmin(m::SeparableMeasure)
     all(fac -> minimum(fac) ≥ 0, m.factors) || return @invoke findmin(m::AbstractArray)
-    I = ntuple(d -> argmin(m.factors[d]), Val(N))
+    I = map(argmin, m.factors)
     return (m[I...], CartesianIndex(I))
 end
 
@@ -124,9 +111,8 @@ Base.argmin(m::SeparableMeasure) = findmin(m)[2]
 @inline _scaled_factor(w::Axes.ConstantVector, c) = Axes.ConstantVector(w.value * c, length(w))
 @inline _scaled_factor(w::AbstractVector, c) = w .* c
 
-_broadcast_scale(m::SeparableMeasure{T,N}, c::Real) where {T,N} = SeparableMeasure(
-    ntuple(d -> d == 1 ? _scaled_factor(m.factors[d], convert(T, c)) : m.factors[d], Val(N)),
-)
+_broadcast_scale(m::SeparableMeasure{T}, c::Real) where {T} =
+    SeparableMeasure((_scaled_factor(first(m.factors), convert(T, c)), Base.tail(m.factors)...))
 
 Base.broadcasted(::typeof(*), c::Real, m::SeparableMeasure) = _broadcast_scale(m, c)
 Base.broadcasted(::typeof(*), m::SeparableMeasure, c::Real) = _broadcast_scale(m, c)
@@ -137,8 +123,7 @@ Base.broadcasted(::typeof(/), m::SeparableMeasure, c::Real) = _broadcast_scale(m
 @inline _mapped_factor(f, w::Axes.ConstantVector) = Axes.ConstantVector(f(w.value), length(w))
 @inline _mapped_factor(f, w::AbstractVector) = f.(w)
 
-Base.broadcasted(f::_MultiplicativeF, m::SeparableMeasure{<:Any,N}) where {N} =
-    SeparableMeasure(ntuple(d -> _mapped_factor(f, m.factors[d]), Val(N)))
+Base.broadcasted(f::_MultiplicativeF, m::SeparableMeasure) = SeparableMeasure(map(w -> _mapped_factor(f, w), m.factors))
 
 @inline _combine_factors(op, u::Axes.ConstantVector, v::Axes.ConstantVector) =
     Axes.ConstantVector(op(u.value, v.value), length(u))
@@ -152,7 +137,7 @@ for op in (:*, :/)
         size(a) == size(b) || throw(DimensionMismatch(
             "separable measures of size $(size(a)) and $(size(b)) do not match",
         ))
-        return SeparableMeasure(ntuple(d -> _combine_factors($op, a.factors[d], b.factors[d]), Val(N)))
+        return SeparableMeasure(map((u, v) -> _combine_factors($op, u, v), a.factors, b.factors))
     end
 end
 

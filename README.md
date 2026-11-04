@@ -70,7 +70,9 @@ when `minimum_spacing == maximum_spacing`.
 
 Periodicity is the same. An `Axes.PeriodicUniformAxis(origin, period, n)` is `n` equal cells around one
 period, and a grid direction built on one wraps; every other direction is bounded unless the
-constructor's `topology` names it `Periodic()`.
+constructor's `topology` names it `Periodic()`. A periodic direction is uniform only on a
+`PeriodicUniformAxis`: a range or vector declared periodic has a seam its period sets, and `isuniform`
+counts that direction nonuniform.
 
 A uniform axis stores three numbers, and its per-cell measure stores one, so a 2000×2000 uniform grid
 is a few hundred bytes, and that is all a device receives.

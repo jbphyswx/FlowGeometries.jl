@@ -25,11 +25,6 @@ Test.@testset "Separable reductions factor, and only where the algebra allows" b
         Test.@test sum(f, m) ≈ sum(f, dense) rtol = 1e-9
     end
 
-    # Reducing a direction away.
-    for dims in (1, 2, (1, 2))
-        Test.@test collect(sum(m; dims = dims)) ≈ sum(dense; dims = dims) rtol = 1e-12
-    end
-
     # max/min of a product are taken from the per-axis endpoints, exact for factors of either sign.
     # A factor list holding a negative entry is the case that separates this from `∏ maximum`.
     ms = FG.Grids.SeparableMeasure(([-2.0, 1.0, 3.0], [-1.0, 4.0]))

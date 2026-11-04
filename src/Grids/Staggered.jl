@@ -129,9 +129,13 @@ function grid_at(
         grid_geometry(sg.center), ax...;
         mask = _staggered_mask(sg, loc, dims),
         topology = topology(sg.center),
-        period = ntuple(d -> period(sg.center, d), Val(N)),
+        period = map(_period_for, ax, ntuple(d -> period(sg.center, d), Val(N))),
     )
 end
+
+# The period a direction's axis is given: a `PeriodicUniformAxis` carries its own.
+@inline _period_for(::Axes.PeriodicUniformAxis, _) = nothing
+@inline _period_for(::AbstractVector, P) = P
 
 @inline grid_at(sg::StaggeredGrid, d::Integer) = grid_at(sg, location_at(sg, d))
 
